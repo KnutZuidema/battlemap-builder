@@ -3,7 +3,7 @@ const cors = require('cors');
 const path = require('path');
 const dotenv = require('dotenv');
 const { prepareInpaintCanvas } = require('./services/imageProcessor');
-const { generateBattlemap, inpaintBattlemap, outpaintBattlemap } = require('./services/battlemapService');
+const { generateBattlemap, inpaintBattlemap, outpaintBattlemap, forgeRegion } = require('./services/battlemapService');
 const { isProviderConfigured, MODEL_CATALOG, DEFAULT_MODEL_ID } = require('./services/modelCatalog');
 
 // The server config lives next to this file; `process.cwd()` is the repo root under `npm run dev`.
@@ -137,6 +137,32 @@ app.post('/api/outpaint', async (req, res) => {
       extensionPrompt,
       expandAmount: parseInt(expandAmount) || 512,
       span: hasSpan ? { start: Number(spanStart), end: Number(spanEnd) } : null,
+      model
+    });
+
+    res.json(result);
+  } catch (err) {
+    sendGenerationError(res, err);
+  }
+});
+
+/**
+ * Unified region modification route (inpainting, outpainting, and hybrid edits)
+ */
+app.post('/api/forge-region', async (req, res) => {
+  try {
+    const { originalDataUrl, selection, prompt, model } = req.body;
+
+    if (!originalDataUrl || !selection) {
+      return res.status(400).json({ error: 'originalDataUrl and selection are required' });
+    }
+
+    console.log(`[API /forge-region] Forging region (${selection.width}x${selection.height} at ${selection.x},${selection.y}): prompt="${prompt}" model="${model || 'default'}"`);
+
+    const result = await forgeRegion({
+      originalDataUrl,
+      selection,
+      prompt,
       model
     });
 

@@ -531,6 +531,254 @@ async function compositeInpaintRegion(originalBuffer, editedBuffer, maskBuffer, 
   return bufferToDataUrl(composited);
 }
 
+/**
+ * Prepares a focused context frame (default 512px padding around selection), guide image,
+ * and binary mask for unified region forging (inpaint, outpaint, and hybrid edits).
+ */
+async function prepareRegionCanvas(originalDataUrl, selection, contextPadding = 512) {
+  const origBuffer = dataUrlToBuffer(originalDataUrl);
+  const metadata = await sharp(origBuffer).metadata();
+  const origW = metadata.width;
+  const origH = metadata.height;
+
+  const selX = Math.round(selection.x);
+  const selY = Math.round(selection.y);
+  const selW = Math.round(selection.width);
+  const selH = Math.round(selection.height);
+
+  const minX = Math.min(0, selX);
+  const minY = Math.min(0, selY);
+  const maxX = Math.max(origW, selX + selW);
+  const maxY = Math.max(origH, selY + selH);
+
+  const newW = maxX - minX;
+  const newH = maxY - minY;
+  const origLeft = -minX;
+  const origTop = -minY;
+  const selLeft = selX - minX;
+  const selTop = selY - minY;
+
+  const contextLeft = Math.max(0, selLeft - contextPadding);
+  const contextTop = Math.max(0, selTop - contextPadding);
+  const contextRight = Math.min(newW, selLeft + selW + contextPadding);
+  const contextBottom = Math.min(newH, selTop + selH + contextPadding);
+
+  const contextW = contextRight - contextLeft;
+  const contextH = contextBottom - contextTop;
+
+  // Intersect context crop with existing map [origLeft, origTop, origW, origH]
+  const intersectLeft = Math.max(origLeft, contextLeft);
+  const intersectTop = Math.max(origTop, contextTop);
+  const intersectRight = Math.min(origLeft + origW, contextRight);
+  const intersectBottom = Math.min(origTop + origH, contextBottom);
+
+  const hasIntersection = intersectRight > intersectLeft && intersectBottom > intersectTop;
+
+  let contextBuffer;
+  if (hasIntersection) {
+    const intersectW = intersectRight - intersectLeft;
+    const intersectH = intersectBottom - intersectTop;
+    const cropX = intersectLeft - origLeft;
+    const cropY = intersectTop - origTop;
+    const placeX = intersectLeft - contextLeft;
+    const placeY = intersectTop - contextTop;
+
+    const mapCrop = await sharp(origBuffer)
+      .extract({ left: cropX, top: cropY, width: intersectW, height: intersectH })
+      .toBuffer();
+
+    contextBuffer = await sharp({
+      create: {
+        width: contextW,
+        height: contextH,
+        channels: 3,
+        background: OUTPAINT_FILL_COLOR
+      }
+    })
+      .composite([{ input: mapCrop, left: placeX, top: placeY }])
+      .png()
+      .toBuffer();
+  } else {
+    contextBuffer = await sharp({
+      create: {
+        width: contextW,
+        height: contextH,
+        channels: 3,
+        background: OUTPAINT_FILL_COLOR
+      }
+    })
+      .png()
+      .toBuffer();
+  }
+
+  const selOnContext = {
+    left: selLeft - contextLeft,
+    top: selTop - contextTop,
+    width: selW,
+    height: selH
+  };
+
+  // Guide image: context frame with cyan highlight box (30% opacity, 4px cyan stroke)
+  const guideSvg = `<svg width="${contextW}" height="${contextH}" xmlns="http://www.w3.org/2000/svg">
+    <rect x="${selOnContext.left}" y="${selOnContext.top}" width="${selOnContext.width}" height="${selOnContext.height}" fill="rgba(34, 211, 238, 0.3)" stroke="#22d3ee" stroke-width="4" />
+  </svg>`;
+
+  const guideBuffer = await sharp(contextBuffer)
+    .composite([{ input: Buffer.from(guideSvg) }])
+    .png()
+    .toBuffer();
+
+  // Binary mask: white inside selection, black everywhere else
+  const maskSvg = `<svg width="${contextW}" height="${contextH}" xmlns="http://www.w3.org/2000/svg">
+    <rect width="${contextW}" height="${contextH}" fill="#000000" />
+    <rect x="${selOnContext.left}" y="${selOnContext.top}" width="${selOnContext.width}" height="${selOnContext.height}" fill="#ffffff" />
+  </svg>`;
+
+  const maskBuffer = await sharp(Buffer.from(maskSvg))
+    .png()
+    .toBuffer();
+
+  return {
+    contextBuffer,
+    guideBuffer,
+    maskBuffer,
+    dimensions: {
+      newW,
+      newH,
+      origW,
+      origH,
+      origLeft,
+      origTop,
+      contextLeft,
+      contextTop,
+      contextW,
+      contextH,
+      selOnContext
+    }
+  };
+}
+
+/**
+ * Composites the model's output buffer back onto the final expanded canvas.
+ * Model output is masked to selOnContext with a soft 20px inward feather along preserved map edges,
+ * ensuring zero bleed outside the box and smooth seamless internal transitions.
+ */
+async function compositeRegion(origBuffer, modelBuffer, dimensions, featherPx = 20) {
+  const {
+    newW,
+    newH,
+    origW,
+    origH,
+    origLeft,
+    origTop,
+    contextLeft,
+    contextTop,
+    contextW,
+    contextH,
+    selOnContext
+  } = dimensions;
+
+  const resizedModel = await sharp(modelBuffer)
+    .resize(contextW, contextH, { fit: 'fill' })
+    .flatten({ background: '#000000' })
+    .ensureAlpha()
+    .toBuffer();
+
+  const feather = Math.max(1, Math.min(featherPx, Math.floor(Math.min(selOnContext.width, selOnContext.height) / 2)));
+
+  const mapCtxLeft = origLeft - contextLeft;
+  const mapCtxTop = origTop - contextTop;
+  const mapCtxRight = mapCtxLeft + origW;
+  const mapCtxBottom = mapCtxTop + origH;
+
+  const overlapLeft = Math.max(selOnContext.left, mapCtxLeft);
+  const overlapTop = Math.max(selOnContext.top, mapCtxTop);
+  const overlapRight = Math.min(selOnContext.left + selOnContext.width, mapCtxRight);
+  const overlapBottom = Math.min(selOnContext.top + selOnContext.height, mapCtxBottom);
+  const hasOverlap = overlapRight > overlapLeft && overlapBottom > overlapTop;
+
+  const defs = [];
+  const bands = [];
+
+  if (hasOverlap && selOnContext.left >= mapCtxLeft && selOnContext.left < mapCtxRight) {
+    defs.push(`<linearGradient id="grad-left" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#000000" />
+      <stop offset="100%" stop-color="#ffffff" />
+    </linearGradient>`);
+    bands.push(`<rect x="${selOnContext.left}" y="${overlapTop}" width="${feather}" height="${overlapBottom - overlapTop}" fill="url(#grad-left)" />`);
+  }
+
+  if (hasOverlap && selOnContext.left + selOnContext.width <= mapCtxRight && selOnContext.left + selOnContext.width > mapCtxLeft) {
+    defs.push(`<linearGradient id="grad-right" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#000000" />
+    </linearGradient>`);
+    bands.push(`<rect x="${selOnContext.left + selOnContext.width - feather}" y="${overlapTop}" width="${feather}" height="${overlapBottom - overlapTop}" fill="url(#grad-right)" />`);
+  }
+
+  if (hasOverlap && selOnContext.top >= mapCtxTop && selOnContext.top < mapCtxBottom) {
+    defs.push(`<linearGradient id="grad-top" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#000000" />
+      <stop offset="100%" stop-color="#ffffff" />
+    </linearGradient>`);
+    bands.push(`<rect x="${overlapLeft}" y="${selOnContext.top}" width="${overlapRight - overlapLeft}" height="${feather}" fill="url(#grad-top)" />`);
+  }
+
+  if (hasOverlap && selOnContext.top + selOnContext.height <= mapCtxBottom && selOnContext.top + selOnContext.height > mapCtxTop) {
+    defs.push(`<linearGradient id="grad-bottom" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#000000" />
+    </linearGradient>`);
+    bands.push(`<rect x="${overlapLeft}" y="${selOnContext.top + selOnContext.height - feather}" width="${overlapRight - overlapLeft}" height="${feather}" fill="url(#grad-bottom)" />`);
+  }
+
+  const alphaSvg = `<svg width="${contextW}" height="${contextH}" xmlns="http://www.w3.org/2000/svg">
+    <defs>${defs.join('')}</defs>
+    <rect width="${contextW}" height="${contextH}" fill="#000000" />
+    <rect x="${selOnContext.left}" y="${selOnContext.top}" width="${selOnContext.width}" height="${selOnContext.height}" fill="#ffffff" />
+    ${bands.join('\n    ')}
+  </svg>`;
+
+  // Strict binary rectangle to guarantee zero bleed outside selOnContext
+  const strictClipSvg = `<svg width="${contextW}" height="${contextH}" xmlns="http://www.w3.org/2000/svg">
+    <rect width="${contextW}" height="${contextH}" fill="#000000" />
+    <rect x="${selOnContext.left}" y="${selOnContext.top}" width="${selOnContext.width}" height="${selOnContext.height}" fill="#ffffff" />
+  </svg>`;
+
+  const strictClipBuffer = await sharp(Buffer.from(strictClipSvg)).greyscale().png().toBuffer();
+
+  const alphaGreyBuffer = await sharp(Buffer.from(alphaSvg))
+    .greyscale()
+    .composite([{ input: await greyToAlphaLayer(strictClipBuffer, contextW, contextH), blend: 'dest-in' }])
+    .png()
+    .toBuffer();
+
+  const modelAlphaLayer = await greyToAlphaLayer(alphaGreyBuffer, contextW, contextH);
+
+  const maskedModel = await sharp(resizedModel)
+    .composite([{ input: modelAlphaLayer, blend: 'dest-in' }])
+    .png()
+    .toBuffer();
+
+  const finalStitched = await sharp({
+    create: {
+      width: newW,
+      height: newH,
+      channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 0 }
+    }
+  })
+    .composite([
+      { input: origBuffer, left: origLeft, top: origTop },
+      { input: maskedModel, left: contextLeft, top: contextTop }
+    ])
+    .png()
+    .toBuffer();
+
+  return bufferToDataUrl(finalStitched);
+}
+
+
 module.exports = {
   dataUrlToBuffer,
   bufferToDataUrl,
@@ -539,5 +787,7 @@ module.exports = {
   prepareInpaintCanvas,
   measureMaskBounds,
   buildInpaintGuide,
-  compositeInpaintRegion
+  compositeInpaintRegion,
+  prepareRegionCanvas,
+  compositeRegion
 };

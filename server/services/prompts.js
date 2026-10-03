@@ -42,7 +42,19 @@ System & Extension Directives:
 2. Fill ONLY the white mask region with top-down battlemap terrain that continues seamlessly from the adjacent map tiles: matching floor tile grid scale, wall thickness, geometry, palette, and lighting direction.
 3. Keep everything outside the white mask region black / blank / unchanged. Do NOT generate map terrain outside the white mask region.
 4. Align floor grid lines, corridors, walls, and environmental features naturally with the existing map along the open seam.
-5. Return only the image — no commentary.`
+5. Return only the image — no commentary.`,
+
+  FORGE_REGION: `You are a 2D TTRPG battlemap inpainting and canvas extension engine.
+You are given three images: (1) the context window showing the battlemap and any expansion void, (2) the guide image highlighting the target region with a semi-transparent cyan box, (3) the binary mask (WHITE = target region to forge, BLACK = keep strictly unchanged/preserved).
+
+System & Forge Directives:
+1. Camera: perfectly flat orthographic top-down 2D view, zero perspective distortion.
+2. Return ONE image matching the exact pixel dimensions of the input images.
+3. Strictly generate terrain INSIDE the white mask area; keep everything outside the white mask unchanged.
+4. For unpainted/void areas inside the mask: generate new seamless terrain continuing walls, floor tiles, and geometry from the surrounding context.
+5. For existing map areas inside the mask: modify, add, or replace details as requested by the user prompt while matching adjacent lighting, tile scale, and style.
+6. The cyan guide in image 2 is for location guidance only and must never appear in the output.
+7. Return only the image — no commentary.`
 };
 
 /**
@@ -68,10 +80,20 @@ function buildOutpaintPrompt({ direction, extensionPrompt, width, height, region
   const boxInfo = region ? ` Paint new map terrain strictly inside the white mask region (${region.width}x${region.height} px box). Do NOT draw map details outside the white mask area.` : '';
   return `${base}.${boxInfo} Output canvas: ${width}x${height} pixels.`;
 }
+/**
+ * User-side instruction for unified region forging (inpaint, outpaint, or hybrid).
+ */
+function buildForgeRegionPrompt(userPrompt, selection, contextW, contextH) {
+  const trimmed = typeof userPrompt === 'string' ? userPrompt.trim() : '';
+  const desc = trimmed || 'Generate natural, style-matched battlemap terrain inside the target region';
+  const selInfo = selection ? ` (${selection.width}x${selection.height} px box)` : '';
+  return `Target region${selInfo}: ${desc}. Output context frame: ${contextW}x${contextH} pixels.`;
+}
 
 module.exports = {
   IMAGE_PROMPTS,
   buildBattlemapPrompt,
   buildInpaintPrompt,
-  buildOutpaintPrompt
+  buildOutpaintPrompt,
+  buildForgeRegionPrompt
 };

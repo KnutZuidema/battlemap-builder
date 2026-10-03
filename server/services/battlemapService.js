@@ -107,8 +107,8 @@ async function runModel(entry, { systemInstruction, userPromptText, fullPromptPa
  * produces no map — the caller must surface the failure rather than hand the user something the
  * model never made.
  */
-async function generateBattlemap({ prompt, width = 1024, height = 1024 }) {
-  const entry = configuredModel();
+async function generateBattlemap({ prompt, width = 1024, height = 1024, model }) {
+  const entry = configuredModel(model);
   const systemInstruction = IMAGE_PROMPTS.GENERATE;
   const userPromptText = buildBattlemapPrompt(prompt);
   const fullPromptPayload = `${systemInstruction}\n\n[USER REQUEST]\n${userPromptText}`;
@@ -134,8 +134,8 @@ async function generateBattlemap({ prompt, width = 1024, height = 1024 }) {
  * and only the masked bounding box of its render is composited back — every pixel outside it keeps
  * its original bytes. The original map is never silently returned as if the edit had happened.
  */
-async function inpaintBattlemap({ originalDataUrl, maskDataUrl, prompt }) {
-  const entry = configuredModel();
+async function inpaintBattlemap({ originalDataUrl, maskDataUrl, prompt, model }) {
+  const entry = configuredModel(model);
 
   if (!entry.vision) {
     throw providerFailure(
@@ -182,8 +182,8 @@ async function inpaintBattlemap({ originalDataUrl, maskDataUrl, prompt }) {
  * filled; the original map is feathered over the seam, and the canvas is never padded with
  * procedurally generated terrain.
  */
-async function outpaintBattlemap({ originalDataUrl, direction = 'east', extensionPrompt = '', expandAmount = 512, span = null }) {
-  const entry = configuredModel();
+async function outpaintBattlemap({ originalDataUrl, direction = 'east', extensionPrompt = '', expandAmount = 512, span = null, model }) {
+  const entry = configuredModel(model);
   const systemInstruction = IMAGE_PROMPTS.OUTPAINT;
 
   const prepared = await prepareOutpaintCanvas(originalDataUrl, direction, expandAmount, span);

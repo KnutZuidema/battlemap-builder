@@ -119,6 +119,12 @@ async function sourceToBuffer(source) {
  * the exact canvas size the stitchers downstream expect.
  */
 async function requestCanvas({ model, systemInstruction, userPromptText, fullPromptPayload, images = [], width, height, apiKey }) {
+  const telemetryImages = images.map((img, idx) => ({
+    id: idx,
+    label: img.label || `Image ${idx + 1}`,
+    dataUrl: `data:${img.mimeType || 'image/png'};base64,${img.buffer.toString('base64')}`
+  }));
+
   const payload = await postCompletion({ apiKey, model, systemInstruction, fullPromptPayload, images });
 
   const usage = readUsage(payload);
@@ -134,6 +140,16 @@ async function requestCanvas({ model, systemInstruction, userPromptText, fullPro
     err.attempts = attempts;
     err.rawResponseText = rawText;
     err.usage = usage;
+    err.telemetry = {
+      modelUsed: model,
+      rawResponseText: rawText,
+      attempts,
+      usage,
+      systemInstruction,
+      userPrompt: userPromptText,
+      fullPrompt: fullPromptPayload,
+      images: telemetryImages
+    };
     throw err;
   }
 
@@ -151,7 +167,8 @@ async function requestCanvas({ model, systemInstruction, userPromptText, fullPro
       usage,
       systemInstruction,
       userPrompt: userPromptText,
-      fullPrompt: fullPromptPayload
+      fullPrompt: fullPromptPayload,
+      images: telemetryImages
     }
   };
 }

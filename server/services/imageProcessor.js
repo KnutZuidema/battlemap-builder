@@ -51,6 +51,11 @@ async function greyToAlphaLayer(greyBuffer, width, height) {
  * Creates an expanded canvas image for Outpainting.
  * Returns the padded base image, cyan guide image, binary mask image, and geometry dimensions.
  */
+/**
+ * Creates an expanded canvas image for Outpainting.
+ * Extracts an adjacent map crop so the model focuses strictly on the selected expansion box.
+ * Returns the padded base image, cyan guide image, binary mask image, and geometry dimensions.
+ */
 async function prepareOutpaintCanvas(originalDataUrl, direction = 'east', expandAmount = OUTPAINT_DEFAULT_DEPTH_PX, span = null) {
   const inputBuffer = dataUrlToBuffer(originalDataUrl);
   const metadata = await sharp(inputBuffer).metadata();
@@ -76,98 +81,158 @@ async function prepareOutpaintCanvas(originalDataUrl, direction = 'east', expand
 
   let newW = origW;
   let newH = origH;
-  let left = 0;
-  let top = 0;
-  let region = null; // the strip the model must fill, in new-canvas coordinates
+  let origLeft = 0;
+  let origTop = 0;
+
+  // Geometry for full expanded canvas & target placement on full canvas
+  let targetRegion = null;
+
+  // Model-focused canvas parameters (crop of map adjacent to expansion box)
+  let cropX = 0, cropY = 0, cropW = origW, cropH = origH;
+  let modelW = origW, modelH = origH;
+  let mapCropOnModel = { left: 0, top: 0 };
+  let expansionBoxOnModel = { left: 0, top: 0, width: origW, height: origH };
 
   switch (dir) {
-    case 'north':
+    case 'north': {
       newH = origH + depth;
-      top = depth;
-      region = { left: spanStart, top: 0, width: spanLength, height: depth };
+      origTop = depth;
+      targetRegion = { left: spanStart, top: 0, width: spanLength, height: depth };
+
+      const contextDepth = Math.min(origH, depth);
+      cropX = spanStart;
+      cropY = 0;
+      cropW = spanLength;
+      cropH = contextDepth;
+
+      modelW = spanLength;
+      modelH = depth + contextDepth;
+      mapCropOnModel = { left: 0, top: depth };
+      expansionBoxOnModel = { left: 0, top: 0, width: spanLength, height: depth };
       break;
-    case 'south':
+    }
+    case 'south': {
       newH = origH + depth;
-      region = { left: spanStart, top: origH, width: spanLength, height: depth };
+      targetRegion = { left: spanStart, top: origH, width: spanLength, height: depth };
+
+      const contextDepth = Math.min(origH, depth);
+      cropX = spanStart;
+      cropY = origH - contextDepth;
+      cropW = spanLength;
+      cropH = contextDepth;
+
+      modelW = spanLength;
+      modelH = contextDepth + depth;
+      mapCropOnModel = { left: 0, top: 0 };
+      expansionBoxOnModel = { left: 0, top: contextDepth, width: spanLength, height: depth };
       break;
-    case 'west':
+    }
+    case 'west': {
       newW = origW + depth;
-      left = depth;
-      region = { left: 0, top: spanStart, width: depth, height: spanLength };
+      origLeft = depth;
+      targetRegion = { left: 0, top: spanStart, width: depth, height: spanLength };
+
+      const contextDepth = Math.min(origW, depth);
+      cropX = 0;
+      cropY = spanStart;
+      cropW = contextDepth;
+      cropH = spanLength;
+
+      modelW = depth + contextDepth;
+      modelH = spanLength;
+      mapCropOnModel = { left: depth, top: 0 };
+      expansionBoxOnModel = { left: 0, top: 0, width: depth, height: spanLength };
       break;
-    case 'east':
+    }
+    case 'east': {
       newW = origW + depth;
-      region = { left: origW, top: spanStart, width: depth, height: spanLength };
+      targetRegion = { left: origW, top: spanStart, width: depth, height: spanLength };
+
+      const contextDepth = Math.min(origW, depth);
+      cropX = origW - contextDepth;
+      cropY = spanStart;
+      cropW = contextDepth;
+      cropH = spanLength;
+
+      modelW = contextDepth + depth;
+      modelH = spanLength;
+      mapCropOnModel = { left: 0, top: 0 };
+      expansionBoxOnModel = { left: contextDepth, top: 0, width: depth, height: spanLength };
       break;
-    case 'all':
+    }
+    case 'all': {
       newW = origW + depth * 2;
       newH = origH + depth * 2;
-      left = depth;
-      top = depth;
-      region = { left: 0, top: 0, width: newW, height: newH };
+      origLeft = depth;
+      origTop = depth;
+      targetRegion = { left: 0, top: 0, width: newW, height: newH };
+
+      cropX = 0; cropY = 0; cropW = origW; cropH = origH;
+      modelW = newW; modelH = newH;
+      mapCropOnModel = { left: depth, top: depth };
+      expansionBoxOnModel = { left: 0, top: 0, width: newW, height: newH };
       break;
+    }
   }
 
-  // 1. Base extended canvas: dark neutral background + original map at top,left + dark fill in region
-  const fillLayer = region ? [{
+  // Extract adjacent map crop from original map
+  const existingCropBuffer = await sharp(inputBuffer)
+    .extract({ left: cropX, top: cropY, width: cropW, height: cropH })
+    .png()
+    .toBuffer();
+
+  // 1. Base model image: dark neutral background + map crop + dark fill inside expansion box
+  const fillLayer = {
     input: await sharp({
-      create: { width: region.width, height: region.height, channels: 3, background: OUTPAINT_FILL_COLOR }
+      create: { width: expansionBoxOnModel.width, height: expansionBoxOnModel.height, channels: 3, background: OUTPAINT_FILL_COLOR }
     }).png().toBuffer(),
-    top: region.top,
-    left: region.left
-  }] : [];
+    top: expansionBoxOnModel.top,
+    left: expansionBoxOnModel.left
+  };
 
   const extendedImageBuffer = await sharp({
     create: {
-      width: newW,
-      height: newH,
+      width: modelW,
+      height: modelH,
       channels: 4,
       background: { r: 10, g: 13, b: 20, alpha: 1 }
     }
   })
     .composite([
-      ...fillLayer,
-      { input: inputBuffer, top, left }
+      fillLayer,
+      { input: existingCropBuffer, top: mapCropOnModel.top, left: mapCropOnModel.left }
     ])
     .png()
     .toBuffer();
 
-  // 2. Guide image: extended canvas with cyan tint inside region
-  let guideImageBuffer = extendedImageBuffer;
-  if (region) {
-    const cyanLayer = await sharp({
-      create: { width: region.width, height: region.height, channels: 4, background: { r: 34, g: 211, b: 238, alpha: 0.45 } }
-    }).png().toBuffer();
-    guideImageBuffer = await sharp(extendedImageBuffer)
-      .composite([{ input: cyanLayer, top: region.top, left: region.left }])
-      .png()
-      .toBuffer();
-  }
+  // 2. Guide image: model canvas with cyan tint inside expansion box
+  const cyanLayer = await sharp({
+    create: { width: expansionBoxOnModel.width, height: expansionBoxOnModel.height, channels: 4, background: { r: 34, g: 211, b: 238, alpha: 0.45 } }
+  }).png().toBuffer();
 
-  // 3. Binary mask image: WHITE inside region ONLY, BLACK everywhere else
-  const maskLayers = region ? [{
+  const guideImageBuffer = await sharp(extendedImageBuffer)
+    .composite([{ input: cyanLayer, top: expansionBoxOnModel.top, left: expansionBoxOnModel.left }])
+    .png()
+    .toBuffer();
+
+  // 3. Binary mask image: WHITE inside expansion box ONLY, BLACK everywhere else
+  const maskLayer = {
     input: await sharp({
-      create: { width: region.width, height: region.height, channels: 3, background: { r: 255, g: 255, b: 255 } }
+      create: { width: expansionBoxOnModel.width, height: expansionBoxOnModel.height, channels: 3, background: { r: 255, g: 255, b: 255 } }
     }).png().toBuffer(),
-    top: region.top,
-    left: region.left
-  }] : [{
-    input: await sharp({
-      create: { width: newW, height: newH, channels: 3, background: { r: 255, g: 255, b: 255 } }
-    }).png().toBuffer(),
-    top: 0,
-    left: 0
-  }];
+    top: expansionBoxOnModel.top,
+    left: expansionBoxOnModel.left
+  };
 
   const maskImageBuffer = await sharp({
     create: {
-      width: newW,
-      height: newH,
+      width: modelW,
+      height: modelH,
       channels: 3,
       background: { r: 0, g: 0, b: 0 }
     }
   })
-    .composite(maskLayers)
+    .composite([maskLayer])
     .png()
     .toBuffer();
 
@@ -180,56 +245,62 @@ async function prepareOutpaintCanvas(originalDataUrl, direction = 'east', expand
       height: newH,
       origW,
       origH,
-      top,
-      left,
+      origLeft,
+      origTop,
       direction: dir,
       expandAmount: depth,
       span: { start: spanStart, end: spanEnd, length: edgeLength },
-      region,
-      hasVoid: partial
+      targetRegion,
+      hasVoid: partial,
+      modelDimensions: {
+        modelW,
+        modelH,
+        cropRegion: { left: cropX, top: cropY, width: cropW, height: cropH },
+        mapCropOnModel,
+        expansionBoxOnModel
+      }
     }
   };
 }
 
 /**
- * Builds the final stitched map: model output is masked strictly inside the selected expansion region
- * (with soft outer edges), and composited with the original map (feathered along the seam).
+ * Composites the model's outpaint render back onto the final extended canvas.
+ * The model output (size modelW x modelH) is masked to the expansion region with soft alpha seam,
+ * and composited with the original map (feathered along the seam).
+ * Regions of the new full canvas outside the original map and outside the expansion box are kept transparent.
  */
 async function featheredOutpaintComposite(origBuffer, extBuffer, dimensions, featherPx = 48, outerFeatherPx = 12) {
-  const { width: newW, height: newH, top, left, direction, span, region } = dimensions;
-  const origMeta = await sharp(origBuffer).metadata();
-  const w = origMeta.width;
-  const h = origMeta.height;
-  const feather = Math.max(1, Math.min(featherPx, Math.floor(Math.min(w, h) / 2)));
-  const segmentLength = span ? span.end - span.start : (direction === 'north' || direction === 'south' ? w : h);
+  const { width: newW, height: newH, origW, origH, origLeft, origTop, direction, targetRegion, modelDimensions } = dimensions;
+  const { modelW, modelH, mapCropOnModel, expansionBoxOnModel } = modelDimensions;
 
-  // 1. Build mask for model output: white inside region + featherPx seam overlap into orig map
-  let seamLeft = region ? region.left : 0;
-  let seamTop = region ? region.top : 0;
-  let seamWidth = region ? region.width : newW;
-  let seamHeight = region ? region.height : newH;
+  const feather = Math.max(1, Math.min(featherPx, Math.floor(Math.min(origW, origH) / 2)));
 
-  if (region) {
-    switch (direction) {
-      case 'east':
-        seamLeft -= feather;
-        seamWidth += feather;
-        break;
-      case 'west':
-        seamWidth += feather;
-        break;
-      case 'north':
-        seamHeight += feather;
-        break;
-      case 'south':
-        seamTop -= feather;
-        seamHeight += feather;
-        break;
-    }
+  // 1. Build mask for model output on model canvas (modelW x modelH):
+  // White inside expansionBoxOnModel + featherPx seam overlap into mapCropOnModel
+  let seamLeft = expansionBoxOnModel.left;
+  let seamTop = expansionBoxOnModel.top;
+  let seamWidth = expansionBoxOnModel.width;
+  let seamHeight = expansionBoxOnModel.height;
+
+  switch (direction) {
+    case 'east':
+      seamLeft -= feather;
+      seamWidth += feather;
+      break;
+    case 'west':
+      seamWidth += feather;
+      break;
+    case 'north':
+      seamHeight += feather;
+      break;
+    case 'south':
+      seamTop -= feather;
+      seamHeight += feather;
+      break;
   }
 
-  const modelMaskSvg = `<svg width="${newW}" height="${newH}" xmlns="http://www.w3.org/2000/svg">
-    <rect x="0" y="0" width="${newW}" height="${newH}" fill="black" />
+  const modelMaskSvg = `<svg width="${modelW}" height="${modelH}" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="0" width="${modelW}" height="${modelH}" fill="black" />
     <rect x="${seamLeft}" y="${seamTop}" width="${seamWidth}" height="${seamHeight}" fill="white" rx="${outerFeatherPx}" />
   </svg>`;
 
@@ -238,39 +309,61 @@ async function featheredOutpaintComposite(origBuffer, extBuffer, dimensions, fea
     .png()
     .toBuffer();
 
-  const modelAlphaLayer = await greyToAlphaLayer(modelMaskBuffer, newW, newH);
+  const modelAlphaLayer = await greyToAlphaLayer(modelMaskBuffer, modelW, modelH);
 
+  // Mask the model output on its model canvas
   const maskedModelLayer = await sharp(extBuffer)
-    .resize(newW, newH, { fit: 'fill' })
+    .resize(modelW, modelH, { fit: 'fill' })
     .ensureAlpha()
     .composite([{ input: modelAlphaLayer, blend: 'dest-in' }])
     .png()
     .toBuffer();
 
+  // Placement of model canvas layer onto the new full canvas (newW x newH):
+  let modelPlacementOnFull = { left: 0, top: 0 };
+  switch (direction) {
+    case 'east':
+      modelPlacementOnFull = { left: targetRegion.left - mapCropOnModel.left, top: targetRegion.top };
+      break;
+    case 'west':
+      modelPlacementOnFull = { left: 0, top: targetRegion.top };
+      break;
+    case 'north':
+      modelPlacementOnFull = { left: targetRegion.left, top: 0 };
+      break;
+    case 'south':
+      modelPlacementOnFull = { left: targetRegion.left, top: targetRegion.top - mapCropOnModel.top };
+      break;
+    case 'all':
+      modelPlacementOnFull = { left: 0, top: 0 };
+      break;
+  }
+
   // 2. Feather original map along the seam (only across selected span)
-  const spanStart = span ? span.start : 0;
+  const spanStart = dimensions.span ? dimensions.span.start : 0;
+  const segmentLength = dimensions.span ? dimensions.span.end - dimensions.span.start : (direction === 'north' || direction === 'south' ? origW : origH);
   const bands = [];
   switch (direction) {
-    case 'east': bands.push({ x: w - feather, y: spanStart, width: feather, height: segmentLength }); break;
+    case 'east': bands.push({ x: origW - feather, y: spanStart, width: feather, height: segmentLength }); break;
     case 'west': bands.push({ x: 0, y: spanStart, width: feather, height: segmentLength }); break;
     case 'north': bands.push({ x: spanStart, y: 0, width: segmentLength, height: feather }); break;
-    case 'south': bands.push({ x: spanStart, y: h - feather, width: segmentLength, height: feather }); break;
+    case 'south': bands.push({ x: spanStart, y: origH - feather, width: segmentLength, height: feather }); break;
     default:
       bands.push(
-        { x: 0, y: 0, width: w, height: feather },
-        { x: 0, y: h - feather, width: w, height: feather },
-        { x: 0, y: 0, width: feather, height: h },
-        { x: w - feather, y: 0, width: feather, height: h }
+        { x: 0, y: 0, width: origW, height: feather },
+        { x: 0, y: origH - feather, width: origW, height: feather },
+        { x: 0, y: 0, width: feather, height: origH },
+        { x: origW - feather, y: 0, width: feather, height: origH }
       );
   }
 
-  const origFeatherSvg = `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">
-    <rect x="0" y="0" width="${w}" height="${h}" fill="white" />
+  const origFeatherSvg = `<svg width="${origW}" height="${origH}" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="0" width="${origW}" height="${origH}" fill="white" />
     ${bands.map((b) => `<rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" fill="black" />`).join('\n    ')}
   </svg>`;
 
   const origFeatherBuffer = await svgToGrey(origFeatherSvg, Math.max(1, Math.round(feather / 2)));
-  const origAlphaLayer = await greyToAlphaLayer(origFeatherBuffer, w, h);
+  const origAlphaLayer = await greyToAlphaLayer(origFeatherBuffer, origW, origH);
 
   const featheredOrig = await sharp(origBuffer)
     .ensureAlpha()
@@ -278,13 +371,13 @@ async function featheredOutpaintComposite(origBuffer, extBuffer, dimensions, fea
     .png()
     .toBuffer();
 
-  // 3. Composite feathered original over masked model layer
+  // 3. Composite masked model layer and feathered original map onto transparent new full canvas
   const finalStitched = await sharp({
     create: { width: newW, height: newH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } }
   })
     .composite([
-      { input: maskedModelLayer, top: 0, left: 0 },
-      { input: featheredOrig, top, left }
+      { input: maskedModelLayer, top: modelPlacementOnFull.top, left: modelPlacementOnFull.left },
+      { input: featheredOrig, top: origTop, left: origLeft }
     ])
     .png()
     .toBuffer();

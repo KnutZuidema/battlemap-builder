@@ -187,26 +187,26 @@ async function outpaintBattlemap({ originalDataUrl, direction = 'east', extensio
   const systemInstruction = IMAGE_PROMPTS.OUTPAINT;
 
   const prepared = await prepareOutpaintCanvas(originalDataUrl, direction, expandAmount, span);
-  const { width: newW, height: newH, region } = prepared.dimensions;
-  // The canvas processor normalises the side and clamps the span; use its view from here on.
+  const { targetRegion, modelDimensions } = prepared.dimensions;
+  const { modelW, modelH } = modelDimensions;
   const resolvedDirection = prepared.dimensions.direction;
 
   const userPromptText = extensionPrompt || `Expand canvas towards ${resolvedDirection.toUpperCase()}`;
   const fullPromptPayload = `${systemInstruction}\n\n[OUTPAINT DIRECTION & USER REQUEST]\n${buildOutpaintPrompt({
     direction: resolvedDirection,
     extensionPrompt,
-    width: newW,
-    height: newH,
-    region
+    width: modelW,
+    height: modelH,
+    region: targetRegion
   })}`;
 
   const images = [
     {
-      label: `Extended battlemap canvas (${newW}x${newH} px) containing the existing map and empty dark expansion region`,
+      label: `Focused battlemap canvas crop (${modelW}x${modelH} px) containing existing map crop and empty expansion region`,
       buffer: dataUrlToBuffer(prepared.extendedImage)
     },
     {
-      label: 'Extended canvas with the selected expansion box highlighted in cyan tint',
+      label: 'Focused crop canvas with the selected expansion box highlighted in cyan tint',
       buffer: dataUrlToBuffer(prepared.guideImage)
     },
     {
@@ -220,8 +220,8 @@ async function outpaintBattlemap({ originalDataUrl, direction = 'east', extensio
     userPromptText,
     fullPromptPayload,
     images,
-    width: newW,
-    height: newH
+    width: modelW,
+    height: modelH
   });
 
   const origBuffer = dataUrlToBuffer(originalDataUrl);

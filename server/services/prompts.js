@@ -30,18 +30,19 @@ System & Editing Directives:
 3. Inside the masked region, replace or add the requested objects (props, hazards, doors, altars, lighting elements).
 4. Preserve room geometry, floor tile scale, wall thickness and perspective so the edit aligns with adjacent tiles.
 5. Match the colour balance and lighting intensity of the surrounding tiles.
-6. The red tint in image 2 is a guide only — it must never appear in the output.
-7. Return only the image — no commentary.`,
+6. The red tint in image 2 is a guide only — it must never appear in the output (unless the request itself asks for something red).
+7. The mask only marks where the edit may happen: draw the requested object at a natural 5 ft-grid scale and let the surrounding floor continue around it, rather than stretching it to fill the mask shape.
+8. Return only the image — no commentary.`,
 
   OUTPAINT: `You are a 2D TTRPG battlemap canvas extension engine.
-You are given one battlemap frame containing a flat, empty dark region where the canvas is being extended.
+You are given three images: (1) the extended canvas containing the existing map and an empty dark expansion box, (2) the guide image highlighting the expansion region in cyan tint, (3) the binary mask (WHITE = area to generate new map terrain inside, BLACK = keep strictly unchanged/blank).
 
 System & Extension Directives:
-1. Fill the empty region with terrain that continues seamlessly from the existing map: same palette, tile scale, wall thickness and lighting direction.
-2. Extend hallways, rooms, or outdoor terrain logically in the requested direction.
-3. Keep every pixel of the existing map unchanged.
-4. Blend the seam softly — no hard cut line along the boundary.
-5. Output ONE image at exactly the pixel dimensions requested by the user — only the image, no commentary.`
+1. Return ONE image at exactly the pixel dimensions requested by the user.
+2. Fill ONLY the white mask region with top-down battlemap terrain that continues seamlessly from the adjacent map tiles: matching floor tile grid scale, wall thickness, geometry, palette, and lighting direction.
+3. Keep everything outside the white mask region black / blank / unchanged. Do NOT generate map terrain outside the white mask region.
+4. Align floor grid lines, corridors, walls, and environmental features naturally with the existing map along the open seam.
+5. Return only the image — no commentary.`
 };
 
 /**
@@ -60,12 +61,12 @@ function buildInpaintPrompt(userPrompt) {
 }
 
 /**
- * User-side instruction for an outpaint call. Image models pick their own output resolution, so the
- * target pixel size is stated explicitly — the stitch back onto the original canvas needs exact dimensions.
+ * User-side instruction for an outpaint call.
  */
-function buildOutpaintPrompt({ direction, extensionPrompt, width, height }) {
+function buildOutpaintPrompt({ direction, extensionPrompt, width, height, region }) {
   const base = `Extend this top-down TTRPG battlemap towards the ${direction.toUpperCase()}. Extended area features: ${extensionPrompt || 'continue room/corridor layout with matching floor tiles and walls'}`;
-  return `${base}. Output canvas: ${width}x${height} pixels.`;
+  const boxInfo = region ? ` Paint new map terrain strictly inside the white mask region (${region.width}x${region.height} px box). Do NOT draw map details outside the white mask area.` : '';
+  return `${base}.${boxInfo} Output canvas: ${width}x${height} pixels.`;
 }
 
 module.exports = {

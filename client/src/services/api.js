@@ -47,6 +47,7 @@ export async function inpaintBattlemapApi({ originalDataUrl, maskDataUrl, prompt
   return postJson('/api/inpaint', { originalDataUrl, maskDataUrl, prompt });
 }
 
-export async function outpaintBattlemapApi({ originalDataUrl, direction, extensionPrompt, expandAmount }) {
-  return postJson('/api/outpaint', { originalDataUrl, direction, extensionPrompt, expandAmount });
+/** `spanStart`/`spanEnd` (px along the expanded edge) limit the new strip to part of that side. */
+export async function outpaintBattlemapApi({ originalDataUrl, direction, extensionPrompt, expandAmount, spanStart, spanEnd }) {
+  return postJson('/api/outpaint', { originalDataUrl, direction, extensionPrompt, expandAmount, spanStart, spanEnd });
 }

@@ -2,6 +2,13 @@ import React, { useRef, useState, useEffect } from 'react';
 import { Stage, Layer, Image as KonvaImage, Line, Rect, Circle, Text, Group } from 'react-konva';
 import { ZoomIn, ZoomOut, Maximize, Move, Clock, Sparkles, Paintbrush, Plus } from 'lucide-react';
 import { formatTimer } from '../utils/format';
+import { createSelection, resizeSelection, selectionHandles } from '../utils/outpaintSelection';
+
+/** Rough height of the expansion popover, used to leave room for it when focusing a selection. */
+const POPOVER_RESERVE_PX = 240;
+const FOCUS_PAD_PX = 40;
+/** Screen-pixel size of the border hit areas and grips, kept constant while zooming. */
+const HANDLE_HIT_PX = 18;
 
 /** Mask brush radius in map pixels — the only edit-brush control left, now that the sidebar is gone. */
 const MASK_BRUSH_RADIUS = 30;
@@ -11,12 +18,14 @@ export default function BattlemapCanvas({
   inpaintMaskLines,
   setInpaintMaskLines,
   onMaskPainted,
-  onRequestOutpaint,
+  // Outpaint selection: the strip of new canvas, resized by dragging its borders
+  outpaintSelection,
+  onOutpaintSelectionChange,
+  renderOutpaintPopover,
   // Timer & Shimmer Overlay Props
   isGenerating,
   isEditing,
   isExpanding,
-  outpaintDirection,
   elapsedSeconds,
   generationPhaseText
 }) {
@@ -31,6 +40,9 @@ export default function BattlemapCanvas({
   // Whether the stroke in progress actually laid down mask points, so a stray right-click does not
   // pop the edit modal.
   const strokeDrewMask = useRef(false);
+  // Edges of the outpaint selection being dragged, and the cursor to show over its handles.
+  const [resizeEdges, setResizeEdges] = useState(null);
+  const [handleCursor, setHandleCursor] = useState(null);
 
   // Loaded map image element
   const [loadedImage, setLoadedImage] = useState(null);
@@ -111,9 +123,11 @@ export default function BattlemapCanvas({
     };
   };
 
-  // Mouse Down — middle-click / Shift pans, right button paints an edit mask
+  // Mouse Down — left / middle button pans, right button paints an edit mask
   const handleMouseDown = (e) => {
-    if (e.evt.button === 1 || e.evt.shiftKey) {
+    if (e.evt.button === 0 || e.evt.button === 1) {
+      // Clicking an expansion hotspot must stay a click, not start a pan.
+      if (e.target && e.target.getParent() && e.target.getParent().attrs.name === 'hotspot') return;
       setIsPanning(true);
       setLastPanPos({ x: e.evt.clientX, y: e.evt.clientY });
       return;
@@ -134,6 +148,14 @@ export default function BattlemapCanvas({
 
   // Mouse Move
   const handleMouseMove = (e) => {
+    if (resizeEdges && outpaintSelection && loadedImage) {
+      const point = pointerToMap();
+      if (point) {
+        onOutpaintSelectionChange(resizeSelection(outpaintSelection, resizeEdges.edges, point, loadedImage.width, loadedImage.height));
+      }
+      return;
+    }
+
     if (isPanning) {
       const dx = e.evt.clientX - lastPanPos.x;
       const dy = e.evt.clientY - lastPanPos.y;
@@ -155,12 +177,80 @@ export default function BattlemapCanvas({
   };
 
   // Mouse Up — a finished mask stroke hands off to the prompt modal
+  // Global pointer listeners while dragging a resize handle so dragging stays active even outside the stage
+  useEffect(() => {
+    if (!resizeEdges || !outpaintSelection || !loadedImage) return undefined;
+
+    const onPointerMove = (e) => {
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const point = {
+        x: (e.clientX - rect.left - position.x) / scale,
+        y: (e.clientY - rect.top - position.y) / scale
+      };
+      onOutpaintSelectionChange(resizeSelection(outpaintSelection, resizeEdges.edges, point, loadedImage.width, loadedImage.height));
+    };
+
+    const onPointerUp = () => {
+      setResizeEdges(null);
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+    };
+  }, [resizeEdges, outpaintSelection, loadedImage, position, scale, onOutpaintSelectionChange]);
+
   const handleMouseUp = ({ openPrompt = true } = {}) => {
     const drew = isDrawing && strokeDrewMask.current;
     strokeDrewMask.current = false;
     setIsDrawing(false);
     setIsPanning(false);
+    setResizeEdges(null);
     if (drew && openPrompt) onMaskPainted();
+  };
+
+  // A clicked hotspot starts a full-side selection and makes sure it (and its popover) is in view.
+  const handleRequestOutpaint = (direction) => {
+    if (!loadedImage) return;
+    const selection = createSelection(direction, loadedImage.width, loadedImage.height);
+    onOutpaintSelectionChange(selection);
+    focusSelection(selection);
+  };
+
+  // Pan/zoom out only as far as needed so the selection — and the popover that sits above a north
+  // selection or below a south one — is fully visible. Never zooms in, never moves a view that fits.
+  const focusSelection = (selection) => {
+    if (!loadedImage || !containerRef.current) return;
+    const cw = containerRef.current.offsetWidth;
+    const ch = containerRef.current.offsetHeight;
+    const needsTop = selection.direction === 'north' ? POPOVER_RESERVE_PX : 0;
+    const needsBottom = selection.direction === 'south' ? POPOVER_RESERVE_PX : 0;
+    const areaLeft = FOCUS_PAD_PX;
+    const areaRight = cw - FOCUS_PAD_PX;
+    const areaTop = FOCUS_PAD_PX + needsTop;
+    const areaBottom = ch - FOCUS_PAD_PX - needsBottom;
+
+    const x0 = Math.min(0, selection.x);
+    const y0 = Math.min(0, selection.y);
+    const x1 = Math.max(loadedImage.width, selection.x + selection.width);
+    const y1 = Math.max(loadedImage.height, selection.y + selection.height);
+
+    const fits = position.x + x0 * scale >= areaLeft
+      && position.x + x1 * scale <= areaRight
+      && position.y + y0 * scale >= areaTop
+      && position.y + y1 * scale <= areaBottom;
+    if (fits) return;
+
+    const fit = Math.min((areaRight - areaLeft) / (x1 - x0), (areaBottom - areaTop) / (y1 - y0));
+    const nextScale = Math.max(0.1, Math.min(scale, fit));
+    setScale(nextScale);
+    setPosition({
+      x: areaLeft + ((areaRight - areaLeft) - (x1 - x0) * nextScale) / 2 - x0 * nextScale,
+      y: areaTop + ((areaBottom - areaTop) - (y1 - y0) * nextScale) / 2 - y0 * nextScale
+    });
   };
 
   // Recenter / fit view
@@ -191,33 +281,11 @@ export default function BattlemapCanvas({
 
     if (isExpanding) {
       color = '#34d399'; // Emerald for outpainting
-      const expandPx = 512;
-      switch (outpaintDirection) {
-        case 'north':
-          targetY = -expandPx;
-          targetH = expandPx;
-          break;
-        case 'south':
-          targetY = mapHeight;
-          targetH = expandPx;
-          break;
-        case 'west':
-          targetX = -expandPx;
-          targetW = expandPx;
-          break;
-        case 'east':
-          targetX = mapWidth;
-          targetW = expandPx;
-          break;
-        case 'all':
-          targetX = -expandPx;
-          targetY = -expandPx;
-          targetW = mapWidth + expandPx * 2;
-          targetH = mapHeight + expandPx * 2;
-          break;
-        default:
-          targetX = mapWidth;
-          targetW = expandPx;
+      if (outpaintSelection) {
+        targetX = outpaintSelection.x;
+        targetY = outpaintSelection.y;
+        targetW = outpaintSelection.width;
+        targetH = outpaintSelection.height;
       }
     } else if (isEditing) {
       color = '#22d3ee'; // Cyan for inpainting
@@ -251,7 +319,30 @@ export default function BattlemapCanvas({
     );
   };
 
-  const cursor = isPanning ? 'grabbing' : isDrawing ? 'crosshair' : 'default';
+  const handleHoverCursor = outpaintSelection && !isBusy ? handleCursor : null;
+  const cursor = resizeEdges
+    ? resizeEdges.cursor
+    : isPanning ? 'grabbing' : isDrawing ? 'crosshair' : (handleHoverCursor || 'default');
+
+  // Where the expansion popover goes: next to the selected strip, on a side that never covers the map.
+  const popoverSides = {
+    north: { sides: ['above'], align: 'center' },
+    south: { sides: ['below'], align: 'center' },
+    east: { sides: ['above', 'below'], align: 'start' },
+    west: { sides: ['above', 'below'], align: 'end' }
+  };
+  const outpaintPopover = outpaintSelection && loadedImage && renderOutpaintPopover
+    ? renderOutpaintPopover({
+      rect: {
+        left: position.x + outpaintSelection.x * scale,
+        top: position.y + outpaintSelection.y * scale,
+        width: outpaintSelection.width * scale,
+        height: outpaintSelection.height * scale
+      },
+      bounds: dimensions,
+      ...(popoverSides[outpaintSelection.direction] || popoverSides.east)
+    })
+    : null;
 
   return (
     <main
@@ -297,7 +388,7 @@ export default function BattlemapCanvas({
       {/* Canvas Interaction Hints */}
       <div className="absolute bottom-4 left-4 z-10 bg-slate-950/70 backdrop-blur-md px-3 py-1.5 rounded-xl border border-white/[0.07] text-[11px] text-slate-400 flex items-center gap-2">
         <Move className="w-3.5 h-3.5 text-amber-400" />
-        <span>Shift + Drag or Middle Click to Pan · Scroll to Zoom</span>
+        <span>Drag to Pan · Scroll to Zoom</span>
       </div>
 
       {!isBusy && (
@@ -352,17 +443,135 @@ export default function BattlemapCanvas({
           ))}
         </Layer>
 
-        {/* OUTPAINT EXPANSION HOTSPOTS */}
+        {/* OUTPAINT SELECTION — drag its borders / outer corners to resize the strip */}
+        {loadedImage && !isBusy && outpaintSelection && (
+          <Layer>
+            <OutpaintSelection
+              selection={outpaintSelection}
+              scale={scale}
+              onResizeStart={setResizeEdges}
+              onHandleHover={setHandleCursor}
+            />
+          </Layer>
+        )}
+
+        {/* OUTPAINT EXPANSION HOTSPOTS — the active side is already selected, so it has none */}
         {loadedImage && !isBusy && (
           <Layer>
-            <Hotspot x={loadedImage.width / 2} y={-44} onClick={() => onRequestOutpaint('north')} />
-            <Hotspot x={loadedImage.width / 2} y={loadedImage.height + 44} onClick={() => onRequestOutpaint('south')} />
-            <Hotspot x={loadedImage.width + 44} y={loadedImage.height / 2} onClick={() => onRequestOutpaint('east')} />
-            <Hotspot x={-44} y={loadedImage.height / 2} onClick={() => onRequestOutpaint('west')} />
+            {outpaintSelection?.direction !== 'north' && (
+              <Hotspot x={loadedImage.width / 2} y={-44} onClick={() => handleRequestOutpaint('north')} />
+            )}
+            {outpaintSelection?.direction !== 'south' && (
+              <Hotspot x={loadedImage.width / 2} y={loadedImage.height + 44} onClick={() => handleRequestOutpaint('south')} />
+            )}
+            {outpaintSelection?.direction !== 'east' && (
+              <Hotspot x={loadedImage.width + 44} y={loadedImage.height / 2} onClick={() => handleRequestOutpaint('east')} />
+            )}
+            {outpaintSelection?.direction !== 'west' && (
+              <Hotspot x={-44} y={loadedImage.height / 2} onClick={() => handleRequestOutpaint('west')} />
+            )}
           </Layer>
         )}
       </Stage>
+
+      {/* Expansion prompt: floats beside the selected strip and follows it while panning / zooming */}
+      {outpaintPopover}
     </main>
+  );
+}
+
+/**
+ * The strip of new canvas the user is about to generate. The edge on the map is fixed; the other
+ * borders and the two outer corners are grabbed to set how deep the strip goes and how much of the
+ * map's side it covers. Hit areas and grips keep a constant on-screen size while zooming.
+ */
+function OutpaintSelection({ selection, scale, onResizeStart, onHandleHover }) {
+  const { x, y, width, height, direction } = selection;
+  const hit = HANDLE_HIT_PX / scale;
+  const px = 1 / scale;
+
+  const hitRect = (handle) => {
+    if (handle.edges.length === 2) {
+      const cx = handle.edges.includes('left') ? x : x + width;
+      const cy = handle.edges.includes('top') ? y : y + height;
+      return { x: cx - hit * 0.8, y: cy - hit * 0.8, width: hit * 1.6, height: hit * 1.6 };
+    }
+    switch (handle.edges[0]) {
+      case 'left': return { x: x - hit / 2, y, width: hit, height };
+      case 'right': return { x: x + width - hit / 2, y, width: hit, height };
+      case 'top': return { x, y: y - hit / 2, width, height: hit };
+      default: return { x, y: y + height - hit / 2, width, height: hit };
+    }
+  };
+
+  const grip = (handle) => {
+    if (handle.edges.length === 2) {
+      const cx = handle.edges.includes('left') ? x : x + width;
+      const cy = handle.edges.includes('top') ? y : y + height;
+      return { x: cx - 6 * px, y: cy - 6 * px, width: 12 * px, height: 12 * px };
+    }
+    const edge = handle.edges[0];
+    const vertical = edge === 'left' || edge === 'right';
+    const w = (vertical ? 6 : 40) * px;
+    const h = (vertical ? 40 : 6) * px;
+    const cx = edge === 'left' ? x : edge === 'right' ? x + width : x + width / 2;
+    const cy = edge === 'top' ? y : edge === 'bottom' ? y + height : y + height / 2;
+    return { x: cx - w / 2, y: cy - h / 2, width: w, height: h };
+  };
+
+  // Single-edge handles first, so the corner handles sit on top of them where the two meet.
+  const handles = selectionHandles(direction).sort((a, b) => a.edges.length - b.edges.length);
+
+  return (
+    <Group>
+      <Rect
+        x={x}
+        y={y}
+        width={width}
+        height={height}
+        fill="rgba(52, 211, 153, 0.14)"
+        stroke="#34d399"
+        strokeWidth={2}
+        strokeScaleEnabled={false}
+        dash={[10, 6]}
+        perfectDrawEnabled={false}
+        listening={false}
+      />
+      <Text
+        x={x + 10 * px}
+        y={y + 8 * px}
+        text={`${Math.round(width)} × ${Math.round(height)} px`}
+        fontSize={12 * px}
+        fontFamily="monospace"
+        fontStyle="bold"
+        fill="#a7f3d0"
+        listening={false}
+      />
+      {handles.map((handle) => (
+        <Group
+          key={handle.id}
+          onMouseDown={(e) => {
+            if (e.evt.button !== 0) return;
+            e.cancelBubble = true;
+            onResizeStart(handle);
+          }}
+          onMouseEnter={() => onHandleHover(handle.cursor)}
+          onMouseLeave={() => onHandleHover(null)}
+        >
+          <Rect {...hitRect(handle)} fill="rgba(0,0,0,0.01)" />
+          <Rect
+            {...grip(handle)}
+            fill="#34d399"
+            stroke="rgba(255,255,255,0.85)"
+            strokeWidth={1}
+            strokeScaleEnabled={false}
+            cornerRadius={3 * px}
+            perfectDrawEnabled={false}
+            listening={false}
+          />
+        </Group>
+      ))}
+    </Group>
   );
 }
 
@@ -371,6 +580,7 @@ function Hotspot({ x, y, onClick }) {
   const [hover, setHover] = React.useState(false);
   return (
     <Group
+      name="hotspot"
       x={x}
       y={y}
       onClick={onClick}

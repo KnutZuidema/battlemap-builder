@@ -182,25 +182,38 @@ async function inpaintBattlemap({ originalDataUrl, maskDataUrl, prompt }) {
  * filled; the original map is feathered over the seam, and the canvas is never padded with
  * procedurally generated terrain.
  */
-async function outpaintBattlemap({ originalDataUrl, direction = 'east', extensionPrompt = '', expandAmount = 512 }) {
+async function outpaintBattlemap({ originalDataUrl, direction = 'east', extensionPrompt = '', expandAmount = 512, span = null }) {
   const entry = configuredModel();
   const systemInstruction = IMAGE_PROMPTS.OUTPAINT;
 
-  const prepared = await prepareOutpaintCanvas(originalDataUrl, direction, expandAmount);
-  const { width: newW, height: newH, top, left } = prepared.dimensions;
+  const prepared = await prepareOutpaintCanvas(originalDataUrl, direction, expandAmount, span);
+  const { width: newW, height: newH, region } = prepared.dimensions;
+  // The canvas processor normalises the side and clamps the span; use its view from here on.
+  const resolvedDirection = prepared.dimensions.direction;
 
-  const userPromptText = extensionPrompt || `Expand canvas towards ${direction.toUpperCase()}`;
+  const userPromptText = extensionPrompt || `Expand canvas towards ${resolvedDirection.toUpperCase()}`;
   const fullPromptPayload = `${systemInstruction}\n\n[OUTPAINT DIRECTION & USER REQUEST]\n${buildOutpaintPrompt({
-    direction,
+    direction: resolvedDirection,
     extensionPrompt,
     width: newW,
-    height: newH
+    height: newH,
+    region
   })}`;
 
-  const images = [{
-    label: `The current ${newW}x${newH} canvas with the empty flat region to fill (the existing map already occupies the ${direction === 'north' || direction === 'south' ? 'vertical' : 'horizontal'} remainder of the frame)`,
-    buffer: dataUrlToBuffer(prepared.extendedImage)
-  }];
+  const images = [
+    {
+      label: `Extended battlemap canvas (${newW}x${newH} px) containing the existing map and empty dark expansion region`,
+      buffer: dataUrlToBuffer(prepared.extendedImage)
+    },
+    {
+      label: 'Extended canvas with the selected expansion box highlighted in cyan tint',
+      buffer: dataUrlToBuffer(prepared.guideImage)
+    },
+    {
+      label: 'Binary mask of the expansion box (WHITE = area to generate new map terrain inside, BLACK = keep strictly unchanged/blank)',
+      buffer: dataUrlToBuffer(prepared.maskImage)
+    }
+  ];
 
   const result = await runModel(entry, {
     systemInstruction,
@@ -212,7 +225,7 @@ async function outpaintBattlemap({ originalDataUrl, direction = 'east', extensio
   });
 
   const origBuffer = dataUrlToBuffer(originalDataUrl);
-  const finalStitchedDataUrl = await featheredOutpaintComposite(origBuffer, result.imageBuffer, top, left, direction, 48);
+  const finalStitchedDataUrl = await featheredOutpaintComposite(origBuffer, result.imageBuffer, prepared.dimensions, 48);
 
   return {
     imageDataUrl: finalStitchedDataUrl,

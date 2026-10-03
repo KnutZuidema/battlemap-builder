@@ -102,19 +102,23 @@ app.post('/api/inpaint', async (req, res) => {
  */
 app.post('/api/outpaint', async (req, res) => {
   try {
-    const { originalDataUrl, direction, extensionPrompt, expandAmount } = req.body;
+    const { originalDataUrl, direction, extensionPrompt, expandAmount, spanStart, spanEnd } = req.body;
 
     if (!originalDataUrl || !direction) {
       return res.status(400).json({ error: 'originalDataUrl and direction are required' });
     }
 
-    console.log(`[API /outpaint] Extending canvas ${direction.toUpperCase()}: prompt="${extensionPrompt}"`);
+    // spanStart/spanEnd (px along the expanded edge) limit the new strip to part of that side
+    const hasSpan = Number.isFinite(Number(spanStart)) && Number.isFinite(Number(spanEnd)) && spanStart !== null && spanEnd !== null;
+
+    console.log(`[API /outpaint] Extending canvas ${direction.toUpperCase()}: prompt="${extensionPrompt}"${hasSpan ? ` span=${spanStart}..${spanEnd}` : ''}`);
 
     const result = await outpaintBattlemap({
       originalDataUrl,
       direction,
       extensionPrompt,
-      expandAmount: parseInt(expandAmount) || 512
+      expandAmount: parseInt(expandAmount) || 512,
+      span: hasSpan ? { start: Number(spanStart), end: Number(spanEnd) } : null
     });
 
     res.json(result);

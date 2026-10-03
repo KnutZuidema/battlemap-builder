@@ -18,109 +18,280 @@ function bufferToDataUrl(buffer, mimeType = 'image/png') {
   return `data:${mimeType};base64,${buffer.toString('base64')}`;
 }
 
+
+const OUTPAINT_MIN_DEPTH_PX = 16;
+const OUTPAINT_MAX_DEPTH_PX = 2048;
+const OUTPAINT_DEFAULT_DEPTH_PX = 512;
+// What the model is asked to fill vs. the part of the new frame the user did not select.
+const OUTPAINT_FILL_COLOR = { r: 15, g: 20, b: 30 };
+const OUTPAINT_VOID_COLOR = { r: 255, g: 0, b: 255 };
+
+const clampInt = (value, min, max, fallback) => {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+};
+
+/** Greyscale rendering of an SVG (white = opaque), ready to become an alpha channel. */
+async function svgToGrey(svg, blurSigma = 0) {
+  let pipeline = sharp(Buffer.from(svg)).flatten({ background: '#ffffff' }).greyscale();
+  if (blurSigma > 0) pipeline = pipeline.blur(blurSigma);
+  return pipeline.png().toBuffer();
+}
+
+/** Black RGB frame carrying `greyBuffer` as its alpha channel, for use with `dest-in`. */
+async function greyToAlphaLayer(greyBuffer, width, height) {
+  return sharp({ create: { width, height, channels: 3, background: '#000000' } })
+    .joinChannel(greyBuffer)
+    .png()
+    .toBuffer();
+}
+
 /**
  * Creates an expanded canvas image for Outpainting.
- * Extends canvas in direction ('north', 'south', 'east', 'west', 'all')
- * and returns both the padded base image and dimensions.
+ * Returns the padded base image, cyan guide image, binary mask image, and geometry dimensions.
  */
-async function prepareOutpaintCanvas(originalDataUrl, direction = 'east', expandAmount = 512, overlap = 128) {
+async function prepareOutpaintCanvas(originalDataUrl, direction = 'east', expandAmount = OUTPAINT_DEFAULT_DEPTH_PX, span = null) {
   const inputBuffer = dataUrlToBuffer(originalDataUrl);
   const metadata = await sharp(inputBuffer).metadata();
   const origW = metadata.width;
   const origH = metadata.height;
 
+  const requested = String(direction || 'east').toLowerCase();
+  const dir = ['north', 'south', 'east', 'west', 'all'].includes(requested) ? requested : 'east';
+  const depth = clampInt(expandAmount, OUTPAINT_MIN_DEPTH_PX, OUTPAINT_MAX_DEPTH_PX, OUTPAINT_DEFAULT_DEPTH_PX);
+
+  const alongHorizontalEdge = dir === 'north' || dir === 'south';
+  const edgeLength = alongHorizontalEdge || dir === 'all' ? origW : origH;
+  let spanStart = 0;
+  let spanEnd = edgeLength;
+  if (span && dir !== 'all') {
+    const start = clampInt(span.start, 0, edgeLength - 1, 0);
+    const end = clampInt(span.end, start + 1, edgeLength, edgeLength);
+    spanStart = start;
+    spanEnd = end;
+  }
+  const spanLength = spanEnd - spanStart;
+  const partial = spanLength < edgeLength;
+
   let newW = origW;
   let newH = origH;
   let left = 0;
   let top = 0;
+  let region = null; // the strip the model must fill, in new-canvas coordinates
 
-  switch (direction.toLowerCase()) {
+  switch (dir) {
     case 'north':
-      newH = origH + expandAmount;
-      top = expandAmount;
+      newH = origH + depth;
+      top = depth;
+      region = { left: spanStart, top: 0, width: spanLength, height: depth };
       break;
     case 'south':
-      newH = origH + expandAmount;
-      top = 0;
+      newH = origH + depth;
+      region = { left: spanStart, top: origH, width: spanLength, height: depth };
       break;
     case 'west':
-      newW = origW + expandAmount;
-      left = expandAmount;
+      newW = origW + depth;
+      left = depth;
+      region = { left: 0, top: spanStart, width: depth, height: spanLength };
       break;
     case 'east':
-      newW = origW + expandAmount;
-      left = 0;
+      newW = origW + depth;
+      region = { left: origW, top: spanStart, width: depth, height: spanLength };
       break;
     case 'all':
-      newW = origW + expandAmount * 2;
-      newH = origH + expandAmount * 2;
-      left = expandAmount;
-      top = expandAmount;
+      newW = origW + depth * 2;
+      newH = origH + depth * 2;
+      left = depth;
+      top = depth;
+      region = { left: 0, top: 0, width: newW, height: newH };
       break;
-    default:
-      newW = origW + expandAmount;
   }
 
-  // Create a canvas with neutral background for the extended area
+  // 1. Base extended canvas: dark neutral background + original map at top,left + dark fill in region
+  const fillLayer = region ? [{
+    input: await sharp({
+      create: { width: region.width, height: region.height, channels: 3, background: OUTPAINT_FILL_COLOR }
+    }).png().toBuffer(),
+    top: region.top,
+    left: region.left
+  }] : [];
+
   const extendedImageBuffer = await sharp({
     create: {
       width: newW,
       height: newH,
       channels: 4,
-      background: { r: 15, g: 20, b: 30, alpha: 1 }
+      background: { r: 10, g: 13, b: 20, alpha: 1 }
     }
   })
-    .composite([{ input: inputBuffer, top, left }])
+    .composite([
+      ...fillLayer,
+      { input: inputBuffer, top, left }
+    ])
+    .png()
+    .toBuffer();
+
+  // 2. Guide image: extended canvas with cyan tint inside region
+  let guideImageBuffer = extendedImageBuffer;
+  if (region) {
+    const cyanLayer = await sharp({
+      create: { width: region.width, height: region.height, channels: 4, background: { r: 34, g: 211, b: 238, alpha: 0.45 } }
+    }).png().toBuffer();
+    guideImageBuffer = await sharp(extendedImageBuffer)
+      .composite([{ input: cyanLayer, top: region.top, left: region.left }])
+      .png()
+      .toBuffer();
+  }
+
+  // 3. Binary mask image: WHITE inside region ONLY, BLACK everywhere else
+  const maskLayers = region ? [{
+    input: await sharp({
+      create: { width: region.width, height: region.height, channels: 3, background: { r: 255, g: 255, b: 255 } }
+    }).png().toBuffer(),
+    top: region.top,
+    left: region.left
+  }] : [{
+    input: await sharp({
+      create: { width: newW, height: newH, channels: 3, background: { r: 255, g: 255, b: 255 } }
+    }).png().toBuffer(),
+    top: 0,
+    left: 0
+  }];
+
+  const maskImageBuffer = await sharp({
+    create: {
+      width: newW,
+      height: newH,
+      channels: 3,
+      background: { r: 0, g: 0, b: 0 }
+    }
+  })
+    .composite(maskLayers)
     .png()
     .toBuffer();
 
   return {
     extendedImage: bufferToDataUrl(extendedImageBuffer),
-    dimensions: { width: newW, height: newH, origW, origH, top, left, direction, expandAmount }
+    guideImage: bufferToDataUrl(guideImageBuffer),
+    maskImage: bufferToDataUrl(maskImageBuffer),
+    dimensions: {
+      width: newW,
+      height: newH,
+      origW,
+      origH,
+      top,
+      left,
+      direction: dir,
+      expandAmount: depth,
+      span: { start: spanStart, end: spanEnd, length: edgeLength },
+      region,
+      hasVoid: partial
+    }
   };
 }
 
 /**
- * Composites original map onto extended map buffer with soft directional alpha feathering
- * to eliminate stark hard line borders along outpainted edges.
+ * Builds the final stitched map: model output is masked strictly inside the selected expansion region
+ * (with soft outer edges), and composited with the original map (feathered along the seam).
  */
-async function featheredOutpaintComposite(origBuffer, extBuffer, top, left, direction = 'east', featherPx = 48) {
+async function featheredOutpaintComposite(origBuffer, extBuffer, dimensions, featherPx = 48, outerFeatherPx = 12) {
+  const { width: newW, height: newH, top, left, direction, span, region } = dimensions;
   const origMeta = await sharp(origBuffer).metadata();
   const w = origMeta.width;
   const h = origMeta.height;
+  const feather = Math.max(1, Math.min(featherPx, Math.floor(Math.min(w, h) / 2)));
+  const segmentLength = span ? span.end - span.start : (direction === 'north' || direction === 'south' ? w : h);
 
-  // Calculate inset feathering margins depending on seam connection direction
-  const topInset = (direction === 'north' || direction === 'all') ? featherPx : 0;
-  const bottomInset = (direction === 'south' || direction === 'all') ? featherPx : 0;
-  const leftInset = (direction === 'west' || direction === 'all') ? featherPx : 0;
-  const rightInset = (direction === 'east' || direction === 'all') ? featherPx : 0;
+  // 1. Build mask for model output: white inside region + featherPx seam overlap into orig map
+  let seamLeft = region ? region.left : 0;
+  let seamTop = region ? region.top : 0;
+  let seamWidth = region ? region.width : newW;
+  let seamHeight = region ? region.height : newH;
 
-  // Build SVG mask with blurred rounded rect edge
-  const maskSvg = `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">
-    <rect x="0" y="0" width="${w}" height="${h}" fill="black" />
-    <rect x="${leftInset}" y="${topInset}" width="${Math.max(1, w - leftInset - rightInset)}" height="${Math.max(1, h - topInset - bottomInset)}" fill="white" rx="${Math.max(1, featherPx / 2)}" />
+  if (region) {
+    switch (direction) {
+      case 'east':
+        seamLeft -= feather;
+        seamWidth += feather;
+        break;
+      case 'west':
+        seamWidth += feather;
+        break;
+      case 'north':
+        seamHeight += feather;
+        break;
+      case 'south':
+        seamTop -= feather;
+        seamHeight += feather;
+        break;
+    }
+  }
+
+  const modelMaskSvg = `<svg width="${newW}" height="${newH}" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="0" width="${newW}" height="${newH}" fill="black" />
+    <rect x="${seamLeft}" y="${seamTop}" width="${seamWidth}" height="${seamHeight}" fill="white" rx="${outerFeatherPx}" />
   </svg>`;
 
-  // Render SVG mask and apply Gaussian blur for 100% soft alpha transition
-  const maskBuf = await sharp(Buffer.from(maskSvg))
-    .blur(Math.max(1, Math.round(featherPx / 2)))
+  const modelMaskBuffer = await sharp(Buffer.from(modelMaskSvg))
+    .blur(Math.max(1, outerFeatherPx))
     .png()
     .toBuffer();
 
-  // Apply dest-in to create smooth alpha fade along connection seam
+  const modelAlphaLayer = await greyToAlphaLayer(modelMaskBuffer, newW, newH);
+
+  const maskedModelLayer = await sharp(extBuffer)
+    .resize(newW, newH, { fit: 'fill' })
+    .ensureAlpha()
+    .composite([{ input: modelAlphaLayer, blend: 'dest-in' }])
+    .png()
+    .toBuffer();
+
+  // 2. Feather original map along the seam (only across selected span)
+  const spanStart = span ? span.start : 0;
+  const bands = [];
+  switch (direction) {
+    case 'east': bands.push({ x: w - feather, y: spanStart, width: feather, height: segmentLength }); break;
+    case 'west': bands.push({ x: 0, y: spanStart, width: feather, height: segmentLength }); break;
+    case 'north': bands.push({ x: spanStart, y: 0, width: segmentLength, height: feather }); break;
+    case 'south': bands.push({ x: spanStart, y: h - feather, width: segmentLength, height: feather }); break;
+    default:
+      bands.push(
+        { x: 0, y: 0, width: w, height: feather },
+        { x: 0, y: h - feather, width: w, height: feather },
+        { x: 0, y: 0, width: feather, height: h },
+        { x: w - feather, y: 0, width: feather, height: h }
+      );
+  }
+
+  const origFeatherSvg = `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="0" width="${w}" height="${h}" fill="white" />
+    ${bands.map((b) => `<rect x="${b.x}" y="${b.y}" width="${b.width}" height="${b.height}" fill="black" />`).join('\n    ')}
+  </svg>`;
+
+  const origFeatherBuffer = await svgToGrey(origFeatherSvg, Math.max(1, Math.round(feather / 2)));
+  const origAlphaLayer = await greyToAlphaLayer(origFeatherBuffer, w, h);
+
   const featheredOrig = await sharp(origBuffer)
-    .composite([{ input: maskBuf, blend: 'dest-in' }])
+    .ensureAlpha()
+    .composite([{ input: origAlphaLayer, blend: 'dest-in' }])
     .png()
     .toBuffer();
 
-  // Composite soft-edged original map over newly generated extension map
-  const finalStitched = await sharp(extBuffer)
-    .composite([{ input: featheredOrig, top, left }])
+  // 3. Composite feathered original over masked model layer
+  const finalStitched = await sharp({
+    create: { width: newW, height: newH, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } }
+  })
+    .composite([
+      { input: maskedModelLayer, top: 0, left: 0 },
+      { input: featheredOrig, top, left }
+    ])
     .png()
     .toBuffer();
 
   return bufferToDataUrl(finalStitched);
 }
+
 
 /**
  * Prepares inpainting composite by blending user mask onto original image.

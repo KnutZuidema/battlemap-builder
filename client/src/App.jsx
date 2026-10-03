@@ -12,6 +12,7 @@ import {
   inpaintBattlemapApi,
   outpaintBattlemapApi
 } from './services/api';
+import { describeSelection, selectionToOutpaintParams } from './utils/outpaintSelection';
 
 const PROVIDER_LABELS = { openrouter: 'OpenRouter' };
 
@@ -41,8 +42,9 @@ export default function App() {
   const [isInpaintModalOpen, setIsInpaintModalOpen] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
 
-  // Outpaint Canvas Extension State — a clicked edge hotspot opens the prompt modal for that direction
-  const [outpaintRequest, setOutpaintRequest] = useState(null);
+  // Outpaint Canvas Extension State — a clicked edge hotspot creates a resizable selection (the strip
+  // of new canvas), and the prompt popover floats next to it
+  const [outpaintSelection, setOutpaintSelection] = useState(null);
   const [outpaintPrompt, setOutpaintPrompt] = useState('Continue hallway into a dark cavern chamber');
   const [isExpanding, setIsExpanding] = useState(false);
 
@@ -71,6 +73,11 @@ export default function App() {
       if (interval) clearInterval(interval);
     };
   }, [isBusy]);
+
+  // The selection is in the current map's pixel space, so it dies with the map (undo/redo, new map)
+  useEffect(() => {
+    setOutpaintSelection(null);
+  }, [mapImage]);
 
   // Loud, dismissible failure report (generation / inpaint / outpaint)
   const [failure, setFailure] = useState(null);
@@ -188,15 +195,23 @@ export default function App() {
     }
   };
 
-  // Convert the painted mask strokes to the binary mask the edit call takes
-  const getInpaintMaskDataUrl = () => {
-    if (inpaintMaskLines.length === 0) return null;
+  // Convert the painted mask strokes to the binary mask the edit call takes. The strokes are in map
+  // pixels, so the mask must be exactly the map's size — an expanded map is no longer 1024x1024, and a
+  // fixed-size mask would be stretched onto the wrong region (and clip strokes past 1024).
+  const getInpaintMaskDataUrl = async () => {
+    if (inpaintMaskLines.length === 0 || !mapImage) return null;
+    const { width, height } = await new Promise((resolve, reject) => {
+      const img = new window.Image();
+      img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      img.onerror = () => reject(new Error('Could not read the map size for the edit mask'));
+      img.src = mapImage;
+    });
     const canvas = document.createElement('canvas');
-    canvas.width = 1024;
-    canvas.height = 1024;
+    canvas.width = width;
+    canvas.height = height;
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#000000';
-    ctx.fillRect(0, 0, 1024, 1024);
+    ctx.fillRect(0, 0, width, height);
 
     ctx.strokeStyle = '#ffffff';
     ctx.lineCap = 'round';
@@ -242,7 +257,7 @@ export default function App() {
 
   // Handle Detail Inpainting Edit
   const handleApplyInpaint = async () => {
-    const maskDataUrl = getInpaintMaskDataUrl();
+    const maskDataUrl = await getInpaintMaskDataUrl();
     if (!mapImage || !maskDataUrl) {
       setIsInpaintModalOpen(false);
       setInpaintMaskLines([]);
@@ -276,8 +291,10 @@ export default function App() {
 
   // Handle Canvas Outpainting Extension
   const handleApplyOutpaint = async () => {
-    const direction = outpaintRequest;
-    if (!mapImage || !direction) return;
+    const selection = outpaintSelection;
+    if (!mapImage || !selection) return;
+    const { direction, expandAmount, spanStart, spanEnd } = selectionToOutpaintParams(selection);
+    const label = `${direction.toUpperCase()} ${selection.width}×${selection.height}`;
 
     const startTimeMs = Date.now();
     setIsExpanding(true);
@@ -288,19 +305,21 @@ export default function App() {
         originalDataUrl: mapImage,
         direction,
         extensionPrompt: outpaintPrompt,
-        expandAmount: 512
+        expandAmount,
+        spanStart,
+        spanEnd
       });
 
       setMapImage(res.imageDataUrl);
       pushHistoryState(res.imageDataUrl);
-      pushDebugLog('OUTPAINT', `${direction.toUpperCase()}: ${outpaintPrompt}`, res, startTimeMs);
+      pushDebugLog('OUTPAINT', `${label}: ${outpaintPrompt}`, res, startTimeMs);
       confetti({ particleCount: 60, spread: 70, origin: { y: 0.8 } });
     } catch (err) {
-      reportFailure('OUTPAINT', `${direction.toUpperCase()}: ${outpaintPrompt}`, err, startTimeMs);
+      reportFailure('OUTPAINT', `${label}: ${outpaintPrompt}`, err, startTimeMs);
     } finally {
       setIsExpanding(false);
       setGenerationPhaseText('');
-      setOutpaintRequest(null);
+      setOutpaintSelection(null);
     }
   };
 
@@ -368,13 +387,42 @@ export default function App() {
             mapImage={mapImage}
             inpaintMaskLines={inpaintMaskLines}
             setInpaintMaskLines={setInpaintMaskLines}
-            onMaskPainted={() => setIsInpaintModalOpen(true)}
-            onRequestOutpaint={(dir) => setOutpaintRequest(dir)}
+            onMaskPainted={() => {
+              setOutpaintSelection(null);
+              setIsInpaintModalOpen(true);
+            }}
+            outpaintSelection={outpaintSelection}
+            onOutpaintSelectionChange={(selection) => {
+              // One canvas action at a time: starting an expansion abandons a pending mask edit
+              if (selection) {
+                setIsInpaintModalOpen(false);
+                setInpaintMaskLines([]);
+              }
+              setOutpaintSelection(selection);
+            }}
+            renderOutpaintPopover={(anchor) => (
+              <ActionModal
+                open
+                anchor={anchor}
+                tone="emerald"
+                icon={Expand}
+                title="Expand the canvas"
+                chip={describeSelection(outpaintSelection)}
+                placeholder="e.g. Continue the corridor into a dark cavern chamber..."
+                value={outpaintPrompt}
+                onChange={setOutpaintPrompt}
+                onSubmit={handleApplyOutpaint}
+                onClose={() => setOutpaintSelection(null)}
+                busy={isExpanding}
+                busyLabel="Expanding…"
+                confirmLabel="Expand Map"
+                allowEmpty
+              />
+            )}
             // Timer & Shimmer Props
             isGenerating={isGenerating}
             isEditing={isEditing}
             isExpanding={isExpanding}
-            outpaintDirection={outpaintRequest}
             elapsedSeconds={elapsedSeconds}
             generationPhaseText={generationPhaseText}
           />
@@ -473,26 +521,6 @@ export default function App() {
           busyLabel="Editing…"
           confirmLabel="Apply Edit"
           hint="Right-click drag to adjust the mask"
-        />
-
-        {/* Expansion prompt — the direction comes from the clicked edge hotspot */}
-        <ActionModal
-          open={Boolean(outpaintRequest)}
-          tone="emerald"
-          icon={Expand}
-          title="Expand the canvas"
-          subtitle="The new region is painted to continue this map seamlessly along the seam."
-          chip={outpaintRequest ? `${outpaintRequest} · +512 px` : null}
-          placeholder="e.g. Continue the corridor into a dark cavern chamber..."
-          value={outpaintPrompt}
-          onChange={setOutpaintPrompt}
-          onSubmit={handleApplyOutpaint}
-          onClose={() => setOutpaintRequest(null)}
-          busy={isExpanding}
-          busyLabel="Expanding…"
-          confirmLabel="Expand Map"
-          hint="Continues tile scale, walls and lighting"
-          allowEmpty
         />
       </div>
 

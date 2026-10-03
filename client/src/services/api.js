@@ -38,16 +38,26 @@ export async function checkServerHealth() {
   }
 }
 
-/** The map model is chosen by the backend; the client never names one. */
-export async function generateBattlemapApi({ prompt, width, height }) {
-  return postJson('/api/generate', { prompt, width, height });
+export async function fetchModelsApi() {
+  try {
+    const res = await fetch(`${API_BASE}/api/models`);
+    if (!res.ok) throw new Error('Failed to fetch models');
+    return await res.json();
+  } catch (err) {
+    return null;
+  }
 }
 
-export async function inpaintBattlemapApi({ originalDataUrl, maskDataUrl, prompt }) {
-  return postJson('/api/inpaint', { originalDataUrl, maskDataUrl, prompt });
+/** Request battlemap generation, optionally specifying a model */
+export async function generateBattlemapApi({ prompt, width, height, model }) {
+  return postJson('/api/generate', { prompt, width, height, model });
+}
+
+export async function inpaintBattlemapApi({ originalDataUrl, maskDataUrl, prompt, model }) {
+  return postJson('/api/inpaint', { originalDataUrl, maskDataUrl, prompt, model });
 }
 
 /** `spanStart`/`spanEnd` (px along the expanded edge) limit the new strip to part of that side. */
-export async function outpaintBattlemapApi({ originalDataUrl, direction, extensionPrompt, expandAmount, spanStart, spanEnd }) {
-  return postJson('/api/outpaint', { originalDataUrl, direction, extensionPrompt, expandAmount, spanStart, spanEnd });
+export async function outpaintBattlemapApi({ originalDataUrl, direction, extensionPrompt, expandAmount, spanStart, spanEnd, model }) {
+  return postJson('/api/outpaint', { originalDataUrl, direction, extensionPrompt, expandAmount, spanStart, spanEnd, model });
 }

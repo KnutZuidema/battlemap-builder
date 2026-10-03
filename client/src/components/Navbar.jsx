@@ -7,10 +7,33 @@ import {
   Trash2,
   FileJson,
   Upload,
-  Terminal
+  Terminal,
+  Sparkles,
+  Zap
 } from 'lucide-react';
 
+const DEFAULT_MODELS = [
+  {
+    id: 'google/gemini-3.1-flash-image',
+    label: 'Nano Banana 2 Flash',
+    shortLabel: 'Flash',
+    badge: 'Quality',
+    costHint: '$0.50/M in · $3/M out (~$0.07 per map)',
+    note: 'High-fidelity battlemap generation'
+  },
+  {
+    id: 'google/gemini-3.1-flash-lite-image',
+    label: 'Nano Banana 2 Flash Lite',
+    shortLabel: 'Flash Lite',
+    badge: 'Fast',
+    costHint: '$0.25/M in · $1.50/M out (~$0.035 per map)',
+    note: 'Ultra-fast, lightweight generation'
+  }
+];
 export default function Navbar({
+  selectedModel,
+  onSelectModel,
+  models,
   onOpenDebugModal,
   debugLogCount,
   onExportPng,
@@ -43,6 +66,8 @@ export default function Navbar({
     e.target.value = '';
   };
 
+  const modelList = (models && models.length > 0) ? models : DEFAULT_MODELS;
+
   return (
     <header className="h-[3.75rem] border-b border-white/[0.07] glass-panel px-4 flex items-center justify-between shrink-0 z-30 relative select-none">
       {/* Brand & Map Title */}
@@ -71,6 +96,51 @@ export default function Navbar({
             aria-label="Map title"
             className="min-w-0 max-w-[18rem] bg-transparent border border-transparent hover:border-white/[0.08] focus:border-amber-400/40 focus:bg-black/30 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-200 outline-none transition"
           />
+        </div>
+      </div>
+
+      {/* Model Picker in Top Bar */}
+      <div className="flex items-center gap-1.5 bg-black/40 p-1 rounded-xl border border-white/[0.08] shadow-inner shadow-black/40">
+        <div className="hidden xl:flex items-center gap-1 px-2 text-[10px] font-mono text-slate-400 uppercase tracking-wider">
+          <Sparkles className="w-3 h-3 text-amber-400/80" />
+          <span>Model</span>
+        </div>
+
+        <div className="flex items-center gap-0.5">
+          {modelList.map((m) => {
+            const isSelected = selectedModel === m.id || (m.aliases && m.aliases.includes(selectedModel));
+            const isLite = m.id.includes('lite');
+            const Icon = isLite ? Zap : Sparkles;
+
+            return (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => onSelectModel && onSelectModel(m.id)}
+                title={`${m.label} (${m.id})\n${m.costHint || ''}\n${m.note || ''}`}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-all ${
+                  isSelected
+                    ? 'bg-amber-500/20 text-amber-200 border border-amber-500/40 shadow-sm shadow-amber-950/50'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-transparent'
+                }`}
+              >
+                <Icon className={`w-3.5 h-3.5 ${isSelected ? 'text-amber-400' : 'text-slate-500'}`} />
+                <span className="hidden md:inline">{m.label}</span>
+                <span className="md:hidden">{m.shortLabel || (isLite ? 'Flash Lite' : 'Flash')}</span>
+                {m.badge && (
+                  <span
+                    className={`text-[9px] font-mono px-1 py-0.2 rounded border hidden 2xl:inline ${
+                      isSelected
+                        ? 'bg-amber-400/20 text-amber-300 border-amber-400/30'
+                        : 'bg-white/[0.04] text-slate-500 border-white/[0.06]'
+                    }`}
+                  >
+                    {m.badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
       </div>
 

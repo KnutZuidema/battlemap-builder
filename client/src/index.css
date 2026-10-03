@@ -1,0 +1,248 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+/* ============================================================
+   DUNGEON FORGE — design tokens
+   ============================================================ */
+:root {
+  --bg-deep: #05070d;
+  --bg-panel: rgba(14, 19, 33, 0.82);
+  --bg-panel-solid: #0d1220;
+  --bg-card: rgba(255, 255, 255, 0.028);
+  --bg-card-hover: rgba(255, 255, 255, 0.055);
+  --border-subtle: rgba(255, 255, 255, 0.075);
+  --border-strong: rgba(255, 255, 255, 0.13);
+
+  --accent: #f5a524;
+  --accent-strong: #f59e0b;
+  --accent-deep: #b45309;
+  --accent-glow: rgba(245, 165, 36, 0.35);
+
+  --arcane: #7c8cff;
+  --cyan: #22d3ee;
+  --emerald: #34d399;
+  --violet: #a78bfa;
+
+  --text-primary: #f4f6fb;
+  --text-secondary: #97a3bd;
+  --text-muted: #5c6884;
+
+  --font-main: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Space Grotesk', 'Plus Jakarta Sans', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-main);
+  background-color: var(--bg-deep);
+  color: var(--text-primary);
+  overflow: hidden;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.font-display { font-family: var(--font-display); letter-spacing: -0.02em; }
+.font-mono { font-family: var(--font-mono); }
+
+/* ============================================================
+   Ambient backdrop — layered aurora glows behind the workspace
+   ============================================================ */
+.app-shell {
+  position: relative;
+  background:
+    radial-gradient(1100px 600px at 12% -8%, rgba(245, 165, 36, 0.14), transparent 60%),
+    radial-gradient(900px 520px at 92% 4%, rgba(124, 140, 255, 0.13), transparent 62%),
+    radial-gradient(1000px 700px at 78% 108%, rgba(34, 211, 238, 0.09), transparent 60%),
+    var(--bg-deep);
+}
+
+.app-shell::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 26px 26px;
+  mask-image: radial-gradient(ellipse 80% 70% at 50% 40%, #000 10%, transparent 75%);
+  opacity: 0.5;
+}
+
+/* ============================================================
+   Surfaces
+   ============================================================ */
+.glass-panel {
+  background: var(--bg-panel);
+  backdrop-filter: blur(22px) saturate(140%);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
+  border-color: var(--border-subtle);
+}
+
+.panel-card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.015));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  transition: border-color 0.22s ease, background 0.22s ease, transform 0.22s ease, box-shadow 0.22s ease;
+}
+
+.panel-card:hover {
+  border-color: var(--border-strong);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.025));
+}
+
+/* ============================================================
+   Buttons
+   ============================================================ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 12px;
+  font-weight: 600;
+  transition: transform 0.15s ease, filter 0.2s ease, background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease;
+}
+
+.btn:active:not(:disabled) { transform: scale(0.975); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.btn-primary {
+  background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 52%, #d97706 100%);
+  color: #1a1206;
+  box-shadow: 0 10px 26px -12px rgba(245, 158, 11, 0.85), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+.btn-primary:hover:not(:disabled) { filter: brightness(1.07); box-shadow: 0 14px 32px -12px rgba(245, 158, 11, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.4); }
+
+.btn-cyan {
+  background: linear-gradient(135deg, #22d3ee 0%, #06b6d4 55%, #0e7490 100%);
+  color: #04222a;
+  box-shadow: 0 10px 26px -12px rgba(6, 182, 212, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+.btn-cyan:hover:not(:disabled) { filter: brightness(1.07); }
+
+.btn-emerald {
+  background: linear-gradient(135deg, #4ade80 0%, #10b981 55%, #059669 100%);
+  color: #03251a;
+  box-shadow: 0 10px 26px -12px rgba(16, 185, 129, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+.btn-emerald:hover:not(:disabled) { filter: brightness(1.07); }
+
+.btn-ghost {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+.btn-ghost:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); color: var(--text-primary); border-color: var(--border-strong); }
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  color: var(--text-secondary);
+  transition: background 0.18s ease, color 0.18s ease, transform 0.15s ease;
+}
+.icon-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); color: var(--text-primary); }
+.icon-btn:active:not(:disabled) { transform: scale(0.94); }
+.icon-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* ============================================================
+   Inputs
+   ============================================================ */
+.field {
+  width: 100%;
+  background: rgba(5, 8, 15, 0.72) !important;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 12px !important;
+  color: var(--text-primary) !important;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease !important;
+}
+.field::placeholder { color: var(--text-muted); }
+.field:hover { border-color: var(--border-strong) !important; }
+.field:focus {
+  border-color: rgba(245, 165, 36, 0.6) !important;
+  box-shadow: 0 0 0 3px rgba(245, 165, 36, 0.16) !important;
+  outline: none !important;
+  background: rgba(5, 8, 15, 0.9) !important;
+}
+
+.field-cyan:focus {
+  border-color: rgba(34, 211, 238, 0.6) !important;
+  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.16) !important;
+}
+.field-emerald:focus {
+  border-color: rgba(52, 211, 153, 0.6) !important;
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.16) !important;
+}
+
+/* ============================================================
+   Scrollbars
+   ============================================================ */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(245, 165, 36, 0.45); }
+
+/* ============================================================
+   Canvas backdrop
+   ============================================================ */
+.canvas-grid-bg {
+  background-color: #04060c;
+  background-image:
+    radial-gradient(circle at 50% 42%, rgba(245, 165, 36, 0.05), transparent 55%),
+    radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+  background-size: 100% 100%, 24px 24px;
+}
+
+/* ============================================================
+   Animations
+   ============================================================ */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.animate-fade { animation: fadeIn 0.18s ease-out both; }
+
+@keyframes floatY {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-7px); }
+}
+.animate-float { animation: floatY 4.5s ease-in-out infinite; }
+
+@keyframes riseIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.animate-rise { animation: riseIn 0.35s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@keyframes spinSlow { to { transform: rotate(360deg); } }
+.animate-spin-slow { animation: spinSlow 2.4s linear infinite; }
+
+@keyframes breathe {
+  0%, 100% { opacity: 0.65; }
+  50% { opacity: 1; }
+}
+.animate-breathe { animation: breathe 2.4s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

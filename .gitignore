@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Build output
+client/dist/
+
+# Secrets — the server key lives in server/.env, never in the repo
+.env
+*.local
+
+# OS noise
+.DS_Store

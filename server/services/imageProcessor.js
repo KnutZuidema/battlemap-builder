@@ -301,11 +301,10 @@ async function featheredOutpaintComposite(origBuffer, extBuffer, dimensions, fea
 
   const modelMaskSvg = `<svg width="${modelW}" height="${modelH}" xmlns="http://www.w3.org/2000/svg">
     <rect x="0" y="0" width="${modelW}" height="${modelH}" fill="black" />
-    <rect x="${seamLeft}" y="${seamTop}" width="${seamWidth}" height="${seamHeight}" fill="white" rx="${outerFeatherPx}" />
+    <rect x="${seamLeft}" y="${seamTop}" width="${seamWidth}" height="${seamHeight}" fill="white" />
   </svg>`;
 
   const modelMaskBuffer = await sharp(Buffer.from(modelMaskSvg))
-    .blur(Math.max(1, outerFeatherPx))
     .png()
     .toBuffer();
 
@@ -323,7 +322,7 @@ async function featheredOutpaintComposite(origBuffer, extBuffer, dimensions, fea
   let modelPlacementOnFull = { left: 0, top: 0 };
   switch (direction) {
     case 'east':
-      modelPlacementOnFull = { left: targetRegion.left - mapCropOnModel.left, top: targetRegion.top };
+      modelPlacementOnFull = { left: origW - mapCropOnModel.width, top: targetRegion.top };
       break;
     case 'west':
       modelPlacementOnFull = { left: 0, top: targetRegion.top };
@@ -332,7 +331,7 @@ async function featheredOutpaintComposite(origBuffer, extBuffer, dimensions, fea
       modelPlacementOnFull = { left: targetRegion.left, top: 0 };
       break;
     case 'south':
-      modelPlacementOnFull = { left: targetRegion.left, top: targetRegion.top - mapCropOnModel.top };
+      modelPlacementOnFull = { left: targetRegion.left, top: origH - mapCropOnModel.height };
       break;
     case 'all':
       modelPlacementOnFull = { left: 0, top: 0 };

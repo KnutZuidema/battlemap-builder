@@ -1,4 +1,5 @@
 const sharp = require('sharp');
+const { getModelPricing } = require('../modelCatalog');
 
 /**
  * OpenRouter provider — one HTTP surface (`/api/v1/chat/completions`) drives every map request.
@@ -66,14 +67,80 @@ async function postCompletion({ apiKey, model, systemInstruction, fullPromptPayl
   return payload;
 }
 
-function readUsage(payload) {
+function readUsage(payload, model) {
   const usage = payload && payload.usage;
   if (!usage) return null;
+
+  const promptTokens = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : null;
+  const completionTokens = typeof usage.completion_tokens === 'number' ? usage.completion_tokens : null;
+  const totalTokens = typeof usage.total_tokens === 'number'
+    ? usage.total_tokens
+    : ((promptTokens ?? 0) + (completionTokens ?? 0));
+
+  const reasoningTokens = (usage.completion_tokens_details && usage.completion_tokens_details.reasoning_tokens) ?? null;
+  const imageTokens = (usage.completion_tokens_details && usage.completion_tokens_details.image_tokens) ?? null;
+
+  const costDetails = usage.cost_details || {};
+  let promptCost = typeof costDetails.upstream_inference_prompt_cost === 'number'
+    ? costDetails.upstream_inference_prompt_cost
+    : null;
+  let completionCost = typeof costDetails.upstream_inference_completions_cost === 'number'
+    ? costDetails.upstream_inference_completions_cost
+    : null;
+  let totalCost = typeof usage.cost === 'number'
+    ? usage.cost
+    : (typeof costDetails.upstream_inference_cost === 'number' ? costDetails.upstream_inference_cost : null);
+
+  // Fallback to calculation if OpenRouter omitted costs
+  const pricing = getModelPricing(model);
+  if (pricing) {
+    if (promptCost === null && promptTokens !== null) {
+      promptCost = (promptTokens / 1_000_000) * pricing.inputPerMillion;
+    }
+    if (completionCost === null && completionTokens !== null) {
+      completionCost = (completionTokens / 1_000_000) * pricing.outputPerMillion;
+    }
+    if (totalCost === null && (promptCost !== null || completionCost !== null)) {
+      totalCost = (promptCost || 0) + (completionCost || 0);
+    }
+  }
+
+  // If totalCost is known but promptCost or completionCost is missing
+  if (totalCost !== null) {
+    if (promptCost === null && completionCost !== null) {
+      promptCost = Math.max(0, totalCost - completionCost);
+    } else if (completionCost === null && promptCost !== null) {
+      completionCost = Math.max(0, totalCost - promptCost);
+    } else if (promptCost === null && completionCost === null) {
+      if (promptTokens && completionTokens) {
+        const inRate = pricing?.inputPerMillion || 0.50;
+        const outRate = pricing?.outputPerMillion || 3.00;
+        const estPrompt = (promptTokens / 1_000_000) * inRate;
+        const estCompletion = (completionTokens / 1_000_000) * outRate;
+        const estTotal = estPrompt + estCompletion;
+        if (estTotal > 0) {
+          promptCost = (estPrompt / estTotal) * totalCost;
+          completionCost = (estCompletion / estTotal) * totalCost;
+        } else {
+          promptCost = 0;
+          completionCost = totalCost;
+        }
+      } else {
+        promptCost = 0;
+        completionCost = totalCost;
+      }
+    }
+  }
+
   return {
-    promptTokens: usage.prompt_tokens ?? null,
-    completionTokens: usage.completion_tokens ?? null,
-    reasoningTokens: (usage.completion_tokens_details && usage.completion_tokens_details.reasoning_tokens) ?? null,
-    cost: usage.cost ?? null
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    reasoningTokens,
+    imageTokens,
+    promptCost: promptCost !== null ? Number(promptCost) : null,
+    completionCost: completionCost !== null ? Number(completionCost) : null,
+    cost: totalCost !== null ? Number(totalCost) : null
   };
 }
 
@@ -127,7 +194,7 @@ async function requestCanvas({ model, systemInstruction, userPromptText, fullPro
 
   const payload = await postCompletion({ apiKey, model, systemInstruction, fullPromptPayload, images });
 
-  const usage = readUsage(payload);
+  const usage = readUsage(payload, model);
   const finishReason = readFinishReason(payload);
   const source = extractImageSource(payload);
   const rawText = (payload.choices && payload.choices[0] && typeof payload.choices[0].message.content === 'string')

@@ -125,7 +125,9 @@ async function generateBattlemap({ prompt, width = 1024, height = 1024, model })
   return {
     imageDataUrl: bufferToDataUrl(result.imageBuffer),
     prompt,
-    debug: result.debug
+    debug: result.debug,
+    usage: result.debug?.usage || null,
+    cost: result.debug?.usage?.cost ?? null
   };
 }
 
@@ -174,7 +176,12 @@ async function inpaintBattlemap({ originalDataUrl, maskDataUrl, prompt, model })
 
   const imageDataUrl = await compositeInpaintRegion(origBuf, result.imageBuffer, maskBuf, width, height, INPAINT_FEATHER_PX);
 
-  return { imageDataUrl, debug: result.debug };
+  return {
+    imageDataUrl,
+    debug: result.debug,
+    usage: result.debug?.usage || null,
+    cost: result.debug?.usage?.cost ?? null
+  };
 }
 
 /**
@@ -230,7 +237,9 @@ async function outpaintBattlemap({ originalDataUrl, direction = 'east', extensio
   return {
     imageDataUrl: finalStitchedDataUrl,
     dimensions: prepared.dimensions,
-    debug: result.debug
+    debug: result.debug,
+    usage: result.debug?.usage || null,
+    cost: result.debug?.usage?.cost ?? null
   };
 }
 

@@ -8,6 +8,7 @@ import ActionModal from './components/ActionModal';
 import DebugModal from './components/DebugModal';
 import {
   checkServerHealth,
+  fetchModelsApi,
   generateBattlemapApi,
   inpaintBattlemapApi,
   outpaintBattlemapApi
@@ -28,6 +29,32 @@ export default function App() {
 
   const [mapTitle, setMapTitle] = useState('Dungeon Hallways Map');
 
+  // Selected Image Gen Model — defaults to Nano Banana 2 Flash, persisted in localStorage
+  const [selectedModel, setSelectedModel] = useState(() => {
+    try {
+      return localStorage.getItem('dungeon_forge_selected_model') || 'google/gemini-3.1-flash-image';
+    } catch {
+      return 'google/gemini-3.1-flash-image';
+    }
+  });
+  const [availableModels, setAvailableModels] = useState([]);
+
+  useEffect(() => {
+    fetchModelsApi().then((data) => {
+      if (data?.models?.length) {
+        setAvailableModels(data.models);
+      }
+    });
+  }, []);
+
+  const handleSelectModel = (modelId) => {
+    setSelectedModel(modelId);
+    try {
+      localStorage.setItem('dungeon_forge_selected_model', modelId);
+    } catch {
+      // ignore
+    }
+  };
   // Map & Canvas State
   const [mapImage, setMapImage] = useState(null);
 
@@ -242,7 +269,8 @@ export default function App() {
       const res = await generateBattlemapApi({
         prompt,
         width: 1024,
-        height: 1024
+        height: 1024,
+        model: selectedModel
       });
 
       setMapImage(res.imageDataUrl);
@@ -273,7 +301,8 @@ export default function App() {
       const res = await inpaintBattlemapApi({
         originalDataUrl: mapImage,
         maskDataUrl,
-        prompt: inpaintPrompt
+        prompt: inpaintPrompt,
+        model: selectedModel
       });
 
       setMapImage(res.imageDataUrl);
@@ -309,7 +338,8 @@ export default function App() {
         extensionPrompt: outpaintPrompt,
         expandAmount,
         spanStart,
-        spanEnd
+        spanEnd,
+        model: selectedModel
       });
 
       setMapImage(res.imageDataUrl);
@@ -368,6 +398,9 @@ export default function App() {
     <div className="app-shell flex flex-col h-screen text-slate-100 font-sans overflow-hidden">
       {/* Top Header Navigation */}
       <Navbar
+        selectedModel={selectedModel}
+        onSelectModel={handleSelectModel}
+        models={availableModels}
         onOpenDebugModal={() => setIsDebugModalOpen(true)}
         debugLogCount={debugLogs.length}
         onExportPng={handleExportPng}

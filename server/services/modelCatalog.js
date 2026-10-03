@@ -26,19 +26,23 @@ const DEFAULT_MODEL_ID = 'google/gemini-3.1-flash-image';
 const MODEL_CATALOG = [
   {
     id: 'google/gemini-3.1-flash-image',
-    label: 'Gemini 3.1 Flash Image',
+    label: 'Nano Banana 2 Flash',
+    shortLabel: 'Flash',
+    aliases: ['nanobanana 2 flash', 'nanobanana-2-flash', 'gemini-3.1-flash-image', 'flash'],
     provider: 'openrouter',
     vision: true,
     costHint: '$0.50/M in · $3/M out (~$0.07 per map, edit or expansion)',
-    note: 'True image render: measured ~12 s generation, ~14 s masked edit, ~13 s expansion. Painted battlemap quality; supports mask edits.'
+    note: 'Google: Nano Banana 2 (Gemini 3.1 Flash Image). Fast, high-quality painted battlemap generation; supports mask edits.'
   },
   {
-    id: 'google/gemini-3-pro-image',
-    label: 'Gemini 3 Pro Image',
+    id: 'google/gemini-3.1-flash-lite-image',
+    label: 'Nano Banana 2 Flash Lite',
+    shortLabel: 'Flash Lite',
+    aliases: ['nanobanana 2 flash lite', 'nanobanana-2-flash-lite', 'gemini-3.1-flash-lite-image', 'flash-lite', 'lite'],
     provider: 'openrouter',
     vision: true,
-    costHint: '$2/M in · $12/M out (~$0.14 per map)',
-    note: 'Highest-fidelity Google image model: generation measured ~23 s / ~$0.14. Shares the verified image contract with Flash Image; mask edits and expansion were probed on Flash Image only.'
+    costHint: '$0.25/M in · $1.50/M out (~$0.035 per map, edit or expansion)',
+    note: 'Google: Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image). Ultra-fast, lightweight image generation; supports mask edits.'
   }
 ];
 
@@ -56,12 +60,34 @@ function isProviderConfigured(provider) {
   return Boolean(value && value.trim().length > 5);
 }
 
+function findModel(requestedId) {
+  if (!requestedId) return null;
+  const norm = String(requestedId).trim().toLowerCase();
+  return (
+    MODEL_CATALOG.find((entry) => {
+      if (entry.id.toLowerCase() === norm) return true;
+      if (entry.label.toLowerCase() === norm) return true;
+      if (entry.shortLabel && entry.shortLabel.toLowerCase() === norm) return true;
+      if (entry.aliases && entry.aliases.some((alias) => alias.toLowerCase() === norm)) return true;
+      return false;
+    }) ||
+    MODEL_CATALOG.find((entry) => {
+      if (norm.includes('lite') && entry.id.includes('lite')) return true;
+      if (!norm.includes('lite') && (norm.includes('flash') || norm.includes('banana')) && !entry.id.includes('lite')) return true;
+      return false;
+    }) ||
+    null
+  );
+}
+
 /**
- * The catalog entry every request runs: `DEFAULT_MODEL_ID` when its provider key is present,
- * otherwise the first entry whose key is present — a keyless provider must not turn a plain request
- * into a NO_API_KEY failure while a usable model exists.
+ * Returns the catalog entry to run: matches `requestedModelId` if provided, otherwise `DEFAULT_MODEL_ID`.
  */
-function configuredModel() {
+function configuredModel(requestedModelId) {
+  if (requestedModelId) {
+    const matched = findModel(requestedModelId);
+    if (matched) return matched;
+  }
   const declared = MODEL_CATALOG.find((entry) => entry.id === DEFAULT_MODEL_ID) || MODEL_CATALOG[0];
   if (isProviderConfigured(declared.provider)) return declared;
   return MODEL_CATALOG.find((entry) => isProviderConfigured(entry.provider)) || declared;
@@ -69,7 +95,9 @@ function configuredModel() {
 
 module.exports = {
   DEFAULT_MODEL_ID,
+  MODEL_CATALOG,
   providerKeyName,
   isProviderConfigured,
-  configuredModel
+  configuredModel,
+  findModel
 };

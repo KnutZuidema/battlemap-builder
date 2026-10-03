@@ -319,30 +319,48 @@ async function featheredOutpaintComposite(origBuffer, extBuffer, dimensions, fea
     .toBuffer();
 
   // Placement of model canvas layer onto the new full canvas (newW x newH):
-  let modelPlacementOnFull = { left: 0, top: 0 };
-  switch (direction) {
+  const cropRegion = modelDimensions.cropRegion || { left: 0, top: 0 };
+  const dir = String(direction || 'east').toLowerCase();
+
+  let rawLeft = 0;
+  let rawTop = 0;
+
+  switch (dir) {
     case 'east':
-      modelPlacementOnFull = { left: origW - mapCropOnModel.width, top: targetRegion.top };
+      rawLeft = cropRegion.left;
+      rawTop = cropRegion.top;
       break;
     case 'west':
-      modelPlacementOnFull = { left: 0, top: targetRegion.top };
+      rawLeft = 0;
+      rawTop = cropRegion.top;
       break;
     case 'north':
-      modelPlacementOnFull = { left: targetRegion.left, top: 0 };
+      rawLeft = cropRegion.left;
+      rawTop = 0;
       break;
     case 'south':
-      modelPlacementOnFull = { left: targetRegion.left, top: origH - mapCropOnModel.height };
+      rawLeft = cropRegion.left;
+      rawTop = cropRegion.top;
       break;
     case 'all':
-      modelPlacementOnFull = { left: 0, top: 0 };
+      rawLeft = 0;
+      rawTop = 0;
       break;
   }
 
+  const modelPlacementOnFull = {
+    left: clampInt(rawLeft, 0, newW, 0),
+    top: clampInt(rawTop, 0, newH, 0)
+  };
+
+  const safeOrigLeft = clampInt(origLeft, 0, newW, 0);
+  const safeOrigTop = clampInt(origTop, 0, newH, 0);
+
   // 2. Feather original map along the seam (only across selected span)
   const spanStart = dimensions.span ? dimensions.span.start : 0;
-  const segmentLength = dimensions.span ? dimensions.span.end - dimensions.span.start : (direction === 'north' || direction === 'south' ? origW : origH);
+  const segmentLength = dimensions.span ? dimensions.span.end - dimensions.span.start : (dir === 'north' || dir === 'south' ? origW : origH);
   const bands = [];
-  switch (direction) {
+  switch (dir) {
     case 'east': bands.push({ x: origW - feather, y: spanStart, width: feather, height: segmentLength }); break;
     case 'west': bands.push({ x: 0, y: spanStart, width: feather, height: segmentLength }); break;
     case 'north': bands.push({ x: spanStart, y: 0, width: segmentLength, height: feather }); break;
@@ -376,7 +394,7 @@ async function featheredOutpaintComposite(origBuffer, extBuffer, dimensions, fea
   })
     .composite([
       { input: maskedModelLayer, top: modelPlacementOnFull.top, left: modelPlacementOnFull.left },
-      { input: featheredOrig, top: origTop, left: origLeft }
+      { input: featheredOrig, top: safeOrigTop, left: safeOrigLeft }
     ])
     .png()
     .toBuffer();

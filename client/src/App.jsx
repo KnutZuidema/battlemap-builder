@@ -204,24 +204,33 @@ export default function App() {
 
   // Save current state to history
   const pushHistoryState = (newMapImage) => {
-    const newHistory = history.slice(0, historyIndex + 1);
+    let baseHistory = history;
+    let baseIndex = historyIndex;
+    // Defensive check: if history was empty but a base map exists, seed it
+    if (baseHistory.length === 0 && mapImage && mapImage !== newMapImage) {
+      baseHistory = [{ mapImage }];
+      baseIndex = 0;
+    }
+    const newHistory = baseHistory.slice(0, baseIndex + 1);
     newHistory.push({ mapImage: newMapImage });
     setHistory(newHistory);
     setHistoryIndex(newHistory.length - 1);
   };
 
   const handleUndo = () => {
-    if (historyIndex > 0) {
-      setMapImage(history[historyIndex - 1].mapImage);
-      setHistoryIndex(historyIndex - 1);
-    }
+    if (isBusy || historyIndex <= 0) return;
+    setMapImage(history[historyIndex - 1].mapImage);
+    setHistoryIndex(historyIndex - 1);
+    setInpaintMaskLines([]);
+    setIsInpaintModalOpen(false);
   };
 
   const handleRedo = () => {
-    if (historyIndex < history.length - 1) {
-      setMapImage(history[historyIndex + 1].mapImage);
-      setHistoryIndex(historyIndex + 1);
-    }
+    if (isBusy || historyIndex >= history.length - 1) return;
+    setMapImage(history[historyIndex + 1].mapImage);
+    setHistoryIndex(historyIndex + 1);
+    setInpaintMaskLines([]);
+    setIsInpaintModalOpen(false);
   };
 
   // Convert the painted mask strokes to the binary mask the edit call takes. The strokes are in map
@@ -369,6 +378,8 @@ export default function App() {
     const projectData = {
       title: mapTitle,
       mapImage,
+      history: history.length > 0 ? history : (mapImage ? [{ mapImage }] : []),
+      historyIndex: history.length > 0 ? historyIndex : (mapImage ? 0 : -1),
       version: '2.0'
     };
     const blob = new Blob([JSON.stringify(projectData, null, 2)], { type: 'application/json' });
@@ -381,7 +392,29 @@ export default function App() {
 
   // Import Project JSON State
   const handleImportJson = (data) => {
-    if (data.mapImage) setMapImage(data.mapImage);
+    if (!data) return;
+    if (data.mapImage) {
+      setMapImage(data.mapImage);
+      const hasValidHistory = Array.isArray(data.history)
+        && data.history.length > 0
+        && data.history.every((item) => item && typeof item.mapImage === 'string');
+
+      if (hasValidHistory) {
+        setHistory(data.history);
+        const validIndex = typeof data.historyIndex === 'number'
+          && data.historyIndex >= 0
+          && data.historyIndex < data.history.length
+            ? data.historyIndex
+            : data.history.length - 1;
+        setHistoryIndex(validIndex);
+      } else {
+        setHistory([{ mapImage: data.mapImage }]);
+        setHistoryIndex(0);
+      }
+      setInpaintMaskLines([]);
+      setInpaintPrompt('');
+      setOutpaintSelection(null);
+    }
     if (data.title) setMapTitle(data.title);
   };
 
@@ -391,6 +424,9 @@ export default function App() {
       setMapImage(null);
       setInpaintMaskLines([]);
       setInpaintPrompt('');
+      setHistory([]);
+      setHistoryIndex(-1);
+      setOutpaintSelection(null);
     }
   };
 
@@ -409,8 +445,8 @@ export default function App() {
         onClearCanvas={handleClearCanvas}
         onUndo={handleUndo}
         onRedo={handleRedo}
-        canUndo={historyIndex > 0}
-        canRedo={historyIndex < history.length - 1}
+        canUndo={historyIndex > 0 && !isBusy}
+        canRedo={historyIndex < history.length - 1 && !isBusy}
         mapTitle={mapTitle}
         setMapTitle={setMapTitle}
       />

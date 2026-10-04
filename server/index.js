@@ -4,8 +4,8 @@ const path = require('path');
 const dotenv = require('dotenv');
 const { generateBattlemap, forgeRegion } = require('./services/battlemapService');
 const { isProviderConfigured, MODEL_CATALOG, DEFAULT_MODEL_ID } = require('./services/modelCatalog');
-const { getWikiTree, getWikiArticle } = require('./services/wikiService');
-const { suggestBattlemaps, generateCustomBattlemapPrompt } = require('./services/wikiPrompter');
+const { getWikiTree, getWikiArticle, createWikiArticle } = require('./services/wikiService');
+const { suggestBattlemaps, generateCustomBattlemapPrompt, suggestRegionForging } = require('./services/wikiPrompter');
 
 // The server config lives next to this file; `process.cwd()` is the repo root under `npm run dev`.
 dotenv.config({ path: path.join(__dirname, '.env') });
@@ -142,6 +142,74 @@ app.post('/api/wiki/prompts/custom', async (req, res) => {
 });
 
 /**
+ * Generates tactical region forging suggestions for a selected canvas region
+ */
+app.post('/api/wiki/regions/suggest', async (req, res) => {
+  try {
+    const { articlePath, selection, mapDimensions, mapTitle, basePrompt, userIntent } = req.body;
+    if (!articlePath || !selection) {
+      return res.status(400).json({
+        error: 'Missing articlePath or selection in request body',
+        code: 'INVALID_PARAMETERS'
+      });
+    }
+    console.log(`[API /wiki/regions/suggest] Suggesting region forging for "${articlePath}"`);
+    const result = await suggestRegionForging({
+      articlePath,
+      selection,
+      mapDimensions,
+      mapTitle,
+      basePrompt,
+      userIntent
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[API /api/wiki/regions/suggest error]', err.message);
+    const status = err.code === 'NO_API_KEY' ? 503
+      : (err.code === 'WIKI_ARTICLE_NOT_FOUND' ? 404
+      : (err.code === 'INVALID_PATH' || err.code === 'INVALID_SELECTION' || err.code === 'INVALID_PARAMETERS' ? 400 : 502));
+    res.status(status).json({
+      error: err.message,
+      code: err.code || 'PROMPT_SUGGESTION_FAILED',
+      debug: err.telemetry || null
+    });
+  }
+});
+
+/**
+ * Creates or updates a wiki markdown article
+ */
+app.post('/api/wiki/article', async (req, res) => {
+  try {
+    const { relPath, content, title, overwrite } = req.body;
+    if (!relPath || typeof relPath !== 'string' || content === undefined || content === null || typeof content !== 'string') {
+      return res.status(400).json({
+        error: 'Missing relPath or content in request body',
+        code: 'INVALID_PARAMETERS'
+      });
+    }
+    console.log(`[API /wiki/article] Creating article at "${relPath}"`);
+    const article = await createWikiArticle({ relPath, content, title, overwrite });
+    res.json({
+      ok: true,
+      article: {
+        path: article.path,
+        title: article.title
+      }
+    });
+  } catch (err) {
+    console.error('[API /api/wiki/article error]', err.message);
+    const status = err.code === 'ACCESS_DENIED' ? 403
+      : (err.code === 'ARTICLE_ALREADY_EXISTS' ? 409
+      : (err.code === 'INVALID_PARAMETERS' || err.code === 'INVALID_PATH' ? 400 : 500));
+    res.status(status).json({
+      error: err.message,
+      code: err.code || 'WIKI_ARTICLE_FAILED'
+    });
+  }
+});
+
+/**
  * No map producer has a fallback: failures carry `telemetry` (prompts, model attempt trail, raw
  * response) which is forwarded so the client can show the real cause instead of a generic error.
  * A missing provider key is a server misconfiguration (503), an unusable model request is a bad
@@ -210,6 +278,10 @@ app.post('/api/forge-region', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`⚔️ Dungeon Forge server running on http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`⚔️ Dungeon Forge server running on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;

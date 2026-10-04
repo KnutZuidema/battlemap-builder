@@ -6,8 +6,8 @@
  * pixels itself and the returned bytes are resized to the requested canvas size. There is no SVG
  * contract any more, so no model returns markup that has to be rasterised locally.
  *
- * `vision` decides whether the model can receive images; only vision models can run the INPAINT
- * flow, which hands the model the map, a tinted guide and the binary mask. Every current entry is
+ * `vision` decides whether the model can receive images; only vision models can run the region forge
+ * flow, which hands the model the map, a cyan guide and the binary mask. Every current entry is
  * vision-capable; the flag stays part of the contract so the guard keeps holding if one is not.
  *
  * `costHint` values are per-million-token OpenRouter list prices observed 2026-09-24, plus the
@@ -37,7 +37,7 @@ const MODEL_CATALOG = [
       imageOutput: 0.00006
     },
     costHint: '$0.50/M in · $3/M out (~$0.07 per map, edit or expansion)',
-    note: 'Google: Nano Banana 2 (Gemini 3.1 Flash Image). Fast, high-quality painted battlemap generation; supports mask edits.'
+    note: 'Google: Nano Banana 2 (Gemini 3.1 Flash Image). Fast, high-quality painted battlemap generation; supports region forging.'
   },
   {
     id: 'google/gemini-3.1-flash-lite-image',
@@ -52,7 +52,7 @@ const MODEL_CATALOG = [
       imageOutput: 0.00003
     },
     costHint: '$0.25/M in · $1.50/M out (~$0.035 per map, edit or expansion)',
-    note: 'Google: Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image). Ultra-fast, lightweight image generation; supports mask edits.'
+    note: 'Google: Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image). Ultra-fast, lightweight image generation; supports region forging.'
   }
 ];
 

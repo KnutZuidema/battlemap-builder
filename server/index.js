@@ -2,8 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const dotenv = require('dotenv');
-const { prepareInpaintCanvas } = require('./services/imageProcessor');
-const { generateBattlemap, inpaintBattlemap, outpaintBattlemap, forgeRegion } = require('./services/battlemapService');
+const { generateBattlemap, forgeRegion } = require('./services/battlemapService');
 const { isProviderConfigured, MODEL_CATALOG, DEFAULT_MODEL_ID } = require('./services/modelCatalog');
 const { getWikiTree, getWikiArticle } = require('./services/wikiService');
 const { suggestBattlemaps, generateCustomBattlemapPrompt } = require('./services/wikiPrompter');
@@ -184,66 +183,9 @@ app.post('/api/generate', async (req, res) => {
   }
 });
 
-/**
- * Inpainting route to update a specific area of the battlemap
- */
-app.post('/api/inpaint', async (req, res) => {
-  try {
-    const { originalDataUrl, maskDataUrl, prompt, model } = req.body;
-
-    if (!originalDataUrl || !maskDataUrl) {
-      return res.status(400).json({ error: 'originalDataUrl and maskDataUrl are required' });
-    }
-
-    console.log(`[API /inpaint] Updating map detail: prompt="${prompt}" model="${model || 'default'}"`);
-
-    const processed = await prepareInpaintCanvas(originalDataUrl, maskDataUrl);
-    const result = await inpaintBattlemap({
-      originalDataUrl: processed.originalDataUrl,
-      maskDataUrl: processed.maskDataUrl,
-      prompt,
-      model
-    });
-
-    res.json(result);
-  } catch (err) {
-    sendGenerationError(res, err);
-  }
-});
 
 /**
- * Outpainting route to extend battlemap canvas outward
- */
-app.post('/api/outpaint', async (req, res) => {
-  try {
-    const { originalDataUrl, direction, extensionPrompt, expandAmount, spanStart, spanEnd, model } = req.body;
-
-    if (!originalDataUrl || !direction) {
-      return res.status(400).json({ error: 'originalDataUrl and direction are required' });
-    }
-
-    // spanStart/spanEnd (px along the expanded edge) limit the new strip to part of that side
-    const hasSpan = Number.isFinite(Number(spanStart)) && Number.isFinite(Number(spanEnd)) && spanStart !== null && spanEnd !== null;
-
-    console.log(`[API /outpaint] Extending canvas ${direction.toUpperCase()}: prompt="${extensionPrompt}" model="${model || 'default'}"${hasSpan ? ` span=${spanStart}..${spanEnd}` : ''}`);
-
-    const result = await outpaintBattlemap({
-      originalDataUrl,
-      direction,
-      extensionPrompt,
-      expandAmount: parseInt(expandAmount) || 512,
-      span: hasSpan ? { start: Number(spanStart), end: Number(spanEnd) } : null,
-      model
-    });
-
-    res.json(result);
-  } catch (err) {
-    sendGenerationError(res, err);
-  }
-});
-
-/**
- * Unified region modification route (inpainting, outpainting, and hybrid edits)
+ * Unified region modification route (edit details, canvas extension, and hybrid region forging)
  */
 app.post('/api/forge-region', async (req, res) => {
   try {

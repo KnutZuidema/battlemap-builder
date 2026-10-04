@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
-import { Stage, Layer, Image as KonvaImage, Rect, Group, Shape } from 'react-konva';
-import { ZoomIn, ZoomOut, Maximize, Move, Clock, Sparkles, Wand2, X, Crop, RefreshCw, Grid } from 'lucide-react';
+import { Stage, Layer, Image as KonvaImage, Rect, Group, Shape, Text as KonvaText } from 'react-konva';
+import { ZoomIn, ZoomOut, Maximize, Move, Clock, Sparkles, Wand2, X, Crop, RefreshCw, Grid, Gamepad2 } from 'lucide-react';
 import { formatTimer } from '../utils/format';
 import {
   REGION_HANDLES,
@@ -26,7 +26,13 @@ export default function BattlemapCanvas({
   isRetryPillDismissed,
   onDismissRetryPill,
   showGrid = true,
-  onToggleGrid
+  onToggleGrid,
+  activeMode = 'edit',
+  features = [],
+  selectedFeatureId = null,
+  onSelectFeature,
+  onToggleFeatureState,
+  onUpdateFeatureBox
 }) {
   const containerRef = useRef(null);
   const stageRef = useRef(null);
@@ -51,6 +57,14 @@ export default function BattlemapCanvas({
 
   // Cursor state
   const [hoverCursor, setHoverCursor] = useState(null);
+  // Interactive feature dragging & hover states
+  const [featureResizeHandle, setFeatureResizeHandle] = useState(null);
+  const [isMovingFeature, setIsMovingFeature] = useState(false);
+  const featureDragStartRef = useRef(null);
+  const featureBoxAtStartRef = useRef(null);
+  const [hoveredFeatureId, setHoveredFeatureId] = useState(null);
+  const selectedFeature = features.find((f) => f.id === selectedFeatureId);
+
 
   // Local grid visibility fallback
   const [localShowGrid, setLocalShowGrid] = useState(true);
@@ -141,12 +155,20 @@ export default function BattlemapCanvas({
 
   // Mouse Down — left / middle button pans canvas, right button initiates region selection
   const handleMouseDown = (e) => {
+    // Deselect feature if left-clicking on empty background in Edit mode
+    if (e.evt.button === 0 && selectedFeatureId) {
+      onSelectFeature?.(null);
+    }
+
     if (e.evt.button === 0 || e.evt.button === 1) {
       setIsPanning(true);
       setLastPanPos({ x: e.evt.clientX, y: e.evt.clientY });
       return;
     }
 
+    if (activeMode === 'play') {
+      return;
+    }
     if (e.evt.button === 2 && loadedImage && !isBusy) {
       if (onDismissRetryPill) onDismissRetryPill();
       const point = pointerToMap();
@@ -175,6 +197,9 @@ export default function BattlemapCanvas({
       return;
     }
 
+    if (activeMode === 'play') {
+      return;
+    }
     if (isRightDragging && loadedImage && dragStartPointRef.current) {
       const point = pointerToMap();
       if (!point) return;
@@ -214,9 +239,11 @@ export default function BattlemapCanvas({
     return () => window.removeEventListener('mouseup', onWindowMouseUp);
   }, []);
 
-  // Global pointer listeners while dragging handles or moving box so interactions stay active even outside stage
+  // Global pointer listeners while dragging handles or moving box/feature
   useEffect(() => {
-    if ((!resizeHandle && !isMovingBox) || !regionSelection || !loadedImage) return undefined;
+    const isInteractingWithFeature = (featureResizeHandle || isMovingFeature) && selectedFeature;
+    const isInteractingWithRegion = (resizeHandle || isMovingBox) && regionSelection;
+    if ((!isInteractingWithFeature && !isInteractingWithRegion) || !loadedImage) return undefined;
 
     const onPointerMove = (e) => {
       if (!containerRef.current) return;
@@ -226,7 +253,28 @@ export default function BattlemapCanvas({
         y: (e.clientY - rect.top - position.y) / scale
       };
 
-      if (resizeHandle) {
+      if (featureResizeHandle && selectedFeature) {
+        const next = resizeRegionSelection(
+          selectedFeature.box,
+          featureResizeHandle.edges,
+          pointer,
+          loadedImage.width,
+          loadedImage.height
+        );
+        onUpdateFeatureBox?.(selectedFeature.id, next);
+      } else if (isMovingFeature && featureDragStartRef.current && featureBoxAtStartRef.current && selectedFeature) {
+        const delta = {
+          x: pointer.x - featureDragStartRef.current.x,
+          y: pointer.y - featureDragStartRef.current.y
+        };
+        const next = moveRegionSelection(
+          featureBoxAtStartRef.current,
+          delta,
+          loadedImage.width,
+          loadedImage.height
+        );
+        onUpdateFeatureBox?.(selectedFeature.id, next);
+      } else if (resizeHandle) {
         const next = resizeRegionSelection(
           regionSelection,
           resizeHandle.edges,
@@ -255,6 +303,11 @@ export default function BattlemapCanvas({
       setIsMovingBox(false);
       dragStartPointRef.current = null;
       selectionAtDragStartRef.current = null;
+
+      setFeatureResizeHandle(null);
+      setIsMovingFeature(false);
+      featureDragStartRef.current = null;
+      featureBoxAtStartRef.current = null;
     };
 
     window.addEventListener('pointermove', onPointerMove);
@@ -263,7 +316,19 @@ export default function BattlemapCanvas({
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
     };
-  }, [resizeHandle, isMovingBox, regionSelection, loadedImage, position, scale, onRegionSelectionChange]);
+  }, [
+    resizeHandle,
+    isMovingBox,
+    regionSelection,
+    loadedImage,
+    position,
+    scale,
+    onRegionSelectionChange,
+    featureResizeHandle,
+    isMovingFeature,
+    selectedFeature,
+    onUpdateFeatureBox
+  ]);
 
   // Escape key clears region selection; 'g'/'G' toggles 5ft grid overlay
   useEffect(() => {
@@ -349,15 +414,14 @@ export default function BattlemapCanvas({
   };
 
   // Determine cursor
-  const cursor = resizeHandle
-    ? resizeHandle.cursor
-    : isMovingBox
-    ? 'move'
-    : isPanning
-    ? 'grabbing'
-    : isRightDragging
-    ? 'crosshair'
-    : hoverCursor || 'default';
+  const cursor = (featureResizeHandle ? featureResizeHandle.cursor : null)
+    || (isMovingFeature ? 'move' : null)
+    || (resizeHandle ? resizeHandle.cursor : null)
+    || (isMovingBox ? 'move' : null)
+    || (isPanning ? 'grabbing' : null)
+    || (isRightDragging ? 'crosshair' : null)
+    || hoverCursor
+    || 'default';
 
   // Description details for badge
   const regionDesc = regionSelection && loadedImage
@@ -461,7 +525,7 @@ export default function BattlemapCanvas({
         <span>Drag to Pan · Scroll to Zoom</span>
       </div>
 
-      {!isBusy && (
+      {!isBusy && activeMode === 'edit' && (
         <div className="absolute bottom-4 right-4 z-10 flex items-center gap-2">
           <span className="bg-slate-950/70 backdrop-blur-md px-3 py-1.5 rounded-xl border border-cyan-500/25 text-[11px] text-cyan-200 flex items-center gap-2">
             <Crop className="w-3.5 h-3.5" />
@@ -469,9 +533,17 @@ export default function BattlemapCanvas({
           </span>
         </div>
       )}
+      {!isBusy && activeMode === 'play' && (
+        <div className="absolute bottom-4 right-4 z-10 flex items-center gap-2">
+          <span className="bg-slate-950/70 backdrop-blur-md px-3 py-1.5 rounded-xl border border-amber-500/25 text-[11px] text-amber-200 flex items-center gap-2">
+            <Gamepad2 className="w-3.5 h-3.5" />
+            <span>Play Mode · Click interactive elements to trigger</span>
+          </span>
+        </div>
+      )}
 
-      {/* FLOATING ACTION PILL ON SELECTION BOX */}
-      {regionSelection && loadedImage && !isBusy && (
+      {/* FLOATING ACTION PILL ON SELECTION BOX (Edit mode only) */}
+      {regionSelection && loadedImage && !isBusy && activeMode === 'edit' && (
         <div
           className="absolute z-20 flex items-center gap-2 bg-slate-950/90 backdrop-blur-xl px-3 py-1.5 rounded-2xl border border-cyan-500/40 shadow-2xl shadow-cyan-500/15 pointer-events-auto transform -translate-x-1/2"
           style={{
@@ -501,7 +573,7 @@ export default function BattlemapCanvas({
       )}
 
       {/* FLOATING RETRY PILL FOR LAST FORGED REGION */}
-      {showRetryPill && (
+      {showRetryPill && activeMode === 'edit' && (
         <div
           className="absolute z-20 flex items-center gap-2 bg-slate-950/90 backdrop-blur-xl px-3 py-1.5 rounded-2xl border border-cyan-500/40 shadow-2xl shadow-cyan-500/15 pointer-events-auto transform -translate-x-1/2 animate-rise"
           style={{
@@ -547,9 +619,15 @@ export default function BattlemapCanvas({
         onMouseLeave={handleMouseUp}
         style={{ cursor }}
       >
-        {/* BASE MAP LAYER */}
+        {/* BASE MAP LAYER & ALTERNATE FEATURE PATCHES */}
         <Layer>
           {loadedImage && <KonvaImage image={loadedImage} x={0} y={0} />}
+          {features.map((feature) => {
+            if (feature.currentState === 1 && feature.states?.[1]?.patchDataUrl) {
+              return <FeaturePatchImage key={`patch-${feature.id}`} feature={feature} />;
+            }
+            return null;
+          })}
           {loadedImage && effectiveShowGrid && (
             <GridOverlay width={loadedImage.width} height={loadedImage.height} />
           )}
@@ -558,8 +636,8 @@ export default function BattlemapCanvas({
         {/* SHIMMER & TIMER TARGET REGION OVERLAY */}
         <Layer>{renderShimmerOverlay()}</Layer>
 
-        {/* REGION SELECTION BOX LAYER */}
-        {loadedImage && !isBusy && regionSelection && (
+        {/* REGION SELECTION BOX LAYER (Edit mode only) */}
+        {loadedImage && !isBusy && regionSelection && activeMode === 'edit' && (
           <Layer>
             <RegionSelectionBox
               selection={regionSelection}
@@ -577,6 +655,124 @@ export default function BattlemapCanvas({
               }}
               onHoverCursor={setHoverCursor}
             />
+          </Layer>
+        )}
+
+        {/* INTERACTIVE FEATURES LAYER */}
+        {loadedImage && (
+          <Layer>
+            {/* Edit Mode: Dashed boxes, badges, and handles */}
+            {activeMode === 'edit' && features.map((feature) => {
+              const isSelected = feature.id === selectedFeatureId;
+              const typeColor = feature.type === 'door'
+                ? '#22d3ee'
+                : (feature.type === 'destructible_wall' ? '#f59e0b' : '#34d399');
+              const px = 1 / scale;
+
+              return (
+                <Group key={`feat-edit-${feature.id}`}>
+                  {/* Feature Bounding Box */}
+                  <Rect
+                    x={feature.box.x}
+                    y={feature.box.y}
+                    width={feature.box.width}
+                    height={feature.box.height}
+                    stroke={isSelected ? '#22d3ee' : typeColor}
+                    strokeWidth={isSelected ? 2.5 * px : 1.5 * px}
+                    strokeScaleEnabled={false}
+                    dash={isSelected ? undefined : [6, 4]}
+                    fill={isSelected ? 'rgba(34, 211, 238, 0.16)' : 'rgba(6, 182, 212, 0.08)'}
+                    perfectDrawEnabled={false}
+                    onClick={(e) => {
+                      e.cancelBubble = true;
+                      onSelectFeature?.(feature.id);
+                    }}
+                    onMouseEnter={() => setHoverCursor('pointer')}
+                    onMouseLeave={() => setHoverCursor(null)}
+                  />
+
+                  {/* Feature Tag Badge */}
+                  <Group x={feature.box.x} y={Math.max(0, feature.box.y - 20 * px)}>
+                    <Rect
+                      width={Math.min(feature.box.width, 100 * px)}
+                      height={18 * px}
+                      fill="rgba(10, 15, 29, 0.9)"
+                      stroke={isSelected ? '#22d3ee' : 'rgba(255, 255, 255, 0.2)'}
+                      strokeWidth={1 * px}
+                      cornerRadius={4 * px}
+                      perfectDrawEnabled={false}
+                    />
+                    <KonvaText
+                      x={4 * px}
+                      y={3 * px}
+                      text={feature.label || feature.type}
+                      fontSize={10 * px}
+                      fill="#ffffff"
+                      fontStyle="bold"
+                      width={Math.min(feature.box.width - 8 * px, 92 * px)}
+                      ellipsis={true}
+                      wrap="none"
+                      perfectDrawEnabled={false}
+                    />
+                  </Group>
+
+                  {/* Resize & move handles for selected feature */}
+                  {isSelected && (
+                    <SelectedFeatureHandles
+                      box={feature.box}
+                      scale={scale}
+                      onResizeStart={(handle) => setFeatureResizeHandle(handle)}
+                      onMoveStart={() => {
+                        const point = pointerToMap();
+                        if (point) {
+                          featureDragStartRef.current = point;
+                          featureBoxAtStartRef.current = { ...feature.box };
+                          setIsMovingFeature(true);
+                        }
+                      }}
+                      onHoverCursor={setHoverCursor}
+                    />
+                  )}
+                </Group>
+              );
+            })}
+
+            {/* Play Mode: Immersive hoverable & clickable areas */}
+            {activeMode === 'play' && features.map((feature) => {
+              const isHovered = hoveredFeatureId === feature.id;
+              const px = 1 / scale;
+
+              return (
+                <Group key={`feat-play-${feature.id}`}>
+                  <Rect
+                    x={feature.box.x}
+                    y={feature.box.y}
+                    width={feature.box.width}
+                    height={feature.box.height}
+                    fill="rgba(0, 0, 0, 0.001)"
+                    stroke={isHovered ? 'rgba(245, 158, 11, 0.9)' : undefined}
+                    strokeWidth={isHovered ? 2.5 * px : 0}
+                    cornerRadius={4 * px}
+                    perfectDrawEnabled={false}
+                    onClick={(e) => {
+                      e.cancelBubble = true;
+                      if (feature.states?.[1]?.patchDataUrl) {
+                        onToggleFeatureState?.(feature.id);
+                      }
+                      onSelectFeature?.(feature.id);
+                    }}
+                    onMouseEnter={() => {
+                      setHoveredFeatureId(feature.id);
+                      setHoverCursor('pointer');
+                    }}
+                    onMouseLeave={() => {
+                      if (hoveredFeatureId === feature.id) setHoveredFeatureId(null);
+                      setHoverCursor(null);
+                    }}
+                  />
+                </Group>
+              );
+            })}
           </Layer>
         )}
       </Stage>
@@ -751,5 +947,159 @@ function GridOverlay({ width, height }) {
       perfectDrawEnabled={false}
       listening={false}
     />
+  );
+}
+
+/**
+ * Reactive patch image overlay for alternate feature states
+ */
+function FeaturePatchImage({ feature }) {
+  const [patchImg, setPatchImg] = useState(null);
+  const patchUrl = feature.states?.[1]?.patchDataUrl;
+
+  useEffect(() => {
+    if (!patchUrl) {
+      setPatchImg(null);
+      return;
+    }
+    const img = new window.Image();
+    img.crossOrigin = 'Anonymous';
+    img.src = patchUrl;
+    img.onload = () => setPatchImg(img);
+  }, [patchUrl]);
+
+  if (!patchImg) return null;
+
+  return (
+    <KonvaImage
+      image={patchImg}
+      x={feature.box.x}
+      y={feature.box.y}
+      width={feature.box.width}
+      height={feature.box.height}
+    />
+  );
+}
+
+/**
+ * 64px Grid-Snapped Selected Feature Handles with interior dragging and 8 resize handles
+ */
+function SelectedFeatureHandles({ box, scale, onResizeStart, onMoveStart, onHoverCursor }) {
+  const { x, y, width, height } = box;
+  const hit = 18 / scale;
+  const px = 1 / scale;
+
+  return (
+    <Group>
+      {/* Interior move drag area */}
+      <Rect
+        x={x}
+        y={y}
+        width={width}
+        height={height}
+        fill="rgba(0,0,0,0.001)"
+        perfectDrawEnabled={false}
+        onMouseDown={(e) => {
+          if (e.evt.button !== 0) return;
+          e.cancelBubble = true;
+          onMoveStart();
+        }}
+        onMouseEnter={() => onHoverCursor('move')}
+        onMouseLeave={() => onHoverCursor(null)}
+      />
+
+      {/* 8 Resize Handles */}
+      {REGION_HANDLES.map((handle) => {
+        const isCorner = handle.edges.length === 2;
+        let hx, hy, hw, hh;
+        let gx, gy, gw, gh;
+
+        if (isCorner) {
+          const cx = handle.edges.includes('left') ? x : x + width;
+          const cy = handle.edges.includes('top') ? y : y + height;
+          hx = cx - hit * 0.8;
+          hy = cy - hit * 0.8;
+          hw = hit * 1.6;
+          hh = hit * 1.6;
+          gx = cx - 5 * px;
+          gy = cy - 5 * px;
+          gw = 10 * px;
+          gh = 10 * px;
+        } else {
+          const edge = handle.edges[0];
+          if (edge === 'left') {
+            hx = x - hit / 2;
+            hy = y;
+            hw = hit;
+            hh = height;
+            gx = x - 2.5 * px;
+            gy = y + height / 2 - 16 * px;
+            gw = 5 * px;
+            gh = 32 * px;
+          } else if (edge === 'right') {
+            hx = x + width - hit / 2;
+            hy = y;
+            hw = hit;
+            hh = height;
+            gx = x + width - 2.5 * px;
+            gy = y + height / 2 - 16 * px;
+            gw = 5 * px;
+            gh = 32 * px;
+          } else if (edge === 'top') {
+            hx = x;
+            hy = y - hit / 2;
+            hw = width;
+            hh = hit;
+            gx = x + width / 2 - 16 * px;
+            gy = y - 2.5 * px;
+            gw = 32 * px;
+            gh = 5 * px;
+          } else {
+            hx = x;
+            hy = y + height - hit / 2;
+            hw = width;
+            hh = hit;
+            gx = x + width / 2 - 16 * px;
+            gy = y + height - 2.5 * px;
+            gw = 32 * px;
+            gh = 5 * px;
+          }
+        }
+
+        return (
+          <Group
+            key={handle.id}
+            onMouseDown={(e) => {
+              if (e.evt.button !== 0) return;
+              e.cancelBubble = true;
+              onResizeStart(handle);
+            }}
+            onMouseEnter={() => onHoverCursor(handle.cursor)}
+            onMouseLeave={() => onHoverCursor(null)}
+          >
+            <Rect
+              x={hx}
+              y={hy}
+              width={hw}
+              height={hh}
+              fill="rgba(0,0,0,0.001)"
+              perfectDrawEnabled={false}
+            />
+            <Rect
+              x={gx}
+              y={gy}
+              width={gw}
+              height={gh}
+              fill="#22d3ee"
+              stroke="#04222a"
+              strokeWidth={1 * px}
+              cornerRadius={2 * px}
+              perfectDrawEnabled={false}
+              listening={false}
+            />
+          </Group>
+        );
+      })}
+    </Group>
   );
 }

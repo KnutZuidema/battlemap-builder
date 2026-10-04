@@ -1,16 +1,12 @@
-const sharp = require('sharp');
 const {
   dataUrlToBuffer,
   bufferToDataUrl,
-  measureMaskBounds,
   prepareRegionCanvas,
   compositeRegion
 } = require('./imageProcessor');
 const {
   IMAGE_PROMPTS,
   buildBattlemapPrompt,
-  buildInpaintPrompt,
-  buildOutpaintPrompt,
   buildForgeRegionPrompt
 } = require('./prompts');
 const {
@@ -22,10 +18,10 @@ const { providerFailure, describeFailure, noApiKeyMessage } = require('./failure
 const openrouterProvider = require('./providers/openrouterProvider');
 
 /**
- * Orchestrates map generation, inpainting and outpainting across providers.
+ * Orchestrates map generation and region forging across providers.
  *
  * The service owns everything provider-agnostic: which model the backend is configured to run,
- * whether it can see images at all, the canvas compositing that keeps edits inside their mask, and
+ * whether it can see images at all, the canvas compositing that keeps edits inside their target region, and
  * the error shape every failure is reported with. Providers only turn a payload into an image.
  *
  * There is no procedural fallback: when the configured model produces nothing, the request fails and
@@ -35,11 +31,6 @@ const openrouterProvider = require('./providers/openrouterProvider');
 const PROVIDERS = {
   openrouter: openrouterProvider
 };
-
-/**
- * Width of the soft alpha ramp inside the mask seam when the model render is composited back.
- */
-const INPAINT_FEATHER_PX = 6;
 
 /**
  * One dispatch point for every mode: checks the provider key, calls the provider, and restates any
@@ -198,52 +189,7 @@ async function forgeRegion({ originalDataUrl, selection, prompt, model }) {
   };
 }
 
-/**
- * Inpainting / detail modification (delegates to forgeRegion).
- */
-async function inpaintBattlemap({ originalDataUrl, maskDataUrl, prompt, model }) {
-  const origBuf = dataUrlToBuffer(originalDataUrl);
-  const maskBuf = dataUrlToBuffer(maskDataUrl);
-  const { width, height } = await sharp(origBuf).metadata();
-  const bounds = await measureMaskBounds(maskBuf, width, height);
-  const selection = bounds || { x: 0, y: 0, width, height };
-  return forgeRegion({ originalDataUrl, selection, prompt, model });
-}
-
-/**
- * Outpainting / canvas extension (delegates to forgeRegion).
- */
-async function outpaintBattlemap({ originalDataUrl, direction = 'east', extensionPrompt = '', expandAmount = 512, span = null, model }) {
-  const origBuf = dataUrlToBuffer(originalDataUrl);
-  const { width: origW, height: origH } = await sharp(origBuf).metadata();
-  const dir = String(direction || 'east').toLowerCase();
-  const depth = Number(expandAmount) || 512;
-
-  let selection;
-  if (dir === 'north') {
-    const sStart = span ? span.start : 0;
-    const sLen = span ? (span.end - span.start) : origW;
-    selection = { x: sStart, y: -depth, width: sLen, height: depth };
-  } else if (dir === 'south') {
-    const sStart = span ? span.start : 0;
-    const sLen = span ? (span.end - span.start) : origW;
-    selection = { x: sStart, y: origH, width: sLen, height: depth };
-  } else if (dir === 'west') {
-    const sStart = span ? span.start : 0;
-    const sLen = span ? (span.end - span.start) : origH;
-    selection = { x: -depth, y: sStart, width: depth, height: sLen };
-  } else {
-    const sStart = span ? span.start : 0;
-    const sLen = span ? (span.end - span.start) : origH;
-    selection = { x: origW, y: sStart, width: depth, height: sLen };
-  }
-
-  return forgeRegion({ originalDataUrl, selection, prompt: extensionPrompt, model });
-}
-
 module.exports = {
   generateBattlemap,
-  inpaintBattlemap,
-  outpaintBattlemap,
   forgeRegion
 };

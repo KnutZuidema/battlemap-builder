@@ -8,14 +8,14 @@ This document serves as the primary guidance file for AI agents and human develo
 
 ## 1. Project Overview & Architecture
 
-DUNGEON FORGE allows dungeon masters and players to generate 2D top-down battlemaps from text descriptions, edit details via canvas mask inpainting, and extend map boundaries infinitely in 4 cardinal directions (North, South, East, West) with soft alpha seam feathering.
+DUNGEON FORGE allows dungeon masters and players to generate 2D top-down battlemaps from text descriptions, edit details, and extend map boundaries seamlessly via 64px grid-snapped region forging with soft inward seam feathering.
 
 ```mermaid
 graph TD
     A["Client: React 19 + Vite (Port 3000)"] -->|HTTP REST /api/*| B["Server: Node.js Express (Port 3001)"]
     B -->|model catalog + dispatch| G["Providers: battlemapService + modelCatalog"]
     G -->|OpenRouter chat completions| H["OpenRouter (Google Gemini image models)"]
-    G -->|Sharp Engine| D["Canvas padding, mask shaping & alpha feathering"]
+    G -->|Sharp Engine| D["Context framing, mask shaping & inward seam feathering"]
     A -->|State & Drawing| E["Konva 2D Interactive Canvas"]
     A -->|Telemetry Window| F["Debug Modal Inspector"]
 ```
@@ -27,14 +27,14 @@ graph TD
 ### Frontend (`/client`)
 - **Framework**: React 19 + Vite 6
 - **Styling**: TailwindCSS v4 (Space Grotesk & Plus Jakarta Sans typography, sleek dark glassmorphism)
-- **Canvas Rendering**: `react-konva` & `konva` for 2D pan/zoom, right-drag mask painting, and edge expansion hotspots
+- **Canvas Rendering**: `react-konva` & `konva` for 2D pan/zoom, 64px grid-snapped region selection, and handle resizing
 - **Icons & Effects**: `lucide-react`, `canvas-confetti`
 
 ### Backend (`/server`)
 - **Runtime & Server**: Node.js & Express (`PORT=3001`)
 - **AI SDK**: OpenRouter's `chat/completions` REST API (`fetch`) — the only provider
 - **Map Models**: every model renders raster pixels directly (the `image` output contract); the reply IS the image and is resized to the canvas size. There is no SVG contract. The full list, with measured behaviour and prices, lives in `server/services/modelCatalog.js`.
-- **Image Processing**: `sharp` for canvas expansion, mask shaping, and 48px Gaussian blurred `dest-in` alpha mask composite feathering
+- **Image Processing**: `sharp` for context framing, binary mask shaping, and 20px inward seam feathering with strict boundary clipping
 
 ---
 
@@ -64,7 +64,7 @@ Battlemap Builder/
 │   │   │   ├── DebugModal.jsx      # Prompt & telemetry debug inspector
 │   │   │   ├── Navbar.jsx          # Header navigation bar & global actions
 │   │   │   ├── PromptHero.jsx      # New-map screen: the prompt, nothing else
-│   │   │   ├── ActionModal.jsx     # Shared prompt modal for edit + expansion
+│   │   │   ├── ActionModal.jsx     # Popover prompt modal for region forging
 │   │   │   └── BattlemapCanvas.jsx # Interactive Konva 2D canvas
 │   │   ├── services/
 │   │   │   └── api.js             # HTTP REST API client
@@ -74,13 +74,13 @@ Battlemap Builder/
 │   │   └── index.css              # Design tokens, glassmorphism & animation utilities
 │   └── package.json
 └── server/                    # Node Express Backend
-    ├── index.js               # Express routes (/api/generate, /api/inpaint, /api/outpaint, /api/health)
+    ├── index.js               # Express routes (/api/generate, /api/forge-region, /api/wiki/*, /api/health)
     ├── services/
     │   ├── battlemapService.js    # Orchestrator: configured model, compositing, failure shape
     │   ├── modelCatalog.js        # Backend model configuration (provider, vision, cost notes)
     │   ├── prompts.js             # IMAGE_PROMPTS + builder functions
     │   ├── failure.js             # Upstream error summarising + user-facing failure sentences
-    │   ├── imageProcessor.js      # Sharp directional canvas expansion & alpha seam feathering
+    │   ├── imageProcessor.js      # Sharp context framing, binary masks & inward seam feathering
     │   └── providers/
     │       └── openrouterProvider.js  # OpenRouter chat completions (image contract)
     └── .env                   # Server environment & API key
@@ -108,11 +108,10 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
 - The model returns raster bytes directly; the provider resizes them to the requested canvas size.
 - The configured model is the only map producer. When its provider key is missing or the model returns no usable image, the error carries `code` + `telemetry` (prompts, model attempt trail, raw response, usage/cost); routes forward it with `400`/`502`/`503` and the client raises the loud failure banner. Never reintroduce a procedural/mock fallback.
 
-### B. Canvas Outpainting & Seam Feathering (`OUTPAINT`)
-- `prepareOutpaintCanvas()` in `imageProcessor.js` computes new target dimensions for directions (`north`, `south`, `east`, `west`, `all`).
-- The model receives the padded canvas (`extendedImage`) so it can see the region to fill.
-- `featheredOutpaintComposite()` applies a 48px Gaussian-blurred alpha mask (`dest-in`) along the boundary seam so extended terrain transitions smoothly into the original canvas without harsh edge cuts.
-
+### B. Canvas Region Forging (`FORGE_REGION`)
+- `prepareRegionCanvas()` in `imageProcessor.js` extracts a focused context frame (default 512px padding around selection), a cyan-tinted guide image, and a binary mask.
+- The model receives the context window, guide image, and binary mask to generate or modify terrain strictly inside the target region.
+- `compositeRegion()` applies a 20px inward feather along preserved map edges while strictly clipping to the selection box to prevent bleed outside the target area.
 ### C. Model Telemetry Inspector (`DebugModal.jsx`)
 - Togglable via **Debug Logs** button in the header bar.
 - Records structured telemetry for every request, including failed ones (`status: 'failed'`):
@@ -128,9 +127,9 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
 ### D. Canvas Interactions — there is no sidebar (`PromptHero.jsx`, `BattlemapCanvas.jsx`, `ActionModal.jsx`)
 - **New map**: with no map loaded, `PromptHero` shows only the prompt field and Generate (plus a forging state while the model runs).
 - **Konva 2D Stage**: Pan (Shift + Drag / Middle Click) & Zoom (10% - 500%); maps auto-fit to the viewport on load.
-- **Layers**: Background map, painted edit mask, generation/outpaint shimmer target region, edge expansion hotspots.
-- **Edit**: right-click drag paints the mask; releasing opens the prompt modal, and only a stroke that actually painted points opens it. Cancel discards the mask; the request composites only the masked bounding box.
-- **Expand**: the `+` hotspots around the canvas open the prompt modal for that direction. Hotspots are Konva `Circle`s — the radius attr is `radius` (not `r`), and `perfectDrawEnabled={false}` keeps the shadow out of Konva's offscreen buffer path.
+- **Layers**: Background map, active region selection rectangle with 8 resize handles, floating action pill.
+- **Region Selection**: Right-click drag selects any 64px grid-snapped region (inside map to edit, outside to expand, or spanning both). Handles and box dragging allow adjusting dimensions.
+- **Forge Region**: Clicking Forge Region opens the popover modal to enter details or expansion prompt.
 - The grid overlay was removed entirely; do not reintroduce grid state, layers or controls.
 
 ---
@@ -143,13 +142,13 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
 2. **Speed & Token Optimization**:
    - All system instructions are kept concise; image models choose their own render resolution, so the payload only states the required output pixel dimensions.
 3. **Prompt Integrity**:
-   - All system instructions live in `server/services/prompts.js` (`IMAGE_PROMPTS` for generation, inpaint and outpaint). Changing directives means changing them there only; the client renders whatever telemetry the server sends and shows an explicit "not captured" note when a request never reached a model.
+   - All system instructions live in `server/services/prompts.js` (`IMAGE_PROMPTS` for generation and region forging). Changing directives means changing them there only; the client renders whatever telemetry the server sends and shows an explicit "not captured" note when a request never reached a model.
 4. **Model Catalog Integrity**:
    - Every model entry in `server/services/modelCatalog.js` must carry capabilities that were actually verified: `vision` and the parent provider. `DEFAULT_MODEL_ID` names the one the backend runs.
-   - Masked edits require `vision`: `inpaintBattlemap()` refuses a non-vision configured model with `MODEL_NOT_VISION_CAPABLE` (HTTP 400) before any upstream call. Never point `DEFAULT_MODEL_ID` at a model that cannot receive images.
+   - Region edits require `vision`: `forgeRegion()` refuses a non-vision configured model with `MODEL_NOT_VISION_CAPABLE` (HTTP 400) before any upstream call. Never point `DEFAULT_MODEL_ID` at a model that cannot receive images.
 5. **No Silent Fallbacks**:
    - If the configured model fails, the request fails: the API returns `{ error, code, debug }` (400 misconfiguration, 502 upstream failure, 503 missing key) and the UI shows the banner. Never substitute procedural/mock imagery, silently switch to a different model, or return the unedited source image as if the request had succeeded.
 6. **Verification**:
    - Always run `cd client && npm run build` to verify clean compilation after making frontend changes.
-   - Provider work must be verified against the live API: the image generation path, the masked-edit path and the canvas-extension path — and the inpaint compositor must still leave 0 pixels changed outside the mask bounding box.
-   - Canvas work must be verified in a real browser: right-drag painting opens the edit modal, a `+` hotspot opens the expansion modal, and the Konva layer canvases are free of uncaught draw errors.
+   - Provider work must be verified against the live API: the image generation path and the region forging path — and the region compositor must leave 0 pixels changed outside the selection box.
+   - Canvas work must be verified in a real browser: right-drag selection opens the region box, dragging handles resizes it, and the Konva layer canvases are free of uncaught draw errors.

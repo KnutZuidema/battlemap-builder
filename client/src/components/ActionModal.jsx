@@ -64,8 +64,8 @@ function placePopover(anchor, size) {
 }
 
 /**
- * One prompt UI for both canvas actions: the canvas decides *where* (a painted mask, a selected
- * strip) and this collects the *what*. Escape closes, Cmd/Ctrl+Enter submits.
+ * Prompt UI for region forging: the canvas decides *where* (the selected region)
+ * and this collects the *what*. Escape closes, Cmd/Ctrl+Enter submits.
  *
  * Without `anchor` it is a centered modal over a dimmed backdrop. With `anchor` it is a compact
  * popover that floats beside a region of the canvas — no backdrop, so the map stays fully visible —

@@ -133,7 +133,7 @@ export default function App() {
   const [prompt, setPrompt] = useState('Flooded stone dungeon room with ancient pillars, glowing torches, and a central boss altar');
   const [isGenerating, setIsGenerating] = useState(false);
 
-  // Unified Region Selection State (Inpaint, Outpaint, and Hybrid edits on 64px grid)
+  // Unified Region Selection State (64px grid)
   const [regionSelection, setRegionSelection] = useState(null);
   const [regionPrompt, setRegionPrompt] = useState('');
   const [isRegionModalOpen, setIsRegionModalOpen] = useState(false);
@@ -170,7 +170,7 @@ export default function App() {
     setIsRegionModalOpen(false);
   }, [mapImage]);
 
-  // Loud, dismissible failure report (generation / inpaint / outpaint)
+  // Loud, dismissible failure report (generation / region forging)
   const [failure, setFailure] = useState(null);
 
   // Warn loudly on load when the server has no provider key: every request would fail anyway
@@ -324,7 +324,7 @@ export default function App() {
   };
 
 
-  // Handle Unified Region Forging (Inpaint / Outpaint / Hybrid)
+  // Handle Unified Region Forging
   const handleApplyRegion = async () => {
     if (!mapImage || !regionSelection) return;
     const startTimeMs = Date.now();
@@ -408,9 +408,9 @@ export default function App() {
         setHistory([{ mapImage: data.mapImage }]);
         setHistoryIndex(0);
       }
-      setInpaintMaskLines([]);
-      setInpaintPrompt('');
-      setOutpaintSelection(null);
+      setRegionSelection(null);
+      setRegionPrompt('');
+      setIsRegionModalOpen(false);
     }
     if (data.title) setMapTitle(data.title);
 
@@ -450,11 +450,11 @@ export default function App() {
   const handleClearCanvas = () => {
     if (window.confirm('Start a new map? This clears the current one.')) {
       setMapImage(null);
-      setInpaintMaskLines([]);
-      setInpaintPrompt('');
+      setRegionSelection(null);
+      setRegionPrompt('');
+      setIsRegionModalOpen(false);
       setHistory([]);
       setHistoryIndex(-1);
-      setOutpaintSelection(null);
       setMapCost(DEFAULT_MAP_COST);
       try {
         localStorage.removeItem('dungeon_forge_map_cost');

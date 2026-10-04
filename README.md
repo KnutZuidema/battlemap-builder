@@ -1,11 +1,11 @@
 # Dungeon Forge
 
-An AI-powered 2D battlemap builder for tabletop RPGs. Generate top-down maps from text prompts, edit specific areas with inpainting, and expand map boundaries with seamless edge feathering.
+An AI-powered 2D battlemap builder for tabletop RPGs. Generate top-down maps from text prompts, edit details, and expand map boundaries with seamless grid-snapped region forging.
 
 ## Features
 
 - **Text-to-Map**: Generate high-res 2D top-down battlemaps using OpenRouter AI image models.
-- **Region Forging**: Right-drag on the canvas to select any 64px grid-snapped region to inpaint details, outpaint to expand map boundaries, or both.
+- **Region Forging**: Right-drag on the canvas to select any 64px grid-snapped region to edit details, expand map boundaries, or both.
 - **Interactive Canvas**: Pan, zoom, adjust selection boxes with resize handles, and inspect request telemetry and token costs in the debug modal.
 
 ## Tech Stack

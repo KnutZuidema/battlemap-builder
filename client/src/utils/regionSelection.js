@@ -1,5 +1,5 @@
 /**
- * Unified Region Selection Geometry & Math for inpainting, outpainting, and hybrid edits.
+ * Unified Region Selection Geometry & Math for edit, expansion, and hybrid region forging.
  *
  * All coordinates are in map pixel space (0,0 is the original map's top-left corner).
  * Negative x/y means expanding north/west; x > mapWidth or y > mapHeight means expanding east/south.
@@ -115,7 +115,7 @@ export function moveRegionSelection(selection, delta, mapWidth, mapHeight, gridS
 }
 
 /**
- * Categorizes region as 'Inpaint', 'Outpaint', or 'Hybrid' and formats descriptive labels.
+ * Categorizes region as 'Edit', 'Expand', or 'Hybrid' and formats descriptive labels.
  */
 export function describeRegion(selection, mapWidth, mapHeight) {
   if (!selection) return null;
@@ -132,7 +132,7 @@ export function describeRegion(selection, mapWidth, mapHeight) {
     selection.y + selection.height <= 0 ||
     selection.y >= mapHeight;
 
-  const type = isInside ? 'Inpaint' : isOutside ? 'Outpaint' : 'Hybrid';
+  const type = isInside ? 'Edit' : isOutside ? 'Expand' : 'Hybrid';
   const dimensions = `${selection.width} × ${selection.height} px`;
   const label = `${type} · ${dimensions}`;
   const details = `${dimensions} · ${REGION_GRID_SIZE}px Grid`;

@@ -181,3 +181,19 @@ export function computeContextWindow(selection, mapWidth, mapHeight, padding = C
     },
   };
 }
+
+/**
+ * Maps a selection from original-map space to the resulting post-forge canvas coordinate space.
+ * If the selection expanded north or west (negative x/y), the new canvas shifted by (-minX, -minY).
+ */
+export function getRegionInCanvasCoordinates(selection) {
+  if (!selection) return null;
+  const minX = Math.min(0, selection.x);
+  const minY = Math.min(0, selection.y);
+  return {
+    x: selection.x - minX,
+    y: selection.y - minY,
+    width: selection.width,
+    height: selection.height
+  };
+}

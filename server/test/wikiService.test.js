@@ -97,7 +97,8 @@ test('createWikiArticle and getWikiTree with Custom directory', async () => {
     assert.strictEqual(article.title, 'The Updated Secret Cave');
     assert.match(article.content, /Updated text/);
   } finally {
-    process.env.WIKI_PATH = originalEnv;
+    if (originalEnv) process.env.WIKI_PATH = originalEnv;
+    else delete process.env.WIKI_PATH;
     fs.rmSync(tmpWiki, { recursive: true, force: true });
   }
 });

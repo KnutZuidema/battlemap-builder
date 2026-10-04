@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import confetti from 'canvas-confetti';
-import { AlertTriangle, X, Terminal, Paintbrush, Expand } from 'lucide-react';
+import { AlertTriangle, X, Terminal, Wand2 } from 'lucide-react';
 import Navbar from './components/Navbar';
 import PromptHero from './components/PromptHero';
 import BattlemapCanvas from './components/BattlemapCanvas';
@@ -10,10 +10,9 @@ import {
   checkServerHealth,
   fetchModelsApi,
   generateBattlemapApi,
-  inpaintBattlemapApi,
-  outpaintBattlemapApi
+  forgeRegionApi
 } from './services/api';
-import { describeSelection, selectionToOutpaintParams } from './utils/outpaintSelection';
+import { describeRegion } from './utils/regionSelection';
 
 const PROVIDER_LABELS = { openrouter: 'OpenRouter' };
 
@@ -125,19 +124,11 @@ export default function App() {
   const [prompt, setPrompt] = useState('Flooded stone dungeon room with ancient pillars, glowing torches, and a central boss altar');
   const [isGenerating, setIsGenerating] = useState(false);
 
-  // Inpaint Detail Edit State — the mask is painted straight onto the canvas with a right-drag, and a
-  // finished stroke opens the prompt modal.
-  const [inpaintMaskLines, setInpaintMaskLines] = useState([]);
-  const [inpaintPrompt, setInpaintPrompt] = useState('');
-  const [isInpaintModalOpen, setIsInpaintModalOpen] = useState(false);
-  const [isEditing, setIsEditing] = useState(false);
-
-  // Outpaint Canvas Extension State — a clicked edge hotspot creates a resizable selection (the strip
-  // of new canvas), and the prompt popover floats next to it
-  const [outpaintSelection, setOutpaintSelection] = useState(null);
-  const [outpaintPrompt, setOutpaintPrompt] = useState('Continue hallway into a dark cavern chamber');
-  const [isExpanding, setIsExpanding] = useState(false);
-
+  // Unified Region Selection State (Inpaint, Outpaint, and Hybrid edits on 64px grid)
+  const [regionSelection, setRegionSelection] = useState(null);
+  const [regionPrompt, setRegionPrompt] = useState('');
+  const [isRegionModalOpen, setIsRegionModalOpen] = useState(false);
+  const [isForgingRegion, setIsForgingRegion] = useState(false);
   // Generation Timer & Target Region Overlay State
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [generationPhaseText, setGenerationPhaseText] = useState('');
@@ -147,7 +138,7 @@ export default function App() {
   const [historyIndex, setHistoryIndex] = useState(-1);
 
   // Live Timer Ticker effect when generation/edit/expand is active
-  const isBusy = isGenerating || isEditing || isExpanding;
+  const isBusy = isGenerating || isForgingRegion;
 
   useEffect(() => {
     let interval = null;
@@ -166,7 +157,8 @@ export default function App() {
 
   // The selection is in the current map's pixel space, so it dies with the map (undo/redo, new map)
   useEffect(() => {
-    setOutpaintSelection(null);
+    setRegionSelection(null);
+    setIsRegionModalOpen(false);
   }, [mapImage]);
 
   // Loud, dismissible failure report (generation / inpaint / outpaint)
@@ -190,8 +182,7 @@ export default function App() {
   // Human-readable names for the failure banner headline
   const FAILURE_LABELS = {
     GENERATE: 'Map generation',
-    INPAINT: 'Detail edit',
-    OUTPAINT: 'Canvas expansion'
+    FORGE_REGION: 'Region forge'
   };
 
   // Push new telemetry entry to debug logs
@@ -284,149 +275,50 @@ export default function App() {
     if (isBusy || historyIndex <= 0) return;
     setMapImage(history[historyIndex - 1].mapImage);
     setHistoryIndex(historyIndex - 1);
-    setInpaintMaskLines([]);
-    setIsInpaintModalOpen(false);
+    setRegionSelection(null);
+    setIsRegionModalOpen(false);
   };
 
   const handleRedo = () => {
     if (isBusy || historyIndex >= history.length - 1) return;
     setMapImage(history[historyIndex + 1].mapImage);
     setHistoryIndex(historyIndex + 1);
-    setInpaintMaskLines([]);
-    setIsInpaintModalOpen(false);
+    setRegionSelection(null);
+    setIsRegionModalOpen(false);
   };
 
-  // Convert the painted mask strokes to the binary mask the edit call takes. The strokes are in map
-  // pixels, so the mask must be exactly the map's size — an expanded map is no longer 1024x1024, and a
-  // fixed-size mask would be stretched onto the wrong region (and clip strokes past 1024).
-  const getInpaintMaskDataUrl = async () => {
-    if (inpaintMaskLines.length === 0 || !mapImage) return null;
-    const { width, height } = await new Promise((resolve, reject) => {
-      const img = new window.Image();
-      img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-      img.onerror = () => reject(new Error('Could not read the map size for the edit mask'));
-      img.src = mapImage;
-    });
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(0, 0, width, height);
-
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-
-    inpaintMaskLines.forEach((line) => {
-      ctx.lineWidth = line.radius * 2;
-      ctx.beginPath();
-      const pts = line.points;
-      ctx.moveTo(pts[0], pts[1]);
-      for (let i = 2; i < pts.length; i += 2) {
-        ctx.lineTo(pts[i], pts[i + 1]);
-      }
-      ctx.stroke();
-    });
-
-    return canvas.toDataURL('image/png');
-  };
-
-  // Handle Initial Map Generation
-  const handleGenerateMap = async () => {
+  // Handle Unified Region Forging (Inpaint / Outpaint / Hybrid)
+  const handleApplyRegion = async () => {
+    if (!mapImage || !regionSelection) return;
     const startTimeMs = Date.now();
-    setIsGenerating(true);
-    setGenerationPhaseText('RENDERING MAP...');
+    const regionInfo = describeRegion(regionSelection, 1024, 1024);
+    const label = regionInfo ? regionInfo.label : 'Region';
+
+    setIsForgingRegion(true);
+    setGenerationPhaseText('FORGING REGION...');
+
     try {
-      const res = await generateBattlemapApi({
-        prompt,
-        width: 1024,
-        height: 1024,
-        model: selectedModel
-      });
-
-      setMapImage(res.imageDataUrl);
-      pushHistoryState(res.imageDataUrl);
-      addMapCost(res.usage || res.debug?.usage, true);
-      pushDebugLog('GENERATE', prompt, res, startTimeMs);
-      confetti({ particleCount: 55, spread: 65, origin: { y: 0.8 } });
-    } catch (err) {
-      reportFailure('GENERATE', prompt, err, startTimeMs);
-    } finally {
-      setIsGenerating(false);
-      setGenerationPhaseText('');
-    }
-  };
-
-  // Handle Detail Inpainting Edit
-  const handleApplyInpaint = async () => {
-    const maskDataUrl = await getInpaintMaskDataUrl();
-    if (!mapImage || !maskDataUrl) {
-      setIsInpaintModalOpen(false);
-      setInpaintMaskLines([]);
-      return;
-    }
-
-    const startTimeMs = Date.now();
-    setIsEditing(true);
-    setGenerationPhaseText('EDITING MASK REGION...');
-    try {
-      const res = await inpaintBattlemapApi({
+      const res = await forgeRegionApi({
         originalDataUrl: mapImage,
-        maskDataUrl,
-        prompt: inpaintPrompt,
+        selection: regionSelection,
+        prompt: regionPrompt,
         model: selectedModel
       });
 
       setMapImage(res.imageDataUrl);
-      setInpaintPrompt('');
+      setRegionPrompt('');
       pushHistoryState(res.imageDataUrl);
       addMapCost(res.usage || res.debug?.usage, false);
-      pushDebugLog('INPAINT', inpaintPrompt, res, startTimeMs);
-      confetti({ particleCount: 40, spread: 50, origin: { y: 0.8 } });
+      pushDebugLog('FORGE_REGION', `${label}: ${regionPrompt || 'seamless terrain'}`, res, startTimeMs);
+      confetti({ particleCount: 50, spread: 60, origin: { y: 0.8 } });
+      setRegionSelection(null);
+      setIsRegionModalOpen(false);
     } catch (err) {
-      reportFailure('INPAINT', inpaintPrompt, err, startTimeMs);
+      reportFailure('FORGE_REGION', `${label}: ${regionPrompt}`, err, startTimeMs);
     } finally {
-      setIsEditing(false);
+      setIsForgingRegion(false);
       setGenerationPhaseText('');
-      setIsInpaintModalOpen(false);
-      setInpaintMaskLines([]);
-    }
-  };
 
-  // Handle Canvas Outpainting Extension
-  const handleApplyOutpaint = async () => {
-    const selection = outpaintSelection;
-    if (!mapImage || !selection) return;
-    const { direction, expandAmount, spanStart, spanEnd } = selectionToOutpaintParams(selection);
-    const label = `${direction.toUpperCase()} ${selection.width}×${selection.height}`;
-
-    const startTimeMs = Date.now();
-    setIsExpanding(true);
-    setGenerationPhaseText(`EXPANDING MAP ${direction.toUpperCase()}...`);
-
-    try {
-      const res = await outpaintBattlemapApi({
-        originalDataUrl: mapImage,
-        direction,
-        extensionPrompt: outpaintPrompt,
-        expandAmount,
-        spanStart,
-        spanEnd,
-        model: selectedModel
-      });
-
-      setMapImage(res.imageDataUrl);
-      pushHistoryState(res.imageDataUrl);
-      addMapCost(res.usage || res.debug?.usage, false);
-      pushDebugLog('OUTPAINT', `${label}: ${outpaintPrompt}`, res, startTimeMs);
-      confetti({ particleCount: 60, spread: 70, origin: { y: 0.8 } });
-    } catch (err) {
-      reportFailure('OUTPAINT', `${label}: ${outpaintPrompt}`, err, startTimeMs);
-    } finally {
-      setIsExpanding(false);
-      setGenerationPhaseText('');
-      setOutpaintSelection(null);
     }
   };
 
@@ -562,44 +454,32 @@ export default function App() {
         {mapImage ? (
           <BattlemapCanvas
             mapImage={mapImage}
-            inpaintMaskLines={inpaintMaskLines}
-            setInpaintMaskLines={setInpaintMaskLines}
-            onMaskPainted={() => {
-              setOutpaintSelection(null);
-              setIsInpaintModalOpen(true);
-            }}
-            outpaintSelection={outpaintSelection}
-            onOutpaintSelectionChange={(selection) => {
-              // One canvas action at a time: starting an expansion abandons a pending mask edit
-              if (selection) {
-                setIsInpaintModalOpen(false);
-                setInpaintMaskLines([]);
-              }
-              setOutpaintSelection(selection);
-            }}
-            renderOutpaintPopover={(anchor) => (
+            regionSelection={regionSelection}
+            onRegionSelectionChange={setRegionSelection}
+            onOpenRegionPrompt={() => setIsRegionModalOpen(true)}
+            renderRegionPopover={(anchor) => (
               <ActionModal
-                open
+                open={isRegionModalOpen}
                 anchor={anchor}
-                tone="emerald"
-                icon={Expand}
-                title="Expand the canvas"
-                chip={describeSelection(outpaintSelection)}
-                placeholder="e.g. Continue the corridor into a dark cavern chamber..."
-                value={outpaintPrompt}
-                onChange={setOutpaintPrompt}
-                onSubmit={handleApplyOutpaint}
-                onClose={() => setOutpaintSelection(null)}
-                busy={isExpanding}
-                busyLabel="Expanding…"
-                confirmLabel="Expand Map"
+                tone="cyan"
+                icon={Wand2}
+                title="Forge Region"
+                subtitle="Modify details or extend map boundaries on a 64px grid."
+                chip={regionSelection && describeRegion(regionSelection, 1024, 1024)?.details}
+                placeholder="e.g. Continue the corridor into a dark cavern chamber with glowing crystals..."
+                value={regionPrompt}
+                onChange={setRegionPrompt}
+                onSubmit={handleApplyRegion}
+                onClose={() => setIsRegionModalOpen(false)}
+                busy={isForgingRegion}
+                busyLabel="Forging Region…"
+                confirmLabel="Forge Region"
                 allowEmpty
               />
             )}
             // Timer & Shimmer Props
             isGenerating={isGenerating}
-            isEditing={isEditing}
-            isExpanding={isExpanding}
+            isForgingRegion={isForgingRegion}
             elapsedSeconds={elapsedSeconds}
             generationPhaseText={generationPhaseText}
           />
@@ -677,28 +557,6 @@ export default function App() {
             </div>
           </div>
         )}
-
-        {/* Masked-edit prompt — the mask is already on the canvas when this opens */}
-        <ActionModal
-          open={isInpaintModalOpen}
-          tone="cyan"
-          icon={Paintbrush}
-          title="Edit the masked region"
-          subtitle="The area you masked will be repainted. Everything outside it keeps its exact pixels."
-          chip="Mask edit"
-          placeholder="e.g. Place a glowing magical altar surrounded by candles..."
-          value={inpaintPrompt}
-          onChange={setInpaintPrompt}
-          onSubmit={handleApplyInpaint}
-          onClose={() => {
-            setIsInpaintModalOpen(false);
-            setInpaintMaskLines([]);
-          }}
-          busy={isEditing}
-          busyLabel="Editing…"
-          confirmLabel="Apply Edit"
-          hint="Right-click drag to adjust the mask"
-        />
       </div>
 
       {/* Debug Telemetry Modal */}

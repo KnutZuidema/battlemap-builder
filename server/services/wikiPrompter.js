@@ -6,16 +6,19 @@ const FALLBACK_MODEL = 'google/gemini-2.5-flash';
 const APPLICATION_TITLE = 'Dungeon Forge';
 const REQUEST_TIMEOUT_MS = Number(process.env.OPENROUTER_TIMEOUT_MS) || 120000;
 
-const SYSTEM_INSTRUCTION = `You are an expert AI prompt engineer specializing in 2D orthographic tabletop battlemaps for D&D 5e encounters in the world of Umbraen.
-Your task is to analyze wiki location lore and generate evocative, tactically rich image prompts for a top-down battlemap generator.
+const SYSTEM_INSTRUCTION = `You are an expert tabletop RPG lore cartographer and encounter designer specializing in the world of Umbraen.
+Your task is to analyze wiki location lore and describe rich, tangible, and tactically evocative map details for tabletop battlemaps.
 
-CRITICAL BATTLEMAP GENERATION RULES:
-- Perspective: Strictly top-down orthographic view (bird's-eye view, 2D flat projection).
-- Grid compatibility: 5ft square grid layout, clear scale (e.g. 20x20 squares, 30x30 squares).
-- No text or UI: Never mention labels, numbers, borders, UI elements, or words in the image prompt.
-- Tactical features: Explicitly incorporate cover (crates, pillars, walls), environmental hazards (deep water, fire, traps), and chokepoints.
-- Art style: Hand-painted fantasy realism, rich textures (stone, water, wood), cinematic directional lighting from above.
-- Prompt length: 100-180 words, dense with visual and spatial detail.
+CORE OBJECTIVE:
+Focus strictly on the physical environment and tangible map details drawn directly from the wiki lore:
+- Architectural structures, construction materials, masonry, woodwork, pillars, doors, and furnishings.
+- Environmental hazards, terrain obstacles, water, elevation differences, and tactical cover.
+- Specific room identities, chambers, passages, and DM secrets described in the location lore.
+- Visible lighting sources (braziers, torches, glowing moss, luminescence) and atmospheric floor textures.
+
+DO NOT INCLUDE:
+- Camera angles, perspective, projection, or rendering directives (such as "top-down", "2D flat view", "orthographic", or "poché") — the image generation system prompt handles camera and perspective.
+- Meta-prompts, art style instructions (e.g. "digital art", "hand-painted"), UI labels, numbers, grid lines, or game statistics.
 
 You must respond in JSON format conforming strictly to the requested schema.`;
 
@@ -156,7 +159,7 @@ Respond with JSON matching:
         "Hazard or terrain obstacle",
         "Chokepoint or flank opportunity"
       ],
-      "imagePrompt": "Detailed 100-180 word top-down orthographic battlemap image prompt..."
+      "imagePrompt": "Evocative 60-120 word description of physical room architecture, materials, furnishings, hazards, and lighting based on the wiki lore..."
     }
   ]
 }`;
@@ -239,7 +242,7 @@ Respond with JSON matching:
       "Hazard or terrain obstacle",
       "Chokepoint or flank opportunity"
     ],
-    "imagePrompt": "Detailed 100-180 word top-down orthographic battlemap image prompt..."
+    "imagePrompt": "Evocative 60-120 word description of physical room architecture, materials, furnishings, hazards, and lighting based on the wiki lore..."
   }
 }`;
 
@@ -343,15 +346,14 @@ Analyze the selected canvas region in relation to the location lore and current 
 Provide 3 distinct suggestions grounded in this article's layout, navigation graph, adjacent rooms, environmental hazards, and tactical features.
 
 DIRECTIVES:
-1. Perspective: Strictly top-down 2D orthographic plan view with poché walls matching the battlemap style.
+1. Focus strictly on physical map details, architecture, materials, and terrain drawn from the wiki lore. Do NOT specify perspective, camera angles, or poché walls (the renderer handles camera and perspective).
 2. If this is an EXPANSION (North, South, East, West, or Boundary):
    - Identify adjacent chambers, connecting corridors, exterior courtyards, subterranean passages, or natural terrain described in the wiki article that logically attach at this boundary.
-   - Describe seamless transition and architectural continuity with the existing map.
+   - Describe doorway connections, floor transitions, and architectural continuity based on the location lore.
 3. If this is an INTERIOR EDIT:
-   - Identify tactical features, altars, traps, furniture, cover, elevated daises, or hazards from the article lore that belong in this room area.
+   - Identify specific furnishings, tactical cover, altars, traps, elevated daises, or hazards from the article lore that belong in this room area.
 4. If User Intent is provided, incorporate and prioritize it.
-5. Provide dense, vivid 40-70 word visual prompts for "forgePrompt" describing materials, lighting, floor textures, and wall cross-sections.
-
+5. Provide dense, vivid 40-70 word descriptions for "forgePrompt" detailing physical architecture, materials, furnishings, lighting, and environmental terrain.
 Respond strictly in JSON matching this schema:
 {
   "suggestions": [
@@ -364,7 +366,7 @@ Respond strictly in JSON matching this schema:
         "Environmental hazard or obstacle",
         "Tactical note or DM secret"
       ],
-      "forgePrompt": "Dense 40-70 word visual prompt describing architectural elements, wall materials, lighting, floor textures, and seamless transition matching adjacent map."
+      "forgePrompt": "Dense 40-70 word description of architectural elements, furnishings, materials, lighting, and terrain features based on the wiki lore."
     }
   ]
 }`;

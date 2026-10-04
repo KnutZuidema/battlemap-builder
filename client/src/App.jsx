@@ -655,6 +655,7 @@ export default function App() {
               <ActionModal
                 open={isRegionModalOpen}
                 anchor={anchor}
+                regionSelection={regionSelection}
                 tone="cyan"
                 icon={Wand2}
                 title="Forge Region"

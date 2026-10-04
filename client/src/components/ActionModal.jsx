@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { X, Wand2, Command } from 'lucide-react';
-
+import { X, Wand2, Command, BookOpen, Sparkles, AlertTriangle, Check, Compass } from 'lucide-react';
+import { suggestWikiRegionForgeApi } from '../services/api';
 const TONES = {
   cyan: {
     tile: 'text-cyan-300 bg-cyan-500/12 border-cyan-500/25',
@@ -20,7 +20,7 @@ const TONES = {
   }
 };
 
-const POPOVER_WIDTH = 340;
+const POPOVER_WIDTH = 380;
 const POPOVER_MARGIN = 12;
 const POPOVER_GAP = 14;
 
@@ -89,11 +89,55 @@ export default function ActionModal({
   confirmLabel = 'Forge Region',
   hint,
   allowEmpty = false,
-  anchor = null
+  anchor = null,
+  wikiContext = null,
+  regionSelection = null,
+  mapDimensions = { width: 1024, height: 1024 },
+  mapTitle = '',
+  basePrompt = '',
+  onOpenWikiDrawer = null
 }) {
   const textareaRef = useRef(null);
   const popoverRef = useRef(null);
   const [popoverSize, setPopoverSize] = useState({ w: POPOVER_WIDTH, h: 220 });
+  const [isSuggesting, setIsSuggesting] = useState(false);
+  const [suggestionError, setSuggestionError] = useState(null);
+  const [suggestions, setSuggestions] = useState([]);
+  const [userSteering, setUserSteering] = useState('');
+  const [appliedIdx, setAppliedIdx] = useState(null);
+
+  const handleSuggest = async () => {
+    if (!wikiContext?.path || isSuggesting || busy) return;
+    setIsSuggesting(true);
+    setSuggestionError(null);
+    try {
+      const res = await suggestWikiRegionForgeApi({
+        articlePath: wikiContext.path,
+        selection: regionSelection || { x: 0, y: 0, width: 512, height: 512 },
+        mapDimensions: mapDimensions || { width: 1024, height: 1024 },
+        mapTitle: mapTitle || '',
+        basePrompt: basePrompt || '',
+        userIntent: userSteering.trim() || undefined
+      });
+      if (res?.suggestions) {
+        setSuggestions(res.suggestions);
+      }
+    } catch (err) {
+      console.error('[ActionModal] suggest ideas error:', err);
+      setSuggestionError(err.message || 'Failed to suggest region concepts');
+    } finally {
+      setIsSuggesting(false);
+    }
+  };
+
+  const handleApplySuggestion = (s, idx) => {
+    if (s.forgePrompt) {
+      onChange(s.forgePrompt);
+      setAppliedIdx(idx);
+      setTimeout(() => setAppliedIdx(null), 2500);
+    }
+  };
+
   const t = TONES[tone] || TONES.cyan;
   const canSubmit = !busy && (allowEmpty || Boolean(value && value.trim()));
   const floating = Boolean(anchor);
@@ -154,6 +198,134 @@ export default function ActionModal({
           <X className="w-4 h-4" />
         </button>
       </div>
+      {/* Wiki Lore Grounding Section */}
+      {wikiContext ? (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.07] p-2.5 space-y-2 text-xs">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 min-w-0 text-amber-200">
+              <BookOpen className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span className="font-semibold truncate text-[11px]" title={wikiContext.title}>
+                Grounding: {wikiContext.title}
+              </span>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleSuggest}
+              disabled={isSuggesting || busy}
+              className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-semibold bg-amber-500/20 text-amber-200 border border-amber-500/40 hover:bg-amber-500/30 transition shrink-0"
+              title="Analyze location lore & canvas region geometry for tactical forge ideas"
+            >
+              {isSuggesting ? (
+                <>
+                  <Wand2 className="w-3 h-3 animate-spin-slow text-amber-300" />
+                  <span>Analyzing…</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-3 h-3 text-amber-300" />
+                  <span>Suggest Ideas</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Optional Steering input */}
+          <input
+            type="text"
+            value={userSteering}
+            onChange={(e) => setUserSteering(e.target.value)}
+            placeholder="Steer suggestions (e.g. secret shrine, flooded tunnel)..."
+            disabled={isSuggesting || busy}
+            className="w-full field text-[11px] px-2 py-1 bg-black/40 border-amber-500/20 text-slate-200 placeholder:text-slate-500 font-sans"
+          />
+
+          {/* Loading Indicator */}
+          {isSuggesting && (
+            <div className="flex items-center gap-2 text-[11px] text-amber-300/90 py-1 px-1 animate-pulse">
+              <Wand2 className="w-3.5 h-3.5 animate-spin-slow text-amber-400 shrink-0" />
+              <span>Analyzing location lore & geometry…</span>
+            </div>
+          )}
+
+          {/* Error Banner */}
+          {suggestionError && (
+            <div className="p-2 rounded-lg bg-rose-950/40 border border-rose-500/40 text-rose-200 text-[11px] flex items-start gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+              <span className="min-w-0 flex-1">{suggestionError}</span>
+            </div>
+          )}
+
+          {/* Suggestion Cards */}
+          {suggestions.length > 0 && !isSuggesting && (
+            <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
+              {suggestions.map((s, idx) => {
+                const isApplied = appliedIdx === idx;
+                return (
+                  <div
+                    key={idx}
+                    onClick={() => handleApplySuggestion(s, idx)}
+                    className={`p-2 rounded-lg border text-left cursor-pointer transition-all ${
+                      isApplied
+                        ? 'bg-emerald-500/15 border-emerald-500/40'
+                        : 'bg-black/40 border-white/[0.08] hover:border-amber-400/40 hover:bg-amber-500/[0.08]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1.5 mb-1">
+                      <span className="font-semibold text-slate-200 text-[11px] truncate">{s.title}</span>
+                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-amber-400/15 border border-amber-400/30 text-amber-300 shrink-0">
+                        {s.category || 'Forge Idea'}
+                      </span>
+                    </div>
+                    {s.description && (
+                      <p className="text-[10px] text-slate-400 leading-snug line-clamp-2 mb-1.5">
+                        {s.description}
+                      </p>
+                    )}
+                    {s.tacticalHighlights?.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mb-1.5">
+                        {s.tacticalHighlights.map((hl, hIdx) => (
+                          <span key={hIdx} className="text-[9px] px-1.5 py-0.2 rounded bg-white/[0.04] text-slate-300 border border-white/[0.08]">
+                            {hl}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between pt-1 border-t border-white/[0.06]">
+                      <span className="text-[9px] text-slate-500">Click to apply prompt</span>
+                      <span className={`text-[10px] font-semibold flex items-center gap-1 ${isApplied ? 'text-emerald-400' : 'text-amber-300'}`}>
+                        {isApplied ? (
+                          <>
+                            <Check className="w-3 h-3" />
+                            <span>Applied!</span>
+                          </>
+                        ) : (
+                          <span>Apply</span>
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="rounded-xl border border-white/[0.07] bg-black/20 p-2.5 flex items-center justify-between text-xs text-slate-400">
+          <span className="text-[11px] text-slate-400">Ground this forge with campaign lore</span>
+          {onOpenWikiDrawer && (
+            <button
+              type="button"
+              onClick={onOpenWikiDrawer}
+              className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-400 hover:text-amber-300 transition"
+            >
+              <BookOpen className="w-3 h-3 text-amber-400" />
+              <span>Link Wiki Article</span>
+            </button>
+          )}
+        </div>
+      )}
+
 
       <textarea
         ref={textareaRef}

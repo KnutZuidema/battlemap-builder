@@ -19,18 +19,25 @@ import {
   Layers,
   Flame,
   CornerDownRight,
-  ExternalLink
+  ExternalLink,
+  Plus,
+  FileText
 } from 'lucide-react';
 import {
   fetchWikiTreeApi,
   fetchWikiArticleApi,
   suggestWikiPromptsApi,
-  generateCustomWikiPromptApi
+  generateCustomWikiPromptApi,
+  createWikiArticleApi
 } from '../services/api';
-import WikiArticleViewer from './WikiArticleViewer';
 
-export default function WikiDrawer({ isOpen, onClose, onSelectPrompt }) {
-  // Navigation & Tree state
+export default function WikiDrawer({
+  isOpen,
+  onClose,
+  onSelectPrompt,
+  activeWikiContext = null,
+  onSetActiveWikiContext = null
+}) {
   const [tree, setTree] = useState(null);
   const [treeLoading, setTreeLoading] = useState(false);
   const [treeError, setTreeError] = useState(null);
@@ -53,6 +60,22 @@ export default function WikiDrawer({ isOpen, onClose, onSelectPrompt }) {
   const [lastUsage, setLastUsage] = useState(null);
   const [promptError, setPromptError] = useState(null);
   const [copiedIdx, setCopiedIdx] = useState(null);
+
+  // Article Creation state
+  const [isCreatingArticle, setIsCreatingArticle] = useState(false);
+  const [newTitle, setNewTitle] = useState('');
+  const [newCategory, setNewCategory] = useState('place'); // 'place' | 'settlement' | 'adventure' | 'custom'
+  const [newParent, setNewParent] = useState('');
+  const [newContent, setNewContent] = useState('');
+  const [isSavingArticle, setIsSavingArticle] = useState(false);
+  const [createError, setCreateError] = useState(null);
+
+  const filteredCustom = useMemo(() => {
+    if (!tree?.custom) return [];
+    if (!searchQuery.trim()) return tree.custom;
+    const q = searchQuery.toLowerCase();
+    return tree.custom.filter((c) => c.name.toLowerCase().includes(q) || c.path.toLowerCase().includes(q));
+  }, [tree, searchQuery]);
 
   // Load tree on open if not loaded
   useEffect(() => {
@@ -232,6 +255,97 @@ export default function WikiDrawer({ isOpen, onClose, onSelectPrompt }) {
       console.error('Failed to copy prompt:', err);
     }
   };
+  // Template insert helper
+  const handleInsertTemplate = () => {
+    const tName = newTitle.trim() || 'Ancient Sanctuary';
+    const template = `# ${tName}
+
+## Overview & Physical Description
+A striking location set within the surrounding realm. The architecture features aged stone walls, high timber-vaulted ceilings, and flickering oil sconces casting long shadows.
+
+## Layout and Key Areas
+
+### Navigation Graph
+- **North**: Iron-reinforced door leading to the inner sanctuary.
+- **South**: Stone staircase descending to the lower crypts.
+- **East**: Arched hallway leading towards the guard quarters.
+- **West**: Collapsed tunnel opening into subterranean natural caves.
+
+### Area 1: Entrance Vestibule
+A 30ft x 40ft chamber with cracked flagstone flooring. Four heavy stone pillars provide three-quarters cover along the flanks. A bronze braziers burns with cold blue flame in the center.
+
+### Area 2: Inner Sanctum
+The primary chamber, featuring elevated daises and ancient runes carved into the granite poché walls. Deep water pools along the sunken northern edge, creating difficult terrain.
+
+## Tactical Features & Hazards
+- **Cover**: Heavy stone pillars and overturned oak tables grant partial and three-quarters cover.
+- **Hazards**: Sunken pit trap (DC 14 Perception to notice) and slick moss-covered stones.
+- **Lighting**: Dim light provided by bioluminescent moss and dying braziers.
+
+## DM Secrets & Notes
+A secret compartment behind the northern altar can be found with a DC 15 Investigation check, containing ancient brass keys and ritual parchment.
+`;
+    setNewContent(template);
+  };
+
+  // Save article handler
+  const handleSaveArticle = async (e) => {
+    e?.preventDefault();
+    if (!newTitle.trim()) {
+      setCreateError('Article Title is required');
+      return;
+    }
+    if (!newContent.trim()) {
+      setCreateError('Article Markdown Content is required');
+      return;
+    }
+
+    setIsSavingArticle(true);
+    setCreateError(null);
+
+    let parent = newParent;
+    if (newCategory === 'place' || newCategory === 'settlement') {
+      if (!parent && tree?.regions?.length) parent = tree.regions[0].name;
+    } else if (newCategory === 'adventure') {
+      if (!parent && tree?.adventures?.length) parent = tree.adventures[0].name;
+    }
+
+    let relPath = '';
+    const sanitizedTitle = newTitle.trim().replace(/[\\/:*?"<>|]/g, '-');
+    if (newCategory === 'place') {
+      relPath = `Regions/${parent || 'General'}/Places/${sanitizedTitle}.md`;
+    } else if (newCategory === 'settlement') {
+      relPath = `Regions/${parent || 'General'}/Settlements/${sanitizedTitle}.md`;
+    } else if (newCategory === 'adventure') {
+      relPath = `Adventures/${parent || 'General'}/${sanitizedTitle}.md`;
+    } else {
+      relPath = `Custom/${sanitizedTitle}.md`;
+    }
+
+    try {
+      const res = await createWikiArticleApi({
+        relPath,
+        content: newContent,
+        title: newTitle.trim(),
+        overwrite: false
+      });
+
+      await loadTree();
+      setIsCreatingArticle(false);
+      setNewTitle('');
+      setNewContent('');
+      await loadArticle(res.article.path);
+      if (onSetActiveWikiContext) {
+        onSetActiveWikiContext({ path: res.article.path, title: res.article.title });
+      }
+    } catch (err) {
+      console.error('Failed to create article:', err);
+      setCreateError(err.message || 'Failed to save article');
+    } finally {
+      setIsSavingArticle(false);
+    }
+  };
+
 
   // Navigate from wikilinks
   const handleNavigateWikiLink = (target) => {
@@ -261,6 +375,14 @@ export default function WikiDrawer({ isOpen, onClose, onSelectPrompt }) {
       for (const c of a.chapters) {
         if (c.path.endsWith(clean) || c.name.toLowerCase() === clean.toLowerCase()) {
           loadArticle(c.path);
+          return;
+        }
+      }
+    }
+    if (tree.custom) {
+      for (const cu of tree.custom) {
+        if (cu.path.endsWith(clean) || cu.name.toLowerCase() === clean.toLowerCase()) {
+          loadArticle(cu.path);
           return;
         }
       }
@@ -296,6 +418,23 @@ export default function WikiDrawer({ isOpen, onClose, onSelectPrompt }) {
           </div>
 
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setIsCreatingArticle((v) => !v);
+                setCreateError(null);
+              }}
+              className={`px-2.5 py-1 text-xs font-semibold rounded-lg border transition-all flex items-center gap-1.5 ${
+                isCreatingArticle
+                  ? 'bg-amber-500/25 text-amber-200 border-amber-500/40 shadow-sm'
+                  : 'text-amber-300 hover:text-amber-100 hover:bg-amber-500/10 border-amber-500/30'
+              }`}
+              title="Author a new campaign wiki context article"
+            >
+              <Plus size={13} />
+              <span>{isCreatingArticle ? 'Cancel' : 'New Article'}</span>
+            </button>
+
             <button
               onClick={onClose}
               className="icon-btn p-1.5 hover:text-white hover:bg-white/10"
@@ -366,56 +505,235 @@ export default function WikiDrawer({ isOpen, onClose, onSelectPrompt }) {
                 <span>Retry Connection</span>
               </button>
             </div>
+          ) : isCreatingArticle ? (
+            /* =======================================================
+               NEW ARTICLE AUTHORING VIEW
+               ======================================================= */
+            <div className="p-5 space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-white/[0.08]">
+                <div className="flex items-center gap-2">
+                  <div className="p-1 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                    <FileText size={15} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Create Campaign Lore Article</h3>
+                    <p className="text-[11px] text-slate-400">Author a new tactical location or chapter in the World Wiki</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCreatingArticle(false);
+                    setCreateError(null);
+                  }}
+                  className="btn btn-ghost px-2.5 py-1 text-xs"
+                >
+                  Cancel
+                </button>
+              </div>
+
+              {createError && (
+                <div className="p-3 rounded-xl border border-rose-500/40 bg-rose-950/40 text-rose-200 text-xs flex items-start gap-2">
+                  <AlertTriangle size={14} className="text-rose-400 shrink-0 mt-0.5" />
+                  <span>{createError}</span>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {/* Article Title */}
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-300 uppercase tracking-wider mb-1">
+                    Article Title *
+                  </label>
+                  <input
+                    type="text"
+                    value={newTitle}
+                    onChange={(e) => setNewTitle(e.target.value)}
+                    placeholder="e.g. Sunken Shrine of Kaelios"
+                    className="w-full field text-xs px-3 py-2 bg-black/40 font-sans"
+                  />
+                </div>
+
+                {/* Target Category */}
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-300 uppercase tracking-wider mb-1">
+                    Target Category *
+                  </label>
+                  <select
+                    value={newCategory}
+                    onChange={(e) => {
+                      setNewCategory(e.target.value);
+                      setNewParent('');
+                    }}
+                    className="w-full field text-xs px-3 py-2 bg-black/40 font-sans"
+                  >
+                    <option value="place">Place in Region (Places/)</option>
+                    <option value="settlement">Settlement in Region (Settlements/)</option>
+                    <option value="adventure">Adventure Chapter (Adventures/)</option>
+                    <option value="custom">Custom Lore (Custom/)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Parent Region / Adventure selector */}
+              {newCategory !== 'custom' && (
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-300 uppercase tracking-wider mb-1">
+                    {newCategory === 'adventure' ? 'Parent Adventure *' : 'Parent Region *'}
+                  </label>
+                  <select
+                    value={newParent}
+                    onChange={(e) => setNewParent(e.target.value)}
+                    className="w-full field text-xs px-3 py-2 bg-black/40 font-sans"
+                  >
+                    {newCategory === 'adventure' ? (
+                      (tree?.adventures || []).map((a) => (
+                        <option key={a.id} value={a.name}>{a.name}</option>
+                       ))
+                    ) : (
+                      (tree?.regions || []).map((r) => (
+                        <option key={r.id} value={r.name}>{r.name}</option>
+                      ))
+                    )}
+                  </select>
+                </div>
+              )}
+
+              {/* Markdown Content Area */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-[11px] font-semibold text-slate-300 uppercase tracking-wider">
+                    Markdown Content *
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleInsertTemplate}
+                    className="flex items-center gap-1.5 text-[11px] font-semibold text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 px-2.5 py-1 rounded-lg transition"
+                    title="Insert standard 5e tactical dungeon/place template"
+                  >
+                    <Sparkles size={11} />
+                    <span>Insert 5e Place Template</span>
+                  </button>
+                </div>
+                <textarea
+                  value={newContent}
+                  onChange={(e) => setNewContent(e.target.value)}
+                  placeholder="# Article Title&#10;&#10;## Physical Description&#10;Describe the location...&#10;&#10;## Layout and Key Areas&#10;### Navigation Graph&#10;- North: Door to chamber&#10;### Area 1: Vestibule"
+                  rows={14}
+                  className="w-full field text-xs p-3 bg-black/50 font-mono text-slate-200 leading-relaxed resize-y"
+                />
+              </div>
+
+              {/* Form Action Buttons */}
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-white/[0.08]">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCreatingArticle(false);
+                    setCreateError(null);
+                  }}
+                  className="btn btn-ghost px-3.5 py-2 text-xs"
+                  disabled={isSavingArticle}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveArticle}
+                  disabled={isSavingArticle || !newTitle.trim() || !newContent.trim()}
+                  className="btn btn-primary px-4 py-2 text-xs font-semibold flex items-center gap-1.5"
+                >
+                  {isSavingArticle ? (
+                    <>
+                      <Wand2 size={13} className="animate-spin-slow" />
+                      <span>Saving Article…</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check size={13} />
+                      <span>Save Article</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
           ) : selectedArticlePath ? (
             /* =======================================================
                ARTICLE VIEW: Tabs for Forge & Prompts / Lore & Reference
                ======================================================= */
             <div className="p-5 space-y-5">
               {/* Breadcrumb Header */}
-              <div className="flex items-center justify-between gap-3 pb-3 border-b border-white/[0.08]">
-                <div className="flex items-center gap-2 text-xs text-slate-400">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-white/[0.08]">
+                <div className="flex items-center gap-2 text-xs text-slate-400 min-w-0">
                   <button
                     onClick={() => setSelectedArticlePath(null)}
                     className="hover:text-amber-300 transition-colors"
                   >
                     Locations
                   </button>
-                  <ChevronRight size={12} className="text-slate-600" />
+                  <ChevronRight size={12} className="text-slate-600 shrink-0" />
                   {article?.parentRegion && (
                     <>
-                      <span className="text-slate-300">{article.parentRegion.name}</span>
-                      <ChevronRight size={12} className="text-slate-600" />
+                      <span className="text-slate-300 truncate">{article.parentRegion.name}</span>
+                      <ChevronRight size={12} className="text-slate-600 shrink-0" />
                     </>
                   )}
-                  <span className="text-amber-300 font-semibold truncate max-w-[240px]">
+                  <span className="text-amber-300 font-semibold truncate max-w-[200px]">
                     {article?.title || 'Loading…'}
                   </span>
                 </div>
 
-                {/* Tabs Switcher */}
-                <div className="flex items-center bg-black/40 p-1 rounded-xl border border-white/[0.08]">
-                  <button
-                    onClick={() => setActiveTab('forge')}
-                    className={`px-3 py-1 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 ${
-                      activeTab === 'forge'
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    <Wand2 size={12} />
-                    <span>Forge & Prompts</span>
-                  </button>
-                  <button
-                    onClick={() => setActiveTab('lore')}
-                    className={`px-3 py-1 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 ${
-                      activeTab === 'lore'
-                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    <BookOpen size={12} />
-                    <span>Lore & Reference</span>
-                  </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  {/* Active Context Toggle Button */}
+                  {onSetActiveWikiContext && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const isAlreadyActive = activeWikiContext?.path === selectedArticlePath;
+                        if (isAlreadyActive) {
+                          onSetActiveWikiContext(null);
+                        } else {
+                          onSetActiveWikiContext({ path: selectedArticlePath, title: article?.title });
+                        }
+                      }}
+                      className={`px-2.5 py-1 text-xs font-semibold rounded-lg border transition-all flex items-center gap-1.5 ${
+                        activeWikiContext?.path === selectedArticlePath
+                          ? 'bg-amber-500/25 text-amber-200 border-amber-500/40 shadow-sm'
+                          : 'text-slate-400 hover:text-amber-200 hover:bg-amber-500/10 border-white/[0.08]'
+                      }`}
+                      title={activeWikiContext?.path === selectedArticlePath ? 'Currently active as map context. Click to unlink.' : 'Link this article as active map lore context'}
+                    >
+                      <BookOpen size={12} className={activeWikiContext?.path === selectedArticlePath ? 'text-amber-400' : 'text-slate-400'} />
+                      <span>{activeWikiContext?.path === selectedArticlePath ? 'Active Context' : 'Use as Context'}</span>
+                      {activeWikiContext?.path === selectedArticlePath && <Check size={11} className="text-emerald-400" />}
+                    </button>
+                  )}
+
+                  {/* Tabs Switcher */}
+                  <div className="flex items-center bg-black/40 p-1 rounded-xl border border-white/[0.08]">
+                    <button
+                      onClick={() => setActiveTab('forge')}
+                      className={`px-3 py-1 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 ${
+                        activeTab === 'forge'
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Wand2 size={12} />
+                      <span>Forge</span>
+                    </button>
+                    <button
+                      onClick={() => setActiveTab('lore')}
+                      className={`px-3 py-1 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 ${
+                        activeTab === 'lore'
+                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <BookOpen size={12} />
+                      <span>Lore</span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -561,7 +879,8 @@ export default function WikiDrawer({ isOpen, onClose, onSelectPrompt }) {
                                   title: item.title,
                                   prompt: item.imagePrompt,
                                   usage: lastUsage,
-                                  articleTitle: article?.title
+                                  articleTitle: article?.title,
+                                  articlePath: selectedArticlePath
                                 })
                               }
                               className="btn btn-primary px-3 py-1.5 text-xs font-semibold shrink-0 shadow-lg"
@@ -832,6 +1151,34 @@ export default function WikiDrawer({ isOpen, onClose, onSelectPrompt }) {
                         </div>
                       );
                     })}
+                  </div>
+                </div>
+              )}
+
+              {/* Custom Lore Section */}
+              {filteredCustom.length > 0 && (
+                <div className="space-y-3 pt-2">
+                  <div className="flex items-center justify-between text-xs text-slate-400 font-semibold uppercase tracking-wider">
+                    <span>Custom Lore & Articles ({filteredCustom.length})</span>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    {filteredCustom.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => loadArticle(item.path)}
+                        className="w-full text-left p-3 rounded-xl border border-white/[0.08] bg-black/25 hover:border-amber-400/40 hover:bg-amber-500/[0.06] transition-all flex items-center justify-between group"
+                      >
+                        <div className="flex items-center gap-2.5 truncate">
+                          <BookOpen size={14} className="text-amber-400 shrink-0" />
+                          <span className="text-xs font-semibold text-white group-hover:text-amber-200 truncate">
+                            {item.name}
+                          </span>
+                        </div>
+                        <ChevronRight size={13} className="text-slate-600 group-hover:text-amber-300 shrink-0" />
+                      </button>
+                    ))}
                   </div>
                 </div>
               )}

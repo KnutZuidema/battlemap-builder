@@ -8,9 +8,18 @@ function getWikiRoot() {
 }
 
 function resolveSafeWikiPath(relPath) {
+  if (!relPath || typeof relPath !== 'string' || !relPath.trim()) {
+    const err = new Error('Invalid path: path must be a non-empty string');
+    err.code = 'INVALID_PATH';
+    throw err;
+  }
   const root = getWikiRoot();
-  const normalizedRel = path.normalize(relPath).replace(/^(\.\.(\/|\\|$))+/, '');
-  const resolved = path.resolve(root, normalizedRel);
+  if (path.isAbsolute(relPath)) {
+    const err = new Error(`Access denied: path traversal detected for "${relPath}"`);
+    err.code = 'ACCESS_DENIED';
+    throw err;
+  }
+  const resolved = path.resolve(root, relPath);
   const relative = path.relative(root, resolved);
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
     const err = new Error(`Access denied: path traversal detected for "${relPath}"`);
@@ -187,11 +196,33 @@ async function getWikiTree() {
     adventures.sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  // 3. Scan Custom
+  const customDir = path.join(root, 'Custom');
+  const custom = [];
+
+  if (fs.existsSync(customDir)) {
+    const customFiles = await getMarkdownFilesRecursively(customDir);
+    for (const f of customFiles) {
+      const content = await fs.promises.readFile(f, 'utf8').catch(() => '');
+      const defaultName = path.basename(f, '.md');
+      const title = extractMarkdownTitle(content, defaultName);
+      const relPath = path.relative(root, f).replace(/\\/g, '/');
+      custom.push({
+        id: slugify(`custom-${path.relative(customDir, f).replace(/\.md$/, '')}`),
+        name: title,
+        path: relPath,
+        type: 'custom'
+      });
+    }
+    custom.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
   return {
     ok: true,
     root,
     regions,
-    adventures
+    adventures,
+    custom
   };
 }
 
@@ -238,11 +269,54 @@ async function getWikiArticle(relPath) {
     parentRegion
   };
 }
+async function createWikiArticle({ relPath, content, title, overwrite = false } = {}) {
+  if (!relPath || typeof relPath !== 'string' || !relPath.trim() ||
+      content === undefined || content === null || typeof content !== 'string') {
+    const err = new Error('Invalid parameters: relPath and content are required strings');
+    err.code = 'INVALID_PARAMETERS';
+    throw err;
+  }
+  if (title !== undefined && (typeof title !== 'string' || !title.trim())) {
+    const err = new Error('Invalid parameters: title must be a non-empty string when provided');
+    err.code = 'INVALID_PARAMETERS';
+    throw err;
+  }
+
+  let trimmedPath = relPath.trim();
+  if (!trimmedPath.endsWith('.md')) {
+    trimmedPath += '.md';
+  }
+
+  const safePath = resolveSafeWikiPath(trimmedPath);
+  const root = getWikiRoot();
+  const normalizedRelPath = path.relative(root, safePath).replace(/\\/g, '/');
+
+  if (fs.existsSync(safePath) && !overwrite) {
+    const err = new Error(`Article already exists at ${normalizedRelPath}`);
+    err.code = 'ARTICLE_ALREADY_EXISTS';
+    throw err;
+  }
+
+  await fs.promises.mkdir(path.dirname(safePath), { recursive: true });
+  await fs.promises.writeFile(safePath, content, 'utf8');
+
+  const defaultTitle = (title && title.trim()) || path.basename(safePath, '.md');
+  const finalTitle = extractMarkdownTitle(content, defaultTitle);
+
+  return {
+    ok: true,
+    path: normalizedRelPath,
+    title: finalTitle,
+    defaultTitle
+  };
+}
+
 
 module.exports = {
   getWikiRoot,
   resolveSafeWikiPath,
   extractMarkdownTitle,
   getWikiTree,
-  getWikiArticle
+  getWikiArticle,
+  createWikiArticle
 };

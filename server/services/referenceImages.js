@@ -20,7 +20,9 @@ const REFERENCE_DEFINITIONS = [
   },
   {
     id: 'ruins-courtyard',
+    // Curated ungridded reference: 1024x1024 px, 1:1 square, 2D top-down plan view, strictly ungridded.
     filename: 'battlemap-reference-3.png',
+    fallbackFilename: 'battlemap-reference-4.jpeg',
     label: 'Perspective Reference: 2D Ruins & Courtyard Plan View',
     keywords: [
       'ruin', 'ruins', 'courtyard', 'river', 'bridge', 'stream', 'outdoor',
@@ -81,7 +83,10 @@ async function loadReferenceBuffer(def, targetSize = 512) {
   }
 
   const dir = getReferencesDir();
-  const filePath = path.join(dir, def.filename);
+  let filePath = path.join(dir, def.filename);
+  if (!fs.existsSync(filePath) && def.fallbackFilename) {
+    filePath = path.join(dir, def.fallbackFilename);
+  }
 
   if (!fs.existsSync(filePath)) {
     console.warn(`[ReferenceImages] File not found: ${filePath}`);

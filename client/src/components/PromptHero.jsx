@@ -1,12 +1,20 @@
 import React, { useEffect, useRef } from 'react';
-import { Sparkles, Crop, Wand2, Layers, Clock } from 'lucide-react';
+import { Sparkles, Crop, Wand2, Layers, Clock, BookOpen } from 'lucide-react';
 import { formatTimer } from '../utils/format';
 
 /**
  * The one thing shown before a map exists: a prompt. Everything else is a canvas affordance, so the
  * new-map screen is the textarea, the generate button, and nothing else to configure.
  */
-export default function PromptHero({ prompt, setPrompt, onGenerate, isGenerating, phaseText, elapsedSeconds }) {
+export default function PromptHero({
+  prompt,
+  setPrompt,
+  onGenerate,
+  isGenerating,
+  phaseText,
+  elapsedSeconds,
+  onOpenWikiDrawer
+}) {
   const textareaRef = useRef(null);
 
   useEffect(() => {
@@ -69,7 +77,20 @@ export default function PromptHero({ prompt, setPrompt, onGenerate, isGenerating
             className="field text-sm p-3.5 leading-relaxed resize-none font-sans"
           />
           <div className="mt-3 flex items-center justify-between gap-3">
-            <p className="text-[10px] font-mono text-slate-500">Engine: server-configured image model</p>
+            <div className="flex items-center gap-2">
+              <p className="text-[10px] font-mono text-slate-500 hidden sm:block">Engine: server-configured image model</p>
+              {onOpenWikiDrawer && (
+                <button
+                  type="button"
+                  onClick={onOpenWikiDrawer}
+                  className="btn btn-ghost px-2.5 py-1.5 text-xs text-amber-300 hover:text-amber-200 border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20"
+                  title="Browse D&D campaign wiki locations and tactical encounters"
+                >
+                  <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Browse World Lore</span>
+                </button>
+              )}
+            </div>
             <button
               onClick={onGenerate}
               disabled={isGenerating || !prompt.trim()}

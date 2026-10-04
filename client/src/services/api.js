@@ -28,6 +28,23 @@ async function postJson(path, body) {
   return data;
 }
 
+/**
+ * Fetches JSON from a backend route.
+ */
+async function getJson(path) {
+  const res = await fetch(`${API_BASE}${path}`);
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `Server error ${res.status}`);
+    err.code = (data && data.code) || 'REQUEST_FAILED';
+    err.debug = (data && data.debug) || null;
+    throw err;
+  }
+
+  return data;
+}
+
 export async function checkServerHealth() {
   try {
     const res = await fetch(`${API_BASE}/api/health`);
@@ -65,4 +82,23 @@ export async function inpaintBattlemapApi({ originalDataUrl, maskDataUrl, prompt
 /** `spanStart`/`spanEnd` (px along the expanded edge) limit the new strip to part of that side. */
 export async function outpaintBattlemapApi({ originalDataUrl, direction, extensionPrompt, expandAmount, spanStart, spanEnd, model }) {
   return postJson('/api/outpaint', { originalDataUrl, direction, extensionPrompt, expandAmount, spanStart, spanEnd, model });
+}
+
+/**
+ * Wiki endpoints for lore navigation and tactical prompt translation
+ */
+export async function fetchWikiTreeApi() {
+  return getJson('/api/wiki/tree');
+}
+
+export async function fetchWikiArticleApi(articlePath) {
+  return getJson(`/api/wiki/article?path=${encodeURIComponent(articlePath)}`);
+}
+
+export async function suggestWikiPromptsApi(articlePath) {
+  return postJson('/api/wiki/prompts/suggest', { path: articlePath });
+}
+
+export async function generateCustomWikiPromptApi(articlePath, userIntent) {
+  return postJson('/api/wiki/prompts/custom', { path: articlePath, userIntent });
 }

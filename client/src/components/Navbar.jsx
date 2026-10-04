@@ -9,7 +9,8 @@ import {
   Upload,
   Terminal,
   Sparkles,
-  Zap
+  Zap,
+  BookOpen
 } from 'lucide-react';
 import CostTracker from './CostTracker';
 
@@ -37,6 +38,7 @@ export default function Navbar({
   models,
   onOpenDebugModal,
   debugLogCount,
+  onOpenWikiDrawer,
   onExportPng,
   onExportJson,
   onImportJson,
@@ -176,6 +178,16 @@ export default function Navbar({
               {debugLogCount}
             </span>
           )}
+        </button>
+
+        {/* World Wiki Lore & Tactical Browser */}
+        <button
+          onClick={onOpenWikiDrawer}
+          title="Browse D&D World Wiki & Tactical Lore"
+          className="btn btn-ghost px-2.5 py-1.5 text-xs text-amber-200/90 hover:text-amber-100 hover:border-amber-500/40 hover:bg-amber-500/10"
+        >
+          <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+          <span className="hidden md:inline">World Wiki</span>
         </button>
 
         <span className="w-px h-6 bg-white/[0.08] mx-0.5 hidden sm:block" />

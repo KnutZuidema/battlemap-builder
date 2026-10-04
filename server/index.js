@@ -5,6 +5,8 @@ const dotenv = require('dotenv');
 const { prepareInpaintCanvas } = require('./services/imageProcessor');
 const { generateBattlemap, inpaintBattlemap, outpaintBattlemap, forgeRegion } = require('./services/battlemapService');
 const { isProviderConfigured, MODEL_CATALOG, DEFAULT_MODEL_ID } = require('./services/modelCatalog');
+const { getWikiTree, getWikiArticle } = require('./services/wikiService');
+const { suggestBattlemaps, generateCustomBattlemapPrompt } = require('./services/wikiPrompter');
 
 // The server config lives next to this file; `process.cwd()` is the repo root under `npm run dev`.
 dotenv.config({ path: path.join(__dirname, '.env') });
@@ -44,6 +46,100 @@ app.get('/api/models', (req, res) => {
     })),
     defaultModelId: DEFAULT_MODEL_ID
   });
+});
+
+// ============================================================================
+// Wiki Endpoints: Lore navigation & Battlemap prompt translation
+// ============================================================================
+
+/**
+ * Returns curated hierarchy of wiki regions (places & settlements) and adventures
+ */
+app.get('/api/wiki/tree', async (req, res) => {
+  try {
+    const tree = await getWikiTree();
+    res.json(tree);
+  } catch (err) {
+    console.error('[API /api/wiki/tree error]', err.message);
+    const status = err.code === 'WIKI_NOT_FOUND' ? 404 : 500;
+    res.status(status).json({
+      error: err.message,
+      code: err.code || 'WIKI_TREE_FAILED'
+    });
+  }
+});
+
+/**
+ * Returns a single wiki article markdown along with parent region excerpt
+ */
+app.get('/api/wiki/article', async (req, res) => {
+  try {
+    const articlePath = req.query.path;
+    if (!articlePath) {
+      return res.status(400).json({ error: 'Missing path parameter', code: 'INVALID_PATH' });
+    }
+    const article = await getWikiArticle(articlePath);
+    res.json(article);
+  } catch (err) {
+    console.error('[API /api/wiki/article error]', err.message);
+    const status = err.code === 'ACCESS_DENIED' ? 403
+      : (err.code === 'WIKI_ARTICLE_NOT_FOUND' ? 404 : 500);
+    res.status(status).json({
+      error: err.message,
+      code: err.code || 'WIKI_ARTICLE_FAILED'
+    });
+  }
+});
+
+/**
+ * Generates 3 tactical battlemap prompt suggestions for an article
+ */
+app.post('/api/wiki/prompts/suggest', async (req, res) => {
+  try {
+    const { path: articlePath } = req.body;
+    if (!articlePath) {
+      return res.status(400).json({ error: 'Missing path in request body', code: 'INVALID_PATH' });
+    }
+    console.log(`[API /wiki/prompts/suggest] Suggesting battlemaps for "${articlePath}"`);
+    const result = await suggestBattlemaps({ articlePath });
+    res.json(result);
+  } catch (err) {
+    console.error('[API /api/wiki/prompts/suggest error]', err.message);
+    const status = err.code === 'NO_API_KEY' ? 503
+      : (err.code === 'WIKI_ARTICLE_NOT_FOUND' || err.code === 'INVALID_PATH' ? 404 : 502);
+    res.status(status).json({
+      error: err.message,
+      code: err.code || 'PROMPT_SUGGESTION_FAILED',
+      debug: err.telemetry || null
+    });
+  }
+});
+
+/**
+ * Generates a single custom battlemap prompt for an article based on user's room/encounter intent
+ */
+app.post('/api/wiki/prompts/custom', async (req, res) => {
+  try {
+    const { path: articlePath, userIntent } = req.body;
+    if (!articlePath || !userIntent) {
+      return res.status(400).json({
+        error: 'Missing path or userIntent in request body',
+        code: 'INVALID_PARAMETERS'
+      });
+    }
+    console.log(`[API /wiki/prompts/custom] Generating custom battlemap for "${articlePath}": "${userIntent}"`);
+    const result = await generateCustomBattlemapPrompt({ articlePath, userIntent });
+    res.json(result);
+  } catch (err) {
+    console.error('[API /api/wiki/prompts/custom error]', err.message);
+    const status = err.code === 'NO_API_KEY' ? 503
+      : (err.code === 'WIKI_ARTICLE_NOT_FOUND' || err.code === 'INVALID_PATH' ? 404 : 502);
+    res.status(status).json({
+      error: err.message,
+      code: err.code || 'PROMPT_CUSTOM_FAILED',
+      debug: err.telemetry || null
+    });
+  }
 });
 
 /**

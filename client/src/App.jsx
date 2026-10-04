@@ -39,6 +39,7 @@ export default function App() {
   const [debugLogs, setDebugLogs] = useState([]);
 
   const [mapTitle, setMapTitle] = useState('Dungeon Hallways Map');
+  const [showGrid, setShowGrid] = useState(true);
 
   // Selected Image Gen Model — defaults to Nano Banana 2 Flash, persisted in localStorage
   const [selectedModel, setSelectedModel] = useState(() => {
@@ -505,8 +506,48 @@ export default function App() {
     if (!mapImage) return;
     const link = document.createElement('a');
     link.download = `${mapTitle.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}.png`;
-    link.href = mapImage;
-    link.click();
+
+    if (!showGrid) {
+      link.href = mapImage;
+      link.click();
+      return;
+    }
+
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth || img.width;
+      canvas.height = img.naturalHeight || img.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        link.href = mapImage;
+        link.click();
+        return;
+      }
+      ctx.drawImage(img, 0, 0);
+
+      // Draw 64px grid overlay with subtle lines
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let x = 0; x <= canvas.width; x += 64) {
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+      }
+      for (let y = 0; y <= canvas.height; y += 64) {
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+      }
+      ctx.stroke();
+
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    };
+    img.onerror = () => {
+      link.href = mapImage;
+      link.click();
+    };
+    img.src = mapImage;
   };
 
   // Export Project JSON State
@@ -641,6 +682,8 @@ export default function App() {
         {mapImage ? (
           <BattlemapCanvas
             mapImage={mapImage}
+            showGrid={showGrid}
+            onToggleGrid={() => setShowGrid((prev) => !prev)}
             regionSelection={regionSelection}
             onRegionSelectionChange={(sel) => {
               setRegionSelection(sel);

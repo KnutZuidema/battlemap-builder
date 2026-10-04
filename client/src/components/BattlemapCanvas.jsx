@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
-import { Stage, Layer, Image as KonvaImage, Rect, Group } from 'react-konva';
-import { ZoomIn, ZoomOut, Maximize, Move, Clock, Sparkles, Wand2, X, Crop, RefreshCw } from 'lucide-react';
+import { Stage, Layer, Image as KonvaImage, Rect, Group, Shape } from 'react-konva';
+import { ZoomIn, ZoomOut, Maximize, Move, Clock, Sparkles, Wand2, X, Crop, RefreshCw, Grid } from 'lucide-react';
 import { formatTimer } from '../utils/format';
 import {
   REGION_HANDLES,
@@ -24,7 +24,9 @@ export default function BattlemapCanvas({
   retryContext,
   onRetry,
   isRetryPillDismissed,
-  onDismissRetryPill
+  onDismissRetryPill,
+  showGrid = true,
+  onToggleGrid
 }) {
   const containerRef = useRef(null);
   const stageRef = useRef(null);
@@ -49,6 +51,17 @@ export default function BattlemapCanvas({
 
   // Cursor state
   const [hoverCursor, setHoverCursor] = useState(null);
+
+  // Local grid visibility fallback
+  const [localShowGrid, setLocalShowGrid] = useState(true);
+  const effectiveShowGrid = typeof showGrid === 'boolean' ? showGrid : localShowGrid;
+  const handleToggleGrid = useCallback(() => {
+    if (onToggleGrid) {
+      onToggleGrid();
+    } else {
+      setLocalShowGrid((prev) => !prev);
+    }
+  }, [onToggleGrid]);
 
   const isBusy = isGenerating || isForgingRegion;
 
@@ -252,16 +265,23 @@ export default function BattlemapCanvas({
     };
   }, [resizeHandle, isMovingBox, regionSelection, loadedImage, position, scale, onRegionSelectionChange]);
 
-  // Escape key clears region selection
+  // Escape key clears region selection; 'g'/'G' toggles 5ft grid overlay
   useEffect(() => {
     const onKeyDown = (e) => {
-      if (e.key === 'Escape' && regionSelection && !isBusy) {
+      const activeTag = document.activeElement ? document.activeElement.tagName : '';
+      const isInput = activeTag === 'INPUT' || activeTag === 'TEXTAREA' || document.activeElement?.isContentEditable;
+      if (isInput) return;
+
+      if ((e.key === 'g' || e.key === 'G') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        handleToggleGrid();
+      } else if (e.key === 'Escape' && regionSelection && !isBusy) {
         onRegionSelectionChange(null);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [regionSelection, isBusy, onRegionSelectionChange]);
+  }, [regionSelection, isBusy, onRegionSelectionChange, handleToggleGrid]);
 
   // Recenter / fit view
   const handleResetView = () => {
@@ -403,6 +423,18 @@ export default function BattlemapCanvas({
         <button onClick={handleResetView} disabled={!loadedImage} className="icon-btn p-2" title="Fit to View">
           <Maximize className="w-4 h-4" />
         </button>
+        <span className="w-px h-4 bg-white/10 mx-0.5" />
+        <button
+          onClick={handleToggleGrid}
+          className={`icon-btn p-2 transition-colors ${
+            effectiveShowGrid
+              ? 'text-cyan-300 bg-cyan-500/15 border border-cyan-500/30'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+          title="Toggle 5ft Grid (G)"
+        >
+          <Grid className="w-4 h-4" />
+        </button>
       </div>
 
       {/* FLOATING GENERATION TIMER BADGE OVERLAY */}
@@ -518,6 +550,9 @@ export default function BattlemapCanvas({
         {/* BASE MAP LAYER */}
         <Layer>
           {loadedImage && <KonvaImage image={loadedImage} x={0} y={0} />}
+          {loadedImage && effectiveShowGrid && (
+            <GridOverlay width={loadedImage.width} height={loadedImage.height} />
+          )}
         </Layer>
 
         {/* SHIMMER & TIMER TARGET REGION OVERLAY */}
@@ -687,5 +722,34 @@ function RegionSelectionBox({
         );
       })}
     </Group>
+  );
+}
+
+/**
+ * 5ft (64px) non-interactive Grid Overlay rendered via a single Konva Shape draw call.
+ */
+function GridOverlay({ width, height }) {
+  const drawGrid = useCallback((context, shape) => {
+    context.beginPath();
+    for (let x = 0; x <= width; x += REGION_GRID_SIZE) {
+      context.moveTo(x, 0);
+      context.lineTo(x, height);
+    }
+    for (let y = 0; y <= height; y += REGION_GRID_SIZE) {
+      context.moveTo(0, y);
+      context.lineTo(width, y);
+    }
+    context.fillStrokeShape(shape);
+  }, [width, height]);
+
+  return (
+    <Shape
+      sceneFunc={drawGrid}
+      stroke="rgba(255, 255, 255, 0.15)"
+      strokeWidth={1}
+      strokeScaleEnabled={false}
+      perfectDrawEnabled={false}
+      listening={false}
+    />
   );
 }

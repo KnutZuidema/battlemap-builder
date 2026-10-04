@@ -1,7 +1,7 @@
 {
   "name": "dungeon-forge-battlemap-builder",
   "version": "1.0.0",
-  "description": "Interactive TTRPG Battlemap Builder with selectable OpenRouter image models, detail inpainting, and canvas outpainting",
+  "description": "Interactive TTRPG Battlemap Builder with selectable OpenRouter image models and grid-snapped region forging",
   "main": "server/index.js",
   "scripts": {
     "dev:server": "node server/index.js",
@@ -15,8 +15,7 @@
     "battlemap",
     "openrouter",
     "ai",
-    "inpainting",
-    "outpainting"
+    "region-forging"
   ],
   "author": "",
   "license": "MIT",

@@ -104,7 +104,8 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
 ## 6. Core Features & Implementation Details
 
 ### A. Initial Map Generation (`GENERATE`)
-- `battlemapService.generateBattlemap()` runs the model `modelCatalog.js` is configured with, then assembles the payload from `IMAGE_PROMPTS.GENERATE`.
+- `battlemapService.generateBattlemap()` runs the model `modelCatalog.js` is configured with, assembling the payload from `IMAGE_PROMPTS.GENERATE` with architectural 2D plan-view directives and flat poché wall cross-sections.
+- When vision-capable, `battlemapService` attaches a curated 1:1 square reference image from `data/` via `referenceImages.js` matching prompt keywords (stone dungeon, tavern, ruins, grand hall) for few-shot orthographic perspective conditioning.
 - The model returns raster bytes directly; the provider resizes them to the requested canvas size.
 - The configured model is the only map producer. When its provider key is missing or the model returns no usable image, the error carries `code` + `telemetry` (prompts, model attempt trail, raw response, usage/cost); routes forward it with `400`/`502`/`503` and the client raises the loud failure banner. Never reintroduce a procedural/mock fallback.
 

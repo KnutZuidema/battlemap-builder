@@ -93,3 +93,23 @@ export async function suggestWikiPromptsApi(articlePath) {
 export async function generateCustomWikiPromptApi(articlePath, userIntent) {
   return postJson('/api/wiki/prompts/custom', { path: articlePath, userIntent });
 }
+
+export async function suggestWikiRegionForgeApi({ articlePath, selection, mapDimensions, mapTitle, basePrompt, userIntent }) {
+  return postJson('/api/wiki/regions/suggest', {
+    articlePath,
+    selection,
+    mapDimensions,
+    mapTitle,
+    basePrompt,
+    userIntent
+  });
+}
+
+export async function createWikiArticleApi({ relPath, content, title, overwrite }) {
+  return postJson('/api/wiki/article', {
+    relPath,
+    content,
+    title,
+    overwrite
+  });
+}

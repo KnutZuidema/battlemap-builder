@@ -54,7 +54,8 @@ export default function Navbar({
   retryTooltip,
   mapTitle,
   setMapTitle,
-  mapCost
+  mapCost,
+  wikiContext
 }) {
   const fileInputRef = useRef(null);
 
@@ -200,15 +201,27 @@ export default function Navbar({
         </button>
 
         {/* World Wiki Lore & Tactical Browser */}
-        <button
-          onClick={onOpenWikiDrawer}
-          title="Browse D&D World Wiki & Tactical Lore"
-          className="btn btn-ghost px-2.5 py-1.5 text-xs text-amber-200/90 hover:text-amber-100 hover:border-amber-500/40 hover:bg-amber-500/10"
-        >
-          <BookOpen className="w-3.5 h-3.5 text-amber-400" />
-          <span className="hidden md:inline">World Wiki</span>
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={onOpenWikiDrawer}
+            title="Browse D&D World Wiki & Tactical Lore"
+            className="btn btn-ghost px-2.5 py-1.5 text-xs text-amber-200/90 hover:text-amber-100 hover:border-amber-500/40 hover:bg-amber-500/10"
+          >
+            <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+            <span className="hidden md:inline">World Wiki</span>
+          </button>
 
+          {wikiContext && (
+            <button
+              onClick={onOpenWikiDrawer}
+              title={`Active Lore Context: ${wikiContext.title} (${wikiContext.path})\nClick to view article in World Wiki`}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-amber-500/20 text-amber-200 border border-amber-500/40 hover:bg-amber-500/30 transition-all max-w-[14rem]"
+            >
+              <BookOpen className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span className="truncate">Context: {wikiContext.title}</span>
+            </button>
+          )}
+        </div>
         <span className="w-px h-6 bg-white/[0.08] mx-0.5 hidden sm:block" />
 
         <input

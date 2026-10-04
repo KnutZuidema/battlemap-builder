@@ -119,7 +119,9 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
   1. **System Prompt (`IMAGE_PROMPTS`)**: Exact defined system directives.
   2. **User Request Prompt**: User input prompt.
   3. **Full Combined Payload**: Full prompt payload dispatched to model API.
-  4. **Raw Model Response**: Exact text response (image-contract replies note that the image bytes are omitted).
+  4. **Input Images**: Any input images sent to the model (context window, guide, mask).
+  5. **Output Images**: Direct raster image outputs received directly from the image gen model before canvas resizing or compositing.
+  6. **Raw Model Response**: Exact text response (or summary of image outputs received).
 - The inspector also shows the provider, the model actually used, token counts and the per-call cost reported by OpenRouter.
 - Every failure also raises the dismissible rose banner in `App.jsx` (`failure` state) with the error `code`, the actionable message, the provider/model, and the per-model attempt trail; `reportFailure()` writes the same data into the debug logs. Nothing is captured for failures that never reached a model (missing key, unreachable backend): those logs say so instead of showing a fabricated prompt.
 

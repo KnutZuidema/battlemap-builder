@@ -7,7 +7,8 @@
     "dev:server": "node server/index.js",
     "dev:client": "cd client && npm run dev",
     "dev": "concurrently -n \"SERVER,CLIENT\" -c \"amber,cyan\" \"npm run dev:server\" \"npm run dev:client\"",
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "test": "npm --prefix server test"
   },
   "keywords": [
     "ttrpg",

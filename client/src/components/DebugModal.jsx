@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Terminal, Copy, Check, Trash2, X, Code2, Sparkles, Clock, MessageSquare, Layers, AlertTriangle, Image as ImageIcon, ZoomIn } from 'lucide-react';
+import { Terminal, Copy, Check, Trash2, X, Code2, Sparkles, Clock, MessageSquare, Layers, AlertTriangle, Image as ImageIcon, ZoomIn, Download } from 'lucide-react';
 
 const PROVIDER_LABELS = { gemini: 'Gemini', openrouter: 'OpenRouter' };
 
@@ -284,12 +284,48 @@ export default function DebugModal({ isOpen, onClose, debugLogs, onClearLogs }) 
                   )}
                 </div>
 
-                {/* Section 5: Raw Model Response Received */}
-                <div className="space-y-1.5">
+                {/* Section 5: Output Images Received from Model */}
+                <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1.5">
-                      <Code2 className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>5. Raw Model Response Received</span>
+                      <ImageIcon className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>5. Output Images Received from Model ({activeLog.outputImages?.length || 0})</span>
+                    </label>
+                  </div>
+                  {activeLog.outputImages && activeLog.outputImages.length > 0 ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                      {activeLog.outputImages.map((img, idx) => (
+                        <div
+                          key={idx}
+                          onClick={() => setPreviewImage(img)}
+                          className="group p-2.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-emerald-500/40 cursor-pointer transition flex flex-col space-y-2"
+                        >
+                          <div className="text-[11px] font-mono font-semibold text-slate-300 truncate group-hover:text-emerald-300 transition" title={img.label}>
+                            {img.label || `Output Image ${idx + 1}`}
+                          </div>
+                          <div className="relative aspect-video rounded-lg overflow-hidden bg-slate-900 border border-white/5 flex items-center justify-center">
+                            <img src={img.dataUrl} alt={img.label} className="w-full h-full object-contain" />
+                            <div className="absolute inset-0 bg-slate-950/40 opacity-0 group-hover:opacity-100 transition flex items-center justify-center text-emerald-300 text-xs font-semibold gap-1">
+                              <ZoomIn className="w-4 h-4" />
+                              <span>Enlarge</span>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-slate-500 italic">
+                      {activeLog.status === 'failed' ? 'No output images received (request failed)' : 'No output images recorded'}
+                    </div>
+                  )}
+                </div>
+
+                {/* Section 6: Raw Model Response Received */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                      <Code2 className="w-3.5 h-3.5 text-slate-400" />
+                      <span>6. Raw Model Response Received</span>
                     </label>
                     <button
                       onClick={() => handleCopy(activeLog.rawResponseText, 'response')}
@@ -313,15 +349,26 @@ export default function DebugModal({ isOpen, onClose, debugLogs, onClearLogs }) 
         </div>
       </div>
 
-      {/* Lightbox for Previewing Input Images */}
+      {/* Lightbox for Previewing Images */}
       {previewImage && (
         <div className="fixed inset-0 bg-black/90 backdrop-blur-md z-50 flex items-center justify-center p-6 select-none" onClick={() => setPreviewImage(null)}>
           <div className="relative max-w-4xl max-h-[90vh] bg-slate-950 border border-slate-800 rounded-2xl overflow-hidden p-4 flex flex-col items-center space-y-3 shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="w-full flex items-center justify-between border-b border-slate-800 pb-2">
-              <span className="text-xs font-mono font-bold text-cyan-300">{previewImage.label || 'Input Image Preview'}</span>
-              <button onClick={() => setPreviewImage(null)} className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition">
-                <X className="w-5 h-5" />
-              </button>
+              <span className="text-xs font-mono font-bold text-cyan-300">{previewImage.label || 'Image Preview'}</span>
+              <div className="flex items-center gap-2">
+                <a
+                  href={previewImage.dataUrl}
+                  download={`${(previewImage.label || 'image').toLowerCase().replace(/[^a-z0-9_-]/g, '_')}.png`}
+                  className="p-1 px-2.5 rounded-lg bg-slate-900 border border-slate-700 hover:bg-slate-800 text-slate-300 hover:text-white text-xs font-medium flex items-center gap-1.5 transition"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download</span>
+                </a>
+                <button onClick={() => setPreviewImage(null)} className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
             <div className="max-h-[75vh] overflow-auto flex items-center justify-center">
               <img src={previewImage.dataUrl} alt={previewImage.label} className="max-w-full max-h-[70vh] object-contain rounded-lg border border-slate-800" />

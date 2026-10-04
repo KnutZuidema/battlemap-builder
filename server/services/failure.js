@@ -83,6 +83,8 @@ function providerFailure(message, {
   systemInstruction,
   userPrompt,
   fullPrompt,
+  images = [],
+  outputImages = [],
   usage = null
 } = {}) {
   const err = new Error(message);
@@ -92,6 +94,8 @@ function providerFailure(message, {
     systemInstruction,
     userPrompt,
     fullPrompt,
+    images,
+    outputImages,
     rawResponseText,
     failureReason: message,
     attempts,

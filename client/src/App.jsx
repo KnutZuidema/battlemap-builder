@@ -17,6 +17,16 @@ import { describeSelection, selectionToOutpaintParams } from './utils/outpaintSe
 
 const PROVIDER_LABELS = { openrouter: 'OpenRouter' };
 
+const DEFAULT_MAP_COST = {
+  totalCost: 0,
+  promptTokens: 0,
+  completionTokens: 0,
+  totalTokens: 0,
+  promptCost: 0,
+  completionCost: 0,
+  requestsCount: 0
+};
+
 // Shown in the inspector when a request failed before any prompt payload existed (missing key,
 // backend unreachable) — never a fabricated prompt.
 const NO_TELEMETRY_PROMPT = 'Not captured — the server returned no prompt telemetry for this request.';
@@ -54,6 +64,59 @@ export default function App() {
     } catch {
       // ignore
     }
+  };
+
+  // Persistent Map Cost Tracking State (including input and output token costs)
+  const [mapCost, setMapCost] = useState(() => {
+    try {
+      const saved = localStorage.getItem('dungeon_forge_map_cost');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed.totalCost === 'number') {
+          return {
+            totalCost: Number(parsed.totalCost) || 0,
+            promptTokens: Number(parsed.promptTokens) || 0,
+            completionTokens: Number(parsed.completionTokens) || 0,
+            totalTokens: Number(parsed.totalTokens) || 0,
+            promptCost: Number(parsed.promptCost) || 0,
+            completionCost: Number(parsed.completionCost) || 0,
+            requestsCount: Number(parsed.requestsCount) || 0
+          };
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return DEFAULT_MAP_COST;
+  });
+
+  const addMapCost = (usage, isNewMap = false) => {
+    if (!usage) return;
+    const pTokens = Number(usage.promptTokens) || 0;
+    const cTokens = Number(usage.completionTokens) || 0;
+    const tTokens = Number(usage.totalTokens) || (pTokens + cTokens);
+    const pCost = Number(usage.promptCost) || 0;
+    const cCost = Number(usage.completionCost) || 0;
+    const callCost = typeof usage.cost === 'number' ? usage.cost : (pCost + cCost);
+
+    setMapCost((prev) => {
+      const base = isNewMap ? DEFAULT_MAP_COST : prev;
+      const updated = {
+        totalCost: (Number(base.totalCost) || 0) + callCost,
+        promptTokens: (Number(base.promptTokens) || 0) + pTokens,
+        completionTokens: (Number(base.completionTokens) || 0) + cTokens,
+        totalTokens: (Number(base.totalTokens) || 0) + tTokens,
+        promptCost: (Number(base.promptCost) || 0) + pCost,
+        completionCost: (Number(base.completionCost) || 0) + cCost,
+        requestsCount: (Number(base.requestsCount) || 0) + 1
+      };
+      try {
+        localStorage.setItem('dungeon_forge_map_cost', JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+      return updated;
+    });
   };
   // Map & Canvas State
   const [mapImage, setMapImage] = useState(null);
@@ -284,6 +347,7 @@ export default function App() {
 
       setMapImage(res.imageDataUrl);
       pushHistoryState(res.imageDataUrl);
+      addMapCost(res.usage || res.debug?.usage, true);
       pushDebugLog('GENERATE', prompt, res, startTimeMs);
       confetti({ particleCount: 55, spread: 65, origin: { y: 0.8 } });
     } catch (err) {
@@ -317,6 +381,7 @@ export default function App() {
       setMapImage(res.imageDataUrl);
       setInpaintPrompt('');
       pushHistoryState(res.imageDataUrl);
+      addMapCost(res.usage || res.debug?.usage, false);
       pushDebugLog('INPAINT', inpaintPrompt, res, startTimeMs);
       confetti({ particleCount: 40, spread: 50, origin: { y: 0.8 } });
     } catch (err) {
@@ -353,6 +418,7 @@ export default function App() {
 
       setMapImage(res.imageDataUrl);
       pushHistoryState(res.imageDataUrl);
+      addMapCost(res.usage || res.debug?.usage, false);
       pushDebugLog('OUTPAINT', `${label}: ${outpaintPrompt}`, res, startTimeMs);
       confetti({ particleCount: 60, spread: 70, origin: { y: 0.8 } });
     } catch (err) {
@@ -380,6 +446,8 @@ export default function App() {
       mapImage,
       history: history.length > 0 ? history : (mapImage ? [{ mapImage }] : []),
       historyIndex: history.length > 0 ? historyIndex : (mapImage ? 0 : -1),
+      cost: mapCost,
+      totalCost: mapCost.totalCost,
       version: '2.0'
     };
     const blob = new Blob([JSON.stringify(projectData, null, 2)], { type: 'application/json' });
@@ -416,6 +484,37 @@ export default function App() {
       setOutpaintSelection(null);
     }
     if (data.title) setMapTitle(data.title);
+
+    // Restore cost from save model
+    if (data.cost && typeof data.cost === 'object') {
+      const restored = {
+        totalCost: Number(data.cost.totalCost ?? data.totalCost ?? 0),
+        promptTokens: Number(data.cost.promptTokens ?? 0),
+        completionTokens: Number(data.cost.completionTokens ?? 0),
+        totalTokens: Number(data.cost.totalTokens ?? 0),
+        promptCost: Number(data.cost.promptCost ?? 0),
+        completionCost: Number(data.cost.completionCost ?? 0),
+        requestsCount: Number(data.cost.requestsCount ?? 1)
+      };
+      setMapCost(restored);
+      try {
+        localStorage.setItem('dungeon_forge_map_cost', JSON.stringify(restored));
+      } catch {
+        // ignore
+      }
+    } else if (typeof data.totalCost === 'number') {
+      const restored = {
+        ...DEFAULT_MAP_COST,
+        totalCost: data.totalCost,
+        requestsCount: 1
+      };
+      setMapCost(restored);
+      try {
+        localStorage.setItem('dungeon_forge_map_cost', JSON.stringify(restored));
+      } catch {
+        // ignore
+      }
+    }
   };
 
   // Start over: back to the prompt with no map
@@ -427,6 +526,12 @@ export default function App() {
       setHistory([]);
       setHistoryIndex(-1);
       setOutpaintSelection(null);
+      setMapCost(DEFAULT_MAP_COST);
+      try {
+        localStorage.removeItem('dungeon_forge_map_cost');
+      } catch {
+        // ignore
+      }
     }
   };
 
@@ -449,6 +554,7 @@ export default function App() {
         canRedo={historyIndex < history.length - 1 && !isBusy}
         mapTitle={mapTitle}
         setMapTitle={setMapTitle}
+        mapCost={mapCost}
       />
 
       {/* Workspace: the prompt while there is no map, the canvas once there is */}

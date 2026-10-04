@@ -8,9 +8,18 @@ function getWikiRoot() {
 }
 
 function resolveSafeWikiPath(relPath) {
+  if (!relPath || typeof relPath !== 'string' || !relPath.trim()) {
+    const err = new Error('Invalid path: path must be a non-empty string');
+    err.code = 'INVALID_PATH';
+    throw err;
+  }
   const root = getWikiRoot();
-  const normalizedRel = path.normalize(relPath).replace(/^(\.\.(\/|\\|$))+/, '');
-  const resolved = path.resolve(root, normalizedRel);
+  if (path.isAbsolute(relPath)) {
+    const err = new Error(`Access denied: path traversal detected for "${relPath}"`);
+    err.code = 'ACCESS_DENIED';
+    throw err;
+  }
+  const resolved = path.resolve(root, relPath);
   const relative = path.relative(root, resolved);
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
     const err = new Error(`Access denied: path traversal detected for "${relPath}"`);
@@ -187,11 +196,33 @@ async function getWikiTree() {
     adventures.sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  // 3. Scan Custom
+  const customDir = path.join(root, 'Custom');
+  const custom = [];
+
+  if (fs.existsSync(customDir)) {
+    const customFiles = await getMarkdownFilesRecursively(customDir);
+    for (const f of customFiles) {
+      const content = await fs.promises.readFile(f, 'utf8').catch(() => '');
+      const defaultName = path.basename(f, '.md');
+      const title = extractMarkdownTitle(content, defaultName);
+      const relPath = path.relative(root, f).replace(/\\/g, '/');
+      custom.push({
+        id: slugify(`custom-${path.relative(customDir, f).replace(/\.md$/, '')}`),
+        name: title,
+        path: relPath,
+        type: 'custom'
+      });
+    }
+    custom.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
   return {
     ok: true,
     root,
     regions,
-    adventures
+    adventures,
+    custom
   };
 }
 
@@ -238,7 +269,6 @@ async function getWikiArticle(relPath) {
     parentRegion
   };
 }
-
 module.exports = {
   getWikiRoot,
   resolveSafeWikiPath,

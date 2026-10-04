@@ -27,10 +27,13 @@ import {
   suggestWikiPromptsApi,
   generateCustomWikiPromptApi
 } from '../services/api';
-import WikiArticleViewer from './WikiArticleViewer';
-
-export default function WikiDrawer({ isOpen, onClose, onSelectPrompt }) {
-  // Navigation & Tree state
+export default function WikiDrawer({
+  isOpen,
+  onClose,
+  onSelectPrompt,
+  activeWikiContext = null,
+  onSetActiveWikiContext = null
+}) {
   const [tree, setTree] = useState(null);
   const [treeLoading, setTreeLoading] = useState(false);
   const [treeError, setTreeError] = useState(null);
@@ -53,6 +56,13 @@ export default function WikiDrawer({ isOpen, onClose, onSelectPrompt }) {
   const [lastUsage, setLastUsage] = useState(null);
   const [promptError, setPromptError] = useState(null);
   const [copiedIdx, setCopiedIdx] = useState(null);
+
+  const filteredCustom = useMemo(() => {
+    if (!tree?.custom) return [];
+    if (!searchQuery.trim()) return tree.custom;
+    const q = searchQuery.toLowerCase();
+    return tree.custom.filter((c) => c.name.toLowerCase().includes(q) || c.path.toLowerCase().includes(q));
+  }, [tree, searchQuery]);
 
   // Load tree on open if not loaded
   useEffect(() => {
@@ -265,6 +275,14 @@ export default function WikiDrawer({ isOpen, onClose, onSelectPrompt }) {
         }
       }
     }
+    if (tree.custom) {
+      for (const cu of tree.custom) {
+        if (cu.path.endsWith(clean) || cu.name.toLowerCase() === clean.toLowerCase()) {
+          loadArticle(cu.path);
+          return;
+        }
+      }
+    }
   };
 
   if (!isOpen) return null;
@@ -372,50 +390,77 @@ export default function WikiDrawer({ isOpen, onClose, onSelectPrompt }) {
                ======================================================= */
             <div className="p-5 space-y-5">
               {/* Breadcrumb Header */}
-              <div className="flex items-center justify-between gap-3 pb-3 border-b border-white/[0.08]">
-                <div className="flex items-center gap-2 text-xs text-slate-400">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-white/[0.08]">
+                <div className="flex items-center gap-2 text-xs text-slate-400 min-w-0">
                   <button
                     onClick={() => setSelectedArticlePath(null)}
                     className="hover:text-amber-300 transition-colors"
                   >
                     Locations
                   </button>
-                  <ChevronRight size={12} className="text-slate-600" />
+                  <ChevronRight size={12} className="text-slate-600 shrink-0" />
                   {article?.parentRegion && (
                     <>
-                      <span className="text-slate-300">{article.parentRegion.name}</span>
-                      <ChevronRight size={12} className="text-slate-600" />
+                      <span className="text-slate-300 truncate">{article.parentRegion.name}</span>
+                      <ChevronRight size={12} className="text-slate-600 shrink-0" />
                     </>
                   )}
-                  <span className="text-amber-300 font-semibold truncate max-w-[240px]">
+                  <span className="text-amber-300 font-semibold truncate max-w-[200px]">
                     {article?.title || 'Loading…'}
                   </span>
                 </div>
 
-                {/* Tabs Switcher */}
-                <div className="flex items-center bg-black/40 p-1 rounded-xl border border-white/[0.08]">
-                  <button
-                    onClick={() => setActiveTab('forge')}
-                    className={`px-3 py-1 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 ${
-                      activeTab === 'forge'
-                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    <Wand2 size={12} />
-                    <span>Forge & Prompts</span>
-                  </button>
-                  <button
-                    onClick={() => setActiveTab('lore')}
-                    className={`px-3 py-1 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 ${
-                      activeTab === 'lore'
-                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    <BookOpen size={12} />
-                    <span>Lore & Reference</span>
-                  </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  {/* Active Context Toggle Button */}
+                  {onSetActiveWikiContext && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const isAlreadyActive = activeWikiContext?.path === selectedArticlePath;
+                        if (isAlreadyActive) {
+                          onSetActiveWikiContext(null);
+                        } else {
+                          onSetActiveWikiContext({ path: selectedArticlePath, title: article?.title });
+                        }
+                      }}
+                      className={`px-2.5 py-1 text-xs font-semibold rounded-lg border transition-all flex items-center gap-1.5 ${
+                        activeWikiContext?.path === selectedArticlePath
+                          ? 'bg-amber-500/25 text-amber-200 border-amber-500/40 shadow-sm'
+                          : 'text-slate-400 hover:text-amber-200 hover:bg-amber-500/10 border-white/[0.08]'
+                      }`}
+                      title={activeWikiContext?.path === selectedArticlePath ? 'Currently active as map context. Click to unlink.' : 'Add this article as context to the current map'}
+                    >
+                      <BookOpen size={12} className={activeWikiContext?.path === selectedArticlePath ? 'text-amber-400' : 'text-slate-400'} />
+                      <span>{activeWikiContext?.path === selectedArticlePath ? 'Active Context' : 'Add as Map Context'}</span>
+                      {activeWikiContext?.path === selectedArticlePath && <Check size={11} className="text-emerald-400" />}
+                    </button>
+                  )}
+
+                  {/* Tabs Switcher */}
+                  <div className="flex items-center bg-black/40 p-1 rounded-xl border border-white/[0.08]">
+                    <button
+                      onClick={() => setActiveTab('forge')}
+                      className={`px-3 py-1 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 ${
+                        activeTab === 'forge'
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <Wand2 size={12} />
+                      <span>Forge</span>
+                    </button>
+                    <button
+                      onClick={() => setActiveTab('lore')}
+                      className={`px-3 py-1 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 ${
+                        activeTab === 'lore'
+                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      <BookOpen size={12} />
+                      <span>Lore</span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -561,7 +606,8 @@ export default function WikiDrawer({ isOpen, onClose, onSelectPrompt }) {
                                   title: item.title,
                                   prompt: item.imagePrompt,
                                   usage: lastUsage,
-                                  articleTitle: article?.title
+                                  articleTitle: article?.title,
+                                  articlePath: selectedArticlePath
                                 })
                               }
                               className="btn btn-primary px-3 py-1.5 text-xs font-semibold shrink-0 shadow-lg"
@@ -832,6 +878,34 @@ export default function WikiDrawer({ isOpen, onClose, onSelectPrompt }) {
                         </div>
                       );
                     })}
+                  </div>
+                </div>
+              )}
+
+              {/* Custom Lore Section */}
+              {filteredCustom.length > 0 && (
+                <div className="space-y-3 pt-2">
+                  <div className="flex items-center justify-between text-xs text-slate-400 font-semibold uppercase tracking-wider">
+                    <span>Custom Lore & Articles ({filteredCustom.length})</span>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    {filteredCustom.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => loadArticle(item.path)}
+                        className="w-full text-left p-3 rounded-xl border border-white/[0.08] bg-black/25 hover:border-amber-400/40 hover:bg-amber-500/[0.06] transition-all flex items-center justify-between group"
+                      >
+                        <div className="flex items-center gap-2.5 truncate">
+                          <BookOpen size={14} className="text-amber-400 shrink-0" />
+                          <span className="text-xs font-semibold text-white group-hover:text-amber-200 truncate">
+                            {item.name}
+                          </span>
+                        </div>
+                        <ChevronRight size={13} className="text-slate-600 group-hover:text-amber-300 shrink-0" />
+                      </button>
+                    ))}
                   </div>
                 </div>
               )}

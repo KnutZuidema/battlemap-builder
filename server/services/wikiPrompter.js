@@ -6,16 +6,19 @@ const FALLBACK_MODEL = 'google/gemini-2.5-flash';
 const APPLICATION_TITLE = 'Dungeon Forge';
 const REQUEST_TIMEOUT_MS = Number(process.env.OPENROUTER_TIMEOUT_MS) || 120000;
 
-const SYSTEM_INSTRUCTION = `You are an expert AI prompt engineer specializing in 2D orthographic tabletop battlemaps for D&D 5e encounters in the world of Umbraen.
-Your task is to analyze wiki location lore and generate evocative, tactically rich image prompts for a top-down battlemap generator.
+const SYSTEM_INSTRUCTION = `You are an expert tabletop RPG lore cartographer and encounter designer specializing in the world of Umbraen.
+Your task is to analyze wiki location lore and describe rich, tangible, and tactically evocative map details for tabletop battlemaps.
 
-CRITICAL BATTLEMAP GENERATION RULES:
-- Perspective: Strictly top-down orthographic view (bird's-eye view, 2D flat projection).
-- Grid compatibility: 5ft square grid layout, clear scale (e.g. 20x20 squares, 30x30 squares).
-- No text or UI: Never mention labels, numbers, borders, UI elements, or words in the image prompt.
-- Tactical features: Explicitly incorporate cover (crates, pillars, walls), environmental hazards (deep water, fire, traps), and chokepoints.
-- Art style: Hand-painted fantasy realism, rich textures (stone, water, wood), cinematic directional lighting from above.
-- Prompt length: 100-180 words, dense with visual and spatial detail.
+CORE OBJECTIVE:
+Focus strictly on the physical environment and tangible map details drawn directly from the wiki lore:
+- Architectural structures, construction materials, masonry, woodwork, pillars, doors, and furnishings.
+- Environmental hazards, terrain obstacles, water, elevation differences, and tactical cover.
+- Specific room identities, chambers, passages, and DM secrets described in the location lore.
+- Visible lighting sources (braziers, torches, glowing moss, luminescence) and atmospheric floor textures.
+
+DO NOT INCLUDE:
+- Camera angles, perspective, projection, or rendering directives (such as "top-down", "2D flat view", "orthographic", or "poché") — the image generation system prompt handles camera and perspective.
+- Meta-prompts, art style instructions (e.g. "digital art", "hand-painted"), UI labels, numbers, grid lines, or game statistics.
 
 You must respond in JSON format conforming strictly to the requested schema.`;
 
@@ -156,7 +159,7 @@ Respond with JSON matching:
         "Hazard or terrain obstacle",
         "Chokepoint or flank opportunity"
       ],
-      "imagePrompt": "Detailed 100-180 word top-down orthographic battlemap image prompt..."
+      "imagePrompt": "Evocative 60-120 word description of physical room architecture, materials, furnishings, hazards, and lighting based on the wiki lore..."
     }
   ]
 }`;
@@ -239,7 +242,7 @@ Respond with JSON matching:
       "Hazard or terrain obstacle",
       "Chokepoint or flank opportunity"
     ],
-    "imagePrompt": "Detailed 100-180 word top-down orthographic battlemap image prompt..."
+    "imagePrompt": "Evocative 60-120 word description of physical room architecture, materials, furnishings, hazards, and lighting based on the wiki lore..."
   }
 }`;
 
@@ -278,10 +281,142 @@ Respond with JSON matching:
     usage
   };
 }
+/**
+ * Suggest lore-grounded forge concepts for a selected region on the canvas
+ */
+async function suggestRegionForging({ articlePath, selection, mapDimensions, mapTitle, basePrompt, userIntent }) {
+  if (!articlePath || typeof articlePath !== 'string' || !articlePath.trim()) {
+    const err = new Error('Missing articlePath for region forge suggestions');
+    err.code = 'INVALID_PATH';
+    throw err;
+  }
+  if (!selection || typeof selection.x !== 'number' || typeof selection.y !== 'number' ||
+      typeof selection.width !== 'number' || typeof selection.height !== 'number') {
+    const err = new Error('Invalid selection coordinates for region forge suggestions');
+    err.code = 'INVALID_SELECTION';
+    throw err;
+  }
+
+  const apiKey = getApiKey();
+  const article = await getWikiArticle(articlePath);
+
+  const mapW = (mapDimensions && typeof mapDimensions.width === 'number' && mapDimensions.width > 0) ? mapDimensions.width : 1024;
+  const mapH = (mapDimensions && typeof mapDimensions.height === 'number' && mapDimensions.height > 0) ? mapDimensions.height : 1024;
+
+  let relationship = 'Interior area (Edit)';
+  if (selection.x >= mapW) {
+    relationship = 'East expansion';
+  } else if (selection.x + selection.width <= 0) {
+    relationship = 'West expansion';
+  } else if (selection.y >= mapH) {
+    relationship = 'South expansion';
+  } else if (selection.y + selection.height <= 0) {
+    relationship = 'North expansion';
+  } else if (selection.x < 0 || selection.y < 0 || selection.x + selection.width > mapW || selection.y + selection.height > mapH) {
+    relationship = 'Boundary extension (Hybrid)';
+  }
+
+  const gridSquaresX = Math.max(1, Math.round(selection.width / 64));
+  const gridSquaresY = Math.max(1, Math.round(selection.height / 64));
+  const dimensionFeetX = gridSquaresX * 5;
+  const dimensionFeetY = gridSquaresY * 5;
+
+  const regionLoreContext = article.parentRegion?.contentExcerpt
+    ? `\nParent Region (${article.parentRegion.name}) Background Lore:\n${article.parentRegion.contentExcerpt}`
+    : '';
+
+  const userPayload = `Location Article: ${article.title}
+Path: ${article.path}
+${regionLoreContext}
+
+Current Map Context:
+- Map Title: ${mapTitle || article.title}
+- Canvas Dimensions: ${mapW}x${mapH} px
+- Base Map Prompt: ${basePrompt || 'Top-down fantasy tabletop battlemap'}
+- Selected Region: x=${selection.x}, y=${selection.y}, w=${selection.width}, h=${selection.height}
+- Spatial Relationship: ${relationship}
+- Region Scale: ${gridSquaresX}x${gridSquaresY} grid squares (${dimensionFeetX}ft x ${dimensionFeetY}ft in 5ft/sq D&D scale)
+${userIntent ? `- User Intent / Steering: ${userIntent}` : ''}
+
+Article Lore & Layout:
+${article.content.slice(0, 5000)}
+
+TASK:
+Analyze the selected canvas region in relation to the location lore and current battlemap.
+Provide 3 distinct suggestions grounded in this article's layout, navigation graph, adjacent rooms, environmental hazards, and tactical features.
+
+DIRECTIVES:
+1. Focus strictly on physical map details, architecture, materials, and terrain drawn from the wiki lore. Do NOT specify perspective, camera angles, or poché walls (the renderer handles camera and perspective).
+2. If this is an EXPANSION (North, South, East, West, or Boundary):
+   - Identify adjacent chambers, connecting corridors, exterior courtyards, subterranean passages, or natural terrain described in the wiki article that logically attach at this boundary.
+   - Describe doorway connections, floor transitions, and architectural continuity based on the location lore.
+3. If this is an INTERIOR EDIT:
+   - Identify specific furnishings, tactical cover, altars, traps, elevated daises, or hazards from the article lore that belong in this room area.
+4. If User Intent is provided, incorporate and prioritize it.
+5. Provide dense, vivid 40-70 word descriptions for "forgePrompt" detailing physical architecture, materials, furnishings, lighting, and environmental terrain.
+Respond strictly in JSON matching this schema:
+{
+  "suggestions": [
+    {
+      "title": "Room / Feature Name",
+      "category": "${relationship}",
+      "description": "Short 1-2 sentence description of lore & purpose from the wiki",
+      "tacticalHighlights": [
+        "Tactical cover or feature",
+        "Environmental hazard or obstacle",
+        "Tactical note or DM secret"
+      ],
+      "forgePrompt": "Dense 40-70 word description of architectural elements, furnishings, materials, lighting, and terrain features based on the wiki lore."
+    }
+  ]
+}`;
+
+  const messages = [
+    { role: 'system', content: SYSTEM_INSTRUCTION },
+    { role: 'user', content: userPayload }
+  ];
+
+  const { payload, modelUsed } = await executeWithFallback({ messages, apiKey });
+  const rawText = payload.choices[0].message.content;
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch (parseErr) {
+    const err = new Error(`Failed to parse region forge suggestions JSON: ${parseErr.message}`);
+    err.code = 'PROMPT_PARSE_ERROR';
+    err.telemetry = { rawText };
+    throw err;
+  }
+
+  const suggestions = Array.isArray(parsed.suggestions)
+    ? parsed.suggestions
+    : (parsed.items || []);
+
+  const normalized = suggestions.slice(0, 3).map((s, idx) => ({
+    title: (typeof s.title === 'string' && s.title.trim()) || `Feature ${idx + 1}`,
+    category: (typeof s.category === 'string' && s.category.trim()) || relationship,
+    description: (typeof s.description === 'string' && s.description.trim()) || '',
+    tacticalHighlights: Array.isArray(s.tacticalHighlights)
+      ? s.tacticalHighlights.map(h => String(h).trim()).filter(Boolean)
+      : [],
+    forgePrompt: (typeof s.forgePrompt === 'string' && s.forgePrompt.trim()) || ''
+  }));
+
+  const usage = parseUsage(payload);
+
+  return {
+    suggestions: normalized,
+    model: modelUsed,
+    usage
+  };
+}
+
 
 module.exports = {
   PRIMARY_MODEL,
   FALLBACK_MODEL,
   suggestBattlemaps,
-  generateCustomBattlemapPrompt
+  generateCustomBattlemapPrompt,
+  suggestRegionForging
 };

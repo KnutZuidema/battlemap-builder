@@ -27,6 +27,7 @@ import {
   suggestWikiPromptsApi,
   generateCustomWikiPromptApi
 } from '../services/api';
+import WikiArticleViewer from './WikiArticleViewer';
 export default function WikiDrawer({
   isOpen,
   onClose,
@@ -105,7 +106,7 @@ export default function WikiDrawer({
   };
 
   // Load selected article
-  const loadArticle = async (path) => {
+  const loadArticle = async (path, tab = 'forge') => {
     setSelectedArticlePath(path);
     setArticleLoading(true);
     setArticleError(null);
@@ -116,7 +117,7 @@ export default function WikiDrawer({
     try {
       const data = await fetchWikiArticleApi(path);
       setArticle(data);
-      setActiveTab('forge');
+      setActiveTab(tab);
     } catch (err) {
       console.error('Failed to load wiki article:', err);
       setArticleError(err.message || 'Failed to read article');
@@ -245,40 +246,55 @@ export default function WikiDrawer({
 
   // Navigate from wikilinks
   const handleNavigateWikiLink = (target) => {
-    if (!tree) return;
-    const clean = target.replace(/\\/g, '/');
+    if (!tree || !target) return;
+    const clean = target.replace(/\\/g, '/').trim();
+    const cleanNoExt = clean.replace(/\.md$/i, '');
+    const cleanBase = cleanNoExt.split('/').pop().toLowerCase();
 
-    // 1. Direct path match
-    for (const r of tree.regions) {
-      for (const p of r.places) {
-        if (p.path.endsWith(clean) || p.name.toLowerCase() === clean.toLowerCase()) {
-          loadArticle(p.path);
+    const matches = (item) => {
+      if (!item?.path) return false;
+      const itemPath = item.path.replace(/\\/g, '/');
+      const itemNoExt = itemPath.replace(/\.md$/i, '');
+      return (
+        itemPath.endsWith(clean) ||
+        itemNoExt === cleanNoExt ||
+        itemNoExt.endsWith('/' + cleanNoExt) ||
+        (item.name && item.name.toLowerCase() === clean.toLowerCase()) ||
+        (item.name && item.name.toLowerCase() === cleanBase)
+      );
+    };
+
+    // 1. Direct path match across regions
+    for (const r of tree.regions || []) {
+      for (const p of r.places || []) {
+        if (matches(p)) {
+          loadArticle(p.path, 'lore');
           return;
         }
       }
-      for (const s of r.settlements) {
-        if (s.path.endsWith(clean) || s.name.toLowerCase() === clean.toLowerCase()) {
-          loadArticle(s.path);
+      for (const s of r.settlements || []) {
+        if (matches(s)) {
+          loadArticle(s.path, 'lore');
           return;
         }
       }
     }
-    for (const a of tree.adventures) {
-      if (a.path.endsWith(clean) || a.name.toLowerCase() === clean.toLowerCase()) {
-        loadArticle(a.path);
+    for (const a of tree.adventures || []) {
+      if (matches(a)) {
+        loadArticle(a.path, 'lore');
         return;
       }
-      for (const c of a.chapters) {
-        if (c.path.endsWith(clean) || c.name.toLowerCase() === clean.toLowerCase()) {
-          loadArticle(c.path);
+      for (const c of a.chapters || []) {
+        if (matches(c)) {
+          loadArticle(c.path, 'lore');
           return;
         }
       }
     }
     if (tree.custom) {
       for (const cu of tree.custom) {
-        if (cu.path.endsWith(clean) || cu.name.toLowerCase() === clean.toLowerCase()) {
-          loadArticle(cu.path);
+        if (matches(cu)) {
+          loadArticle(cu.path, 'lore');
           return;
         }
       }

@@ -13,7 +13,9 @@ import {
   Zap,
   BookOpen,
   ChevronDown,
-  Check
+  Check,
+  Wand2,
+  Gamepad2
 } from 'lucide-react';
 import CostTracker from './CostTracker';
 
@@ -57,7 +59,13 @@ export default function Navbar({
   mapTitle,
   setMapTitle,
   mapCost,
-  wikiContext
+  wikiContext,
+  activeMode = 'edit',
+  onSetMode,
+  onDetectFeatures,
+  isDetectingFeatures = false,
+  featureCount = 0,
+  hasMap = false
 }) {
   const fileInputRef = useRef(null);
   const modelDropdownRef = useRef(null);
@@ -134,6 +142,64 @@ export default function Navbar({
             className="hidden lg:block w-28 xl:w-48 bg-transparent border border-transparent hover:border-white/[0.08] focus:border-amber-400/40 focus:bg-black/30 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-200 outline-none transition truncate"
           />
         </div>
+      </div>
+
+      {/* Center Controls: Mode Toggle & Feature Detection */}
+      <div className="flex items-center gap-2">
+        {hasMap && (
+          <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/[0.08] shadow-inner shadow-black/40">
+            <button
+              type="button"
+              onClick={() => onSetMode && onSetMode('edit')}
+              title="Edit Mode: Inspect, forge, and adjust interactive map features and regions"
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+                activeMode === 'edit'
+                  ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-500/40 shadow-sm shadow-cyan-950/50'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-transparent'
+              }`}
+            >
+              <Wand2 className={`w-3.5 h-3.5 ${activeMode === 'edit' ? 'text-cyan-400' : 'text-slate-500'}`} />
+              <span>Edit</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onSetMode && onSetMode('play')}
+              title="Play Mode: Tactical gameplay mode with seamless interactive feature triggers"
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+                activeMode === 'play'
+                  ? 'bg-amber-500/20 text-amber-200 border border-amber-500/40 shadow-sm shadow-amber-950/50'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-transparent'
+              }`}
+            >
+              <Gamepad2 className={`w-3.5 h-3.5 ${activeMode === 'play' ? 'text-amber-400' : 'text-slate-500'}`} />
+              <span>Play</span>
+            </button>
+          </div>
+        )}
+
+        {hasMap && activeMode === 'edit' && (
+          <button
+            type="button"
+            onClick={onDetectFeatures}
+            disabled={isDetectingFeatures}
+            title="Detect doors, destructible walls, and hidden trapdoors using AI Vision"
+            className={`btn px-3 py-1.5 text-xs flex items-center gap-1.5 ${
+              featureCount > 0
+                ? 'btn-ghost text-cyan-200 border-cyan-500/30 bg-cyan-500/10 hover:bg-cyan-500/20'
+                : 'btn-ghost text-amber-300 border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20'
+            }`}
+          >
+            <Sparkles className={`w-3.5 h-3.5 ${isDetectingFeatures ? 'animate-spin text-cyan-400' : 'text-amber-400'}`} />
+            <span className="hidden sm:inline">
+              {isDetectingFeatures ? 'Detecting Features…' : 'Detect Features'}
+            </span>
+            {featureCount > 0 && !isDetectingFeatures && (
+              <span className="text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-200 px-1.5 py-0.2 rounded-full border border-cyan-500/40">
+                {featureCount}
+              </span>
+            )}
+          </button>
+        )}
       </div>
 
       {/* Model Picker Dropdown */}

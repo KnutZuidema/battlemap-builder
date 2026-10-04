@@ -4,6 +4,7 @@ import {
   Download,
   RotateCcw,
   RotateCw,
+  RefreshCw,
   Trash2,
   FileJson,
   Upload,
@@ -47,6 +48,10 @@ export default function Navbar({
   onRedo,
   canUndo,
   canRedo,
+  onRetry,
+  canRetry,
+  isRetrying,
+  retryTooltip,
   mapTitle,
   setMapTitle,
   mapCost
@@ -156,12 +161,26 @@ export default function Navbar({
         <span className="w-px h-6 bg-white/[0.08] mx-0.5 hidden sm:block" />
 
         <div className="flex items-center gap-0.5 bg-black/25 p-1 rounded-xl border border-white/[0.07]">
-          <button onClick={onUndo} disabled={!canUndo} title="Undo" className="icon-btn p-1.5">
+          <button onClick={onUndo} disabled={!canUndo} title="Undo (Ctrl+Z)" className="icon-btn p-1.5">
             <RotateCcw className="w-3.5 h-3.5" />
           </button>
           <span className="w-px h-3.5 bg-white/[0.08]" />
-          <button onClick={onRedo} disabled={!canRedo} title="Redo" className="icon-btn p-1.5">
+          <button onClick={onRedo} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)" className="icon-btn p-1.5">
             <RotateCw className="w-3.5 h-3.5" />
+          </button>
+          <span className="w-px h-3.5 bg-white/[0.08]" />
+          <button
+            onClick={onRetry}
+            disabled={!canRetry}
+            title={retryTooltip || 'Retry last generation (Alt+R)'}
+            className={`flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-medium transition-all ${
+              canRetry
+                ? 'text-cyan-300 hover:text-cyan-100 hover:bg-cyan-500/15'
+                : 'text-slate-500 opacity-40 cursor-not-allowed'
+            }`}
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isRetrying ? 'animate-spin' : ''}`} />
+            <span className="hidden sm:inline">Retry</span>
           </button>
         </div>
 

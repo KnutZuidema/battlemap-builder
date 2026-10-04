@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import confetti from 'canvas-confetti';
-import { AlertTriangle, X, Terminal, Wand2 } from 'lucide-react';
+import { AlertTriangle, X, Terminal, Wand2, RefreshCw } from 'lucide-react';
 import Navbar from './components/Navbar';
 import PromptHero from './components/PromptHero';
 import BattlemapCanvas from './components/BattlemapCanvas';
@@ -13,7 +13,7 @@ import {
   generateBattlemapApi,
   forgeRegionApi
 } from './services/api';
-import { describeRegion } from './utils/regionSelection';
+import { describeRegion, getRegionInCanvasCoordinates } from './utils/regionSelection';
 
 const PROVIDER_LABELS = { openrouter: 'OpenRouter' };
 
@@ -138,6 +138,12 @@ export default function App() {
   const [regionPrompt, setRegionPrompt] = useState('');
   const [isRegionModalOpen, setIsRegionModalOpen] = useState(false);
   const [isForgingRegion, setIsForgingRegion] = useState(false);
+
+  // Retry Mechanism State for regenerating last map generation or region forge
+  const [retryContext, setRetryContext] = useState(null);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [isRetryPillDismissed, setIsRetryPillDismissed] = useState(false);
+
   // Generation Timer & Target Region Overlay State
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [generationPhaseText, setGenerationPhaseText] = useState('');
@@ -145,7 +151,6 @@ export default function App() {
   // History Stack for Undo / Redo
   const [history, setHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
-
   // Live Timer Ticker effect when generation/edit/expand is active
   const isBusy = isGenerating || isForgingRegion;
 
@@ -300,8 +305,20 @@ export default function App() {
   // Handle Initial Map Generation
   const handleGenerateMap = async () => {
     const startTimeMs = Date.now();
+    const currentContext = {
+      type: 'GENERATE',
+      prompt,
+      width: 1024,
+      height: 1024,
+      model: selectedModel,
+      label: 'Initial map'
+    };
+    setRetryContext(currentContext);
+    setIsRetryPillDismissed(true);
+
     setIsGenerating(true);
     setGenerationPhaseText('RENDERING MAP...');
+    setFailure(null);
     try {
       const res = await generateBattlemapApi({
         prompt,
@@ -323,16 +340,29 @@ export default function App() {
     }
   };
 
-
   // Handle Unified Region Forging
   const handleApplyRegion = async () => {
     if (!mapImage || !regionSelection) return;
     const startTimeMs = Date.now();
     const regionInfo = describeRegion(regionSelection, 1024, 1024);
     const label = regionInfo ? regionInfo.label : 'Region';
+    const resultRegion = getRegionInCanvasCoordinates(regionSelection);
+
+    const currentContext = {
+      type: 'FORGE_REGION',
+      originalDataUrl: mapImage,
+      selection: { ...regionSelection },
+      prompt: regionPrompt,
+      model: selectedModel,
+      label,
+      resultRegion
+    };
+    setRetryContext(currentContext);
+    setIsRetryPillDismissed(false);
 
     setIsForgingRegion(true);
     setGenerationPhaseText('FORGING REGION...');
+    setFailure(null);
 
     try {
       const res = await forgeRegionApi({
@@ -350,14 +380,125 @@ export default function App() {
       confetti({ particleCount: 50, spread: 60, origin: { y: 0.8 } });
       setRegionSelection(null);
       setIsRegionModalOpen(false);
+      setIsRetryPillDismissed(false);
     } catch (err) {
       reportFailure('FORGE_REGION', `${label}: ${regionPrompt}`, err, startTimeMs);
     } finally {
       setIsForgingRegion(false);
       setGenerationPhaseText('');
-
     }
   };
+
+  // Retry the last generation or region forge with a simple button click
+  const handleRetry = async () => {
+    if (!retryContext || isBusy) return;
+    const startTimeMs = Date.now();
+    setIsRetrying(true);
+    setFailure(null);
+
+    if (retryContext.type === 'FORGE_REGION') {
+      const { originalDataUrl, selection, prompt: savedPrompt, label } = retryContext;
+      setIsForgingRegion(true);
+      setGenerationPhaseText('RETRYING REGION FORGE...');
+
+      try {
+        const res = await forgeRegionApi({
+          originalDataUrl,
+          selection,
+          prompt: savedPrompt,
+          model: selectedModel || retryContext.model
+        });
+
+        setMapImage(res.imageDataUrl);
+        pushHistoryState(res.imageDataUrl);
+        addMapCost(res.usage || res.debug?.usage, false);
+        pushDebugLog('FORGE_REGION', `${label} (retry): ${savedPrompt || 'seamless terrain'}`, res, startTimeMs);
+        confetti({ particleCount: 50, spread: 60, origin: { y: 0.8 } });
+        setRegionSelection(null);
+        setIsRegionModalOpen(false);
+        setIsRetryPillDismissed(false);
+      } catch (err) {
+        reportFailure('FORGE_REGION', `${label} (retry): ${savedPrompt}`, err, startTimeMs);
+      } finally {
+        setIsForgingRegion(false);
+        setIsRetrying(false);
+        setGenerationPhaseText('');
+      }
+    } else if (retryContext.type === 'GENERATE') {
+      const { prompt: savedPrompt, width, height } = retryContext;
+      setIsGenerating(true);
+      setGenerationPhaseText('RETRYING MAP GENERATION...');
+
+      try {
+        const res = await generateBattlemapApi({
+          prompt: savedPrompt,
+          width: width || 1024,
+          height: height || 1024,
+          model: selectedModel || retryContext.model
+        });
+
+        setMapImage(res.imageDataUrl);
+        pushHistoryState(res.imageDataUrl);
+        addMapCost(res.usage || res.debug?.usage, true);
+        pushDebugLog('GENERATE', `Retry: ${savedPrompt}`, res, startTimeMs);
+        confetti({ particleCount: 55, spread: 65, origin: { y: 0.8 } });
+      } catch (err) {
+        reportFailure('GENERATE', `Retry: ${savedPrompt}`, err, startTimeMs);
+      } finally {
+        setIsGenerating(false);
+        setIsRetrying(false);
+        setGenerationPhaseText('');
+      }
+    }
+  };
+
+  // Keep refs for keydown shortcuts
+  const handleRetryRef = useRef(handleRetry);
+  const handleUndoRef = useRef(handleUndo);
+  const handleRedoRef = useRef(handleRedo);
+
+  useEffect(() => {
+    handleRetryRef.current = handleRetry;
+    handleUndoRef.current = handleUndo;
+    handleRedoRef.current = handleRedo;
+  });
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      const isInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+      if (isInput) return;
+
+      // Undo: Ctrl+Z or Cmd+Z (without Shift)
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndoRef.current?.();
+        return;
+      }
+
+      // Redo: Ctrl+Shift+Z, Cmd+Shift+Z, or Ctrl+Y / Cmd+Y
+      if ((e.metaKey || e.ctrlKey) && ((e.key.toLowerCase() === 'z' && e.shiftKey) || e.key.toLowerCase() === 'y')) {
+        e.preventDefault();
+        handleRedoRef.current?.();
+        return;
+      }
+
+      // Retry: Alt+R
+      if (e.altKey && e.key.toLowerCase() === 'r') {
+        e.preventDefault();
+        handleRetryRef.current?.();
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  const canRetry = Boolean(retryContext) && !isBusy;
+  const retryTooltip = retryContext
+    ? retryContext.type === 'FORGE_REGION'
+      ? `Retry region forge: "${retryContext.prompt || 'seamless terrain'}" (Alt+R)`
+      : `Retry map generation: "${retryContext.prompt}" (Alt+R)`
+    : 'No generation to retry';
 
   // Export Map to PNG
   const handleExportPng = () => {
@@ -411,6 +552,8 @@ export default function App() {
       setRegionSelection(null);
       setRegionPrompt('');
       setIsRegionModalOpen(false);
+      setRetryContext(null);
+      setIsRetryPillDismissed(false);
     }
     if (data.title) setMapTitle(data.title);
 
@@ -455,6 +598,8 @@ export default function App() {
       setIsRegionModalOpen(false);
       setHistory([]);
       setHistoryIndex(-1);
+      setRetryContext(null);
+      setIsRetryPillDismissed(false);
       setMapCost(DEFAULT_MAP_COST);
       try {
         localStorage.removeItem('dungeon_forge_map_cost');
@@ -482,6 +627,10 @@ export default function App() {
         onRedo={handleRedo}
         canUndo={historyIndex > 0 && !isBusy}
         canRedo={historyIndex < history.length - 1 && !isBusy}
+        onRetry={handleRetry}
+        canRetry={canRetry}
+        isRetrying={isRetrying}
+        retryTooltip={retryTooltip}
         mapTitle={mapTitle}
         setMapTitle={setMapTitle}
         mapCost={mapCost}
@@ -493,7 +642,10 @@ export default function App() {
           <BattlemapCanvas
             mapImage={mapImage}
             regionSelection={regionSelection}
-            onRegionSelectionChange={setRegionSelection}
+            onRegionSelectionChange={(sel) => {
+              setRegionSelection(sel);
+              if (sel) setIsRetryPillDismissed(true);
+            }}
             onOpenRegionPrompt={() => setIsRegionModalOpen(true)}
             renderRegionPopover={(anchor) => (
               <ActionModal
@@ -520,6 +672,11 @@ export default function App() {
             isForgingRegion={isForgingRegion}
             elapsedSeconds={elapsedSeconds}
             generationPhaseText={generationPhaseText}
+            // Retry Props
+            retryContext={retryContext}
+            onRetry={handleRetry}
+            isRetryPillDismissed={isRetryPillDismissed}
+            onDismissRetryPill={() => setIsRetryPillDismissed(true)}
           />
         ) : (
           <PromptHero
@@ -587,6 +744,15 @@ export default function App() {
                 <Terminal className="w-3.5 h-3.5" />
                 <span>Inspect Failed Request Logs</span>
               </button>
+              {canRetry && (
+                <button
+                  onClick={handleRetry}
+                  className="btn px-3 py-1.5 text-[11px] bg-cyan-500/20 border border-cyan-500/40 text-cyan-200 hover:bg-cyan-500/30"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isRetrying ? 'animate-spin' : ''}`} />
+                  <span>Retry Request</span>
+                </button>
+              )}
               <button
                 onClick={() => setFailure(null)}
                 className="btn px-3 py-1.5 text-[11px] bg-rose-900/60 border border-rose-700/60 text-rose-100 hover:bg-rose-900"

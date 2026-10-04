@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Stage, Layer, Image as KonvaImage, Rect, Group } from 'react-konva';
-import { ZoomIn, ZoomOut, Maximize, Move, Clock, Sparkles, Wand2, X, Crop } from 'lucide-react';
+import { ZoomIn, ZoomOut, Maximize, Move, Clock, Sparkles, Wand2, X, Crop, RefreshCw } from 'lucide-react';
 import { formatTimer } from '../utils/format';
 import {
   REGION_HANDLES,
@@ -20,7 +20,11 @@ export default function BattlemapCanvas({
   isGenerating,
   isForgingRegion,
   elapsedSeconds,
-  generationPhaseText
+  generationPhaseText,
+  retryContext,
+  onRetry,
+  isRetryPillDismissed,
+  onDismissRetryPill
 }) {
   const containerRef = useRef(null);
   const stageRef = useRef(null);
@@ -131,6 +135,7 @@ export default function BattlemapCanvas({
     }
 
     if (e.evt.button === 2 && loadedImage && !isBusy) {
+      if (onDismissRetryPill) onDismissRetryPill();
       const point = pointerToMap();
       if (!point) return;
 
@@ -183,6 +188,18 @@ export default function BattlemapCanvas({
       dragStartPointRef.current = null;
     }
   };
+
+
+  // Global mouseup listener so dragging/panning is cleanly released even outside canvas
+  useEffect(() => {
+    const onWindowMouseUp = () => {
+      setIsPanning(false);
+      setIsRightDragging(false);
+      dragStartPointRef.current = null;
+    };
+    window.addEventListener('mouseup', onWindowMouseUp);
+    return () => window.removeEventListener('mouseup', onWindowMouseUp);
+  }, []);
 
   // Global pointer listeners while dragging handles or moving box so interactions stay active even outside stage
   useEffect(() => {
@@ -272,14 +289,17 @@ export default function BattlemapCanvas({
     let targetH = mapHeight;
     let color = '#f5a524'; // Amber for initial generation
 
-    if (isForgingRegion && regionSelection) {
-      targetX = regionSelection.x;
-      targetY = regionSelection.y;
-      targetW = regionSelection.width;
-      targetH = regionSelection.height;
+    const isBaseMap = mapImage === retryContext?.originalDataUrl;
+    const activeRetryRegion = isBaseMap ? retryContext?.selection : retryContext?.resultRegion;
+    const activeForgeRegion = regionSelection || activeRetryRegion;
+
+    if (isForgingRegion && activeForgeRegion) {
+      targetX = activeForgeRegion.x;
+      targetY = activeForgeRegion.y;
+      targetW = activeForgeRegion.width;
+      targetH = activeForgeRegion.height;
       color = '#22d3ee'; // Cyan for region forging
     }
-
     return (
       <Group x={targetX} y={targetY}>
         <Rect
@@ -333,6 +353,20 @@ export default function BattlemapCanvas({
   const pillLeft = screenLeft + screenWidth / 2;
   const pillIsAbove = screenTop > 65;
   const pillTop = pillIsAbove ? screenTop - 12 : screenTop + screenHeight + 12;
+
+  // Screen coordinates for floating retry pill on last forged region
+  const isBaseMap = mapImage === retryContext?.originalDataUrl;
+  const activeRetryRegion = isBaseMap ? retryContext?.selection : retryContext?.resultRegion;
+  const showRetryPill = !isBusy && !regionSelection && !isRightDragging && !isRetryPillDismissed && loadedImage && retryContext?.type === 'FORGE_REGION' && activeRetryRegion;
+
+  const retryScreenLeft = activeRetryRegion ? position.x + activeRetryRegion.x * scale : 0;
+  const retryScreenTop = activeRetryRegion ? position.y + activeRetryRegion.y * scale : 0;
+  const retryScreenWidth = activeRetryRegion ? activeRetryRegion.width * scale : 0;
+  const retryScreenHeight = activeRetryRegion ? activeRetryRegion.height * scale : 0;
+
+  const retryPillLeft = retryScreenLeft + retryScreenWidth / 2;
+  const retryPillIsAbove = retryScreenTop > 65;
+  const retryPillTop = retryPillIsAbove ? retryScreenTop - 12 : retryScreenTop + retryScreenHeight + 12;
 
   const regionPopover = regionSelection && loadedImage && renderRegionPopover
     ? renderRegionPopover({
@@ -428,6 +462,38 @@ export default function BattlemapCanvas({
             onClick={() => onRegionSelectionChange(null)}
             className="icon-btn p-1 text-slate-400 hover:text-white rounded-lg"
             title="Clear selection (Esc)"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* FLOATING RETRY PILL FOR LAST FORGED REGION */}
+      {showRetryPill && (
+        <div
+          className="absolute z-20 flex items-center gap-2 bg-slate-950/90 backdrop-blur-xl px-3 py-1.5 rounded-2xl border border-cyan-500/40 shadow-2xl shadow-cyan-500/15 pointer-events-auto transform -translate-x-1/2 animate-rise"
+          style={{
+            left: retryPillLeft,
+            top: retryPillTop,
+            transform: `translate(-50%, ${retryPillIsAbove ? '-100%' : '0'})`
+          }}
+        >
+          <div className="flex items-center gap-1.5 text-xs font-mono font-bold text-cyan-300 px-1">
+            <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+            <span>{retryContext.label ? `${retryContext.label} forged` : 'Region forged'}</span>
+          </div>
+          <button
+            onClick={onRetry}
+            className="btn-cyan flex items-center gap-1.5 px-3 py-1 text-xs rounded-xl font-semibold shadow-lg shadow-cyan-500/25 hover:brightness-110 active:scale-95 transition"
+            title={`Retry generation for this region (${retryContext.prompt || 'seamless terrain'})`}
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Retry</span>
+          </button>
+          <button
+            onClick={onDismissRetryPill}
+            className="icon-btn p-1 text-slate-400 hover:text-white rounded-lg"
+            title="Dismiss"
           >
             <X className="w-3.5 h-3.5" />
           </button>

@@ -151,23 +151,49 @@ function readFinishReason(payload) {
 /**
  * Image-out models return either `message.images[]` or image parts inside `message.content`.
  */
-function extractImageSource(payload) {
+function extractImageSources(payload) {
   const message = payload.choices && payload.choices[0] && payload.choices[0].message;
-  if (!message) return null;
+  if (!message) return [];
 
   const candidates = [];
   if (Array.isArray(message.images)) candidates.push(...message.images);
   if (Array.isArray(message.content)) candidates.push(...message.content);
 
+  const sources = [];
   for (const candidate of candidates) {
     if (!candidate) continue;
+    if (typeof candidate === 'string' && candidate.length > 0) {
+      sources.push(candidate);
+      continue;
+    }
     const url = candidate.image_url && (candidate.image_url.url || candidate.image_url);
-    if (typeof url === 'string' && url.length > 0) return url;
+    if (typeof url === 'string' && url.length > 0) {
+      sources.push(url);
+      continue;
+    }
+    if (typeof candidate.url === 'string' && candidate.url.length > 0) {
+      sources.push(candidate.url);
+      continue;
+    }
     if (typeof candidate.data === 'string' && candidate.data.length > 0) {
-      return `data:${candidate.mime_type || candidate.media_type || 'image/png'};base64,${candidate.data}`;
+      sources.push(`data:${candidate.mime_type || candidate.media_type || 'image/png'};base64,${candidate.data}`);
+      continue;
+    }
+    if (candidate.inline_data && typeof candidate.inline_data.data === 'string' && candidate.inline_data.data.length > 0) {
+      sources.push(`data:${candidate.inline_data.mime_type || 'image/png'};base64,${candidate.inline_data.data}`);
+      continue;
+    }
+    if (candidate.source && typeof candidate.source.data === 'string' && candidate.source.data.length > 0) {
+      sources.push(`data:${candidate.source.media_type || 'image/png'};base64,${candidate.source.data}`);
+      continue;
     }
   }
-  return null;
+  return sources;
+}
+
+function extractImageSource(payload) {
+  const sources = extractImageSources(payload);
+  return sources[0] || null;
 }
 
 async function sourceToBuffer(source) {
@@ -196,7 +222,8 @@ async function requestCanvas({ model, systemInstruction, userPromptText, fullPro
 
   const usage = readUsage(payload, model);
   const finishReason = readFinishReason(payload);
-  const source = extractImageSource(payload);
+  const sources = extractImageSources(payload);
+  const source = sources[0] || null;
   const rawText = (payload.choices && payload.choices[0] && typeof payload.choices[0].message.content === 'string')
     ? payload.choices[0].message.content
     : '';
@@ -215,29 +242,54 @@ async function requestCanvas({ model, systemInstruction, userPromptText, fullPro
       systemInstruction,
       userPrompt: userPromptText,
       fullPrompt: fullPromptPayload,
-      images: telemetryImages
+      images: telemetryImages,
+      outputImages: []
     };
     throw err;
   }
 
-  const imageBuffer = await sharp(await sourceToBuffer(source))
+  const rawImageBuffer = await sourceToBuffer(source);
+  const imageBuffer = await sharp(rawImageBuffer)
     .resize(width, height, { fit: 'fill' })
     .png()
     .toBuffer();
+
+  const outputImages = await Promise.all(sources.map(async (src, idx) => {
+    const buf = (idx === 0) ? rawImageBuffer : await sourceToBuffer(src);
+    const meta = await sharp(buf).metadata().catch(() => null);
+    const mime = (meta && meta.format) ? `image/${meta.format}` : 'image/png';
+    const dataUrl = src.startsWith('data:') ? src : `data:${mime};base64,${buf.toString('base64')}`;
+    const dim = meta?.width && meta?.height ? ` (${meta.width}×${meta.height} px)` : '';
+    return {
+      id: idx,
+      label: `Model Output ${idx + 1}${dim}`,
+      dataUrl
+    };
+  }));
+
+  const fallbackResponseText = outputImages.length > 0
+    ? `[${finishReason || 'stop'} response — ${outputImages.length} image output${outputImages.length === 1 ? '' : 's'} received]`
+    : `[${finishReason || 'stop'} response]`;
 
   return {
     imageBuffer,
     debug: {
       modelUsed: model,
-      rawResponseText: rawText || `[${finishReason || 'image'} response — image bytes omitted from telemetry]`,
+      rawResponseText: rawText || fallbackResponseText,
       attempts: [{ model, outcome: 'ok', finishReason, responseChars: rawText.length, usage }],
       usage,
       systemInstruction,
       userPrompt: userPromptText,
       fullPrompt: fullPromptPayload,
-      images: telemetryImages
+      images: telemetryImages,
+      outputImages
     }
   };
 }
 
-module.exports = { requestCanvas };
+module.exports = {
+  extractImageSources,
+  extractImageSource,
+  sourceToBuffer,
+  requestCanvas
+};

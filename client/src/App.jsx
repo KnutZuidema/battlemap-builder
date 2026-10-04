@@ -286,6 +286,31 @@ export default function App() {
     setRegionSelection(null);
     setIsRegionModalOpen(false);
   };
+  // Handle Initial Map Generation
+  const handleGenerateMap = async () => {
+    const startTimeMs = Date.now();
+    setIsGenerating(true);
+    setGenerationPhaseText('RENDERING MAP...');
+    try {
+      const res = await generateBattlemapApi({
+        prompt,
+        width: 1024,
+        height: 1024,
+        model: selectedModel
+      });
+
+      setMapImage(res.imageDataUrl);
+      pushHistoryState(res.imageDataUrl);
+      pushDebugLog('GENERATE', prompt, res, startTimeMs);
+      confetti({ particleCount: 55, spread: 65, origin: { y: 0.8 } });
+    } catch (err) {
+      reportFailure('GENERATE', prompt, err, startTimeMs);
+    } finally {
+      setIsGenerating(false);
+      setGenerationPhaseText('');
+    }
+  };
+
 
   // Handle Unified Region Forging (Inpaint / Outpaint / Hybrid)
   const handleApplyRegion = async () => {

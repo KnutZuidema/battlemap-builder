@@ -131,7 +131,7 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
 - **Layers**: Background map, active region selection rectangle with 8 resize handles, floating action pill.
 - **Region Selection**: Right-click drag selects any 64px grid-snapped region (inside map to edit, outside to expand, or spanning both). Handles and box dragging allow adjusting dimensions.
 - **Forge Region**: Clicking Forge Region opens the popover modal to enter details or expansion prompt.
-- The grid overlay was removed entirely; do not reintroduce grid state, layers or controls.
+- **5ft Grid Overlay**: Interactive 2D canvas renders a non-interactive, single-draw-call 64px = 5ft grid overlay over the clean ungridded battlemap, toggleable via the top-right canvas control bar or the 'G' keyboard shortcut.
 
 ---
 

@@ -6,6 +6,7 @@ import PromptHero from './components/PromptHero';
 import BattlemapCanvas from './components/BattlemapCanvas';
 import ActionModal from './components/ActionModal';
 import DebugModal from './components/DebugModal';
+import WikiDrawer from './components/WikiDrawer';
 import {
   checkServerHealth,
   fetchModelsApi,
@@ -32,6 +33,7 @@ const NO_TELEMETRY_PROMPT = 'Not captured — the server returned no prompt tele
 
 export default function App() {
   const [isDebugModalOpen, setIsDebugModalOpen] = useState(false);
+  const [isWikiDrawerOpen, setIsWikiDrawerOpen] = useState(false);
 
   // Debug Log History State
   const [debugLogs, setDebugLogs] = useState([]);
@@ -116,6 +118,13 @@ export default function App() {
       }
       return updated;
     });
+  };
+
+  const handleSelectWikiPrompt = ({ title, prompt: newPrompt, usage, articleTitle }) => {
+    if (newPrompt) setPrompt(newPrompt);
+    if (title) setMapTitle(articleTitle ? `${articleTitle}: ${title}` : title);
+    if (usage) addMapCost(usage);
+    setIsWikiDrawerOpen(false);
   };
   // Map & Canvas State
   const [mapImage, setMapImage] = useState(null);
@@ -462,6 +471,7 @@ export default function App() {
         models={availableModels}
         onOpenDebugModal={() => setIsDebugModalOpen(true)}
         debugLogCount={debugLogs.length}
+        onOpenWikiDrawer={() => setIsWikiDrawerOpen(true)}
         onExportPng={handleExportPng}
         onExportJson={handleExportJson}
         onImportJson={handleImportJson}
@@ -517,6 +527,7 @@ export default function App() {
             isGenerating={isGenerating}
             phaseText={generationPhaseText}
             elapsedSeconds={elapsedSeconds}
+            onOpenWikiDrawer={() => setIsWikiDrawerOpen(true)}
           />
         )}
 
@@ -591,6 +602,13 @@ export default function App() {
         onClose={() => setIsDebugModalOpen(false)}
         debugLogs={debugLogs}
         onClearLogs={() => setDebugLogs([])}
+      />
+
+      {/* World Wiki & Battlemap Prompt Drawer */}
+      <WikiDrawer
+        isOpen={isWikiDrawerOpen}
+        onClose={() => setIsWikiDrawerOpen(false)}
+        onSelectPrompt={handleSelectWikiPrompt}
       />
     </div>
   );

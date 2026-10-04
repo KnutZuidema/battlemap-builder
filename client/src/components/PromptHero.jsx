@@ -115,7 +115,7 @@ export default function PromptHero({
           {[
             { icon: Sparkles, label: 'Describe', desc: 'Text prompt' },
             { icon: Crop, label: 'Select', desc: 'Right-drag 64px box' },
-            { icon: Wand2, label: 'Forge', desc: 'Inpaint or expand' }
+            { icon: Wand2, label: 'Forge', desc: 'Edit or expand' }
           ].map((step, i) => {
             const Icon = step.icon;
             return (

@@ -70,18 +70,9 @@ export async function generateBattlemapApi({ prompt, width, height, model }) {
   return postJson('/api/generate', { prompt, width, height, model });
 }
 
-/** Request unified region forging (inpaint, outpaint, or hybrid) */
+/** Request unified region forging (edit, expand, or hybrid) */
 export async function forgeRegionApi({ originalDataUrl, selection, prompt, model }) {
   return postJson('/api/forge-region', { originalDataUrl, selection, prompt, model });
-}
-
-export async function inpaintBattlemapApi({ originalDataUrl, maskDataUrl, prompt, model }) {
-  return postJson('/api/inpaint', { originalDataUrl, maskDataUrl, prompt, model });
-}
-
-/** `spanStart`/`spanEnd` (px along the expanded edge) limit the new strip to part of that side. */
-export async function outpaintBattlemapApi({ originalDataUrl, direction, extensionPrompt, expandAmount, spanStart, spanEnd, model }) {
-  return postJson('/api/outpaint', { originalDataUrl, direction, extensionPrompt, expandAmount, spanStart, spanEnd, model });
 }
 
 /**

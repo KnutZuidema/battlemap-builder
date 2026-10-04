@@ -301,6 +301,7 @@ export default function App() {
 
       setMapImage(res.imageDataUrl);
       pushHistoryState(res.imageDataUrl);
+      addMapCost(res.usage || res.debug?.usage, true);
       pushDebugLog('GENERATE', prompt, res, startTimeMs);
       confetti({ particleCount: 55, spread: 65, origin: { y: 0.8 } });
     } catch (err) {

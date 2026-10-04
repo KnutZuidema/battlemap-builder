@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+# Resolve node_modules in linked worktrees if only installed in the primary checkout
+GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "")"
+if [ -n "$GIT_COMMON_DIR" ] && [ "$GIT_COMMON_DIR" != ".git" ]; then
+  MAIN_ROOT="$(cd "$GIT_COMMON_DIR/.." && pwd)"
+  if [ ! -d "./node_modules" ] && [ -d "$MAIN_ROOT/node_modules" ]; then
+    ln -s "$MAIN_ROOT/node_modules" ./node_modules 2>/dev/null || true
+  fi
+  if [ ! -d "./client/node_modules" ] && [ -d "$MAIN_ROOT/client/node_modules" ]; then
+    ln -s "$MAIN_ROOT/client/node_modules" ./client/node_modules 2>/dev/null || true
+  fi
+  if [ ! -d "./server/node_modules" ] && [ -d "$MAIN_ROOT/server/node_modules" ]; then
+    ln -s "$MAIN_ROOT/server/node_modules" ./server/node_modules 2>/dev/null || true
+  fi
+fi
+
+echo "Running pre-commit checks (lint & tests)..."
+npm run lint
+npm test

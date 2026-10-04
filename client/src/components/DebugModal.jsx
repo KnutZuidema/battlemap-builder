@@ -148,7 +148,14 @@ export default function DebugModal({ isOpen, onClose, debugLogs, onClearLogs }) 
                           <div className="w-px h-4 bg-slate-800"></div>
                           <div>
                             <span className="text-slate-500">Cost:</span>{' '}
-                            <span className="text-slate-300 font-mono">${activeLog.usage.cost.toFixed(4)}</span>
+                            <span className="text-slate-300 font-mono">
+                              ${activeLog.usage.cost.toFixed(4)}
+                              {(typeof activeLog.usage.promptCost === 'number' || typeof activeLog.usage.completionCost === 'number') && (
+                                <span className="text-[10px] text-slate-500 ml-1">
+                                  (${Number(activeLog.usage.promptCost || 0).toFixed(4)} in / ${Number(activeLog.usage.completionCost || 0).toFixed(4)} out)
+                                </span>
+                              )}
+                            </span>
                           </div>
                         </>
                       )}

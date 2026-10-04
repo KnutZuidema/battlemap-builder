@@ -31,6 +31,11 @@ const MODEL_CATALOG = [
     aliases: ['nanobanana 2 flash', 'nanobanana-2-flash', 'gemini-3.1-flash-image', 'flash'],
     provider: 'openrouter',
     vision: true,
+    pricing: {
+      inputPerMillion: 0.50,
+      outputPerMillion: 3.00,
+      imageOutput: 0.00006
+    },
     costHint: '$0.50/M in · $3/M out (~$0.07 per map, edit or expansion)',
     note: 'Google: Nano Banana 2 (Gemini 3.1 Flash Image). Fast, high-quality painted battlemap generation; supports mask edits.'
   },
@@ -41,6 +46,11 @@ const MODEL_CATALOG = [
     aliases: ['nanobanana 2 flash lite', 'nanobanana-2-flash-lite', 'gemini-3.1-flash-lite-image', 'flash-lite', 'lite'],
     provider: 'openrouter',
     vision: true,
+    pricing: {
+      inputPerMillion: 0.25,
+      outputPerMillion: 1.50,
+      imageOutput: 0.00003
+    },
     costHint: '$0.25/M in · $1.50/M out (~$0.035 per map, edit or expansion)',
     note: 'Google: Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image). Ultra-fast, lightweight image generation; supports mask edits.'
   }
@@ -93,11 +103,21 @@ function configuredModel(requestedModelId) {
   return MODEL_CATALOG.find((entry) => isProviderConfigured(entry.provider)) || declared;
 }
 
+function getModelPricing(modelId) {
+  const model = findModel(modelId) || configuredModel(modelId);
+  return model?.pricing || {
+    inputPerMillion: 0.50,
+    outputPerMillion: 3.00,
+    imageOutput: 0.00006
+  };
+}
+
 module.exports = {
   DEFAULT_MODEL_ID,
   MODEL_CATALOG,
   providerKeyName,
   isProviderConfigured,
   configuredModel,
-  findModel
+  findModel,
+  getModelPricing
 };

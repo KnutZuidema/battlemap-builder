@@ -11,6 +11,7 @@ import {
   Sparkles,
   Zap
 } from 'lucide-react';
+import CostTracker from './CostTracker';
 
 const DEFAULT_MODELS = [
   {
@@ -45,7 +46,8 @@ export default function Navbar({
   canUndo,
   canRedo,
   mapTitle,
-  setMapTitle
+  setMapTitle,
+  mapCost
 }) {
   const fileInputRef = useRef(null);
 
@@ -146,7 +148,11 @@ export default function Navbar({
 
       {/* Actions & Tools */}
       <div className="flex items-center gap-2">
-        {/* Undo / Redo Group */}
+        {/* Persistent Cost Tracker */}
+        <CostTracker mapCost={mapCost} />
+
+        <span className="w-px h-6 bg-white/[0.08] mx-0.5 hidden sm:block" />
+
         <div className="flex items-center gap-0.5 bg-black/25 p-1 rounded-xl border border-white/[0.07]">
           <button onClick={onUndo} disabled={!canUndo} title="Undo" className="icon-btn p-1.5">
             <RotateCcw className="w-3.5 h-3.5" />

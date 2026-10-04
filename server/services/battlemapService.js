@@ -2,16 +2,16 @@ const sharp = require('sharp');
 const {
   dataUrlToBuffer,
   bufferToDataUrl,
-  prepareOutpaintCanvas,
-  featheredOutpaintComposite,
-  buildInpaintGuide,
-  compositeInpaintRegion
+  measureMaskBounds,
+  prepareRegionCanvas,
+  compositeRegion
 } = require('./imageProcessor');
 const {
   IMAGE_PROMPTS,
   buildBattlemapPrompt,
   buildInpaintPrompt,
-  buildOutpaintPrompt
+  buildOutpaintPrompt,
+  buildForgeRegionPrompt
 } = require('./prompts');
 const {
   providerKeyName,
@@ -132,93 +132,46 @@ async function generateBattlemap({ prompt, width = 1024, height = 1024, model })
 }
 
 /**
- * Inpainting / detail modification: the model receives the map, the tinted guide and the binary mask,
- * and only the masked bounding box of its render is composited back — every pixel outside it keeps
- * its original bytes. The original map is never silently returned as if the edit had happened.
+ * Unified region modification and canvas extension:
+ * Extracts a focused context window around the selection, runs the vision model
+ * with context/guide/mask images, and composites the render back with zero bleed outside
+ * the selection and a soft 20px inward seam feather against preserved map tiles.
  */
-async function inpaintBattlemap({ originalDataUrl, maskDataUrl, prompt, model }) {
+async function forgeRegion({ originalDataUrl, selection, prompt, model }) {
   const entry = configuredModel(model);
 
   if (!entry.vision) {
     throw providerFailure(
-      `The configured model ${entry.label} (${entry.id}) cannot receive images, so it cannot run a masked detail edit. Point DEFAULT_MODEL_ID in server/services/modelCatalog.js at a vision-capable model.`,
+      `The configured model ${entry.label} (${entry.id}) cannot receive images, so it cannot run a region edit. Point DEFAULT_MODEL_ID in server/services/modelCatalog.js at a vision-capable model.`,
       { code: 'MODEL_NOT_VISION_CAPABLE', provider: entry.provider }
     );
   }
 
-  const systemInstruction = IMAGE_PROMPTS.INPAINT;
-  const userPromptText = buildInpaintPrompt(prompt);
-  const fullPromptPayload = `${systemInstruction}\n\n[USER INPAINT REQUEST]\n${userPromptText}`;
+  const systemInstruction = IMAGE_PROMPTS.FORGE_REGION;
+  const prepared = await prepareRegionCanvas(originalDataUrl, selection, 512);
+  const { dimensions, contextBuffer, guideBuffer, maskBuffer } = prepared;
+  const { contextW, contextH } = dimensions;
 
-  const origBuf = dataUrlToBuffer(originalDataUrl);
-  const maskBuf = dataUrlToBuffer(maskDataUrl);
-  const { width, height } = await sharp(origBuf).metadata();
-
-  const guideBuffer = await buildInpaintGuide(origBuf, maskBuf, width, height);
-  const maskPngBuffer = await sharp(maskBuf)
-    .resize(width, height, { fit: 'fill' })
-    .greyscale()
-    .png()
-    .toBuffer();
-
-  const result = await runModel(entry, {
-    systemInstruction,
-    userPromptText: prompt,
-    fullPromptPayload,
-    images: [
-      { label: `Image 1 — current battlemap at ${width}x${height} (authoritative pixels)`, buffer: origBuf },
-      { label: 'Image 2 — the same battlemap with the editable region tinted red', buffer: guideBuffer },
-      { label: 'Image 3 — binary mask of the editable region, white = edit, black = preserve', buffer: maskPngBuffer }
-    ],
-    width,
-    height
-  });
-
-  const imageDataUrl = await compositeInpaintRegion(origBuf, result.imageBuffer, maskBuf, width, height, INPAINT_FEATHER_PX);
-
-  return {
-    imageDataUrl,
-    debug: result.debug,
-    usage: result.debug?.usage || null,
-    cost: result.debug?.usage?.cost ?? null
-  };
-}
-
-/**
- * Outpainting / canvas extension. The model receives the padded canvas so it can see what has to be
- * filled; the original map is feathered over the seam, and the canvas is never padded with
- * procedurally generated terrain.
- */
-async function outpaintBattlemap({ originalDataUrl, direction = 'east', extensionPrompt = '', expandAmount = 512, span = null, model }) {
-  const entry = configuredModel(model);
-  const systemInstruction = IMAGE_PROMPTS.OUTPAINT;
-
-  const prepared = await prepareOutpaintCanvas(originalDataUrl, direction, expandAmount, span);
-  const { targetRegion, modelDimensions } = prepared.dimensions;
-  const { modelW, modelH } = modelDimensions;
-  const resolvedDirection = prepared.dimensions.direction;
-
-  const userPromptText = extensionPrompt || `Expand canvas towards ${resolvedDirection.toUpperCase()}`;
-  const fullPromptPayload = `${systemInstruction}\n\n[OUTPAINT DIRECTION & USER REQUEST]\n${buildOutpaintPrompt({
-    direction: resolvedDirection,
-    extensionPrompt,
-    width: modelW,
-    height: modelH,
-    region: targetRegion
-  })}`;
+  const userPromptText = prompt || 'Generate seamless, style-matched battlemap terrain in the target region';
+  const fullPromptPayload = `${systemInstruction}\n\n[USER REGION FORGE REQUEST]\n${buildForgeRegionPrompt(
+    prompt,
+    selection,
+    contextW,
+    contextH
+  )}`;
 
   const images = [
     {
-      label: `Focused battlemap canvas crop (${modelW}x${modelH} px) containing existing map crop and empty expansion region`,
-      buffer: dataUrlToBuffer(prepared.extendedImage)
+      label: `Image 1 — Focused battlemap context window (${contextW}x${contextH} px)`,
+      buffer: contextBuffer
     },
     {
-      label: 'Focused crop canvas with the selected expansion box highlighted in cyan tint',
-      buffer: dataUrlToBuffer(prepared.guideImage)
+      label: 'Image 2 — Context window with target region highlighted in cyan tint',
+      buffer: guideBuffer
     },
     {
-      label: 'Binary mask of the expansion box (WHITE = area to generate new map terrain inside, BLACK = keep strictly unchanged/blank)',
-      buffer: dataUrlToBuffer(prepared.maskImage)
+      label: 'Image 3 — Binary mask (WHITE = target region to forge, BLACK = preserve strictly unchanged)',
+      buffer: maskBuffer
     }
   ];
 
@@ -227,24 +180,68 @@ async function outpaintBattlemap({ originalDataUrl, direction = 'east', extensio
     userPromptText,
     fullPromptPayload,
     images,
-    width: modelW,
-    height: modelH
+    width: contextW,
+    height: contextH
   });
 
   const origBuffer = dataUrlToBuffer(originalDataUrl);
-  const finalStitchedDataUrl = await featheredOutpaintComposite(origBuffer, result.imageBuffer, prepared.dimensions, 48);
+  const finalStitchedDataUrl = await compositeRegion(origBuffer, result.imageBuffer, dimensions, 20);
 
   return {
     imageDataUrl: finalStitchedDataUrl,
-    dimensions: prepared.dimensions,
+    dimensions,
     debug: result.debug,
     usage: result.debug?.usage || null,
     cost: result.debug?.usage?.cost ?? null
   };
 }
 
+/**
+ * Inpainting / detail modification (delegates to forgeRegion).
+ */
+async function inpaintBattlemap({ originalDataUrl, maskDataUrl, prompt, model }) {
+  const origBuf = dataUrlToBuffer(originalDataUrl);
+  const maskBuf = dataUrlToBuffer(maskDataUrl);
+  const { width, height } = await sharp(origBuf).metadata();
+  const bounds = await measureMaskBounds(maskBuf, width, height);
+  const selection = bounds || { x: 0, y: 0, width, height };
+  return forgeRegion({ originalDataUrl, selection, prompt, model });
+}
+
+/**
+ * Outpainting / canvas extension (delegates to forgeRegion).
+ */
+async function outpaintBattlemap({ originalDataUrl, direction = 'east', extensionPrompt = '', expandAmount = 512, span = null, model }) {
+  const origBuf = dataUrlToBuffer(originalDataUrl);
+  const { width: origW, height: origH } = await sharp(origBuf).metadata();
+  const dir = String(direction || 'east').toLowerCase();
+  const depth = Number(expandAmount) || 512;
+
+  let selection;
+  if (dir === 'north') {
+    const sStart = span ? span.start : 0;
+    const sLen = span ? (span.end - span.start) : origW;
+    selection = { x: sStart, y: -depth, width: sLen, height: depth };
+  } else if (dir === 'south') {
+    const sStart = span ? span.start : 0;
+    const sLen = span ? (span.end - span.start) : origW;
+    selection = { x: sStart, y: origH, width: sLen, height: depth };
+  } else if (dir === 'west') {
+    const sStart = span ? span.start : 0;
+    const sLen = span ? (span.end - span.start) : origH;
+    selection = { x: -depth, y: sStart, width: depth, height: sLen };
+  } else {
+    const sStart = span ? span.start : 0;
+    const sLen = span ? (span.end - span.start) : origH;
+    selection = { x: origW, y: sStart, width: depth, height: sLen };
+  }
+
+  return forgeRegion({ originalDataUrl, selection, prompt: extensionPrompt, model });
+}
+
 module.exports = {
   generateBattlemap,
   inpaintBattlemap,
-  outpaintBattlemap
+  outpaintBattlemap,
+  forgeRegion
 };

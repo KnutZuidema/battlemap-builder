@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Sparkles, Layers, Paintbrush, Expand, Clock, Wand2 } from 'lucide-react';
+import { Sparkles, Crop, Wand2, Layers, Clock } from 'lucide-react';
 import { formatTimer } from '../utils/format';
 
 /**
@@ -93,8 +93,8 @@ export default function PromptHero({ prompt, setPrompt, onGenerate, isGenerating
         <div className="mt-6 grid grid-cols-3 gap-2 text-left">
           {[
             { icon: Sparkles, label: 'Describe', desc: 'Text prompt' },
-            { icon: Paintbrush, label: 'Edit', desc: 'Right-drag a mask' },
-            { icon: Expand, label: 'Expand', desc: 'Click a + at an edge' }
+            { icon: Crop, label: 'Select', desc: 'Right-drag 64px box' },
+            { icon: Wand2, label: 'Forge', desc: 'Inpaint or expand' }
           ].map((step, i) => {
             const Icon = step.icon;
             return (

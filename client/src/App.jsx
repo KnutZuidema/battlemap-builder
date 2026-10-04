@@ -34,7 +34,7 @@ const NO_TELEMETRY_PROMPT = 'Not captured — the server returned no prompt tele
 export default function App() {
   const [isDebugModalOpen, setIsDebugModalOpen] = useState(false);
   const [isWikiDrawerOpen, setIsWikiDrawerOpen] = useState(false);
-
+  const [wikiContext, setWikiContext] = useState(null);
   // Debug Log History State
   const [debugLogs, setDebugLogs] = useState([]);
 
@@ -119,11 +119,13 @@ export default function App() {
       return updated;
     });
   };
-
-  const handleSelectWikiPrompt = ({ title, prompt: newPrompt, usage, articleTitle }) => {
+  const handleSelectWikiPrompt = ({ title, prompt: newPrompt, usage, articleTitle, articlePath }) => {
     if (newPrompt) setPrompt(newPrompt);
     if (title) setMapTitle(articleTitle ? `${articleTitle}: ${title}` : title);
     if (usage) addMapCost(usage);
+    if (articlePath) {
+      setWikiContext({ path: articlePath, title: articleTitle || title });
+    }
     setIsWikiDrawerOpen(false);
   };
   // Map & Canvas State
@@ -518,6 +520,7 @@ export default function App() {
       historyIndex: history.length > 0 ? historyIndex : (mapImage ? 0 : -1),
       cost: mapCost,
       totalCost: mapCost.totalCost,
+      wikiContext: wikiContext || null,
       version: '2.0'
     };
     const blob = new Blob([JSON.stringify(projectData, null, 2)], { type: 'application/json' });
@@ -556,7 +559,7 @@ export default function App() {
       setIsRetryPillDismissed(false);
     }
     if (data.title) setMapTitle(data.title);
-
+    setWikiContext(data.wikiContext || null);
     // Restore cost from save model
     if (data.cost && typeof data.cost === 'object') {
       const restored = {
@@ -601,6 +604,7 @@ export default function App() {
       setRetryContext(null);
       setIsRetryPillDismissed(false);
       setMapCost(DEFAULT_MAP_COST);
+      setWikiContext(null);
       try {
         localStorage.removeItem('dungeon_forge_map_cost');
       } catch {
@@ -634,8 +638,8 @@ export default function App() {
         mapTitle={mapTitle}
         setMapTitle={setMapTitle}
         mapCost={mapCost}
+        wikiContext={wikiContext}
       />
-
       {/* Workspace: the prompt while there is no map, the canvas once there is */}
       <div className="flex flex-1 overflow-hidden relative z-10">
         {mapImage ? (
@@ -665,6 +669,11 @@ export default function App() {
                 busyLabel="Forging Region…"
                 confirmLabel="Forge Region"
                 allowEmpty
+                wikiContext={wikiContext}
+                onOpenWikiDrawer={() => setIsWikiDrawerOpen(true)}
+                mapDimensions={{ width: 1024, height: 1024 }}
+                mapTitle={mapTitle}
+                basePrompt={prompt}
               />
             )}
             // Timer & Shimmer Props
@@ -777,6 +786,8 @@ export default function App() {
         isOpen={isWikiDrawerOpen}
         onClose={() => setIsWikiDrawerOpen(false)}
         onSelectPrompt={handleSelectWikiPrompt}
+        activeWikiContext={wikiContext}
+        onSetActiveWikiContext={setWikiContext}
       />
     </div>
   );

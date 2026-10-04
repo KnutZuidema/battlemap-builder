@@ -104,12 +104,3 @@ export async function suggestWikiRegionForgeApi({ articlePath, selection, mapDim
     userIntent
   });
 }
-
-export async function createWikiArticleApi({ relPath, content, title, overwrite }) {
-  return postJson('/api/wiki/article', {
-    relPath,
-    content,
-    title,
-    overwrite
-  });
-}

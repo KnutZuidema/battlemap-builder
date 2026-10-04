@@ -4,7 +4,7 @@ const path = require('path');
 const dotenv = require('dotenv');
 const { generateBattlemap, forgeRegion } = require('./services/battlemapService');
 const { isProviderConfigured, MODEL_CATALOG, DEFAULT_MODEL_ID } = require('./services/modelCatalog');
-const { getWikiTree, getWikiArticle, createWikiArticle } = require('./services/wikiService');
+const { getWikiTree, getWikiArticle } = require('./services/wikiService');
 const { suggestBattlemaps, generateCustomBattlemapPrompt, suggestRegionForging } = require('./services/wikiPrompter');
 
 // The server config lives next to this file; `process.cwd()` is the repo root under `npm run dev`.
@@ -176,38 +176,6 @@ app.post('/api/wiki/regions/suggest', async (req, res) => {
   }
 });
 
-/**
- * Creates or updates a wiki markdown article
- */
-app.post('/api/wiki/article', async (req, res) => {
-  try {
-    const { relPath, content, title, overwrite } = req.body;
-    if (!relPath || typeof relPath !== 'string' || content === undefined || content === null || typeof content !== 'string') {
-      return res.status(400).json({
-        error: 'Missing relPath or content in request body',
-        code: 'INVALID_PARAMETERS'
-      });
-    }
-    console.log(`[API /wiki/article] Creating article at "${relPath}"`);
-    const article = await createWikiArticle({ relPath, content, title, overwrite });
-    res.json({
-      ok: true,
-      article: {
-        path: article.path,
-        title: article.title
-      }
-    });
-  } catch (err) {
-    console.error('[API /api/wiki/article error]', err.message);
-    const status = err.code === 'ACCESS_DENIED' ? 403
-      : (err.code === 'ARTICLE_ALREADY_EXISTS' ? 409
-      : (err.code === 'INVALID_PARAMETERS' || err.code === 'INVALID_PATH' ? 400 : 500));
-    res.status(status).json({
-      error: err.message,
-      code: err.code || 'WIKI_ARTICLE_FAILED'
-    });
-  }
-});
 
 /**
  * No map producer has a fallback: failures carry `telemetry` (prompts, model attempt trail, raw

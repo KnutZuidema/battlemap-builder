@@ -269,54 +269,10 @@ async function getWikiArticle(relPath) {
     parentRegion
   };
 }
-async function createWikiArticle({ relPath, content, title, overwrite = false } = {}) {
-  if (!relPath || typeof relPath !== 'string' || !relPath.trim() ||
-      content === undefined || content === null || typeof content !== 'string') {
-    const err = new Error('Invalid parameters: relPath and content are required strings');
-    err.code = 'INVALID_PARAMETERS';
-    throw err;
-  }
-  if (title !== undefined && (typeof title !== 'string' || !title.trim())) {
-    const err = new Error('Invalid parameters: title must be a non-empty string when provided');
-    err.code = 'INVALID_PARAMETERS';
-    throw err;
-  }
-
-  let trimmedPath = relPath.trim();
-  if (!trimmedPath.endsWith('.md')) {
-    trimmedPath += '.md';
-  }
-
-  const safePath = resolveSafeWikiPath(trimmedPath);
-  const root = getWikiRoot();
-  const normalizedRelPath = path.relative(root, safePath).replace(/\\/g, '/');
-
-  if (fs.existsSync(safePath) && !overwrite) {
-    const err = new Error(`Article already exists at ${normalizedRelPath}`);
-    err.code = 'ARTICLE_ALREADY_EXISTS';
-    throw err;
-  }
-
-  await fs.promises.mkdir(path.dirname(safePath), { recursive: true });
-  await fs.promises.writeFile(safePath, content, 'utf8');
-
-  const defaultTitle = (title && title.trim()) || path.basename(safePath, '.md');
-  const finalTitle = extractMarkdownTitle(content, defaultTitle);
-
-  return {
-    ok: true,
-    path: normalizedRelPath,
-    title: finalTitle,
-    defaultTitle
-  };
-}
-
-
 module.exports = {
   getWikiRoot,
   resolveSafeWikiPath,
   extractMarkdownTitle,
   getWikiTree,
-  getWikiArticle,
-  createWikiArticle
+  getWikiArticle
 };

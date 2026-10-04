@@ -418,5 +418,6 @@ module.exports = {
   FALLBACK_MODEL,
   suggestBattlemaps,
   generateCustomBattlemapPrompt,
-  suggestRegionForging
+  suggestRegionForging,
+  parseUsage
 };

@@ -41,7 +41,7 @@ export default function BattlemapCanvas({
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const [lastPanPos, setLastPanPos] = useState({ x: 0, y: 0 });
-
+  const hasFittedRef = useRef(false);
   // Loaded map image element
   const [loadedImage, setLoadedImage] = useState(null);
 
@@ -83,21 +83,33 @@ export default function BattlemapCanvas({
   useEffect(() => {
     const updateSize = () => {
       if (containerRef.current) {
+        const cw = containerRef.current.offsetWidth;
+        const ch = containerRef.current.offsetHeight;
         setDimensions({
-          width: containerRef.current.offsetWidth,
-          height: containerRef.current.offsetHeight
+          width: cw,
+          height: ch
         });
+        if (!hasFittedRef.current && loadedImage && cw > 0 && ch > 0) {
+          hasFittedRef.current = true;
+          const fit = Math.min((cw * 0.86) / loadedImage.width, (ch * 0.86) / loadedImage.height, 1.6);
+          setScale(fit);
+          setPosition({
+            x: (cw - loadedImage.width * fit) / 2,
+            y: (ch - loadedImage.height * fit) / 2
+          });
+        }
       }
     };
     updateSize();
     window.addEventListener('resize', updateSize);
     return () => window.removeEventListener('resize', updateSize);
-  }, []);
+  }, [loadedImage]);
 
-  // Load Map Image when `mapImage` dataUrl changes, and fit it to the viewport
+  // Load Map Image when `mapImage` dataUrl changes, and fit it to the viewport on initial load
   useEffect(() => {
     if (!mapImage) {
       setLoadedImage(null);
+      hasFittedRef.current = false;
       return;
     }
     const img = new window.Image();
@@ -105,15 +117,18 @@ export default function BattlemapCanvas({
     img.src = mapImage;
     img.onload = () => {
       setLoadedImage(img);
-      if (containerRef.current) {
+      if (!hasFittedRef.current && containerRef.current) {
         const cw = containerRef.current.offsetWidth;
         const ch = containerRef.current.offsetHeight;
-        const fit = Math.min((cw * 0.86) / img.width, (ch * 0.86) / img.height, 1.6);
-        setScale(fit);
-        setPosition({
-          x: (cw - img.width * fit) / 2,
-          y: (ch - img.height * fit) / 2
-        });
+        if (cw > 0 && ch > 0) {
+          hasFittedRef.current = true;
+          const fit = Math.min((cw * 0.86) / img.width, (ch * 0.86) / img.height, 1.6);
+          setScale(fit);
+          setPosition({
+            x: (cw - img.width * fit) / 2,
+            y: (ch - img.height * fit) / 2
+          });
+        }
       }
     };
   }, [mapImage]);

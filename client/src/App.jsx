@@ -135,6 +135,7 @@ export default function App() {
   };
   // Map & Canvas State
   const [mapImage, setMapImage] = useState(null);
+  const [mapSessionId, setMapSessionId] = useState(0);
 
   // Interactive Features & Active Mode State
   const [activeMode, setActiveMode] = useState('edit'); // 'edit' | 'play'
@@ -603,6 +604,7 @@ export default function App() {
     if (!data) return;
     if (data.mapImage) {
       setMapImage(data.mapImage);
+      setMapSessionId((prev) => prev + 1);
       const hasValidHistory = Array.isArray(data.history)
         && data.history.length > 0
         && data.history.every((item) => item && typeof item.mapImage === 'string');
@@ -670,6 +672,7 @@ export default function App() {
   const handleClearCanvas = () => {
     if (window.confirm('Start a new map? This clears the current one.')) {
       setMapImage(null);
+      setMapSessionId((prev) => prev + 1);
       setFeatures([]);
       setSelectedFeatureId(null);
       setActiveMode('edit');
@@ -859,6 +862,7 @@ export default function App() {
       <div className="flex flex-1 overflow-hidden relative z-10">
         {mapImage ? (
           <BattlemapCanvas
+            key={mapSessionId}
             mapImage={mapImage}
             showGrid={showGrid}
             onToggleGrid={() => setShowGrid((prev) => !prev)}

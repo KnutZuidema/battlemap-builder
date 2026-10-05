@@ -33,6 +33,18 @@ System & Forge Directives:
 5. For unpainted/void areas inside the mask: generate new seamless terrain continuing walls, floor tiles, and geometry from the surrounding context.
 6. For existing map areas inside the mask: modify, add, or replace details as requested by the user prompt while matching adjacent lighting, tile scale, and style.
 7. The cyan guide in image 2 is for location guidance only and must never appear in the output.
+8. Return only the image — no commentary.`,
+  FORGE_REGION_HIGHLIGHTED: `You are a 2D TTRPG battlemap region modification and canvas extension engine.
+You are given ONE image: the battlemap context window with the target region highlighted by a semi-transparent cyan tint and border.
+
+System & Forge Directives:
+1. Camera & Perspective: Strictly flat 2D architectural plan view, zero perspective distortion. Walls must remain flat horizontal cross-sections (poché walls) with zero visible vertical wall faces or 3D side perspective.
+2. Spatial Scale & Gridless Constraint: Maintain exact scale of 64 pixels = 5 feet (corridors 64-128px, doors 64px). Strictly GRIDLESS: do not draw any grid lines, coordinate lines, or grid overlays inside the target region.
+3. Return ONE image matching the exact pixel dimensions of the input image.
+4. Strictly generate terrain INSIDE the highlighted target region; keep everything outside the highlighted region unchanged.
+5. For unpainted/void areas inside the highlighted region: generate new seamless terrain continuing walls, floor tiles, and geometry from the surrounding context.
+6. For existing map areas inside the highlighted region: modify, add, or replace details as requested by the user prompt while matching adjacent lighting, tile scale, and style.
+7. The cyan highlight box is for location guidance only and must never appear in the output.
 8. Return only the image — no commentary.`
 };
 
@@ -53,8 +65,20 @@ function buildForgeRegionPrompt(userPrompt, selection, contextW, contextH) {
   return `Target region${selInfo}: ${desc}. Output context frame: ${contextW}x${contextH} pixels, scale: 64px = 5ft, strictly gridless.`;
 }
 
+/**
+ * Returns the system instruction matching the configured forge image mode.
+ * Defaults to 'highlighted-only'.
+ */
+function getForgeRegionSystemPrompt(mode = 'highlighted-only') {
+  if (mode === 'all-three' || mode === 'all' || mode === 'three') {
+    return IMAGE_PROMPTS.FORGE_REGION;
+  }
+  return IMAGE_PROMPTS.FORGE_REGION_HIGHLIGHTED;
+}
+
 module.exports = {
   IMAGE_PROMPTS,
   buildBattlemapPrompt,
-  buildForgeRegionPrompt
+  buildForgeRegionPrompt,
+  getForgeRegionSystemPrompt
 };

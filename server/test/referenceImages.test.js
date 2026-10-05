@@ -5,7 +5,7 @@ const {
   REFERENCE_DEFINITIONS,
   getReferenceImagesForPrompt
 } = require('../services/referenceImages');
-const { IMAGE_PROMPTS, buildBattlemapPrompt } = require('../services/prompts');
+const { IMAGE_PROMPTS, buildBattlemapPrompt, getForgeRegionSystemPrompt } = require('../services/prompts');
 
 test('REFERENCE_DEFINITIONS contains curated battlemap references', () => {
   assert.strictEqual(REFERENCE_DEFINITIONS.length, 4);
@@ -57,6 +57,15 @@ test('IMAGE_PROMPTS enforce flat 2D architectural plan view, poché wall cross-s
   assert.match(IMAGE_PROMPTS.FORGE_REGION, /gridless/i);
   assert.match(IMAGE_PROMPTS.FORGE_REGION, /64 pixels = 5 feet/i);
 
+  assert.match(IMAGE_PROMPTS.FORGE_REGION_HIGHLIGHTED, /architectural plan view/i);
+  assert.match(IMAGE_PROMPTS.FORGE_REGION_HIGHLIGHTED, /poché/i);
+  assert.match(IMAGE_PROMPTS.FORGE_REGION_HIGHLIGHTED, /gridless/i);
+  assert.match(IMAGE_PROMPTS.FORGE_REGION_HIGHLIGHTED, /64 pixels = 5 feet/i);
+  assert.match(IMAGE_PROMPTS.FORGE_REGION_HIGHLIGHTED, /ONE image/i);
+
+  assert.strictEqual(getForgeRegionSystemPrompt('highlighted-only'), IMAGE_PROMPTS.FORGE_REGION_HIGHLIGHTED);
+  assert.strictEqual(getForgeRegionSystemPrompt('all-three'), IMAGE_PROMPTS.FORGE_REGION);
+  assert.strictEqual(getForgeRegionSystemPrompt(), IMAGE_PROMPTS.FORGE_REGION_HIGHLIGHTED);
   const prompt = buildBattlemapPrompt('A grand library');
   assert.match(prompt, /poché/i);
   assert.match(prompt, /architectural floor plan/i);

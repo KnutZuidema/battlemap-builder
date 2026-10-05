@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import {
   X,
   DoorClosed,
-  DoorOpen,
   Hammer,
   Layers,
   Wand2,
@@ -41,20 +40,21 @@ export default function FeatureInspector({
   onForgeState,
   onDelete,
   isForgingState = false,
-  onOpenWikiArticle = null
+  _onOpenWikiArticle = null
 }) {
-  if (!feature) return null;
-
   const [isEditingLabel, setIsEditingLabel] = useState(false);
-  const [labelValue, setLabelValue] = useState(feature.label);
-  const [altPrompt, setAltPrompt] = useState(feature.suggestedAltPrompt || '');
+  const [labelValue, setLabelValue] = useState(feature?.label || '');
+  const [altPrompt, setAltPrompt] = useState(feature?.suggestedAltPrompt || '');
   const [showReforgePrompt, setShowReforgePrompt] = useState(false);
 
   useEffect(() => {
-    setLabelValue(feature.label);
-    setAltPrompt(feature.suggestedAltPrompt || '');
-  }, [feature.id, feature.label, feature.suggestedAltPrompt]);
+    if (feature) {
+      setLabelValue(feature.label || '');
+      setAltPrompt(feature.suggestedAltPrompt || '');
+    }
+  }, [feature?.id, feature?.label, feature?.suggestedAltPrompt]);
 
+  if (!feature) return null;
   const config = TYPE_CONFIG[feature.type] || {
     label: feature.type,
     icon: Sparkles,

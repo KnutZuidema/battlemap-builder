@@ -8,7 +8,6 @@ import {
   BookOpen,
   Sparkles,
   Wand2,
-  ExternalLink,
   RotateCcw
 } from 'lucide-react';
 
@@ -38,7 +37,7 @@ export default function PlayFeatureCard({
   onClose,
   onToggleState,
   onSwitchToEdit,
-  onOpenWikiArticle
+  _onOpenWikiArticle
 }) {
   if (!feature) return null;
 

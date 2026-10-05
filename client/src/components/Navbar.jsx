@@ -116,7 +116,7 @@ export default function Navbar({
   return (
     <header className="h-[3.75rem] border-b border-white/[0.07] glass-panel px-3 sm:px-4 flex items-center justify-between gap-2 shrink-0 z-30 relative select-none">
       {/* Brand & Map Title */}
-      <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
+      <div className="flex items-center gap-2.5 sm:gap-3.5 shrink-0">
         <div className="relative shrink-0">
           <div className="absolute inset-0 rounded-xl bg-amber-500/40 blur-lg" />
           <div className="relative w-9 h-9 rounded-xl bg-gradient-to-br from-amber-300 via-amber-500 to-amber-700 flex items-center justify-center shadow-lg shadow-amber-900/40 border border-amber-300/40">
@@ -132,66 +132,81 @@ export default function Navbar({
             <p className="mt-1 text-[9px] font-mono uppercase tracking-[0.28em] text-slate-500">Battlemap Studio</p>
           </div>
 
-          <span className="hidden lg:block w-px h-7 bg-white/[0.08]" />
+          <span className="hidden 2xl:block w-px h-7 bg-white/[0.08]" />
 
           <input
             value={mapTitle}
             onChange={(e) => setMapTitle(e.target.value)}
             spellCheck={false}
             aria-label="Map title"
-            className="hidden lg:block w-28 xl:w-48 bg-transparent border border-transparent hover:border-white/[0.08] focus:border-amber-400/40 focus:bg-black/30 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-200 outline-none transition truncate"
+            className="hidden 2xl:block w-36 2xl:w-48 bg-transparent border border-transparent hover:border-white/[0.08] focus:border-amber-400/40 focus:bg-black/30 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-200 outline-none transition truncate"
           />
         </div>
       </div>
 
-      {/* Center Controls: Mode Toggle & Feature Detection */}
-      <div className="flex items-center gap-2">
-        {hasMap && (
-          <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/[0.08] shadow-inner shadow-black/40">
-            <button
-              type="button"
-              onClick={() => onSetMode && onSetMode('edit')}
-              title="Edit Mode: Inspect, forge, and adjust interactive map features and regions"
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
-                activeMode === 'edit'
-                  ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-500/40 shadow-sm shadow-cyan-950/50'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-transparent'
-              }`}
-            >
-              <Wand2 className={`w-3.5 h-3.5 ${activeMode === 'edit' ? 'text-cyan-400' : 'text-slate-500'}`} />
-              <span>Edit</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => onSetMode && onSetMode('play')}
-              title="Play Mode: Tactical gameplay mode with seamless interactive feature triggers"
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
-                activeMode === 'play'
-                  ? 'bg-amber-500/20 text-amber-200 border border-amber-500/40 shadow-sm shadow-amber-950/50'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-transparent'
-              }`}
-            >
-              <Gamepad2 className={`w-3.5 h-3.5 ${activeMode === 'play' ? 'text-amber-400' : 'text-slate-500'}`} />
-              <span>Play</span>
-            </button>
-          </div>
-        )}
+      {/* Center Controls: Mode Toggle, Feature Detection & Model Picker */}
+      <div className="flex items-center gap-2 shrink-0">
+        {/* Mode Toggle & Tactical Features Pill */}
+        <div className="flex items-center gap-0.5 bg-black/25 p-1 rounded-xl border border-white/[0.07]">
+          <button
+            type="button"
+            onClick={() => onSetMode && onSetMode('edit')}
+            title="Edit Mode: Inspect, forge, and adjust interactive map features and regions"
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+              activeMode === 'edit'
+                ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-500/40 shadow-sm shadow-cyan-950/50'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-transparent'
+            }`}
+          >
+            <Wand2 className={`w-3.5 h-3.5 ${activeMode === 'edit' ? 'text-cyan-400' : 'text-slate-500'}`} />
+            <span>Edit</span>
+          </button>
 
-        {hasMap && activeMode === 'edit' && (
+          <button
+            type="button"
+            onClick={() => onSetMode && onSetMode('play')}
+            disabled={!hasMap}
+            title={
+              !hasMap
+                ? 'Generate or load a battlemap to enter Play mode'
+                : 'Play Mode: Tactical gameplay mode with seamless interactive feature triggers'
+            }
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+              !hasMap
+                ? 'text-slate-500 opacity-40 cursor-not-allowed border border-transparent'
+                : activeMode === 'play'
+                ? 'bg-amber-500/20 text-amber-200 border border-amber-500/40 shadow-sm shadow-amber-950/50 cursor-pointer'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-transparent cursor-pointer'
+            }`}
+          >
+            <Gamepad2 className={`w-3.5 h-3.5 ${activeMode === 'play' ? 'text-amber-400' : 'text-slate-500'}`} />
+            <span>Play</span>
+          </button>
+
+          <span className="w-px h-3.5 bg-white/[0.08]" />
+
           <button
             type="button"
             onClick={onDetectFeatures}
-            disabled={isDetectingFeatures}
-            title="Detect doors, destructible walls, and hidden trapdoors using AI Vision"
-            className={`btn px-3 py-1.5 text-xs flex items-center gap-1.5 ${
-              featureCount > 0
-                ? 'btn-ghost text-cyan-200 border-cyan-500/30 bg-cyan-500/10 hover:bg-cyan-500/20'
-                : 'btn-ghost text-amber-300 border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20'
+            disabled={!hasMap || isDetectingFeatures || activeMode !== 'edit'}
+            title={
+              !hasMap
+                ? 'Generate or load a battlemap first to detect features'
+                : activeMode !== 'edit'
+                ? 'Switch to Edit mode to detect features'
+                : 'Detect doors, destructible walls, and hidden trapdoors using AI Vision'
+            }
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium transition-all ${
+              !hasMap || activeMode !== 'edit'
+                ? 'text-slate-500 opacity-40 cursor-not-allowed border border-transparent'
+                : featureCount > 0
+                ? 'text-cyan-200 bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 cursor-pointer'
+                : 'text-amber-300 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 cursor-pointer'
             }`}
           >
             <Sparkles className={`w-3.5 h-3.5 ${isDetectingFeatures ? 'animate-spin text-cyan-400' : 'text-amber-400'}`} />
             <span className="hidden sm:inline">
-              {isDetectingFeatures ? 'Detecting Features…' : 'Detect Features'}
+              {isDetectingFeatures ? 'Detecting…' : 'Detect Features'}
             </span>
             {featureCount > 0 && !isDetectingFeatures && (
               <span className="text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-200 px-1.5 py-0.2 rounded-full border border-cyan-500/40">
@@ -199,11 +214,10 @@ export default function Navbar({
               </span>
             )}
           </button>
-        )}
-      </div>
+        </div>
 
-      {/* Model Picker Dropdown */}
-      <div className="relative select-none shrink-0" ref={modelDropdownRef}>
+        {/* Model Picker Dropdown */}
+        <div className="relative select-none shrink-0" ref={modelDropdownRef}>
         <button
           type="button"
           onClick={() => setIsModelDropdownOpen((prev) => !prev)}
@@ -320,12 +334,13 @@ export default function Navbar({
             </div>
           </div>
         )}
+        </div>
       </div>
 
       {/* Actions & Tools */}
       <div className="flex items-center gap-2 shrink-0">
         {/* Persistent Cost Tracker */}
-        <div className="hidden lg:block">
+        <div className="hidden 2xl:block">
           <CostTracker mapCost={mapCost} />
         </div>
 
@@ -361,7 +376,7 @@ export default function Navbar({
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-slate-300 hover:text-cyan-200 hover:bg-cyan-500/15 transition-all cursor-pointer"
           >
             <Terminal className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="hidden xl:inline">Debug Logs</span>
+            <span className="hidden 2xl:inline">Debug Logs</span>
             {debugLogCount > 0 && (
               <span className="text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-200 px-1.5 rounded-full border border-cyan-500/40">
                 {debugLogCount}
@@ -377,7 +392,7 @@ export default function Navbar({
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-slate-300 hover:text-amber-200 hover:bg-amber-500/15 transition-all cursor-pointer"
           >
             <BookOpen className="w-3.5 h-3.5 text-amber-400" />
-            <span className="hidden xl:inline">World Wiki</span>
+            <span className="hidden 2xl:inline">World Wiki</span>
           </button>
 
           {wikiContext && (
@@ -410,7 +425,7 @@ export default function Navbar({
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-slate-300 hover:text-white hover:bg-white/[0.06] transition-all cursor-pointer"
           >
             <Upload className="w-3.5 h-3.5 text-slate-400" />
-            <span className="hidden xl:inline">Load</span>
+            <span className="hidden 2xl:inline">Load</span>
           </button>
           <span className="w-px h-3.5 bg-white/[0.08]" />
 
@@ -420,7 +435,7 @@ export default function Navbar({
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-slate-300 hover:text-white hover:bg-white/[0.06] transition-all cursor-pointer"
           >
             <FileJson className="w-3.5 h-3.5 text-slate-400" />
-            <span className="hidden xl:inline">Save</span>
+            <span className="hidden 2xl:inline">Save</span>
           </button>
 
           <span className="w-px h-3.5 bg-white/[0.08]" />

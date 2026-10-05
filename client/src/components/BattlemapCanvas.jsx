@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { Stage, Layer, Image as KonvaImage, Rect, Group, Shape, Text as KonvaText } from 'react-konva';
-import { ZoomIn, ZoomOut, Maximize, Move, Clock, Sparkles, Wand2, X, Crop, RefreshCw, Grid, Gamepad2 } from 'lucide-react';
+import { ZoomIn, ZoomOut, Maximize, Move, Clock, Sparkles, Wand2, X, Crop, RefreshCw, Grid, Gamepad2, Trash2 } from 'lucide-react';
 import { formatTimer } from '../utils/format';
 import {
   REGION_HANDLES,
@@ -16,6 +16,7 @@ export default function BattlemapCanvas({
   regionSelection,
   onRegionSelectionChange,
   onOpenRegionPrompt,
+  onDeleteRegion,
   renderRegionPopover,
   isGenerating,
   isForgingRegion,
@@ -357,11 +358,14 @@ export default function BattlemapCanvas({
         handleToggleGrid();
       } else if (e.key === 'Escape' && regionSelection && !isBusy) {
         onRegionSelectionChange(null);
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && regionSelection && !isBusy && activeMode === 'edit') {
+        e.preventDefault();
+        onDeleteRegion?.();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [regionSelection, isBusy, onRegionSelectionChange, handleToggleGrid]);
+  }, [regionSelection, isBusy, activeMode, onDeleteRegion, onRegionSelectionChange, handleToggleGrid]);
 
   // Recenter / fit view
   const handleResetView = () => {
@@ -576,6 +580,14 @@ export default function BattlemapCanvas({
           >
             <Wand2 className="w-3.5 h-3.5" />
             <span>Forge Region</span>
+          </button>
+          <button
+            onClick={onDeleteRegion}
+            className="flex items-center gap-1.5 px-3 py-1 text-xs rounded-xl font-semibold bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 hover:text-white border border-rose-500/40 shadow-lg shadow-rose-950/50 hover:brightness-110 active:scale-95 transition cursor-pointer"
+            title="Delete Region (Del)"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span>Delete Region</span>
           </button>
           <button
             onClick={() => onRegionSelectionChange(null)}

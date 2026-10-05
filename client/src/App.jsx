@@ -14,10 +14,11 @@ import {
   fetchModelsApi,
   generateBattlemapApi,
   forgeRegionApi,
+  deleteRegionApi,
   detectFeaturesApi,
   forgeFeatureStateApi
 } from './services/api';
-import { describeRegion, getRegionInCanvasCoordinates } from './utils/regionSelection';
+import { describeRegion, getRegionInCanvasCoordinates, deleteRegionClient } from './utils/regionSelection';
 
 const PROVIDER_LABELS = { openrouter: 'OpenRouter' };
 
@@ -212,6 +213,7 @@ export default function App() {
   const FAILURE_LABELS = {
     GENERATE: 'Map generation',
     FORGE_REGION: 'Region forge',
+    DELETE_REGION: 'Region delete',
     FEATURE_DETECTION: 'Feature detection',
     FORGE_FEATURE_STATE: 'Feature state forge'
   };
@@ -415,6 +417,56 @@ export default function App() {
     } finally {
       setIsForgingRegion(false);
       setGenerationPhaseText('');
+    }
+  };
+
+  // Handle Region Deletion
+  const handleDeleteRegion = async () => {
+    if (!mapImage || !regionSelection) return;
+    const startTimeMs = Date.now();
+    const regionInfo = describeRegion(regionSelection, 1024, 1024);
+    const label = regionInfo ? regionInfo.label : 'Region';
+
+    try {
+      let nextDataUrl;
+      try {
+        const res = await deleteRegionApi({
+          originalDataUrl: mapImage,
+          selection: regionSelection
+        });
+        nextDataUrl = res.imageDataUrl;
+      } catch (apiErr) {
+        console.warn('Backend delete region failed, falling back to client-side canvas:', apiErr.message);
+        nextDataUrl = await deleteRegionClient(mapImage, regionSelection);
+      }
+
+      // Filter out features whose center is inside the deleted region
+      const updatedFeatures = features.filter((f) => {
+        if (!f.box) return true;
+        const centerX = f.box.x + f.box.width / 2;
+        const centerY = f.box.y + f.box.height / 2;
+        const isInside = (
+          centerX >= regionSelection.x &&
+          centerX <= regionSelection.x + regionSelection.width &&
+          centerY >= regionSelection.y &&
+          centerY <= regionSelection.y + regionSelection.height
+        );
+        return !isInside;
+      });
+
+      if (selectedFeatureId && !updatedFeatures.some((f) => f.id === selectedFeatureId)) {
+        setSelectedFeatureId(null);
+      }
+
+      setMapImage(nextDataUrl);
+      setFeatures(updatedFeatures);
+      pushHistoryState(nextDataUrl, updatedFeatures);
+      pushDebugLog('DELETE_REGION', `Deleted ${label}`, { debug: { action: 'DELETE_REGION', selection: regionSelection } }, startTimeMs);
+      setRegionSelection(null);
+      setIsRegionModalOpen(false);
+      setIsRetryPillDismissed(true);
+    } catch (err) {
+      reportFailure('DELETE_REGION', `Delete ${label}`, err, startTimeMs);
     }
   };
 
@@ -872,6 +924,7 @@ export default function App() {
               if (sel) setIsRetryPillDismissed(true);
             }}
             onOpenRegionPrompt={() => setIsRegionModalOpen(true)}
+            onDeleteRegion={handleDeleteRegion}
             renderRegionPopover={(anchor) => (
               <ActionModal
                 open={isRegionModalOpen}

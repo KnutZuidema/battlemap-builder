@@ -276,9 +276,57 @@ async function compositeRegion(origBuffer, modelBuffer, dimensions, featherPx = 
   return bufferToDataUrl(finalStitched);
 }
 
+/**
+ * Deletes a rectangular region from the map image, setting the pixels inside
+ * the selection rectangle to transparent.
+ *
+ * @param {string} originalDataUrl - The map image as a base64 data URL
+ * @param {{x: number, y: number, width: number, height: number}} selection - Bounding box in map coordinates
+ * @returns {Promise<string>} The updated image data URL with the region cleared
+ */
+async function deleteRegion(originalDataUrl, selection) {
+  const origBuffer = dataUrlToBuffer(originalDataUrl);
+  const metadata = await sharp(origBuffer).metadata();
+  const { width, height } = metadata;
+
+  const selX = Math.round(selection.x);
+  const selY = Math.round(selection.y);
+  const selW = Math.round(selection.width);
+  const selH = Math.round(selection.height);
+
+  const intersectLeft = Math.max(0, selX);
+  const intersectTop = Math.max(0, selY);
+  const intersectRight = Math.min(width, selX + selW);
+  const intersectBottom = Math.min(height, selY + selH);
+
+  if (intersectRight <= intersectLeft || intersectBottom <= intersectTop) {
+    return originalDataUrl;
+  }
+
+  const maskW = intersectRight - intersectLeft;
+  const maskH = intersectBottom - intersectTop;
+
+  const maskSvg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+    <rect width="${width}" height="${height}" fill="#ffffff" />
+    <rect x="${intersectLeft}" y="${intersectTop}" width="${maskW}" height="${maskH}" fill="#000000" />
+  </svg>`;
+
+  const maskBuffer = await sharp(Buffer.from(maskSvg)).greyscale().png().toBuffer();
+  const maskAlphaLayer = await greyToAlphaLayer(maskBuffer, width, height);
+
+  const resultBuffer = await sharp(origBuffer)
+    .ensureAlpha()
+    .composite([{ input: maskAlphaLayer, blend: 'dest-in' }])
+    .png()
+    .toBuffer();
+
+  return bufferToDataUrl(resultBuffer);
+}
+
 module.exports = {
   dataUrlToBuffer,
   bufferToDataUrl,
   prepareRegionCanvas,
-  compositeRegion
+  compositeRegion,
+  deleteRegion
 };

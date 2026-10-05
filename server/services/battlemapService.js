@@ -3,7 +3,8 @@ const {
   dataUrlToBuffer,
   bufferToDataUrl,
   prepareRegionCanvas,
-  compositeRegion
+  compositeRegion,
+  deleteRegion: processDeleteRegion
 } = require('./imageProcessor');
 const {
   IMAGE_PROMPTS,
@@ -249,8 +250,25 @@ async function forgeFeatureState({ originalDataUrl, box, prompt, model }) {
   };
 }
 
+/**
+ * Deletes a rectangular region from the battlemap, clearing it to transparent.
+ */
+async function deleteRegion({ originalDataUrl, selection }) {
+  if (!originalDataUrl || !selection) {
+    const err = new Error('originalDataUrl and selection are required');
+    err.code = 'INVALID_PARAMETERS';
+    throw err;
+  }
+  const imageDataUrl = await processDeleteRegion(originalDataUrl, selection);
+  return {
+    imageDataUrl,
+    selection
+  };
+}
+
 module.exports = {
   generateBattlemap,
   forgeRegion,
-  forgeFeatureState
+  forgeFeatureState,
+  deleteRegion
 };

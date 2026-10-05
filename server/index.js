@@ -2,7 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const dotenv = require('dotenv');
-const { generateBattlemap, forgeRegion } = require('./services/battlemapService');
+const { generateBattlemap, forgeRegion, forgeFeatureState } = require('./services/battlemapService');
+const { detectFeatures } = require('./services/featureService');
 const { isProviderConfigured, MODEL_CATALOG, DEFAULT_MODEL_ID } = require('./services/modelCatalog');
 const { getWikiTree, getWikiArticle } = require('./services/wikiService');
 const { suggestBattlemaps, generateCustomBattlemapPrompt, suggestRegionForging } = require('./services/wikiPrompter');
@@ -245,6 +246,52 @@ app.post('/api/forge-region', async (req, res) => {
     sendGenerationError(res, err);
   }
 });
+/**
+ * Detects interactive features (doors, destructible walls, carpets) on a battlemap
+ */
+app.post('/api/features/detect', async (req, res) => {
+  try {
+    const { mapDataUrl, prompt, wikiContext, mapDimensions } = req.body;
+    if (!mapDataUrl) {
+      return res.status(400).json({ error: 'mapDataUrl is required', code: 'INVALID_PARAMETERS' });
+    }
+    console.log(`[API /features/detect] Detecting interactive features for prompt="${prompt || 'Tabletop battlemap'}"`);
+    const result = await detectFeatures({ mapDataUrl, prompt, wikiContext, mapDimensions });
+    res.json(result);
+  } catch (err) {
+    console.error('[API /api/features/detect error]', err.message);
+    const status = err.code === 'NO_API_KEY' ? 503
+      : (err.code === 'INVALID_PARAMETERS' ? 400 : 502);
+    res.status(status).json({
+      error: err.message,
+      code: err.code || 'FEATURE_DETECTION_FAILED',
+      debug: err.telemetry || null
+    });
+  }
+});
+
+/**
+ * Forges an alternate state for an interactive feature and returns the overlay patch
+ */
+app.post('/api/features/forge-state', async (req, res) => {
+  try {
+    const { originalDataUrl, box, prompt, model } = req.body;
+    if (!originalDataUrl || !box) {
+      return res.status(400).json({ error: 'originalDataUrl and box are required', code: 'INVALID_PARAMETERS' });
+    }
+    console.log(`[API /features/forge-state] Forging feature state (${box.width}x${box.height} at ${box.x},${box.y}): prompt="${prompt}" model="${model || 'default'}"`);
+    const result = await forgeFeatureState({
+      originalDataUrl,
+      box,
+      prompt,
+      model
+    });
+    res.json(result);
+  } catch (err) {
+    sendGenerationError(res, err);
+  }
+});
+
 
 if (require.main === module) {
   app.listen(PORT, () => {

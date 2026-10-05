@@ -1,3 +1,4 @@
+const sharp = require('sharp');
 const {
   dataUrlToBuffer,
   bufferToDataUrl,
@@ -195,7 +196,61 @@ async function forgeRegion({ originalDataUrl, selection, prompt, model }) {
   };
 }
 
+/**
+ * Forges an alternate state for an interactive feature within its bounding box,
+ * then extracts and returns the cropped overlay patch.
+ */
+async function forgeFeatureState({ originalDataUrl, box, prompt, model }) {
+  if (!originalDataUrl || !box) {
+    const err = new Error('originalDataUrl and box are required for forgeFeatureState');
+    err.code = 'INVALID_PARAMETERS';
+    throw err;
+  }
+
+  const selection = {
+    x: Math.round(box.x),
+    y: Math.round(box.y),
+    width: Math.round(box.width),
+    height: Math.round(box.height)
+  };
+
+  const compositeResult = await forgeRegion({
+    originalDataUrl,
+    selection,
+    prompt,
+    model
+  });
+
+  const compBuffer = dataUrlToBuffer(compositeResult.imageDataUrl);
+  const meta = await sharp(compBuffer).metadata();
+  const extractLeft = Math.max(0, Math.min((compositeResult.dimensions?.origLeft || 0) + selection.x, meta.width - 1));
+  const extractTop = Math.max(0, Math.min((compositeResult.dimensions?.origTop || 0) + selection.y, meta.height - 1));
+  const extractWidth = Math.min(selection.width, meta.width - extractLeft);
+  const extractHeight = Math.min(selection.height, meta.height - extractTop);
+
+  const patchBuffer = await sharp(compBuffer)
+    .extract({
+      left: extractLeft,
+      top: extractTop,
+      width: Math.max(1, extractWidth),
+      height: Math.max(1, extractHeight)
+    })
+    .png()
+    .toBuffer();
+
+  const patchDataUrl = bufferToDataUrl(patchBuffer);
+
+  return {
+    patchDataUrl,
+    dimensions: compositeResult.dimensions,
+    debug: compositeResult.debug,
+    usage: compositeResult.usage,
+    cost: compositeResult.cost
+  };
+}
+
 module.exports = {
   generateBattlemap,
-  forgeRegion
+  forgeRegion,
+  forgeFeatureState
 };

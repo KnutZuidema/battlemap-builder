@@ -7,11 +7,15 @@ import BattlemapCanvas from './components/BattlemapCanvas';
 import ActionModal from './components/ActionModal';
 import DebugModal from './components/DebugModal';
 import WikiDrawer from './components/WikiDrawer';
+import FeatureInspector from './components/FeatureInspector';
+import PlayFeatureCard from './components/PlayFeatureCard';
 import {
   checkServerHealth,
   fetchModelsApi,
   generateBattlemapApi,
-  forgeRegionApi
+  forgeRegionApi,
+  detectFeaturesApi,
+  forgeFeatureStateApi
 } from './services/api';
 import { describeRegion, getRegionInCanvasCoordinates } from './utils/regionSelection';
 
@@ -132,6 +136,13 @@ export default function App() {
   // Map & Canvas State
   const [mapImage, setMapImage] = useState(null);
 
+  // Interactive Features & Active Mode State
+  const [activeMode, setActiveMode] = useState('edit'); // 'edit' | 'play'
+  const [features, setFeatures] = useState([]);
+  const [selectedFeatureId, setSelectedFeatureId] = useState(null);
+  const [isDetectingFeatures, setIsDetectingFeatures] = useState(false);
+  const [isForgingFeatureState, setIsForgingFeatureState] = useState(false);
+
   // AI Generator State
   const [prompt, setPrompt] = useState('Flooded stone dungeon room with ancient pillars, glowing torches, and a central boss altar');
   const [isGenerating, setIsGenerating] = useState(false);
@@ -199,7 +210,9 @@ export default function App() {
   // Human-readable names for the failure banner headline
   const FAILURE_LABELS = {
     GENERATE: 'Map generation',
-    FORGE_REGION: 'Region forge'
+    FORGE_REGION: 'Region forge',
+    FEATURE_DETECTION: 'Feature detection',
+    FORGE_FEATURE_STATE: 'Feature state forge'
   };
 
   // Push new telemetry entry to debug logs
@@ -276,34 +289,44 @@ export default function App() {
   };
 
   // Save current state to history
-  const pushHistoryState = (newMapImage) => {
+  const pushHistoryState = (newMapImage, newFeatures = features) => {
     let baseHistory = history;
     let baseIndex = historyIndex;
     // Defensive check: if history was empty but a base map exists, seed it
     if (baseHistory.length === 0 && mapImage && mapImage !== newMapImage) {
-      baseHistory = [{ mapImage }];
+      baseHistory = [{ mapImage, features }];
       baseIndex = 0;
     }
     const newHistory = baseHistory.slice(0, baseIndex + 1);
-    newHistory.push({ mapImage: newMapImage });
+    newHistory.push({ mapImage: newMapImage, features: newFeatures });
     setHistory(newHistory);
     setHistoryIndex(newHistory.length - 1);
   };
 
   const handleUndo = () => {
     if (isBusy || historyIndex <= 0) return;
-    setMapImage(history[historyIndex - 1].mapImage);
+    const prev = history[historyIndex - 1];
+    setMapImage(prev.mapImage);
+    if (Array.isArray(prev.features)) {
+      setFeatures(prev.features);
+    }
     setHistoryIndex(historyIndex - 1);
     setRegionSelection(null);
     setIsRegionModalOpen(false);
+    setSelectedFeatureId(null);
   };
 
   const handleRedo = () => {
     if (isBusy || historyIndex >= history.length - 1) return;
-    setMapImage(history[historyIndex + 1].mapImage);
+    const next = history[historyIndex + 1];
+    setMapImage(next.mapImage);
+    if (Array.isArray(next.features)) {
+      setFeatures(next.features);
+    }
     setHistoryIndex(historyIndex + 1);
     setRegionSelection(null);
     setIsRegionModalOpen(false);
+    setSelectedFeatureId(null);
   };
   // Handle Initial Map Generation
   const handleGenerateMap = async () => {
@@ -331,7 +354,9 @@ export default function App() {
       });
 
       setMapImage(res.imageDataUrl);
-      pushHistoryState(res.imageDataUrl);
+      setFeatures([]);
+      setSelectedFeatureId(null);
+      pushHistoryState(res.imageDataUrl, []);
       addMapCost(res.usage || res.debug?.usage, true);
       pushDebugLog('GENERATE', prompt, res, startTimeMs);
       confetti({ particleCount: 55, spread: 65, origin: { y: 0.8 } });
@@ -557,7 +582,8 @@ export default function App() {
     const projectData = {
       title: mapTitle,
       mapImage,
-      history: history.length > 0 ? history : (mapImage ? [{ mapImage }] : []),
+      features: features || [],
+      history: history.length > 0 ? history : (mapImage ? [{ mapImage, features }] : []),
       historyIndex: history.length > 0 ? historyIndex : (mapImage ? 0 : -1),
       cost: mapCost,
       totalCost: mapCost.totalCost,
@@ -599,6 +625,13 @@ export default function App() {
       setRetryContext(null);
       setIsRetryPillDismissed(false);
     }
+      if (Array.isArray(data.features)) {
+        setFeatures(data.features);
+      } else {
+        setFeatures([]);
+      }
+      setSelectedFeatureId(null);
+      setActiveMode('edit');
     if (data.title) setMapTitle(data.title);
     setWikiContext(data.wikiContext || null);
     // Restore cost from save model
@@ -637,6 +670,9 @@ export default function App() {
   const handleClearCanvas = () => {
     if (window.confirm('Start a new map? This clears the current one.')) {
       setMapImage(null);
+      setFeatures([]);
+      setSelectedFeatureId(null);
+      setActiveMode('edit');
       setRegionSelection(null);
       setRegionPrompt('');
       setIsRegionModalOpen(false);
@@ -652,6 +688,138 @@ export default function App() {
         // ignore
       }
     }
+  };
+
+  // Set Edit or Play mode
+  const handleSetMode = (mode) => {
+    setActiveMode(mode);
+    if (mode === 'play') {
+      setRegionSelection(null);
+      setIsRegionModalOpen(false);
+    }
+  };
+
+  // Detect interactive features via AI Vision
+  const handleDetectFeatures = async () => {
+    if (!mapImage || isBusy || isDetectingFeatures) return;
+    const startTimeMs = Date.now();
+    setIsDetectingFeatures(true);
+    setFailure(null);
+
+    try {
+      const res = await detectFeaturesApi({
+        mapDataUrl: mapImage,
+        prompt,
+        wikiContext,
+        mapDimensions: { width: 1024, height: 1024 }
+      });
+
+      const detected = res.features || [];
+      setFeatures(detected);
+      if (detected.length > 0) {
+        setSelectedFeatureId(detected[0].id);
+      }
+      pushHistoryState(mapImage, detected);
+      if (res.usage) {
+        addMapCost(res.usage, false);
+      }
+      pushDebugLog('FEATURE_DETECTION', `Detect features for: "${prompt}"`, res, startTimeMs);
+      confetti({ particleCount: 45, spread: 60, origin: { y: 0.8 } });
+    } catch (err) {
+      reportFailure('FEATURE_DETECTION', `Feature detection: "${prompt}"`, err, startTimeMs);
+    } finally {
+      setIsDetectingFeatures(false);
+    }
+  };
+
+  // Toggle feature state between default (0) and alternate (1)
+  const handleToggleFeatureState = (featureId) => {
+    setFeatures((prev) => {
+      const next = prev.map((f) => {
+        if (f.id === featureId) {
+          const nextState = f.currentState === 0 ? 1 : 0;
+          return { ...f, currentState: nextState };
+        }
+        return f;
+      });
+      pushHistoryState(mapImage, next);
+      return next;
+    });
+  };
+
+  // Forge alternate state for a feature within its bounding box
+  const handleForgeFeatureState = async (featureId, customPrompt) => {
+    const target = features.find((f) => f.id === featureId);
+    if (!target || !mapImage || isForgingFeatureState) return;
+
+    const startTimeMs = Date.now();
+    setIsForgingFeatureState(true);
+    setFailure(null);
+
+    const forgePromptText = customPrompt || target.suggestedAltPrompt;
+
+    try {
+      const res = await forgeFeatureStateApi({
+        originalDataUrl: mapImage,
+        box: target.box,
+        prompt: forgePromptText,
+        model: selectedModel
+      });
+
+      const nextFeatures = features.map((f) => {
+        if (f.id === featureId) {
+          const updatedStates = [...f.states];
+          updatedStates[1] = {
+            ...updatedStates[1],
+            patchDataUrl: res.patchDataUrl
+          };
+          return {
+            ...f,
+            states: updatedStates,
+            currentState: 1 // Automatically activate newly forged state
+          };
+        }
+        return f;
+      });
+
+      setFeatures(nextFeatures);
+      pushHistoryState(mapImage, nextFeatures);
+      if (res.usage) {
+        addMapCost(res.usage, false);
+      }
+      pushDebugLog('FORGE_FEATURE_STATE', `${target.label}: ${forgePromptText}`, res, startTimeMs);
+      confetti({ particleCount: 45, spread: 60, origin: { y: 0.8 } });
+    } catch (err) {
+      reportFailure('FORGE_FEATURE_STATE', `${target.label}: ${forgePromptText}`, err, startTimeMs);
+    } finally {
+      setIsForgingFeatureState(false);
+    }
+  };
+
+  // Update feature properties (e.g. label)
+  const handleUpdateFeature = (featureId, updates) => {
+    setFeatures((prev) => {
+      const next = prev.map((f) => (f.id === featureId ? { ...f, ...updates } : f));
+      pushHistoryState(mapImage, next);
+      return next;
+    });
+  };
+
+  // Delete a feature
+  const handleDeleteFeature = (featureId) => {
+    setFeatures((prev) => {
+      const next = prev.filter((f) => f.id !== featureId);
+      pushHistoryState(mapImage, next);
+      return next;
+    });
+    if (selectedFeatureId === featureId) {
+      setSelectedFeatureId(null);
+    }
+  };
+
+  // Update feature box (e.g. while dragging/resizing handles in edit mode)
+  const handleUpdateFeatureBox = (featureId, nextBox) => {
+    setFeatures((prev) => prev.map((f) => (f.id === featureId ? { ...f, box: nextBox } : f)));
   };
 
   return (
@@ -680,6 +848,12 @@ export default function App() {
         setMapTitle={setMapTitle}
         mapCost={mapCost}
         wikiContext={wikiContext}
+        activeMode={activeMode}
+        onSetMode={handleSetMode}
+        onDetectFeatures={handleDetectFeatures}
+        isDetectingFeatures={isDetectingFeatures}
+        featureCount={features.length}
+        hasMap={Boolean(mapImage)}
       />
       {/* Workspace: the prompt while there is no map, the canvas once there is */}
       <div className="flex flex-1 overflow-hidden relative z-10">
@@ -730,6 +904,12 @@ export default function App() {
             onRetry={handleRetry}
             isRetryPillDismissed={isRetryPillDismissed}
             onDismissRetryPill={() => setIsRetryPillDismissed(true)}
+            activeMode={activeMode}
+            features={features}
+            selectedFeatureId={selectedFeatureId}
+            onSelectFeature={setSelectedFeatureId}
+            onToggleFeatureState={handleToggleFeatureState}
+            onUpdateFeatureBox={handleUpdateFeatureBox}
           />
         ) : (
           <PromptHero
@@ -740,6 +920,34 @@ export default function App() {
             phaseText={generationPhaseText}
             elapsedSeconds={elapsedSeconds}
             onOpenWikiDrawer={() => setIsWikiDrawerOpen(true)}
+          />
+        )}
+
+        {/* Edit Mode: Feature Inspector Modal */}
+        {mapImage && activeMode === 'edit' && selectedFeatureId && (
+          <FeatureInspector
+            feature={features.find((f) => f.id === selectedFeatureId)}
+            onClose={() => setSelectedFeatureId(null)}
+            onUpdate={handleUpdateFeature}
+            onToggleState={handleToggleFeatureState}
+            onForgeState={handleForgeFeatureState}
+            onDelete={handleDeleteFeature}
+            isForgingState={isForgingFeatureState}
+            onOpenWikiArticle={() => setIsWikiDrawerOpen(true)}
+          />
+        )}
+
+        {/* Play Mode: Tactical Feature Card */}
+        {mapImage && activeMode === 'play' && selectedFeatureId && (
+          <PlayFeatureCard
+            feature={features.find((f) => f.id === selectedFeatureId)}
+            onClose={() => setSelectedFeatureId(null)}
+            onToggleState={handleToggleFeatureState}
+            onSwitchToEdit={(featureId) => {
+              setActiveMode('edit');
+              setSelectedFeatureId(featureId);
+            }}
+            onOpenWikiArticle={() => setIsWikiDrawerOpen(true)}
           />
         )}
 

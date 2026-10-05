@@ -104,3 +104,14 @@ export async function suggestWikiRegionForgeApi({ articlePath, selection, mapDim
     userIntent
   });
 }
+
+/**
+ * Interactive features detection and alternate state forging
+ */
+export async function detectFeaturesApi({ mapDataUrl, prompt, wikiContext, mapDimensions }) {
+  return postJson('/api/features/detect', { mapDataUrl, prompt, wikiContext, mapDimensions });
+}
+
+export async function forgeFeatureStateApi({ originalDataUrl, box, prompt, model }) {
+  return postJson('/api/features/forge-state', { originalDataUrl, box, prompt, model });
+}

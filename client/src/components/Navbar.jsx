@@ -15,7 +15,11 @@ import {
   ChevronDown,
   Check,
   Wand2,
-  Gamepad2
+  Gamepad2,
+  Settings,
+  Sliders,
+  Layers,
+  Grid3X3
 } from 'lucide-react';
 import CostTracker from './CostTracker';
 
@@ -41,6 +45,10 @@ export default function Navbar({
   selectedModel,
   onSelectModel,
   models,
+  forgeImageMode = 'highlighted-only',
+  onSelectForgeImageMode,
+  showGrid = true,
+  onToggleGrid,
   onOpenDebugModal,
   debugLogCount,
   onOpenWikiDrawer,
@@ -69,8 +77,29 @@ export default function Navbar({
 }) {
   const fileInputRef = useRef(null);
   const modelDropdownRef = useRef(null);
+  const settingsDropdownRef = useRef(null);
   const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
+  useEffect(() => {
+    if (!isSettingsOpen) return;
+    const handleClickOutside = (e) => {
+      if (settingsDropdownRef.current && !settingsDropdownRef.current.contains(e.target)) {
+        setIsSettingsOpen(false);
+      }
+    };
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        setIsSettingsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isSettingsOpen]);
   useEffect(() => {
     if (!isModelDropdownOpen) return;
     const handleClickOutside = (e) => {
@@ -220,8 +249,10 @@ export default function Navbar({
         <div className="relative select-none shrink-0" ref={modelDropdownRef}>
         <button
           type="button"
-          onClick={() => setIsModelDropdownOpen((prev) => !prev)}
-          aria-haspopup="listbox"
+          onClick={() => {
+            setIsModelDropdownOpen((prev) => !prev);
+            setIsSettingsOpen(false);
+          }}
           aria-expanded={isModelDropdownOpen}
           title={`Active Model: ${currentModel.label} (${currentModel.id})\nClick to change model`}
           className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border transition-all cursor-pointer ${
@@ -410,7 +441,8 @@ export default function Navbar({
         </div>
 
         {/* Project & File Actions: Load, Save, Export PNG, Delete */}
-        <div className="flex items-center gap-0.5 bg-black/25 p-1 rounded-xl border border-white/[0.07]">
+        {/* Settings Menu Dropdown */}
+        <div className="relative select-none shrink-0" ref={settingsDropdownRef}>
           <input
             type="file"
             ref={fileInputRef}
@@ -420,46 +452,285 @@ export default function Navbar({
           />
 
           <button
-            onClick={() => fileInputRef.current?.click()}
-            title="Load Map JSON"
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-slate-300 hover:text-white hover:bg-white/[0.06] transition-all cursor-pointer"
+            type="button"
+            onClick={() => {
+              setIsSettingsOpen((prev) => !prev);
+              setIsModelDropdownOpen(false);
+            }}
+            aria-haspopup="dialog"
+            aria-expanded={isSettingsOpen}
+            title="Settings: Forge image modes, grid overlay, project actions"
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border transition-all cursor-pointer ${
+              isSettingsOpen
+                ? 'bg-amber-500/20 border-amber-500/40 text-amber-200 shadow-sm shadow-amber-950/50'
+                : 'bg-black/35 hover:bg-black/50 border-white/[0.08] hover:border-amber-500/30 text-slate-200 shadow-inner shadow-black/40'
+            }`}
           >
-            <Upload className="w-3.5 h-3.5 text-slate-400" />
-            <span className="hidden 2xl:inline">Load</span>
-          </button>
-          <span className="w-px h-3.5 bg-white/[0.08]" />
-
-          <button
-            onClick={onExportJson}
-            title="Save Map Project State (JSON)"
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium text-slate-300 hover:text-white hover:bg-white/[0.06] transition-all cursor-pointer"
-          >
-            <FileJson className="w-3.5 h-3.5 text-slate-400" />
-            <span className="hidden 2xl:inline">Save</span>
-          </button>
-
-          <span className="w-px h-3.5 bg-white/[0.08]" />
-
-          <button
-            onClick={onExportPng}
-            title="Export Map as PNG"
-            className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-slate-950 hover:brightness-105 shadow-sm shadow-amber-950/40 transition-all cursor-pointer"
-          >
-            <Download className="w-3.5 h-3.5 text-slate-950" strokeWidth={2.4} />
-            <span className="hidden sm:inline">Export PNG</span>
-            <span className="sm:hidden">Export</span>
+            <Settings className={`w-3.5 h-3.5 text-amber-400 transition-transform duration-200 ${isSettingsOpen ? 'rotate-45' : ''}`} />
+            <span className="text-xs font-medium">Settings</span>
+            <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform duration-200 ${isSettingsOpen ? 'rotate-180 text-amber-400' : ''}`} />
           </button>
 
-          <span className="w-px h-3.5 bg-white/[0.08]" />
+          {/* Expandable Settings Popover Dropdown */}
+          {isSettingsOpen && (
+            <div
+              role="dialog"
+              aria-label="Studio Settings"
+              className="animate-rise absolute right-0 top-full mt-2 w-80 sm:w-96 max-h-[calc(100vh-5rem)] overflow-y-auto p-3.5 rounded-2xl bg-slate-950/95 backdrop-blur-xl border border-white/[0.1] shadow-2xl shadow-black/90 z-50 text-xs text-slate-200 space-y-4"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between border-b border-white/[0.08] pb-2.5">
+                <div className="flex items-center gap-2">
+                  <Sliders className="w-4 h-4 text-amber-400" />
+                  <span className="font-semibold text-sm text-slate-100 font-display tracking-wide">Studio Settings</span>
+                </div>
+                <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500">Preferences</span>
+              </div>
 
-          <button
-            onClick={onClearCanvas}
-            title="New Map (Clear Canvas)"
-            className="flex items-center justify-center p-1.5 rounded-lg text-slate-400 hover:text-rose-300 hover:bg-rose-500/15 transition-all cursor-pointer"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
+              {/* Section 1: Region Forging Image Inputs */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                    <Layers className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Region Forge Image Inputs</span>
+                  </div>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-snug">
+                  Configure which visual reference images are sent to the AI model during region edits and canvas expansion.
+                </p>
+
+                <div className="space-y-1.5 pt-0.5">
+                  {/* Option 1: Highlighted Only */}
+                  <button
+                    type="button"
+                    onClick={() => onSelectForgeImageMode && onSelectForgeImageMode('highlighted-only')}
+                    className={`w-full text-left p-2.5 rounded-xl border transition-all flex items-start gap-2.5 cursor-pointer ${
+                      forgeImageMode === 'highlighted-only'
+                        ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-100 shadow-sm shadow-cyan-950/40'
+                        : 'bg-white/[0.02] hover:bg-white/[0.05] border-white/[0.08] text-slate-300'
+                    }`}
+                  >
+                    <div
+                      className={`w-4 h-4 rounded-full mt-0.5 border flex items-center justify-center shrink-0 ${
+                        forgeImageMode === 'highlighted-only'
+                          ? 'border-cyan-400 bg-cyan-500/20 text-cyan-300'
+                          : 'border-slate-600 bg-slate-800'
+                      }`}
+                    >
+                      {forgeImageMode === 'highlighted-only' && <div className="w-1.5 h-1.5 rounded-full bg-cyan-400" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-semibold text-xs text-white">Highlighted Area Only</span>
+                        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded border bg-cyan-400/20 text-cyan-300 border-cyan-400/30">
+                          1 Image · Recommended
+                        </span>
+                      </div>
+                      <p className="mt-1 text-[11px] text-slate-400 leading-snug">
+                        Sends only the context window with the target area highlighted in cyan tint. Avoids conflicting multi-image directives and lowers token usage.
+                      </p>
+                    </div>
+                  </button>
+
+                  {/* Option 2: All 3 Images */}
+                  <button
+                    type="button"
+                    onClick={() => onSelectForgeImageMode && onSelectForgeImageMode('all-three')}
+                    className={`w-full text-left p-2.5 rounded-xl border transition-all flex items-start gap-2.5 cursor-pointer ${
+                      forgeImageMode === 'all-three' || forgeImageMode === 'all'
+                        ? 'bg-amber-500/15 border-amber-500/40 text-amber-100 shadow-sm shadow-amber-950/40'
+                        : 'bg-white/[0.02] hover:bg-white/[0.05] border-white/[0.08] text-slate-300'
+                    }`}
+                  >
+                    <div
+                      className={`w-4 h-4 rounded-full mt-0.5 border flex items-center justify-center shrink-0 ${
+                        forgeImageMode === 'all-three' || forgeImageMode === 'all'
+                          ? 'border-amber-400 bg-amber-500/20 text-amber-300'
+                          : 'border-slate-600 bg-slate-800'
+                      }`}
+                    >
+                      {(forgeImageMode === 'all-three' || forgeImageMode === 'all') && (
+                        <div className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-semibold text-xs text-white">All 3 Images</span>
+                        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded border bg-amber-400/20 text-amber-300 border-amber-400/30">
+                          3 Images · Legacy
+                        </span>
+                      </div>
+                      <p className="mt-1 text-[11px] text-slate-400 leading-snug">
+                        Dispatches raw context battlemap, cyan-highlighted guide image, and black/white binary mask.
+                      </p>
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              {/* Section 2: Canvas Display */}
+              <div className="space-y-2 pt-2 border-t border-white/[0.08]">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                  <Grid3X3 className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Canvas & Display</span>
+                </div>
+
+                <div className="flex items-center justify-between p-2.5 rounded-xl bg-white/[0.02] border border-white/[0.08]">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-xs text-white">5ft Tactical Grid</span>
+                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded border bg-slate-800 text-slate-400 border-slate-700">
+                        Key: G
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-snug mt-0.5">
+                      64px = 5ft grid lines overlaid on map
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={onToggleGrid}
+                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                      showGrid ? 'bg-cyan-500' : 'bg-slate-700'
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                        showGrid ? 'translate-x-4' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+              </div>
+
+              {/* Section 3: Project Actions */}
+              <div className="space-y-2 pt-2 border-t border-white/[0.08]">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                  <FileJson className="w-3.5 h-3.5 text-slate-400" />
+                  <span>Project Files & Canvas</span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      fileInputRef.current?.click();
+                      setIsSettingsOpen(false);
+                    }}
+                    className="flex items-center gap-2 p-2 rounded-xl bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.08] text-slate-200 text-left transition cursor-pointer"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="font-medium text-xs truncate">Load JSON</div>
+                      <div className="text-[10px] text-slate-500 truncate">Import project</div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onExportJson();
+                      setIsSettingsOpen(false);
+                    }}
+                    disabled={!hasMap}
+                    className={`flex items-center gap-2 p-2 rounded-xl border text-left transition ${
+                      hasMap
+                        ? 'bg-white/[0.03] hover:bg-white/[0.07] border-white/[0.08] text-slate-200 cursor-pointer'
+                        : 'bg-white/[0.01] border-white/[0.04] text-slate-600 opacity-50 cursor-not-allowed'
+                    }`}
+                  >
+                    <FileJson className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="font-medium text-xs truncate">Save JSON</div>
+                      <div className="text-[10px] text-slate-500 truncate">Export project</div>
+                    </div>
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClearCanvas();
+                    setIsSettingsOpen(false);
+                  }}
+                  disabled={!hasMap}
+                  className={`w-full flex items-center justify-between p-2 rounded-xl border transition ${
+                    hasMap
+                      ? 'bg-rose-500/10 hover:bg-rose-500/20 border-rose-500/30 text-rose-300 cursor-pointer'
+                      : 'bg-white/[0.01] border-white/[0.04] text-slate-600 opacity-50 cursor-not-allowed'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Trash2 className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    <span className="font-medium text-xs">New Map (Clear Canvas)</span>
+                  </div>
+                  <span className="text-[10px] font-mono text-rose-400/70">Reset</span>
+                </button>
+              </div>
+
+              {/* Section 4: Diagnostics & Telemetry */}
+              <div className="space-y-2 pt-2 border-t border-white/[0.08]">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                    <Terminal className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Telemetry & Debug</span>
+                  </div>
+                  {debugLogCount > 0 && (
+                    <span className="text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-200 px-1.5 py-0.2 rounded-full border border-cyan-500/40">
+                      {debugLogCount} logs
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between p-2.5 rounded-xl bg-white/[0.02] border border-white/[0.08]">
+                  <div>
+                    <div className="font-medium text-xs text-white">Debug Logs Inspector</div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">
+                      {debugLogCount > 0
+                        ? `${debugLogCount} request payload${debugLogCount === 1 ? '' : 's'} recorded`
+                        : 'View system prompts & API responses'}
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onOpenDebugModal();
+                      setIsSettingsOpen(false);
+                    }}
+                    className="px-2.5 py-1 rounded-lg text-xs font-medium text-cyan-200 bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 transition cursor-pointer"
+                  >
+                    Open Inspector
+                  </button>
+                </div>
+
+                {mapCost && typeof mapCost.totalCost === 'number' && (
+                  <div className="flex items-center justify-between px-2.5 py-1 text-[11px] text-slate-400 font-mono">
+                    <span>Session Cost:</span>
+                    <span className="text-amber-300 font-bold">${mapCost.totalCost.toFixed(4)}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
+
+        {/* Export PNG Primary Action */}
+        <button
+          onClick={onExportPng}
+          disabled={!hasMap}
+          title="Export Map as PNG"
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold shadow-sm transition-all ${
+            hasMap
+              ? 'bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-slate-950 hover:brightness-105 shadow-amber-950/40 cursor-pointer'
+              : 'bg-white/[0.04] text-slate-500 border border-white/[0.06] cursor-not-allowed opacity-50'
+          }`}
+        >
+          <Download className={`w-3.5 h-3.5 ${hasMap ? 'text-slate-950' : 'text-slate-500'}`} strokeWidth={2.4} />
+          <span className="hidden sm:inline">Export PNG</span>
+          <span className="sm:hidden">Export</span>
+        </button>
       </div>
     </header>
   );

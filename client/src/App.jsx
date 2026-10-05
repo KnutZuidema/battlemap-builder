@@ -53,8 +53,15 @@ export default function App() {
       return 'google/gemini-3.1-flash-image';
     }
   });
+  // Configurable Forge Region Image Inputs mode — defaults to 'highlighted-only', persisted in localStorage
+  const [forgeImageMode, setForgeImageMode] = useState(() => {
+    try {
+      return localStorage.getItem('dungeon_forge_image_mode') || 'highlighted-only';
+    } catch {
+      return 'highlighted-only';
+    }
+  });
   const [availableModels, setAvailableModels] = useState([]);
-
   useEffect(() => {
     fetchModelsApi().then((data) => {
       if (data?.models?.length) {
@@ -67,6 +74,15 @@ export default function App() {
     setSelectedModel(modelId);
     try {
       localStorage.setItem('dungeon_forge_selected_model', modelId);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSelectForgeImageMode = (mode) => {
+    setForgeImageMode(mode);
+    try {
+      localStorage.setItem('dungeon_forge_image_mode', mode);
     } catch {
       // ignore
     }
@@ -382,6 +398,7 @@ export default function App() {
       selection: { ...regionSelection },
       prompt: regionPrompt,
       model: selectedModel,
+      forgeImageMode,
       label,
       resultRegion
     };
@@ -397,7 +414,8 @@ export default function App() {
         originalDataUrl: mapImage,
         selection: regionSelection,
         prompt: regionPrompt,
-        model: selectedModel
+        model: selectedModel,
+        forgeImageMode
       });
 
       setMapImage(res.imageDataUrl);
@@ -434,7 +452,8 @@ export default function App() {
           originalDataUrl,
           selection,
           prompt: savedPrompt,
-          model: selectedModel || retryContext.model
+          model: selectedModel || retryContext.model,
+          forgeImageMode: retryContext.forgeImageMode || forgeImageMode
         });
 
         setMapImage(res.imageDataUrl);
@@ -763,7 +782,8 @@ export default function App() {
         originalDataUrl: mapImage,
         box: target.box,
         prompt: forgePromptText,
-        model: selectedModel
+        model: selectedModel,
+        forgeImageMode
       });
 
       const nextFeatures = features.map((f) => {
@@ -829,6 +849,10 @@ export default function App() {
         selectedModel={selectedModel}
         onSelectModel={handleSelectModel}
         models={availableModels}
+        forgeImageMode={forgeImageMode}
+        onSelectForgeImageMode={handleSelectForgeImageMode}
+        showGrid={showGrid}
+        onToggleGrid={() => setShowGrid((prev) => !prev)}
         onOpenDebugModal={() => setIsDebugModalOpen(true)}
         debugLogCount={debugLogs.length}
         onOpenWikiDrawer={() => setIsWikiDrawerOpen(true)}

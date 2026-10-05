@@ -71,8 +71,8 @@ export async function generateBattlemapApi({ prompt, width, height, model }) {
 }
 
 /** Request unified region forging (edit, expand, or hybrid) */
-export async function forgeRegionApi({ originalDataUrl, selection, prompt, model }) {
-  return postJson('/api/forge-region', { originalDataUrl, selection, prompt, model });
+export async function forgeRegionApi({ originalDataUrl, selection, prompt, model, forgeImageMode }) {
+  return postJson('/api/forge-region', { originalDataUrl, selection, prompt, model, forgeImageMode });
 }
 
 /**
@@ -112,6 +112,6 @@ export async function detectFeaturesApi({ mapDataUrl, prompt, wikiContext, mapDi
   return postJson('/api/features/detect', { mapDataUrl, prompt, wikiContext, mapDimensions });
 }
 
-export async function forgeFeatureStateApi({ originalDataUrl, box, prompt, model }) {
-  return postJson('/api/features/forge-state', { originalDataUrl, box, prompt, model });
+export async function forgeFeatureStateApi({ originalDataUrl, box, prompt, model, forgeImageMode }) {
+  return postJson('/api/features/forge-state', { originalDataUrl, box, prompt, model, forgeImageMode });
 }

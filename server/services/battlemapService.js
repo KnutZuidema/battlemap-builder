@@ -68,7 +68,8 @@ async function runModel(entry, { systemInstruction, userPromptText, fullPromptPa
       images,
       width,
       height,
-      apiKey: process.env[providerKeyName(entry.provider)]
+      apiKey: process.env[providerKeyName(entry.provider)],
+      apiType: entry.apiType
     });
 
     return {

@@ -11,6 +11,8 @@ import {
   Terminal,
   Sparkles,
   Zap,
+  Feather,
+  Palette,
   BookOpen,
   ChevronDown,
   Check
@@ -33,8 +35,38 @@ const DEFAULT_MODELS = [
     badge: 'Fast',
     costHint: '$0.25/M in · $1.50/M out (~$0.035 per map)',
     note: 'Ultra-fast, lightweight generation'
+  },
+  {
+    id: 'meta/muse-image',
+    label: 'Meta: Muse Image',
+    shortLabel: 'Muse',
+    badge: 'TTRPG Classic',
+    costHint: '$0.01 per map (flat image pricing)',
+    note: 'Ultra-cheap classic 2D TTRPG line art & poché walls'
+  },
+  {
+    id: 'bytedance-seed/seedream-5-0-flash',
+    label: 'ByteDance Seedream 5.0 Flash',
+    shortLabel: 'Seedream Flash',
+    badge: 'Rich Art',
+    costHint: '$0.018 per map (flat image pricing)',
+    note: 'High-speed, high-detail digital painted battlemaps'
   }
 ];
+
+function getModelMeta(model) {
+  const id = model?.id || '';
+  if (id.includes('muse')) {
+    return { Icon: Feather, badge: model?.badge || 'TTRPG Classic' };
+  }
+  if (id.includes('seedream')) {
+    return { Icon: Palette, badge: model?.badge || 'Rich Art' };
+  }
+  if (id.includes('lite')) {
+    return { Icon: Zap, badge: model?.badge || 'Fast' };
+  }
+  return { Icon: Sparkles, badge: model?.badge || 'Quality' };
+}
 export default function Navbar({
   selectedModel,
   onSelectModel,
@@ -103,8 +135,7 @@ export default function Navbar({
   const currentModel = modelList.find(
     (m) => selectedModel === m.id || (m.aliases && m.aliases.includes(selectedModel))
   ) || modelList[0];
-  const isCurrentLite = currentModel?.id?.includes('lite');
-  const CurrentIcon = isCurrentLite ? Zap : Sparkles;
+  const { Icon: CurrentIcon, badge: currentBadge } = getModelMeta(currentModel);
   return (
     <header className="h-[3.75rem] border-b border-white/[0.07] glass-panel px-3 sm:px-4 flex items-center justify-between gap-2 shrink-0 z-30 relative select-none">
       {/* Brand & Map Title */}
@@ -155,11 +186,11 @@ export default function Navbar({
             <span className="text-[10px] font-mono text-slate-400 uppercase tracking-wider hidden 2xl:inline">Model:</span>
             <span className="text-xs font-medium text-slate-200 truncate">
               <span className="hidden xl:inline">{currentModel.label}</span>
-              <span className="xl:hidden">{currentModel.shortLabel || (isCurrentLite ? 'Flash Lite' : 'Flash')}</span>
+              <span className="xl:hidden">{currentModel.shortLabel || currentModel.label}</span>
             </span>
-            {currentModel.badge && (
+            {currentBadge && (
               <span className="text-[9px] font-mono px-1 py-0.2 rounded border bg-amber-400/20 text-amber-300 border-amber-400/30 hidden 2xl:inline shrink-0">
-                {currentModel.badge}
+                {currentBadge}
               </span>
             )}
           </div>
@@ -189,9 +220,7 @@ export default function Navbar({
             <div className="space-y-1">
               {modelList.map((m) => {
                 const isSelected = selectedModel === m.id || (m.aliases && m.aliases.includes(selectedModel));
-                const isLite = m.id.includes('lite');
-                const Icon = isLite ? Zap : Sparkles;
-
+                const { Icon, badge } = getModelMeta(m);
                 return (
                   <button
                     key={m.id}
@@ -222,7 +251,7 @@ export default function Navbar({
                       <div className="flex items-center justify-between gap-1.5">
                         <div className="flex items-center gap-1.5 min-w-0">
                           <span className="font-semibold text-xs truncate">{m.label}</span>
-                          {m.badge && (
+                          {badge && (
                             <span
                               className={`text-[9px] font-mono px-1 py-0.2 rounded border shrink-0 ${
                                 isSelected
@@ -230,7 +259,7 @@ export default function Navbar({
                                   : 'bg-white/[0.04] text-slate-500 border-white/[0.06]'
                               }`}
                             >
-                              {m.badge}
+                              {badge}
                             </span>
                           )}
                         </div>

@@ -30,6 +30,7 @@ const MODEL_CATALOG = [
     shortLabel: 'Flash',
     aliases: ['nanobanana 2 flash', 'nanobanana-2-flash', 'gemini-3.1-flash-image', 'flash'],
     provider: 'openrouter',
+    apiType: 'chat',
     vision: true,
     pricing: {
       inputPerMillion: 0.50,
@@ -45,6 +46,7 @@ const MODEL_CATALOG = [
     shortLabel: 'Flash Lite',
     aliases: ['nanobanana 2 flash lite', 'nanobanana-2-flash-lite', 'gemini-3.1-flash-lite-image', 'flash-lite', 'lite'],
     provider: 'openrouter',
+    apiType: 'chat',
     vision: true,
     pricing: {
       inputPerMillion: 0.25,
@@ -53,6 +55,38 @@ const MODEL_CATALOG = [
     },
     costHint: '$0.25/M in · $1.50/M out (~$0.035 per map, edit or expansion)',
     note: 'Google: Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image). Ultra-fast, lightweight image generation; supports region forging.'
+  },
+  {
+    id: 'meta/muse-image',
+    label: 'Meta: Muse Image',
+    shortLabel: 'Muse',
+    aliases: ['muse', 'muse-image', 'meta-muse', 'meta/muse'],
+    provider: 'openrouter',
+    apiType: 'images',
+    vision: true,
+    pricing: {
+      inputPerMillion: 0,
+      outputPerMillion: 0,
+      imageOutput: 0.01
+    },
+    costHint: '$0.01 per map (flat image pricing)',
+    note: 'Meta: Muse Image. Ultra-cheap ($0.01), authentic 2D TTRPG battlemap line art with flat poché walls; supports region forging.'
+  },
+  {
+    id: 'bytedance-seed/seedream-5-0-flash',
+    label: 'ByteDance Seedream 5.0 Flash',
+    shortLabel: 'Seedream Flash',
+    aliases: ['seedream', 'seedream-5', 'seedream-5-flash', 'seedream-flash', 'seedream-5-0-flash', 'bytedance-seedream'],
+    provider: 'openrouter',
+    apiType: 'images',
+    vision: true,
+    pricing: {
+      inputPerMillion: 0,
+      outputPerMillion: 0,
+      imageOutput: 0.018
+    },
+    costHint: '$0.018 per map (flat image pricing)',
+    note: 'ByteDance: Seedream 5.0 Flash. High-speed, high-detail digital painted battlemap generation; supports region forging.'
   }
 ];
 

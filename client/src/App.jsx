@@ -258,6 +258,7 @@ export default function App() {
       usage: telemetry.usage || null,
       failureReason: telemetry.failureReason || null,
       attempts: telemetry.attempts || [],
+      imageConfig: telemetry.imageConfig || null,
       durationMs,
       timestamp: new Date().toISOString()
     }, ...prev]);
@@ -290,6 +291,7 @@ export default function App() {
       usage: telemetry.usage || null,
       failureReason: message,
       attempts,
+      imageConfig: telemetry.imageConfig || null,
       durationMs: Date.now() - startTimeMs,
       timestamp: new Date().toISOString()
     }, ...prev]);

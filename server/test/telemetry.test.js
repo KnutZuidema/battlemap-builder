@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const sharp = require('sharp');
-const { extractImageSources, extractImageSource } = require('../services/providers/openrouterProvider');
+const { extractImageSources, extractImageSource, selectAspectRatio } = require('../services/providers/openrouterProvider');
 const { providerFailure } = require('../services/failure');
 
 test('extractImageSources extracts images from message.images array', () => {
@@ -127,4 +127,63 @@ test('requestCanvas captures direct model output images in debug telemetry', asy
   assert.strictEqual(result.debug.outputImages[0].id, 0);
   assert.strictEqual(result.debug.outputImages[0].label, 'Model Output 1 (1×1 px)');
   assert.match(result.debug.outputImages[0].dataUrl, /^data:image\/png;base64,/);
+});
+
+test('selectAspectRatio maps dimensions to closest supported aspect ratios', () => {
+  assert.strictEqual(selectAspectRatio(1024, 1024), '1:1');
+  assert.strictEqual(selectAspectRatio(null, null), '1:1');
+  assert.strictEqual(selectAspectRatio(1920, 1080), '16:9');
+  assert.strictEqual(selectAspectRatio(1080, 1920), '9:16');
+  assert.strictEqual(selectAspectRatio(1024, 768), '4:3');
+  assert.strictEqual(selectAspectRatio(768, 1024), '3:4');
+  assert.strictEqual(selectAspectRatio(1200, 800), '3:2');
+  assert.strictEqual(selectAspectRatio(800, 1200), '2:3');
+  assert.strictEqual(selectAspectRatio(1000, 800), '5:4');
+  assert.strictEqual(selectAspectRatio(800, 1000), '4:5');
+  assert.strictEqual(selectAspectRatio(2560, 1080), '21:9');
+});
+
+test('requestCanvas sends image_config with aspect_ratio in request body and debug telemetry', async (t) => {
+  const { requestCanvas } = require('../services/providers/openrouterProvider');
+  const originalFetch = global.fetch;
+  const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  let capturedBody = null;
+
+  global.fetch = async (url, opts) => {
+    capturedBody = JSON.parse(opts.body);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [
+          {
+            finish_reason: 'stop',
+            message: {
+              images: [{ data: pngBase64, mime_type: 'image/png' }]
+            }
+          }
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 }
+      })
+    };
+  };
+
+  t.after(() => {
+    global.fetch = originalFetch;
+  });
+
+  const result = await requestCanvas({
+    model: 'google/gemini-3.1-flash-image',
+    systemInstruction: 'Generate map',
+    userPromptText: 'A dungeon room',
+    fullPromptPayload: 'Generate map\n\nA dungeon room',
+    images: [],
+    width: 1024,
+    height: 1024,
+    apiKey: 'mock-key'
+  });
+
+  assert.ok(capturedBody);
+  assert.deepStrictEqual(capturedBody.image_config, { aspect_ratio: '1:1' });
+  assert.deepStrictEqual(result.debug.imageConfig, { aspect_ratio: '1:1' });
 });

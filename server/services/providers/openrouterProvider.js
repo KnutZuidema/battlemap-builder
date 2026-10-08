@@ -27,11 +27,46 @@ function buildUserContent(fullPromptPayload, images) {
   return parts;
 }
 
+const SUPPORTED_ASPECT_RATIOS = [
+  { id: '1:8', ratio: 1 / 8 },
+  { id: '1:4', ratio: 1 / 4 },
+  { id: '9:16', ratio: 9 / 16 },
+  { id: '2:3', ratio: 2 / 3 },
+  { id: '3:4', ratio: 3 / 4 },
+  { id: '4:5', ratio: 4 / 5 },
+  { id: '1:1', ratio: 1.0 },
+  { id: '5:4', ratio: 5 / 4 },
+  { id: '4:3', ratio: 4 / 3 },
+  { id: '3:2', ratio: 3 / 2 },
+  { id: '16:9', ratio: 16 / 9 },
+  { id: '21:9', ratio: 21 / 9 },
+  { id: '4:1', ratio: 4 / 1 },
+  { id: '8:1', ratio: 8 / 1 }
+];
+
+/**
+ * Selects the closest supported aspect ratio for a given width and height using logarithmic ratio distance.
+ */
+function selectAspectRatio(width, height) {
+  if (!width || !height || width === height) return '1:1';
+  const targetRatio = width / height;
+  let best = SUPPORTED_ASPECT_RATIOS[0];
+  let minDiff = Math.abs(Math.log(targetRatio / best.ratio));
+  for (let i = 1; i < SUPPORTED_ASPECT_RATIOS.length; i++) {
+    const diff = Math.abs(Math.log(targetRatio / SUPPORTED_ASPECT_RATIOS[i].ratio));
+    if (diff < minDiff) {
+      minDiff = diff;
+      best = SUPPORTED_ASPECT_RATIOS[i];
+    }
+  }
+  return best.id;
+}
+
 /**
  * POSTs one chat completion and returns the parsed body, turning any HTTP failure into an Error
  * carrying OpenRouter's own message so the failure summary stays factual.
  */
-async function postCompletion({ apiKey, model, systemInstruction, fullPromptPayload, images }) {
+async function postCompletion({ apiKey, model, systemInstruction, fullPromptPayload, images, imageConfig }) {
   const body = {
     model,
     modalities: ['image', 'text'],
@@ -41,6 +76,9 @@ async function postCompletion({ apiKey, model, systemInstruction, fullPromptPayl
     ]
   };
 
+  if (imageConfig && Object.keys(imageConfig).length > 0) {
+    body.image_config = imageConfig;
+  }
   const res = await fetch(OPENROUTER_CHAT_URL, {
     method: 'POST',
     headers: {
@@ -218,7 +256,17 @@ async function requestCanvas({ model, systemInstruction, userPromptText, fullPro
     dataUrl: `data:${img.mimeType || 'image/png'};base64,${img.buffer.toString('base64')}`
   }));
 
-  const payload = await postCompletion({ apiKey, model, systemInstruction, fullPromptPayload, images });
+  const aspectRatio = selectAspectRatio(width, height);
+  const imageConfig = { aspect_ratio: aspectRatio };
+
+  const payload = await postCompletion({
+    apiKey,
+    model,
+    systemInstruction,
+    fullPromptPayload,
+    images,
+    imageConfig
+  });
 
   const usage = readUsage(payload, model);
   const finishReason = readFinishReason(payload);
@@ -243,7 +291,8 @@ async function requestCanvas({ model, systemInstruction, userPromptText, fullPro
       userPrompt: userPromptText,
       fullPrompt: fullPromptPayload,
       images: telemetryImages,
-      outputImages: []
+      outputImages: [],
+      imageConfig
     };
     throw err;
   }
@@ -282,7 +331,8 @@ async function requestCanvas({ model, systemInstruction, userPromptText, fullPro
       userPrompt: userPromptText,
       fullPrompt: fullPromptPayload,
       images: telemetryImages,
-      outputImages
+      outputImages,
+      imageConfig
     }
   };
 }
@@ -291,5 +341,8 @@ module.exports = {
   extractImageSources,
   extractImageSource,
   sourceToBuffer,
-  requestCanvas
+  postCompletion,
+  requestCanvas,
+  selectAspectRatio,
+  SUPPORTED_ASPECT_RATIOS
 };

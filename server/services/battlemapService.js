@@ -9,7 +9,8 @@ const {
 const {
   IMAGE_PROMPTS,
   buildBattlemapPrompt,
-  buildForgeRegionPrompt
+  buildForgeRegionPrompt,
+  getForgeRegionSystemPrompt
 } = require('./prompts');
 const {
   providerKeyName,
@@ -138,7 +139,7 @@ async function generateBattlemap({ prompt, width = 1024, height = 1024, model })
  * with context/guide/mask images, and composites the render back with zero bleed outside
  * the selection and a soft 20px inward seam feather against preserved map tiles.
  */
-async function forgeRegion({ originalDataUrl, selection, prompt, model }) {
+async function forgeRegion({ originalDataUrl, selection, prompt, model, forgeImageMode = 'highlighted-only' }) {
   const entry = configuredModel(model);
 
   if (!entry.vision) {
@@ -148,7 +149,8 @@ async function forgeRegion({ originalDataUrl, selection, prompt, model }) {
     );
   }
 
-  const systemInstruction = IMAGE_PROMPTS.FORGE_REGION;
+  const isAllThree = forgeImageMode === 'all-three' || forgeImageMode === 'all';
+  const systemInstruction = getForgeRegionSystemPrompt(forgeImageMode);
   const prepared = await prepareRegionCanvas(originalDataUrl, selection, 512);
   const { dimensions, contextBuffer, guideBuffer, maskBuffer } = prepared;
   const { contextW, contextH } = dimensions;
@@ -161,20 +163,27 @@ async function forgeRegion({ originalDataUrl, selection, prompt, model }) {
     contextH
   )}`;
 
-  const images = [
-    {
-      label: `Image 1 — Focused battlemap context window (${contextW}x${contextH} px)`,
-      buffer: contextBuffer
-    },
-    {
-      label: 'Image 2 — Context window with target region highlighted in cyan tint',
-      buffer: guideBuffer
-    },
-    {
-      label: 'Image 3 — Binary mask (WHITE = target region to forge, BLACK = preserve strictly unchanged)',
-      buffer: maskBuffer
-    }
-  ];
+  const images = isAllThree
+    ? [
+        {
+          label: `Image 1 — Focused battlemap context window (${contextW}x${contextH} px)`,
+          buffer: contextBuffer
+        },
+        {
+          label: 'Image 2 — Context window with target region highlighted in cyan tint',
+          buffer: guideBuffer
+        },
+        {
+          label: 'Image 3 — Binary mask (WHITE = target region to forge, BLACK = preserve strictly unchanged)',
+          buffer: maskBuffer
+        }
+      ]
+    : [
+        {
+          label: `Context window with target region highlighted in cyan tint (${contextW}x${contextH} px)`,
+          buffer: guideBuffer
+        }
+      ];
 
   const result = await runModel(entry, {
     systemInstruction,
@@ -201,7 +210,7 @@ async function forgeRegion({ originalDataUrl, selection, prompt, model }) {
  * Forges an alternate state for an interactive feature within its bounding box,
  * then extracts and returns the cropped overlay patch.
  */
-async function forgeFeatureState({ originalDataUrl, box, prompt, model }) {
+async function forgeFeatureState({ originalDataUrl, box, prompt, model, forgeImageMode }) {
   if (!originalDataUrl || !box) {
     const err = new Error('originalDataUrl and box are required for forgeFeatureState');
     err.code = 'INVALID_PARAMETERS';
@@ -219,9 +228,9 @@ async function forgeFeatureState({ originalDataUrl, box, prompt, model }) {
     originalDataUrl,
     selection,
     prompt,
-    model
+    model,
+    forgeImageMode
   });
-
   const compBuffer = dataUrlToBuffer(compositeResult.imageDataUrl);
   const meta = await sharp(compBuffer).metadata();
   const extractLeft = Math.max(0, Math.min((compositeResult.dimensions?.origLeft || 0) + selection.x, meta.width - 1));

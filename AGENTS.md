@@ -111,7 +111,9 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
 
 ### B. Canvas Region Forging (`FORGE_REGION`)
 - `prepareRegionCanvas()` in `imageProcessor.js` extracts a focused context frame (default 512px padding around selection), a cyan-tinted guide image, and a binary mask.
-- The model receives the context window, guide image, and binary mask to generate or modify terrain strictly inside the target region.
+- **Configurable Image Mode**: Configurable via the Studio Settings menu in the top bar (`forgeImageMode`, persisted in `localStorage`):
+  - `highlighted-only` (Default): Sends only 1 image — the context window with the target region highlighted in cyan tint — paired with `IMAGE_PROMPTS.FORGE_REGION_HIGHLIGHTED`. Prevents contradictory multi-image guidance and minimizes token payload.
+  - `all-three` (Legacy): Sends all 3 images (raw context window, cyan guide image, and binary mask) paired with `IMAGE_PROMPTS.FORGE_REGION`.
 - `compositeRegion()` applies a 20px inward feather along preserved map edges while strictly clipping to the selection box to prevent bleed outside the target area.
 ### C. Model Telemetry Inspector (`DebugModal.jsx`)
 - Togglable via **Debug Logs** button in the header bar.

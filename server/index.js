@@ -226,21 +226,21 @@ app.post('/api/generate', async (req, res) => {
  */
 app.post('/api/forge-region', async (req, res) => {
   try {
-    const { originalDataUrl, selection, prompt, model } = req.body;
+    const { originalDataUrl, selection, prompt, model, forgeImageMode } = req.body;
 
     if (!originalDataUrl || !selection) {
       return res.status(400).json({ error: 'originalDataUrl and selection are required' });
     }
 
-    console.log(`[API /forge-region] Forging region (${selection.width}x${selection.height} at ${selection.x},${selection.y}): prompt="${prompt}" model="${model || 'default'}"`);
+    console.log(`[API /forge-region] Forging region (${selection.width}x${selection.height} at ${selection.x},${selection.y}): prompt="${prompt}" model="${model || 'default'}" mode="${forgeImageMode || 'highlighted-only'}"`);
 
     const result = await forgeRegion({
       originalDataUrl,
       selection,
       prompt,
-      model
+      model,
+      forgeImageMode
     });
-
     res.json(result);
   } catch (err) {
     sendGenerationError(res, err);
@@ -301,16 +301,17 @@ app.post('/api/features/detect', async (req, res) => {
  */
 app.post('/api/features/forge-state', async (req, res) => {
   try {
-    const { originalDataUrl, box, prompt, model } = req.body;
+    const { originalDataUrl, box, prompt, model, forgeImageMode } = req.body;
     if (!originalDataUrl || !box) {
       return res.status(400).json({ error: 'originalDataUrl and box are required', code: 'INVALID_PARAMETERS' });
     }
-    console.log(`[API /features/forge-state] Forging feature state (${box.width}x${box.height} at ${box.x},${box.y}): prompt="${prompt}" model="${model || 'default'}"`);
+    console.log(`[API /features/forge-state] Forging feature state (${box.width}x${box.height} at ${box.x},${box.y}): prompt="${prompt}" model="${model || 'default'}" mode="${forgeImageMode || 'highlighted-only'}"`);
     const result = await forgeFeatureState({
       originalDataUrl,
       box,
       prompt,
-      model
+      model,
+      forgeImageMode
     });
     res.json(result);
   } catch (err) {

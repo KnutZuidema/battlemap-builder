@@ -197,3 +197,53 @@ export function getRegionInCanvasCoordinates(selection) {
     height: selection.height
   };
 }
+
+/**
+ * Client-side deletion of a region from an image data URL via HTML5 Canvas.
+ * Sets the pixels in the selected region to transparent.
+ *
+ * @param {string} imageDataUrl - Base64 PNG data URL
+ * @param {{x: number, y: number, width: number, height: number}} selection - Bounding box in map pixels
+ * @returns {Promise<string>} Updated base64 PNG data URL
+ */
+export async function deleteRegionClient(imageDataUrl, selection) {
+  return new Promise((resolve, reject) => {
+    if (!imageDataUrl || !selection) {
+      resolve(imageDataUrl);
+      return;
+    }
+    const img = new Image();
+    img.crossOrigin = 'Anonymous';
+    img.onload = () => {
+      const width = img.naturalWidth || img.width;
+      const height = img.naturalHeight || img.height;
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error('Failed to get 2D canvas context'));
+        return;
+      }
+      ctx.drawImage(img, 0, 0);
+
+      const selX = Math.round(selection.x);
+      const selY = Math.round(selection.y);
+      const selW = Math.round(selection.width);
+      const selH = Math.round(selection.height);
+
+      const intersectLeft = Math.max(0, selX);
+      const intersectTop = Math.max(0, selY);
+      const intersectRight = Math.min(width, selX + selW);
+      const intersectBottom = Math.min(height, selY + selH);
+
+      if (intersectRight > intersectLeft && intersectBottom > intersectTop) {
+        ctx.clearRect(intersectLeft, intersectTop, intersectRight - intersectLeft, intersectBottom - intersectTop);
+      }
+
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.onerror = () => reject(new Error('Failed to load map image for region deletion'));
+    img.src = imageDataUrl;
+  });
+}

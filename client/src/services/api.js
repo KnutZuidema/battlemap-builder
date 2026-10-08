@@ -75,6 +75,11 @@ export async function forgeRegionApi({ originalDataUrl, selection, prompt, model
   return postJson('/api/forge-region', { originalDataUrl, selection, prompt, model });
 }
 
+/** Request deletion of a region from the battlemap (sets selected area to transparent) */
+export async function deleteRegionApi({ originalDataUrl, selection }) {
+  return postJson('/api/delete-region', { originalDataUrl, selection });
+}
+
 /**
  * Wiki endpoints for lore navigation and tactical prompt translation
  */

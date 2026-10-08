@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const dotenv = require('dotenv');
-const { generateBattlemap, forgeRegion, forgeFeatureState } = require('./services/battlemapService');
+const { generateBattlemap, forgeRegion, forgeFeatureState, deleteRegion } = require('./services/battlemapService');
 const { detectFeatures } = require('./services/featureService');
 const { isProviderConfigured, MODEL_CATALOG, DEFAULT_MODEL_ID } = require('./services/modelCatalog');
 const { getWikiTree, getWikiArticle } = require('./services/wikiService');
@@ -244,6 +244,32 @@ app.post('/api/forge-region', async (req, res) => {
     res.json(result);
   } catch (err) {
     sendGenerationError(res, err);
+  }
+});
+
+/**
+ * Deletes a rectangular region from the map image, setting the pixels inside the selection to transparent.
+ */
+app.post('/api/delete-region', async (req, res) => {
+  try {
+    const { originalDataUrl, selection } = req.body;
+    if (!originalDataUrl || !selection) {
+      return res.status(400).json({
+        error: 'originalDataUrl and selection are required',
+        code: 'INVALID_PARAMETERS'
+      });
+    }
+
+    console.log(`[API /delete-region] Deleting region (${selection.width}x${selection.height} at ${selection.x},${selection.y})`);
+
+    const result = await deleteRegion({ originalDataUrl, selection });
+    res.json(result);
+  } catch (err) {
+    console.error('[API /api/delete-region error]', err.message);
+    res.status(500).json({
+      error: err.message,
+      code: err.code || 'DELETE_REGION_FAILED'
+    });
   }
 });
 /**

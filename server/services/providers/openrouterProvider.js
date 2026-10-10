@@ -1,5 +1,5 @@
 const sharp = require('sharp');
-const { getModelPricing } = require('../modelCatalog');
+const { getModelPricing, findModel } = require('../modelCatalog');
 
 /**
  * OpenRouter provider — one HTTP surface (`/api/v1/chat/completions`) drives every map request.
@@ -8,11 +8,10 @@ const { getModelPricing } = require('../modelCatalog');
  * image parts of `message.content`; those bytes are resized to the exact canvas size the stitchers
  * downstream expect (fill, so no map content is cropped away).
  */
-
 const OPENROUTER_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const OPENROUTER_IMAGES_URL = 'https://openrouter.ai/api/v1/images';
 const APPLICATION_TITLE = 'Dungeon Forge';
 const REQUEST_TIMEOUT_MS = Number(process.env.OPENROUTER_TIMEOUT_MS) || 300000;
-
 function buildUserContent(fullPromptPayload, images) {
   if (!images.length) return fullPromptPayload;
 
@@ -26,6 +25,71 @@ function buildUserContent(fullPromptPayload, images) {
   }
   return parts;
 }
+/**
+ * Filters out synthetic mask and cyan guide images so diffusion models receive only visual scene context.
+ */
+function buildInputReferences(images) {
+  if (!Array.isArray(images) || !images.length) return [];
+  const filtered = images.filter((img) => {
+    if (!img) return false;
+    if (img.label && (img.label.toLowerCase().includes('cyan') || img.label.toLowerCase().includes('mask'))) {
+      return false;
+    }
+    return true;
+  });
+  return filtered.map((img) => ({
+    type: 'image_url',
+    image_url: {
+      url: `data:${img.mimeType || 'image/png'};base64,${img.buffer.toString('base64')}`
+    }
+  }));
+}
+
+/**
+ * POSTs to OpenRouter's /api/v1/images endpoint for raster image generation models.
+ */
+async function postImages({ apiKey, model, systemInstruction, fullPromptPayload, images = [], aspectRatio = '1:1' }) {
+  const combinedPrompt = systemInstruction
+    ? `${systemInstruction}\n\n[USER REQUEST]\n${fullPromptPayload}`
+    : fullPromptPayload;
+
+  const inputReferences = buildInputReferences(images);
+  const body = {
+    model,
+    prompt: combinedPrompt,
+    aspect_ratio: aspectRatio || '1:1'
+  };
+
+  if (inputReferences.length > 0) {
+    body.input_references = inputReferences;
+  }
+
+  const res = await fetch(OPENROUTER_IMAGES_URL, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'X-Title': APPLICATION_TITLE
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  });
+
+  const payload = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    const detail = payload && payload.error
+      ? `${payload.error.code || payload.error.type || res.status}: ${payload.error.message || JSON.stringify(payload.error)}`
+      : `HTTP ${res.status} from OpenRouter`;
+    const err = new Error(detail);
+    err.status = res.status;
+    throw err;
+  }
+
+  if (!payload) throw new Error(`HTTP ${res.status} from OpenRouter with an unreadable body`);
+  return payload;
+}
+
 
 const SUPPORTED_ASPECT_RATIOS = [
   { id: '1:8', ratio: 1 / 8 },
@@ -132,14 +196,22 @@ function readUsage(payload, model) {
   // Fallback to calculation if OpenRouter omitted costs
   const pricing = getModelPricing(model);
   if (pricing) {
-    if (promptCost === null && promptTokens !== null) {
-      promptCost = (promptTokens / 1_000_000) * pricing.inputPerMillion;
-    }
-    if (completionCost === null && completionTokens !== null) {
-      completionCost = (completionTokens / 1_000_000) * pricing.outputPerMillion;
-    }
-    if (totalCost === null && (promptCost !== null || completionCost !== null)) {
-      totalCost = (promptCost || 0) + (completionCost || 0);
+    if (pricing.inputPerMillion === 0 && pricing.outputPerMillion === 0 && pricing.imageOutput) {
+      if (totalCost === null) {
+        totalCost = pricing.imageOutput;
+        promptCost = 0;
+        completionCost = pricing.imageOutput;
+      }
+    } else {
+      if (promptCost === null && promptTokens !== null) {
+        promptCost = (promptTokens / 1_000_000) * pricing.inputPerMillion;
+      }
+      if (completionCost === null && completionTokens !== null) {
+        completionCost = (completionTokens / 1_000_000) * pricing.outputPerMillion;
+      }
+      if (totalCost === null && (promptCost !== null || completionCost !== null)) {
+        totalCost = (promptCost || 0) + (completionCost || 0);
+      }
     }
   }
 
@@ -190,14 +262,28 @@ function readFinishReason(payload) {
  * Image-out models return either `message.images[]` or image parts inside `message.content`.
  */
 function extractImageSources(payload) {
+  if (!payload) return [];
+  const sources = [];
+
+  if (Array.isArray(payload.data)) {
+    for (const item of payload.data) {
+      if (!item) continue;
+      if (typeof item === 'string' && item.length > 0) {
+        sources.push(item);
+      } else if (item.b64_json) {
+        sources.push(`data:${item.media_type || 'image/png'};base64,${item.b64_json}`);
+      } else if (item.url) {
+        sources.push(item.url);
+      }
+    }
+  }
+
   const message = payload.choices && payload.choices[0] && payload.choices[0].message;
-  if (!message) return [];
+  if (!message) return sources;
 
   const candidates = [];
   if (Array.isArray(message.images)) candidates.push(...message.images);
   if (Array.isArray(message.content)) candidates.push(...message.content);
-
-  const sources = [];
   for (const candidate of candidates) {
     if (!candidate) continue;
     if (typeof candidate === 'string' && candidate.length > 0) {
@@ -249,7 +335,7 @@ async function sourceToBuffer(source) {
  * Runs the image contract: ask for raster output, take the first returned image, and force it to
  * the exact canvas size the stitchers downstream expect.
  */
-async function requestCanvas({ model, systemInstruction, userPromptText, fullPromptPayload, images = [], width, height, apiKey }) {
+async function requestCanvas({ model, systemInstruction, userPromptText, fullPromptPayload, images = [], width, height, apiKey, apiType }) {
   const telemetryImages = images.map((img, idx) => ({
     id: idx,
     label: img.label || `Image ${idx + 1}`,
@@ -258,16 +344,10 @@ async function requestCanvas({ model, systemInstruction, userPromptText, fullPro
 
   const aspectRatio = selectAspectRatio(width, height);
   const imageConfig = { aspect_ratio: aspectRatio };
-
-  const payload = await postCompletion({
-    apiKey,
-    model,
-    systemInstruction,
-    fullPromptPayload,
-    images,
-    imageConfig
-  });
-
+  const resolvedApiType = apiType || findModel(model)?.apiType || 'chat';
+  const payload = resolvedApiType === 'images'
+    ? await postImages({ apiKey, model, systemInstruction, fullPromptPayload, images, aspectRatio })
+    : await postCompletion({ apiKey, model, systemInstruction, fullPromptPayload, images, imageConfig });
   const usage = readUsage(payload, model);
   const finishReason = readFinishReason(payload);
   const sources = extractImageSources(payload);
@@ -342,7 +422,9 @@ module.exports = {
   extractImageSource,
   sourceToBuffer,
   postCompletion,
+  postImages,
   requestCanvas,
+  buildInputReferences,
   selectAspectRatio,
   SUPPORTED_ASPECT_RATIOS
 };

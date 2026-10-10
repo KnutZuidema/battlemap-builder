@@ -95,7 +95,8 @@ async function runModel(entry, { systemInstruction, userPromptText, fullPromptPa
       userPrompt: userPromptText,
       fullPrompt: fullPromptPayload,
       images: err.telemetry?.images || [],
-      outputImages: err.telemetry?.outputImages || []
+      outputImages: err.telemetry?.outputImages || [],
+      imageConfig: err.telemetry?.imageConfig || null
     });
   }
 }

@@ -134,6 +134,15 @@ export default function DebugModal({ isOpen, onClose, debugLogs, onClearLogs }) 
                         : (PROVIDER_LABELS[activeLog.provider] || 'UNKNOWN')}
                     </strong>
                   </div>
+                  {activeLog.imageConfig?.aspect_ratio && (
+                    <>
+                      <div className="w-px h-4 bg-slate-800"></div>
+                      <div>
+                        <span className="text-slate-500">Aspect Ratio:</span>{' '}
+                        <strong className="text-purple-300 font-mono">{activeLog.imageConfig.aspect_ratio}</strong>
+                      </div>
+                    </>
+                  )}
                   {activeLog.usage && (
                     <>
                       <div className="w-px h-4 bg-slate-800"></div>

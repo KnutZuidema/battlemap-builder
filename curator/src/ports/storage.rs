@@ -1,4 +1,6 @@
-use crate::domain::{Candidate, CuratedMap, RedditSidecarMetadata, RejectionReason, Theme};
+use crate::domain::{
+    BenchmarkMetadata, Candidate, CuratedMap, RedditSidecarMetadata, RejectionReason, Theme,
+};
 use thiserror::Error;
 
 /// Errors arising from storage repository operations.
@@ -44,6 +46,16 @@ pub trait StorageRepository: Send + Sync {
     ) -> Result<(), StorageError> {
         let candidate = metadata.to_candidate();
         self.save_staging_subfolder("reddit", &candidate, data)
+    }
+
+    /// Save a generated candidate image and companion benchmark metadata into staging/generated/.
+    fn save_staging_generated(
+        &self,
+        metadata: &BenchmarkMetadata,
+        data: &[u8],
+    ) -> Result<(), StorageError> {
+        let candidate = metadata.to_candidate();
+        self.save_staging_subfolder("generated", &candidate, data)
     }
 
     /// Retrieve the raw image bytes for a staged candidate by ID.
@@ -142,6 +154,14 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
         data: &[u8],
     ) -> Result<(), StorageError> {
         (**self).save_staging_reddit(metadata, data)
+    }
+
+    fn save_staging_generated(
+        &self,
+        metadata: &BenchmarkMetadata,
+        data: &[u8],
+    ) -> Result<(), StorageError> {
+        (**self).save_staging_generated(metadata, data)
     }
 
     fn get_staging_image(&self, id: &str) -> Result<Vec<u8>, StorageError> {

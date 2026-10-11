@@ -11,8 +11,6 @@ pub enum Theme {
     Dungeon,
     #[serde(alias = "Cave")]
     Cave,
-    #[serde(alias = "Tavern")]
-    Tavern,
     #[serde(alias = "Wilderness")]
     Wilderness,
     #[serde(alias = "Ruins")]
@@ -24,6 +22,8 @@ pub enum Theme {
     #[serde(
         alias = "Building",
         alias = "building",
+        alias = "Tavern",
+        alias = "tavern",
         alias = "Structure",
         alias = "structure",
         alias = "Outpost",
@@ -43,12 +43,11 @@ impl Theme {
     pub const ALL: &'static [Theme] = &[
         Theme::Dungeon,
         Theme::Cave,
-        Theme::Tavern,
+        Theme::Building,
         Theme::Wilderness,
         Theme::Ruins,
         Theme::Urban,
         Theme::SciFi,
-        Theme::Building,
     ];
 
     /// Lowercase string representation of the theme.
@@ -56,12 +55,11 @@ impl Theme {
         match self {
             Self::Dungeon => "dungeon",
             Self::Cave => "cave",
-            Self::Tavern => "tavern",
+            Self::Building => "building",
             Self::Wilderness => "wilderness",
             Self::Ruins => "ruins",
             Self::Urban => "urban",
             Self::SciFi => "scifi",
-            Self::Building => "building",
         }
     }
 }
@@ -79,12 +77,11 @@ impl std::str::FromStr for Theme {
         match s.to_lowercase().replace(['-', '_'], "").as_str() {
             "dungeon" => Ok(Self::Dungeon),
             "cave" => Ok(Self::Cave),
-            "tavern" => Ok(Self::Tavern),
             "wilderness" => Ok(Self::Wilderness),
             "ruins" => Ok(Self::Ruins),
             "urban" => Ok(Self::Urban),
             "scifi" => Ok(Self::SciFi),
-            "building" | "structure" | "outpost" | "homestead" | "cabin" | "cottage" => {
+            "building" | "tavern" | "structure" | "outpost" | "homestead" | "cabin" | "cottage" => {
                 Ok(Self::Building)
             }
             _ => Err(format!("Unknown theme: {s}")),
@@ -859,6 +856,8 @@ mod tests {
         assert_eq!(Theme::from_str("homestead").unwrap(), Theme::Building);
         assert_eq!(Theme::from_str("cabin").unwrap(), Theme::Building);
         assert_eq!(Theme::from_str("cottage").unwrap(), Theme::Building);
+        assert_eq!(Theme::from_str("tavern").unwrap(), Theme::Building);
+        assert_eq!(Theme::from_str("Tavern").unwrap(), Theme::Building);
         assert!(Theme::from_str("unknown").is_err());
     }
 
@@ -880,6 +879,10 @@ mod tests {
         assert_eq!(deserialized_structure, Theme::Building);
         let deserialized_outpost: Theme = serde_json::from_str("\"Outpost\"").unwrap();
         assert_eq!(deserialized_outpost, Theme::Building);
+        let deserialized_tavern: Theme = serde_json::from_str("\"tavern\"").unwrap();
+        assert_eq!(deserialized_tavern, Theme::Building);
+        let deserialized_capital_tavern: Theme = serde_json::from_str("\"Tavern\"").unwrap();
+        assert_eq!(deserialized_capital_tavern, Theme::Building);
     }
 
     #[test]

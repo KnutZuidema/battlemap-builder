@@ -1009,7 +1009,7 @@ mod tests {
 
         let invalid_map_zero = CuratedMap::with_now(
             "invalid_0",
-            Theme::Tavern,
+            Theme::Building,
             0,
             vec![],
             (1024, 1024),
@@ -1022,7 +1022,7 @@ mod tests {
 
         let invalid_map_six = CuratedMap::with_now(
             "invalid_6",
-            Theme::Tavern,
+            Theme::Building,
             6,
             vec![],
             (1024, 1024),
@@ -1040,24 +1040,24 @@ mod tests {
         let storage = FilesystemStorage::new(dir.path());
 
         let map = CuratedMap::with_now(
-            "direct_tavern",
-            Theme::Tavern,
+            "direct_building",
+            Theme::Building,
             4,
             vec!["cozy".into()],
             (1024, 768),
         );
-        let data = b"tavern-image-bytes";
+        let data = b"building-image-bytes";
 
         storage.save_curated(&map, data).unwrap();
 
         let retrieved = storage
-            .get_curated_image(&Theme::Tavern, "direct_tavern")
+            .get_curated_image(&Theme::Building, "direct_building")
             .unwrap();
         assert_eq!(retrieved, data);
 
-        let list = storage.list_curated(Some(&Theme::Tavern)).unwrap();
+        let list = storage.list_curated(Some(&Theme::Building)).unwrap();
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, "direct_tavern");
+        assert_eq!(list[0].id, "direct_building");
     }
     #[test]
     fn test_multiple_rejections_accumulate() {

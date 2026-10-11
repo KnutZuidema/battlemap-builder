@@ -209,7 +209,7 @@ impl BenchmarkArchetype {
         match self {
             Self::StoneCrypt => Theme::Dungeon,
             Self::RiversideAmbush => Theme::Wilderness,
-            Self::TavernCommonRoom => Theme::Tavern,
+            Self::TavernCommonRoom => Theme::Building,
             Self::UnderdarkCavern => Theme::Cave,
             Self::DesertRuins => Theme::Ruins,
             Self::SewersSluice => Theme::Dungeon,

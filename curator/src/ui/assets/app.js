@@ -67,12 +67,11 @@
     const THEMES = [
         "dungeon",
         "cave",
-        "tavern",
+        "building",
         "wilderness",
         "ruins",
         "urban",
         "scifi",
-        "building",
     ];
 
     const REJECTION_REASONS = [
@@ -1366,8 +1365,8 @@
             return;
         }
 
-        // Theme selection hotkeys: 1-8
-        if (!e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && ["1", "2", "3", "4", "5", "6", "7", "8"].includes(e.key)) {
+        // Theme selection hotkeys: 1-7
+        if (!e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && ["1", "2", "3", "4", "5", "6", "7"].includes(e.key)) {
             const idx = parseInt(e.key, 10) - 1;
             const theme = THEMES[idx];
             if (theme) {

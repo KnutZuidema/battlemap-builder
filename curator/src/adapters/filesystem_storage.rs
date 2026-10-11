@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::{DateTime, Utc};
 
 use crate::domain::{
-    Candidate, CuratedMap, RedditSidecarMetadata, RejectionReason, RejectionRecord, Source, Theme,
+    BenchmarkMetadata, Candidate, CuratedMap, RedditSidecarMetadata, RejectionReason,
+    RejectionRecord, Source, Theme,
 };
 use crate::ports::storage::{StorageError, StorageRepository};
 
@@ -123,6 +124,12 @@ impl FilesystemStorage {
         let reddit_path = staging.join("reddit").join(&target_name);
         if reddit_path.is_file() {
             return Some(reddit_path);
+        }
+
+        // 3. Check direct in staging/generated/
+        let generated_path = staging.join("generated").join(&target_name);
+        if generated_path.is_file() {
+            return Some(generated_path);
         }
 
         // 3. Recursive search in staging subdirectories
@@ -405,11 +412,40 @@ impl StorageRepository for FilesystemStorage {
         Ok(())
     }
 
+    fn save_staging_generated(
+        &self,
+        metadata: &BenchmarkMetadata,
+        data: &[u8],
+    ) -> Result<(), StorageError> {
+        if metadata.id.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "Metadata ID cannot be empty".into(),
+            ));
+        }
+
+        let generated_dir = self.staging_dir().join("generated");
+        std::fs::create_dir_all(&generated_dir)?;
+
+        let image_path = generated_dir.join(format!("{}.png", metadata.id));
+        let sidecar_path = generated_dir.join(format!("{}.json", metadata.id));
+
+        Self::atomic_write(&image_path, data)?;
+
+        let sidecar_json = serde_json::to_string_pretty(metadata)?;
+        Self::atomic_write(&sidecar_path, sidecar_json.as_bytes())?;
+
+        Ok(())
+    }
+
     fn get_staging_image(&self, id: &str) -> Result<Vec<u8>, StorageError> {
         let sidecar_path = self.find_staging_sidecar_path(id);
         let candidate: Option<Candidate> = if let Some(p) = &sidecar_path {
             let content = std::fs::read_to_string(p)?;
-            serde_json::from_str(&content).ok()
+            serde_json::from_str(&content).ok().or_else(|| {
+                serde_json::from_str::<BenchmarkMetadata>(&content)
+                    .ok()
+                    .map(|b| b.to_candidate())
+            })
         } else {
             None
         };
@@ -446,7 +482,14 @@ impl StorageRepository for FilesystemStorage {
                         .unwrap_or_default();
                     if !file_name.starts_with('.') {
                         if let Ok(content) = std::fs::read_to_string(path) {
-                            if let Ok(mut candidate) = serde_json::from_str::<Candidate>(&content) {
+                            let candidate_opt = serde_json::from_str::<Candidate>(&content)
+                                .ok()
+                                .or_else(|| {
+                                    serde_json::from_str::<BenchmarkMetadata>(&content)
+                                        .ok()
+                                        .map(|b| b.to_candidate())
+                                });
+                            if let Some(mut candidate) = candidate_opt {
                                 // If filename is missing or empty, resolve it relative to staging
                                 if candidate.filename.is_empty() {
                                     if let Ok(rel) = path.strip_prefix(&staging) {

@@ -88,8 +88,10 @@ mod tests {
         assert!(html.contains("DUNGEON FORGE"));
         assert!(html.contains("triage-canvas"));
         assert!(html.contains("theme-selector"));
+        assert!(html.contains("Theme Selection (Press 1, then 1-8)"));
         assert!(html.contains("data-theme=\"building\""));
         assert!(html.contains("rating-selector"));
+        assert!(html.contains("Quality Rating (Press 2, then 1-5)"));
         assert!(html.contains("btn-grid-toggle"));
         assert!(html.contains("btn-fit-screen"));
         assert!(html.contains("btn-reject"));
@@ -146,8 +148,12 @@ mod tests {
         assert!(js.contains("curateCurrentCandidate"));
         assert!(js.contains("confirmRejection"));
 
+        // Two-step labeling mode hotkeys & selectors
+        assert!(js.contains("enterLabelingMode"));
+        assert!(js.contains("exitLabelingMode"));
+        assert!(js.contains("selecting-mode"));
+
         assert!(js.contains("\"building\""));
-        // Ingestion drawer & live harvesting
         assert!(js.contains("/api/harvest/reddit"));
         assert!(js.contains("openIngestionDrawer"));
         assert!(js.contains("closeIngestionDrawer"));
@@ -163,10 +169,10 @@ mod tests {
         assert!(css.contains("triage-viewport"));
         assert!(css.contains("theme-badge"));
         assert!(css.contains("rating-stars"));
+        assert!(css.contains("selecting-mode"));
         assert!(css.contains("[data-theme=\"building\"]"));
         assert!(css.contains("modal-backdrop"));
         assert!(css.contains("toast-container"));
-
         // Ingestion drawer & harvesting styling
         assert!(css.contains("drawer-backdrop"));
         assert!(css.contains("drawer-panel"));
@@ -174,6 +180,49 @@ mod tests {
         assert!(css.contains("slider-switch"));
         assert!(css.contains("progress-bar-fill"));
     }
+    #[test]
+    fn test_embedded_assets_contain_two_step_labeling_workflow() {
+        let app_js = Assets::get("app.js").expect("app.js must be embedded");
+        let js = std::str::from_utf8(app_js.data.as_ref()).expect("app.js must be valid utf8");
+
+        // Verify state initialization
+        assert!(js.contains("labelingMode: null"));
+
+        // Verify helper functions
+        assert!(js.contains("function enterLabelingMode(mode)"));
+        assert!(js.contains("function exitLabelingMode()"));
+        assert!(js.contains("themeSelector.classList.add(\"selecting-mode\")"));
+        assert!(js.contains("ratingSelector.classList.add(\"selecting-mode\")"));
+        assert!(js.contains("themeSelector.classList.remove(\"selecting-mode\")"));
+        assert!(js.contains("ratingSelector.classList.remove(\"selecting-mode\")"));
+
+        // Verify two-step hotkey dispatching
+        assert!(js.contains("enterLabelingMode(\"theme\")"));
+        assert!(js.contains("enterLabelingMode(\"rating\")"));
+        assert!(js.contains("state.labelingMode === \"theme\""));
+        assert!(js.contains("state.labelingMode === \"rating\""));
+
+        // Verify Escape dismisses labeling mode
+        assert!(js.contains("if (state.labelingMode)"));
+        assert!(js.contains("exitLabelingMode();"));
+
+        // Verify HTML tooltips & guide
+        let index_html = Assets::get("index.html").expect("index.html must be embedded");
+        let html = std::str::from_utf8(index_html.data.as_ref()).expect("index.html must be valid utf8");
+        assert!(html.contains("Theme Selection (Press 1, then 1-8)"));
+        assert!(html.contains("Quality Rating (Press 2, then 1-5)"));
+        assert!(html.contains("Theme Classification (Two-Step Hotkey)"));
+        assert!(html.contains("Quality Rating (Two-Step Hotkey)"));
+
+        // Verify CSS styling
+        let style_css = Assets::get("style.css").expect("style.css must be embedded");
+        let css = std::str::from_utf8(style_css.data.as_ref()).expect("style.css must be valid utf8");
+        assert!(css.contains(".theme-selector.selecting-mode"));
+        assert!(css.contains(".rating-selector.selecting-mode"));
+        assert!(css.contains("selecting-mode-pulse-cyan"));
+        assert!(css.contains("selecting-mode-pulse-amber"));
+    }
+
 
     #[tokio::test]
     async fn test_static_handler_index() {

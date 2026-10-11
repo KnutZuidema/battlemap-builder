@@ -21,7 +21,7 @@
         selectedTheme: "dungeon",
         selectedRating: 4,
         selectedReason: "GridBurnedIn",
-
+        labelingMode: null,
         // Canvas transform
         pan: { x: 0, y: 0 },
         zoom: 1.0,
@@ -422,6 +422,7 @@
      * Loads candidate by index, leveraging in-memory prefetch cache for 0ms transitions.
      */
     function loadCandidate(index) {
+        exitLabelingMode();
         if (index < 0 || index >= state.candidates.length) {
             state.currentIndex = -1;
             state.currentImage = null;
@@ -538,6 +539,7 @@
     // ==========================================================================
 
     async function curateCurrentCandidate() {
+        exitLabelingMode();
         if (state.isSubmitting || state.currentIndex < 0 || state.currentIndex >= state.candidates.length) {
             return;
         }
@@ -635,6 +637,7 @@
     }
 
     function openRejectionModal() {
+        exitLabelingMode();
         if (state.currentIndex < 0 || state.currentIndex >= state.candidates.length) return;
         state.rejectionModalOpen = true;
         rejectionNotesInput.value = "";
@@ -1298,6 +1301,11 @@
 
         // Global Modal Dismiss: Escape
         if (e.key === "Escape") {
+            if (state.labelingMode) {
+                exitLabelingMode();
+                e.preventDefault();
+                return;
+            }
             if (state.budgetGuardModalOpen) {
                 closeBudgetGuardModal();
                 e.preventDefault();
@@ -1348,6 +1356,34 @@
 
         // Ignore triage hotkeys if typing in an input
         if (isInputFocused) return;
+
+        // Secondary selection handling for active labeling mode
+        if (state.labelingMode === "theme") {
+            if (["1", "2", "3", "4", "5", "6", "7", "8", "9"].includes(e.key)) {
+                const idx = parseInt(e.key, 10) - 1;
+                if (idx >= 0 && idx < THEMES.length) {
+                    setTheme(THEMES[idx]);
+                }
+                exitLabelingMode();
+                e.preventDefault();
+                return;
+            }
+        }
+
+        if (state.labelingMode === "rating") {
+            if (["1", "2", "3", "4", "5"].includes(e.key)) {
+                const rating = parseInt(e.key, 10);
+                setRating(rating);
+                exitLabelingMode();
+                e.preventDefault();
+                return;
+            }
+            if (["6", "7", "8", "9"].includes(e.key)) {
+                e.preventDefault();
+                return;
+            }
+        }
+
         // Ingestion drawer hotkey: H
         if (e.key === "h" || e.key === "H") {
             toggleIngestionDrawer();
@@ -1369,25 +1405,17 @@
             return;
         }
 
-        // Quality rating hotkeys: Shift + 1-5
-        if (e.shiftKey && ["1", "2", "3", "4", "5"].includes(e.key)) {
-            const rating = parseInt(e.key, 10);
-            setRating(rating);
+        // Two-step labeling mode triggers: 1 (Theme), 2 (Rating)
+        if (e.key === "1" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+            enterLabelingMode("theme");
             e.preventDefault();
             return;
         }
-
-        // Theme selection hotkeys: 1-8
-        if (!e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && ["1", "2", "3", "4", "5", "6", "7", "8"].includes(e.key)) {
-            const idx = parseInt(e.key, 10) - 1;
-            const theme = THEMES[idx];
-            if (theme) {
-                setTheme(theme);
-                e.preventDefault();
-            }
+        if (e.key === "2" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+            enterLabelingMode("rating");
+            e.preventDefault();
             return;
         }
-
         // 64px VTT Grid toggle: G
         if (e.key === "g" || e.key === "G") {
             toggleGrid();
@@ -1479,7 +1507,32 @@
         showToast(`64px VTT Grid: ${state.gridVisible ? "Enabled" : "Disabled"}`, "info");
     }
 
+    function enterLabelingMode(mode) {
+        state.labelingMode = mode;
+        const themeSelector = document.getElementById("theme-selector");
+        const ratingSelector = document.getElementById("rating-selector");
+        if (themeSelector) themeSelector.classList.remove("selecting-mode");
+        if (ratingSelector) ratingSelector.classList.remove("selecting-mode");
+
+        if (mode === "theme" && themeSelector) {
+            themeSelector.classList.add("selecting-mode");
+            showToast("Select Theme: press 1-8 (Esc to cancel)", "info");
+        } else if (mode === "rating" && ratingSelector) {
+            ratingSelector.classList.add("selecting-mode");
+            showToast("Select Rating: press 1-5 (Esc to cancel)", "info");
+        }
+    }
+
+    function exitLabelingMode() {
+        state.labelingMode = null;
+        const themeSelector = document.getElementById("theme-selector");
+        const ratingSelector = document.getElementById("rating-selector");
+        if (themeSelector) themeSelector.classList.remove("selecting-mode");
+        if (ratingSelector) ratingSelector.classList.remove("selecting-mode");
+    }
+
     function setTheme(theme) {
+        exitLabelingMode();
         state.selectedTheme = theme;
         const badges = document.querySelectorAll(".theme-badge");
         badges.forEach((b) => {
@@ -1493,6 +1546,7 @@
         showToast(`Theme: ${capitalized}`, "info");
     }
     function setRating(rating) {
+        exitLabelingMode();
         state.selectedRating = rating;
         const starBtns = document.querySelectorAll(".star-btn");
         starBtns.forEach((btn) => {

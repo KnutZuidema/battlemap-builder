@@ -21,6 +21,21 @@ pub enum Theme {
     Urban,
     #[serde(alias = "SciFi", alias = "scifi", alias = "sci-fi", alias = "Sci-Fi")]
     SciFi,
+    #[serde(
+        alias = "Building",
+        alias = "building",
+        alias = "Structure",
+        alias = "structure",
+        alias = "Outpost",
+        alias = "outpost",
+        alias = "Homestead",
+        alias = "homestead",
+        alias = "Cabin",
+        alias = "cabin",
+        alias = "Cottage",
+        alias = "cottage"
+    )]
+    Building,
 }
 
 impl Theme {
@@ -33,6 +48,7 @@ impl Theme {
         Theme::Ruins,
         Theme::Urban,
         Theme::SciFi,
+        Theme::Building,
     ];
 
     /// Lowercase string representation of the theme.
@@ -45,6 +61,7 @@ impl Theme {
             Self::Ruins => "ruins",
             Self::Urban => "urban",
             Self::SciFi => "scifi",
+            Self::Building => "building",
         }
     }
 }
@@ -67,6 +84,9 @@ impl std::str::FromStr for Theme {
             "ruins" => Ok(Self::Ruins),
             "urban" => Ok(Self::Urban),
             "scifi" => Ok(Self::SciFi),
+            "building" | "structure" | "outpost" | "homestead" | "cabin" | "cottage" => {
+                Ok(Self::Building)
+            }
             _ => Err(format!("Unknown theme: {s}")),
         }
     }
@@ -831,6 +851,14 @@ mod tests {
         assert_eq!(Theme::from_str("sci-fi").unwrap(), Theme::SciFi);
         assert_eq!(Theme::from_str("SciFi").unwrap(), Theme::SciFi);
         assert_eq!(Theme::from_str("scifi").unwrap(), Theme::SciFi);
+        assert_eq!(Theme::Building.as_str(), "building");
+        assert_eq!(Theme::from_str("Building").unwrap(), Theme::Building);
+        assert_eq!(Theme::from_str("building").unwrap(), Theme::Building);
+        assert_eq!(Theme::from_str("structure").unwrap(), Theme::Building);
+        assert_eq!(Theme::from_str("outpost").unwrap(), Theme::Building);
+        assert_eq!(Theme::from_str("homestead").unwrap(), Theme::Building);
+        assert_eq!(Theme::from_str("cabin").unwrap(), Theme::Building);
+        assert_eq!(Theme::from_str("cottage").unwrap(), Theme::Building);
         assert!(Theme::from_str("unknown").is_err());
     }
 
@@ -844,6 +872,14 @@ mod tests {
         assert_eq!(deserialized_capital, Theme::Dungeon);
         let deserialized_scifi: Theme = serde_json::from_str("\"sci-fi\"").unwrap();
         assert_eq!(deserialized_scifi, Theme::SciFi);
+        let serialized_building = serde_json::to_string(&Theme::Building).unwrap();
+        assert_eq!(serialized_building, "\"building\"");
+        let deserialized_building: Theme = serde_json::from_str("\"building\"").unwrap();
+        assert_eq!(deserialized_building, Theme::Building);
+        let deserialized_structure: Theme = serde_json::from_str("\"structure\"").unwrap();
+        assert_eq!(deserialized_structure, Theme::Building);
+        let deserialized_outpost: Theme = serde_json::from_str("\"Outpost\"").unwrap();
+        assert_eq!(deserialized_outpost, Theme::Building);
     }
 
     #[test]

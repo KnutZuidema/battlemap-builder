@@ -17,7 +17,8 @@ pub const DEFAULT_USER_AGENT: &str =
 pub const DEFAULT_REDDIT_BASE_URL: &str = "https://www.reddit.com";
 pub const DEFAULT_REDDIT_OAUTH_BASE_URL: &str = "https://oauth.reddit.com";
 pub const DEFAULT_REDDIT_TOKEN_URL: &str = "https://www.reddit.com/api/v1/access_token";
-
+pub const DEFAULT_REDDIT_PUBLIC_CLIENT_ID: &str = "TWTsqXa53CexlrYGBWaesQ";
+pub const DEFAULT_REDDIT_REFRESH_TOKEN_CLIENT_ID: &str = DEFAULT_REDDIT_PUBLIC_CLIENT_ID;
 /// OAuth2 client credentials for authenticating against Reddit's API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedditCredentials {
@@ -32,6 +33,18 @@ impl RedditCredentials {
             client_secret: client_secret.into(),
         }
     }
+}
+
+/// OAuth2 authentication strategy for Reddit's API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedditAuthStrategy {
+    /// OAuth2 client credentials flow using client_id and client_secret.
+    ClientCredentials(RedditCredentials),
+    /// OAuth2 refresh token flow using user grant refresh token and client_id (no secret).
+    RefreshToken {
+        client_id: String,
+        refresh_token: String,
+    },
 }
 
 /// Cached OAuth2 bearer access token with expiration tracking.
@@ -99,7 +112,7 @@ pub struct RedditCrawler {
     oauth_base_url: String,
     token_url: String,
     user_agent: String,
-    credentials: Option<RedditCredentials>,
+    auth_strategy: Option<RedditAuthStrategy>,
     token_cache: Arc<RwLock<Option<CachedToken>>>,
     backoff: BackoffConfig,
 }
@@ -120,13 +133,15 @@ impl RedditCrawler {
             oauth_base_url: DEFAULT_REDDIT_OAUTH_BASE_URL.to_string(),
             token_url: DEFAULT_REDDIT_TOKEN_URL.to_string(),
             user_agent: DEFAULT_USER_AGENT.to_string(),
-            credentials: None,
+            auth_strategy: None,
             token_cache: Arc::new(RwLock::new(None)),
             backoff: BackoffConfig::default(),
         }
     }
 
     /// Create a `RedditCrawler` configured from environment variables:
+    /// - `REDDIT_REFRESH_TOKEN`: OAuth2 refresh token (takes precedence over client credentials;
+    ///   uses `REDDIT_CLIENT_ID` if set, otherwise defaults to `DEFAULT_REDDIT_PUBLIC_CLIENT_ID`)
     /// - `REDDIT_CLIENT_ID` & `REDDIT_CLIENT_SECRET`: OAuth2 client credentials
     /// - `REDDIT_USER_AGENT`: custom User-Agent header
     /// - `REDDIT_BASE_URL`: override unauthenticated base URL
@@ -135,15 +150,26 @@ impl RedditCrawler {
     pub fn from_env() -> Self {
         let mut crawler = Self::new();
 
-        if let (Ok(client_id), Ok(client_secret)) = (
-            std::env::var("REDDIT_CLIENT_ID"),
-            std::env::var("REDDIT_CLIENT_SECRET"),
-        ) {
-            let client_id = client_id.trim();
-            let client_secret = client_secret.trim();
-            if !client_id.is_empty() && !client_secret.is_empty() {
-                crawler = crawler.with_credentials(RedditCredentials::new(client_id, client_secret));
-            }
+        let refresh_token = std::env::var("REDDIT_REFRESH_TOKEN")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let client_id = std::env::var("REDDIT_CLIENT_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        let client_secret = std::env::var("REDDIT_CLIENT_SECRET")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        if let Some(token) = refresh_token {
+            let cid = client_id.unwrap_or_else(|| DEFAULT_REDDIT_PUBLIC_CLIENT_ID.to_string());
+            crawler = crawler.with_refresh_token(cid, token);
+        } else if let (Some(cid), Some(csec)) = (client_id, client_secret) {
+            crawler = crawler.with_credentials(RedditCredentials::new(cid, csec));
         }
 
         if let Ok(user_agent) = std::env::var("REDDIT_USER_AGENT") {
@@ -198,7 +224,7 @@ impl RedditCrawler {
     }
 
     pub fn with_credentials(mut self, credentials: RedditCredentials) -> Self {
-        self.credentials = Some(credentials);
+        self.auth_strategy = Some(RedditAuthStrategy::ClientCredentials(credentials));
         self
     }
 
@@ -207,8 +233,32 @@ impl RedditCrawler {
         client_id: impl Into<String>,
         client_secret: impl Into<String>,
     ) -> Self {
-        self.credentials = Some(RedditCredentials::new(client_id, client_secret));
+        self.auth_strategy = Some(RedditAuthStrategy::ClientCredentials(RedditCredentials::new(
+            client_id,
+            client_secret,
+        )));
         self
+    }
+
+    pub fn with_auth_strategy(mut self, auth_strategy: RedditAuthStrategy) -> Self {
+        self.auth_strategy = Some(auth_strategy);
+        self
+    }
+
+    pub fn with_refresh_token(
+        mut self,
+        client_id: impl Into<String>,
+        refresh_token: impl Into<String>,
+    ) -> Self {
+        self.auth_strategy = Some(RedditAuthStrategy::RefreshToken {
+            client_id: client_id.into(),
+            refresh_token: refresh_token.into(),
+        });
+        self
+    }
+
+    pub fn with_refresh_token_auth(self, refresh_token: impl Into<String>) -> Self {
+        self.with_refresh_token(DEFAULT_REDDIT_PUBLIC_CLIENT_ID, refresh_token)
     }
 
     pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
@@ -234,7 +284,21 @@ impl RedditCrawler {
     }
 
     pub fn credentials(&self) -> Option<&RedditCredentials> {
-        self.credentials.as_ref()
+        match &self.auth_strategy {
+            Some(RedditAuthStrategy::ClientCredentials(creds)) => Some(creds),
+            _ => None,
+        }
+    }
+
+    pub fn auth_strategy(&self) -> Option<&RedditAuthStrategy> {
+        self.auth_strategy.as_ref()
+    }
+
+    pub fn refresh_token(&self) -> Option<&str> {
+        match &self.auth_strategy {
+            Some(RedditAuthStrategy::RefreshToken { refresh_token, .. }) => Some(refresh_token),
+            _ => None,
+        }
     }
 
     pub fn user_agent(&self) -> &str {
@@ -248,7 +312,7 @@ impl RedditCrawler {
     /// Returns the effective base URL: `oauth_base_url` when credentials are configured,
     /// otherwise `base_url`.
     pub fn effective_base_url(&self) -> &str {
-        if self.credentials.is_some() {
+        if self.auth_strategy.is_some() {
             &self.oauth_base_url
         } else {
             &self.base_url
@@ -257,9 +321,9 @@ impl RedditCrawler {
 
     /// Obtains an OAuth2 bearer access token using client credentials, reusing the cached token if valid.
     pub async fn get_or_refresh_token(&self) -> Result<String, HarvesterError> {
-        let creds = self.credentials.as_ref().ok_or_else(|| {
+        let auth = self.auth_strategy.as_ref().ok_or_else(|| {
             HarvesterError::InvalidResponse(
-                "Cannot obtain Reddit OAuth token: client credentials are not configured".to_string(),
+                "Cannot obtain Reddit OAuth token: client credentials or refresh token authentication is not configured".to_string(),
             )
         })?;
 
@@ -281,7 +345,7 @@ impl RedditCrawler {
             }
         }
 
-        let new_token = self.fetch_access_token(creds).await?;
+        let new_token = self.fetch_access_token(auth).await?;
         let token_str = new_token.access_token.clone();
         *cache = Some(new_token);
         Ok(token_str)
@@ -295,19 +359,34 @@ impl RedditCrawler {
 
     async fn fetch_access_token(
         &self,
-        creds: &RedditCredentials,
+        auth: &RedditAuthStrategy,
     ) -> Result<CachedToken, HarvesterError> {
         info!(url = %self.token_url, "Requesting Reddit OAuth2 access token");
 
-        let res = self
-            .client
-            .post(&self.token_url)
-            .basic_auth(&creds.client_id, Some(&creds.client_secret))
-            .header(reqwest::header::USER_AGENT, &self.user_agent)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .form(&[("grant_type", "client_credentials")])
-            .send()
-            .await?;
+        let req = match auth {
+            RedditAuthStrategy::ClientCredentials(creds) => self
+                .client
+                .post(&self.token_url)
+                .basic_auth(&creds.client_id, Some(&creds.client_secret))
+                .header(reqwest::header::USER_AGENT, &self.user_agent)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .form(&[("grant_type", "client_credentials")]),
+            RedditAuthStrategy::RefreshToken {
+                client_id,
+                refresh_token,
+            } => self
+                .client
+                .post(&self.token_url)
+                .basic_auth(client_id, Some(""))
+                .header(reqwest::header::USER_AGENT, &self.user_agent)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh_token),
+                ]),
+        };
+
+        let res = req.send().await?;
 
         let status = res.status();
         if !status.is_success() {
@@ -323,7 +402,14 @@ impl RedditCrawler {
             "Reddit OAuth2 access token acquired successfully (expires in {}s)",
             token_resp.expires_in
         );
-        let expires_at = Instant::now() + Duration::from_secs(token_resp.expires_in);
+
+        const TOKEN_SAFETY_BUFFER_SECS: u64 = 60;
+        let ttl = if token_resp.expires_in > TOKEN_SAFETY_BUFFER_SECS {
+            Duration::from_secs(token_resp.expires_in - TOKEN_SAFETY_BUFFER_SECS)
+        } else {
+            Duration::from_secs(token_resp.expires_in)
+        };
+        let expires_at = Instant::now() + ttl;
 
         Ok(CachedToken {
             access_token: token_resp.access_token,
@@ -576,7 +662,7 @@ impl RedditHarvester for RedditCrawler {
         &self,
         query: &RedditHarvestQuery,
     ) -> Result<Vec<RedditPost>, HarvesterError> {
-        let token = if self.credentials.is_some() {
+        let token = if self.auth_strategy.is_some() {
             Some(self.get_or_refresh_token().await?)
         } else {
             None
@@ -589,7 +675,7 @@ impl RedditHarvester for RedditCrawler {
         loop {
             info!(
                 url = %url,
-                authenticated = self.credentials.is_some(),
+                authenticated = self.auth_strategy.is_some(),
                 attempt = attempts,
                 "Dispatching Reddit API request"
             );
@@ -641,25 +727,50 @@ impl RedditHarvester for RedditCrawler {
             }
 
             if status == reqwest::StatusCode::FORBIDDEN {
-                let msg = if self.credentials.is_some() {
-                    format!(
-                        "Reddit HTTP error 403 Forbidden for URL {url}: Access denied. \
-                        Please verify your REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, and REDDIT_USER_AGENT configuration."
-                    )
-                } else {
-                    format!(
-                        "Reddit HTTP error 403 Forbidden for URL {url}: Reddit blocks unauthenticated requests to public JSON endpoints. \
-                        Please configure REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET in .env to authenticate via OAuth2 client credentials."
-                    )
+                let msg = match &self.auth_strategy {
+                    Some(RedditAuthStrategy::RefreshToken { .. }) => {
+                        format!(
+                            "Reddit HTTP error 403 Forbidden for URL {url}: Access denied. \
+                            Please verify your REDDIT_REFRESH_TOKEN, REDDIT_CLIENT_ID, and REDDIT_USER_AGENT configuration."
+                        )
+                    }
+                    Some(RedditAuthStrategy::ClientCredentials(_)) => {
+                        format!(
+                            "Reddit HTTP error 403 Forbidden for URL {url}: Access denied. \
+                            Please verify your REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, and REDDIT_USER_AGENT configuration."
+                        )
+                    }
+                    None => {
+                        format!(
+                            "Reddit HTTP error 403 Forbidden for URL {url}: Reddit blocks unauthenticated requests to public JSON endpoints. \
+                            Please configure REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET in .env to authenticate via OAuth2 client credentials."
+                        )
+                    }
                 };
                 return Err(HarvesterError::InvalidResponse(msg));
             }
 
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                return Err(HarvesterError::InvalidResponse(format!(
-                    "Reddit HTTP error 401 Unauthorized for URL {url}: Invalid or expired OAuth2 credentials. \
-                    Please check REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET in .env."
-                )));
+                let msg = match &self.auth_strategy {
+                    Some(RedditAuthStrategy::RefreshToken { .. }) => {
+                        format!(
+                            "Reddit HTTP error 401 Unauthorized for URL {url}: Invalid or expired OAuth2 credentials. \
+                            Please check REDDIT_REFRESH_TOKEN in .env."
+                        )
+                    }
+                    Some(RedditAuthStrategy::ClientCredentials(_)) => {
+                        format!(
+                            "Reddit HTTP error 401 Unauthorized for URL {url}: Invalid or expired OAuth2 credentials. \
+                            Please check REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET in .env."
+                        )
+                    }
+                    None => {
+                        format!(
+                            "Reddit HTTP error 401 Unauthorized for URL {url}: Invalid or expired OAuth2 credentials."
+                        )
+                    }
+                };
+                return Err(HarvesterError::InvalidResponse(msg));
             }
 
             if !status.is_success() {
@@ -830,6 +941,47 @@ mod tests {
             crawler.build_url(&q1),
             "https://oauth.reddit.com/r/battlemaps/hot.json?t=all&limit=25"
         );
+    }
+
+    #[test]
+    fn test_build_url_authenticated_refresh_token() {
+        let crawler = RedditCrawler::new().with_refresh_token_auth("mock_refresh_token");
+
+        let q1 = RedditHarvestQuery::battlemaps()
+            .with_sort(RedditSort::Hot)
+            .with_time(RedditTimeRange::All)
+            .with_limit(25);
+        assert_eq!(
+            crawler.build_url(&q1),
+            "https://oauth.reddit.com/r/battlemaps/hot.json?t=all&limit=25"
+        );
+        assert_eq!(
+            crawler.auth_strategy(),
+            Some(&RedditAuthStrategy::RefreshToken {
+                client_id: DEFAULT_REDDIT_PUBLIC_CLIENT_ID.to_string(),
+                refresh_token: "mock_refresh_token".to_string(),
+            })
+        );
+        assert_eq!(crawler.refresh_token(), Some("mock_refresh_token"));
+        assert_eq!(crawler.credentials(), None);
+        assert_eq!(crawler.effective_base_url(), DEFAULT_REDDIT_OAUTH_BASE_URL);
+    }
+
+    #[test]
+    fn test_crawler_refresh_token_custom_client_id() {
+        let crawler = RedditCrawler::new()
+            .with_refresh_token("custom_client_id", "mock_refresh_token");
+
+        assert_eq!(
+            crawler.auth_strategy(),
+            Some(&RedditAuthStrategy::RefreshToken {
+                client_id: "custom_client_id".to_string(),
+                refresh_token: "mock_refresh_token".to_string(),
+            })
+        );
+        assert_eq!(crawler.refresh_token(), Some("mock_refresh_token"));
+        assert_eq!(crawler.credentials(), None);
+        assert_eq!(crawler.effective_base_url(), DEFAULT_REDDIT_OAUTH_BASE_URL);
     }
 
     #[test]

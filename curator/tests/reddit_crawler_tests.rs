@@ -3,9 +3,11 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
+use base64::prelude::*;
 use curator::adapters::reddit::{
-    BackoffConfig, RedditCrawler, RedditCredentials, DEFAULT_REDDIT_BASE_URL,
-    DEFAULT_REDDIT_OAUTH_BASE_URL, DEFAULT_REDDIT_TOKEN_URL, DEFAULT_USER_AGENT,
+    BackoffConfig, RedditAuthStrategy, RedditCrawler, RedditCredentials,
+    DEFAULT_REDDIT_BASE_URL, DEFAULT_REDDIT_OAUTH_BASE_URL,
+    DEFAULT_REDDIT_PUBLIC_CLIENT_ID, DEFAULT_REDDIT_TOKEN_URL, DEFAULT_USER_AGENT,
 };
 use curator::domain::{GridStatus, RedditHarvestQuery, RedditSort, RedditTimeRange};
 use curator::ports::harvester::{HarvesterError, RedditHarvester};
@@ -370,6 +372,184 @@ async fn test_authenticated_fetch_posts_with_bearer_token() {
 }
 
 #[tokio::test]
+async fn test_refresh_token_retrieval_formatting_and_caching() {
+    let token_requests = Arc::new(AtomicU32::new(0));
+    let token_requests_clone = token_requests.clone();
+
+    let app = Router::new().route(
+        "/api/v1/access_token",
+        post(move |headers: HeaderMap, body: String| {
+            let token_requests = token_requests_clone.clone();
+            async move {
+                token_requests.fetch_add(1, Ordering::SeqCst);
+
+                let auth = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                assert!(
+                    auth.starts_with("Basic "),
+                    "expected Basic auth header, got {auth}"
+                );
+                let basic_b64 = auth.strip_prefix("Basic ").unwrap();
+                let decoded = String::from_utf8(
+                    BASE64_STANDARD.decode(basic_b64).expect("valid base64"),
+                )
+                .expect("valid utf-8 credentials");
+                assert_eq!(
+                    decoded, "custom_client_123:",
+                    "expected Basic auth containing client_id and empty password"
+                );
+
+                let content_type = headers
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                assert!(
+                    content_type.contains("application/x-www-form-urlencoded"),
+                    "expected application/x-www-form-urlencoded content-type, got: {content_type}"
+                );
+
+                let ua = headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                assert_eq!(ua, DEFAULT_USER_AGENT);
+
+                let accept = headers
+                    .get(axum::http::header::ACCEPT)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                assert_eq!(accept, "application/json");
+
+                assert!(
+                    body.contains("grant_type=refresh_token"),
+                    "expected grant_type=refresh_token in body, got: {body}"
+                );
+                assert!(
+                    body.contains("refresh_token=mock_refresh_token_secret"),
+                    "expected refresh_token parameter in body, got: {body}"
+                );
+
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    r#"{"access_token":"mock_rt_access_token_777","token_type":"bearer","expires_in":3600,"scope":"read"}"#,
+                )
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let token_url = format!("http://{addr}/api/v1/access_token");
+    let crawler = RedditCrawler::new()
+        .with_refresh_token("custom_client_123", "mock_refresh_token_secret")
+        .with_token_url(token_url);
+
+    assert!(!crawler.has_cached_token().await);
+
+    // First call: retrieves token from mock server
+    let token1 = crawler
+        .get_or_refresh_token()
+        .await
+        .expect("token should be obtained via refresh token");
+    assert_eq!(token1, "mock_rt_access_token_777");
+    assert_eq!(token_requests.load(Ordering::SeqCst), 1);
+    assert!(crawler.has_cached_token().await);
+
+    // Second call: should use cached token and NOT issue another HTTP request
+    let token2 = crawler
+        .get_or_refresh_token()
+        .await
+        .expect("cached token should be returned");
+    assert_eq!(token2, "mock_rt_access_token_777");
+    assert_eq!(token_requests.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_authenticated_fetch_posts_with_refresh_token() {
+    let token_requests = Arc::new(AtomicU32::new(0));
+    let token_requests_clone = token_requests.clone();
+
+    let app = Router::new()
+        .route(
+            "/api/v1/access_token",
+            post(move |headers: HeaderMap, body: String| {
+                let token_requests = token_requests_clone.clone();
+                async move {
+                    token_requests.fetch_add(1, Ordering::SeqCst);
+
+                    let auth = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("");
+                    assert!(auth.starts_with("Basic "));
+                    let basic_b64 = auth.strip_prefix("Basic ").unwrap();
+                    let decoded = String::from_utf8(
+                        BASE64_STANDARD.decode(basic_b64).expect("valid base64"),
+                    )
+                    .unwrap();
+                    assert_eq!(decoded, format!("{DEFAULT_REDDIT_PUBLIC_CLIENT_ID}:"));
+
+                    assert!(body.contains("grant_type=refresh_token"));
+                    assert!(body.contains("refresh_token=mock_user_rt_999"));
+
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        r#"{"access_token":"bearer_from_rt_xyz","token_type":"bearer","expires_in":3600}"#,
+                    )
+                }
+            }),
+        )
+        .route(
+            "/r/battlemaps/top.json",
+            get(|headers: HeaderMap| async move {
+                let auth = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                assert_eq!(auth, "Bearer bearer_from_rt_xyz");
+
+                let accept = headers
+                    .get(axum::http::header::ACCEPT)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("");
+                assert_eq!(accept, "application/json");
+
+                (StatusCode::OK, MOCK_LISTING_JSON)
+            }),
+        );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let crawler = RedditCrawler::new()
+        .with_refresh_token_auth("mock_user_rt_999")
+        .with_oauth_base_url(format!("http://{addr}"))
+        .with_token_url(format!("http://{addr}/api/v1/access_token"));
+
+    let query = RedditHarvestQuery::battlemaps().with_sort(RedditSort::Top);
+    let posts = crawler
+        .fetch_posts(&query)
+        .await
+        .expect("harvest via refresh token succeeds");
+
+    assert_eq!(posts.len(), 2);
+    assert_eq!(posts[0].id, "single1");
+    assert!(crawler.has_cached_token().await);
+    assert_eq!(token_requests.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn test_403_forbidden_diagnostic_error_unauthenticated() {
     let app = Router::new().route(
         "/r/battlemaps/top.json",
@@ -532,4 +712,99 @@ async fn test_crawler_builder_and_environment_variable_configuration() {
         default_crawler.effective_base_url(),
         DEFAULT_REDDIT_BASE_URL
     );
+}
+
+#[tokio::test]
+async fn test_refresh_token_builder_and_from_env_configuration() {
+    // 1. Builder configuration with custom client ID
+    let crawler1 = RedditCrawler::new()
+        .with_refresh_token("builder_client_id", "builder_refresh_token");
+
+    assert_eq!(
+        crawler1.auth_strategy(),
+        Some(&RedditAuthStrategy::RefreshToken {
+            client_id: "builder_client_id".to_string(),
+            refresh_token: "builder_refresh_token".to_string(),
+        })
+    );
+    assert_eq!(crawler1.refresh_token(), Some("builder_refresh_token"));
+    assert_eq!(crawler1.credentials(), None);
+    assert_eq!(
+        crawler1.effective_base_url(),
+        DEFAULT_REDDIT_OAUTH_BASE_URL
+    );
+
+    // 2. Convenience builder defaulting to public client ID
+    let crawler2 = RedditCrawler::new()
+        .with_refresh_token_auth("default_refresh_token");
+
+    assert_eq!(
+        crawler2.auth_strategy(),
+        Some(&RedditAuthStrategy::RefreshToken {
+            client_id: DEFAULT_REDDIT_PUBLIC_CLIENT_ID.to_string(),
+            refresh_token: "default_refresh_token".to_string(),
+        })
+    );
+    assert_eq!(crawler2.refresh_token(), Some("default_refresh_token"));
+    assert_eq!(crawler2.credentials(), None);
+    assert_eq!(
+        crawler2.effective_base_url(),
+        DEFAULT_REDDIT_OAUTH_BASE_URL
+    );
+
+    // 3. from_env with REDDIT_REFRESH_TOKEN alone (default client ID)
+    let _guard = ENV_TEST_MUTEX.lock().await;
+    std::env::set_var("REDDIT_REFRESH_TOKEN", "env_user_rt");
+    let env_crawler1 = RedditCrawler::from_env();
+    assert_eq!(
+        env_crawler1.auth_strategy(),
+        Some(&RedditAuthStrategy::RefreshToken {
+            client_id: DEFAULT_REDDIT_PUBLIC_CLIENT_ID.to_string(),
+            refresh_token: "env_user_rt".to_string(),
+        })
+    );
+    assert_eq!(env_crawler1.refresh_token(), Some("env_user_rt"));
+    assert_eq!(env_crawler1.credentials(), None);
+    assert_eq!(
+        env_crawler1.effective_base_url(),
+        DEFAULT_REDDIT_OAUTH_BASE_URL
+    );
+
+    // 4. from_env with REDDIT_REFRESH_TOKEN and custom REDDIT_CLIENT_ID
+    std::env::set_var("REDDIT_CLIENT_ID", "env_custom_cid");
+    let env_crawler2 = RedditCrawler::from_env();
+    assert_eq!(
+        env_crawler2.auth_strategy(),
+        Some(&RedditAuthStrategy::RefreshToken {
+            client_id: "env_custom_cid".to_string(),
+            refresh_token: "env_user_rt".to_string(),
+        })
+    );
+    assert_eq!(env_crawler2.refresh_token(), Some("env_user_rt"));
+
+    // 5. REDDIT_REFRESH_TOKEN takes precedence over REDDIT_CLIENT_SECRET
+    std::env::set_var("REDDIT_CLIENT_SECRET", "unused_client_secret");
+    let env_crawler3 = RedditCrawler::from_env();
+    assert_eq!(
+        env_crawler3.auth_strategy(),
+        Some(&RedditAuthStrategy::RefreshToken {
+            client_id: "env_custom_cid".to_string(),
+            refresh_token: "env_user_rt".to_string(),
+        })
+    );
+
+    // 6. If REDDIT_REFRESH_TOKEN is empty string, falls back to client credentials
+    std::env::set_var("REDDIT_REFRESH_TOKEN", "   ");
+    std::env::set_var("REDDIT_CLIENT_ID", "fallback_client_id");
+    std::env::set_var("REDDIT_CLIENT_SECRET", "fallback_secret");
+    let env_crawler4 = RedditCrawler::from_env();
+    assert_eq!(
+        env_crawler4.credentials(),
+        Some(&RedditCredentials::new("fallback_client_id", "fallback_secret"))
+    );
+
+    // Clean up
+    std::env::remove_var("REDDIT_REFRESH_TOKEN");
+    std::env::remove_var("REDDIT_CLIENT_ID");
+    std::env::remove_var("REDDIT_CLIENT_SECRET");
 }

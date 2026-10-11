@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 
 /// Thematic classification for battlemaps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -278,6 +280,317 @@ impl CuratedMap {
     }
 }
 
+static GRIDLESS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\[?(no[- ]?grid|gridless|ungridded)\]?").expect("valid gridless regex")
+});
+
+static GRIDDED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(\[?\d+\s*[x×]\s*\d+\]?|\[?gridded?\]?)").expect("valid gridded regex")
+});
+
+static DIMENSIONS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\[?(\d{2,3})\s*[x×]\s*(\d{2,3})\]?").expect("valid dimensions regex")
+});
+
+/// Sort order for querying Reddit listings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RedditSort {
+    #[default]
+    #[serde(alias = "hot", alias = "Hot")]
+    Hot,
+    #[serde(alias = "top", alias = "Top")]
+    Top,
+    #[serde(alias = "new", alias = "New")]
+    New,
+}
+
+impl RedditSort {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hot => "hot",
+            Self::Top => "top",
+            Self::New => "new",
+        }
+    }
+}
+
+impl std::fmt::Display for RedditSort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for RedditSort {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "hot" => Ok(Self::Hot),
+            "top" => Ok(Self::Top),
+            "new" => Ok(Self::New),
+            _ => Err(format!("Unknown Reddit sort: {s}")),
+        }
+    }
+}
+
+/// Time interval filter for Reddit top listing queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RedditTimeRange {
+    #[serde(alias = "hour", alias = "Hour")]
+    Hour,
+    #[serde(alias = "day", alias = "Day")]
+    Day,
+    #[serde(alias = "week", alias = "Week")]
+    Week,
+    #[serde(alias = "month", alias = "Month")]
+    Month,
+    #[serde(alias = "year", alias = "Year")]
+    Year,
+    #[default]
+    #[serde(alias = "all", alias = "All")]
+    All,
+}
+
+impl RedditTimeRange {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hour => "hour",
+            Self::Day => "day",
+            Self::Week => "week",
+            Self::Month => "month",
+            Self::Year => "year",
+            Self::All => "all",
+        }
+    }
+}
+
+impl std::fmt::Display for RedditTimeRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for RedditTimeRange {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "hour" => Ok(Self::Hour),
+            "day" => Ok(Self::Day),
+            "week" => Ok(Self::Week),
+            "month" => Ok(Self::Month),
+            "year" => Ok(Self::Year),
+            "all" => Ok(Self::All),
+            _ => Err(format!("Unknown Reddit time range: {s}")),
+        }
+    }
+}
+
+/// Query configuration for crawling Reddit posts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedditHarvestQuery {
+    pub subreddit: String,
+    pub sort: RedditSort,
+    pub time: Option<RedditTimeRange>,
+    pub limit: usize,
+    pub after: Option<String>,
+}
+
+impl Default for RedditHarvestQuery {
+    fn default() -> Self {
+        Self {
+            subreddit: "battlemaps".to_string(),
+            sort: RedditSort::Hot,
+            time: Some(RedditTimeRange::All),
+            limit: 25,
+            after: None,
+        }
+    }
+}
+
+impl RedditHarvestQuery {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn battlemaps() -> Self {
+        Self::default()
+    }
+
+    pub fn with_subreddit(mut self, subreddit: impl Into<String>) -> Self {
+        self.subreddit = subreddit.into();
+        self
+    }
+
+    pub fn with_sort(mut self, sort: RedditSort) -> Self {
+        self.sort = sort;
+        self
+    }
+
+    pub fn with_time(mut self, time: RedditTimeRange) -> Self {
+        self.time = Some(time);
+        self
+    }
+
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit.clamp(1, 100);
+        self
+    }
+
+    pub fn with_after(mut self, after: impl Into<String>) -> Self {
+        self.after = Some(after.into());
+        self
+    }
+}
+
+/// Grid overlay status inferred from title metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GridStatus {
+    #[serde(alias = "Gridless")]
+    Gridless,
+    #[serde(alias = "Gridded")]
+    Gridded,
+    #[default]
+    #[serde(alias = "Unknown")]
+    Unknown,
+}
+
+impl GridStatus {
+    pub fn is_gridless(&self) -> bool {
+        matches!(self, Self::Gridless)
+    }
+
+    pub fn is_gridded(&self) -> bool {
+        matches!(self, Self::Gridded)
+    }
+}
+
+impl std::fmt::Display for GridStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Gridless => write!(f, "gridless"),
+            Self::Gridded => write!(f, "gridded"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+/// Extracted tags and dimensions from post titles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParsedTags {
+    pub grid_status: GridStatus,
+    pub dimensions: Option<(u32, u32)>,
+    pub raw_title: String,
+}
+
+impl ParsedTags {
+    /// Parse grid status and dimension hints from a title string.
+    pub fn parse_title(title: &str) -> Self {
+        let grid_status = if GRIDLESS_RE.is_match(title) {
+            GridStatus::Gridless
+        } else if GRIDDED_RE.is_match(title) {
+            GridStatus::Gridded
+        } else {
+            GridStatus::Unknown
+        };
+
+        let dimensions = DIMENSIONS_RE.captures(title).and_then(|caps| {
+            let width = caps.get(1)?.as_str().parse::<u32>().ok()?;
+            let height = caps.get(2)?.as_str().parse::<u32>().ok()?;
+            Some((width, height))
+        });
+
+        Self {
+            grid_status,
+            dimensions,
+            raw_title: title.to_string(),
+        }
+    }
+
+    pub fn is_gridless(&self) -> bool {
+        self.grid_status.is_gridless()
+    }
+
+    pub fn is_gridded(&self) -> bool {
+        self.grid_status.is_gridded()
+    }
+}
+
+/// A harvestable media image item from a Reddit post.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarvestedMedia {
+    pub url: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub caption: Option<String>,
+}
+
+impl HarvestedMedia {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            width: None,
+            height: None,
+            caption: None,
+        }
+    }
+
+    pub fn with_dimensions(mut self, width: u32, height: u32) -> Self {
+        self.width = Some(width);
+        self.height = Some(height);
+        self
+    }
+
+    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
+        self.caption = Some(caption.into());
+        self
+    }
+}
+
+/// A battlemap post harvested from Reddit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedditPost {
+    pub id: String,
+    pub name: String,
+    pub title: String,
+    pub author: String,
+    pub permalink: String,
+    pub url: String,
+    pub score: i32,
+    pub created_utc: DateTime<Utc>,
+    pub media: Vec<HarvestedMedia>,
+    pub tags: ParsedTags,
+}
+
+impl RedditPost {
+    pub fn has_media(&self) -> bool {
+        !self.media.is_empty()
+    }
+
+    pub fn primary_image_url(&self) -> Option<&str> {
+        self.media.first().map(|m| m.url.as_str())
+    }
+
+    pub fn to_candidate(&self, media_index: usize) -> Option<Candidate> {
+        let media = self.media.get(media_index)?;
+        let filename = format!("{}_{}.png", self.id, media_index);
+        let dimensions = match (media.width, media.height) {
+            (Some(w), Some(h)) => (w, h),
+            _ => self.tags.dimensions.unwrap_or((0, 0)),
+        };
+        Some(Candidate::new(
+            format!("{}_{}", self.id, media_index),
+            Source::Reddit,
+            filename,
+            dimensions,
+            self.created_utc,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +683,137 @@ mod tests {
         assert_eq!(parsed.theme, Theme::Cave);
         assert_eq!(parsed.rating, 5);
         assert_eq!(parsed.tags, vec!["water", "stalagmites"]);
+    }
+
+    #[test]
+    fn test_reddit_sort_and_timerange_serde() {
+        assert_eq!(RedditSort::Hot.as_str(), "hot");
+        assert_eq!(RedditSort::Top.as_str(), "top");
+        assert_eq!(RedditSort::New.as_str(), "new");
+        assert_eq!(RedditSort::from_str("hot").unwrap(), RedditSort::Hot);
+        assert_eq!(RedditSort::from_str("TOP").unwrap(), RedditSort::Top);
+        assert_eq!(RedditSort::from_str("New").unwrap(), RedditSort::New);
+        assert!(RedditSort::from_str("invalid").is_err());
+
+        assert_eq!(RedditTimeRange::All.as_str(), "all");
+        assert_eq!(RedditTimeRange::Day.as_str(), "day");
+        assert_eq!(RedditTimeRange::from_str("week").unwrap(), RedditTimeRange::Week);
+        assert_eq!(RedditTimeRange::from_str("Year").unwrap(), RedditTimeRange::Year);
+        assert_eq!(RedditTimeRange::from_str("MONTH").unwrap(), RedditTimeRange::Month);
+        assert!(RedditTimeRange::from_str("invalid").is_err());
+
+        let sort_json = serde_json::to_string(&RedditSort::Top).unwrap();
+        assert_eq!(sort_json, "\"top\"");
+        let time_json = serde_json::to_string(&RedditTimeRange::Month).unwrap();
+        assert_eq!(time_json, "\"month\"");
+    }
+
+    #[test]
+    fn test_reddit_harvest_query_builder() {
+        let default_query = RedditHarvestQuery::default();
+        assert_eq!(default_query.subreddit, "battlemaps");
+        assert_eq!(default_query.sort, RedditSort::Hot);
+        assert_eq!(default_query.limit, 25);
+
+        let query = RedditHarvestQuery::new()
+            .with_subreddit("dndmaps")
+            .with_sort(RedditSort::Top)
+            .with_time(RedditTimeRange::Month)
+            .with_limit(150) // clamped to 100
+            .with_after("t3_abc123");
+
+        assert_eq!(query.subreddit, "dndmaps");
+        assert_eq!(query.sort, RedditSort::Top);
+        assert_eq!(query.time, Some(RedditTimeRange::Month));
+        assert_eq!(query.limit, 100);
+        assert_eq!(query.after, Some("t3_abc123".into()));
+    }
+
+    #[test]
+    fn test_title_parsing_grid_status() {
+        let t1 = ParsedTags::parse_title("[30x40] Forest Shrine [Gridless]");
+        assert_eq!(t1.grid_status, GridStatus::Gridless);
+        assert!(t1.is_gridless());
+        assert!(!t1.is_gridded());
+        assert_eq!(t1.dimensions, Some((30, 40)));
+
+        let t2 = ParsedTags::parse_title("Dungeon Corridor (No Grid) - 25x25");
+        assert_eq!(t2.grid_status, GridStatus::Gridless);
+        assert_eq!(t2.dimensions, Some((25, 25)));
+
+        let t3 = ParsedTags::parse_title("[No-Grid] Desert Oasis [50x50]");
+        assert_eq!(t3.grid_status, GridStatus::Gridless);
+        assert_eq!(t3.dimensions, Some((50, 50)));
+
+        let t4 = ParsedTags::parse_title("Castle Ruins - ungridded");
+        assert_eq!(t4.grid_status, GridStatus::Gridless);
+        assert_eq!(t4.dimensions, None);
+
+        let t5 = ParsedTags::parse_title("[40x30] Wizard's Tower");
+        assert_eq!(t5.grid_status, GridStatus::Gridded);
+        assert!(t5.is_gridded());
+        assert!(!t5.is_gridless());
+        assert_eq!(t5.dimensions, Some((40, 30)));
+
+        let t6 = ParsedTags::parse_title("Mountain Pass [Gridded]");
+        assert_eq!(t6.grid_status, GridStatus::Gridded);
+        assert_eq!(t6.dimensions, None);
+
+        let t7 = ParsedTags::parse_title("A scenic view of our campaign world");
+        assert_eq!(t7.grid_status, GridStatus::Unknown);
+        assert_eq!(t7.dimensions, None);
+    }
+
+    #[test]
+    fn test_title_parsing_dimensions() {
+        assert_eq!(
+            ParsedTags::parse_title("[30x40] Forest").dimensions,
+            Some((30, 40))
+        );
+        assert_eq!(
+            ParsedTags::parse_title("Temple 30 x 40").dimensions,
+            Some((30, 40))
+        );
+        assert_eq!(
+            ParsedTags::parse_title("Cave 45×60 [Gridless]").dimensions,
+            Some((45, 60))
+        );
+        assert_eq!(
+            ParsedTags::parse_title("[100x120] Massive Dungeon").dimensions,
+            Some((100, 120))
+        );
+        assert_eq!(
+            ParsedTags::parse_title("Battlemap 20X30").dimensions,
+            Some((20, 30))
+        );
+    }
+
+    #[test]
+    fn test_reddit_post_candidate_conversion() {
+        let tags = ParsedTags::parse_title("[30x40] Forest [Gridless]");
+        let post = RedditPost {
+            id: "xyz123".into(),
+            name: "t3_xyz123".into(),
+            title: "[30x40] Forest [Gridless]".into(),
+            author: "cartographer".into(),
+            permalink: "https://www.reddit.com/r/battlemaps/comments/xyz123/".into(),
+            url: "https://i.redd.it/xyz123.png".into(),
+            score: 250,
+            created_utc: Utc::now(),
+            media: vec![
+                HarvestedMedia::new("https://i.redd.it/xyz123.png")
+                    .with_dimensions(3000, 4000),
+            ],
+            tags,
+        };
+
+        assert!(post.has_media());
+        assert_eq!(post.primary_image_url(), Some("https://i.redd.it/xyz123.png"));
+
+        let candidate = post.to_candidate(0).expect("candidate generated");
+        assert_eq!(candidate.id, "xyz123_0");
+        assert_eq!(candidate.source, Source::Reddit);
+        assert_eq!(candidate.filename, "xyz123_0.png");
+        assert_eq!(candidate.dimensions, (3000, 4000));
     }
 }

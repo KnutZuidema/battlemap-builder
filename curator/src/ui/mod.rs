@@ -80,6 +80,59 @@ mod tests {
         assert!(Assets::get("app.js").is_some());
     }
 
+    #[test]
+    fn test_embedded_index_html_contains_triage_deck_elements() {
+        let file = Assets::get("index.html").expect("index.html must be embedded");
+        let html = std::str::from_utf8(file.data.as_ref()).expect("index.html must be valid utf8");
+
+        assert!(html.contains("DUNGEON FORGE"));
+        assert!(html.contains("triage-canvas"));
+        assert!(html.contains("theme-selector"));
+        assert!(html.contains("rating-selector"));
+        assert!(html.contains("btn-grid-toggle"));
+        assert!(html.contains("btn-fit-screen"));
+        assert!(html.contains("btn-reject"));
+        assert!(html.contains("btn-curate"));
+        assert!(html.contains("rejection-modal"));
+        assert!(html.contains("help-modal"));
+        assert!(html.contains("toast-container"));
+        assert!(html.contains("empty-state"));
+    }
+
+    #[test]
+    fn test_embedded_app_js_contains_triage_engine_and_hotkeys() {
+        let file = Assets::get("app.js").expect("app.js must be embedded");
+        let js = std::str::from_utf8(file.data.as_ref()).expect("app.js must be valid utf8");
+
+        // Canvas 2D and 64px VTT grid overlay
+        assert!(js.contains("VTT_GRID_SIZE"));
+        assert!(js.contains("drawVttGrid"));
+        assert!(js.contains("fitToScreen"));
+
+        // In-memory prefetching
+        assert!(js.contains("imageCache"));
+        assert!(js.contains("prefetchUpcoming"));
+
+        // Hotkeys & triage API calls
+        assert!(js.contains("/api/staging"));
+        assert!(js.contains("/api/curate"));
+        assert!(js.contains("/api/reject"));
+        assert!(js.contains("curateCurrentCandidate"));
+        assert!(js.contains("confirmRejection"));
+    }
+
+    #[test]
+    fn test_embedded_style_css_contains_triage_styling() {
+        let file = Assets::get("style.css").expect("style.css must be embedded");
+        let css = std::str::from_utf8(file.data.as_ref()).expect("style.css must be valid utf8");
+
+        assert!(css.contains("triage-viewport"));
+        assert!(css.contains("theme-badge"));
+        assert!(css.contains("rating-stars"));
+        assert!(css.contains("modal-backdrop"));
+        assert!(css.contains("toast-container"));
+    }
+
     #[tokio::test]
     async fn test_static_handler_index() {
         let uri = "/".parse::<Uri>().unwrap();

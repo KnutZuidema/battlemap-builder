@@ -10,7 +10,9 @@
     "start": "node server/index.js",
     "test": "npm --prefix server test",
     "lint": "npm --prefix client run lint",
-    "prepare": "git config core.hooksPath .githooks 2>/dev/null || true"
+    "prepare": "git config core.hooksPath .githooks 2>/dev/null || true",
+    "curator": "cargo run --manifest-path curator/Cargo.toml --release",
+    "curator:dev": "cargo run --manifest-path curator/Cargo.toml"
   },
   "keywords": [
     "ttrpg",

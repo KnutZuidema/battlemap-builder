@@ -34,6 +34,21 @@
                     <span>Harvest</span>
                     <kbd>H</kbd>
                 </button>
+                <button type="button" id="btn-open-benchmark-drawer" class="btn btn-tool btn-benchmark" title="AI Benchmark Suite & Drawer (Hotkey: B)">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                    </svg>
+                    <span>Benchmark</span>
+                    <kbd>B</kbd>
+                </button>
+            </div>
+
+            <!-- Topbar Cost Monitor HUD -->
+            <div class="hud-section hud-cost-section">
+                <div id="cost-monitor-hud" class="cost-monitor-pill" title="Real-time Inference Spend & Map Stats">
+                    <span class="cost-monitor-icon">$</span>
+                    <span id="cost-monitor-text" class="cost-monitor-text mono">Session: $0.00 · Total: $0.00 (0 maps generated)</span>
+                </div>
             </div>
 
             <!-- Candidate Metadata & Queue Counter -->
@@ -270,6 +285,8 @@
                             <div class="help-row"><kbd>X</kbd> or <kbd>Del</kbd><span>Open Rejection dialogue (quick-select reason with 1-5 + Enter)</span></div>
                             <div class="help-row"><kbd>J</kbd> or <kbd>→</kbd><span>Advance to next candidate (without curating)</span></div>
                             <div class="help-row"><kbd>K</kbd> or <kbd>←</kbd><span>Return to previous candidate</span></div>
+                            <div class="help-row"><kbd>B</kbd><span>Open AI Benchmark Suite drawer</span></div>
+                            <div class="help-row"><kbd>H</kbd><span>Open Reddit Harvest drawer</span></div>
                         </div>
                     </div>
 
@@ -419,6 +436,236 @@
                     <button type="button" id="btn-cancel-drawer" class="btn btn-secondary">
                         <kbd>Esc</kbd>
                         <span>Close</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Benchmark Drawer (Multi-Model AI Generation & Benchmarking) -->
+        <div id="benchmark-drawer" class="drawer-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="benchmark-drawer-title">
+            <div class="drawer-panel benchmark-drawer-panel" id="benchmark-drawer-panel">
+                <div class="drawer-header">
+                    <div class="drawer-title-group">
+                        <svg class="drawer-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                        </svg>
+                        <h3 id="benchmark-drawer-title">AI Benchmark Suite</h3>
+                    </div>
+                    <button type="button" id="btn-close-benchmark-drawer" class="btn-close" aria-label="Close benchmark drawer">×</button>
+                </div>
+
+                <div class="drawer-body">
+                    <p class="drawer-description">
+                        Run multi-model generation benchmarks across standard archetypes. Outputs persist to <code>staging/generated/</code> with complete cost telemetry.
+                    </p>
+
+                    <!-- Models Section -->
+                    <div class="form-group">
+                        <div class="section-label-row">
+                            <label class="control-label">Target Models</label>
+                            <div class="quick-select-actions">
+                                <button type="button" id="btn-models-select-all" class="btn-link">All</button>
+                                <span class="action-divider-dot">·</span>
+                                <button type="button" id="btn-models-select-none" class="btn-link">None</button>
+                            </div>
+                        </div>
+                        <div class="checklist-container" id="benchmark-models-list">
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-model" value="google/gemini-3.1-flash-image" checked>
+                                <div class="check-item-info">
+                                    <div class="check-item-title-row">
+                                        <span class="check-item-name">Google Gemini 3.1 Flash Image</span>
+                                        <span class="pricing-badge badge-flash">Flash (~$0.07/map)</span>
+                                    </div>
+                                    <span class="check-item-desc mono">google/gemini-3.1-flash-image</span>
+                                </div>
+                            </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-model" value="google/gemini-3.1-flash-lite-image" checked>
+                                <div class="check-item-info">
+                                    <div class="check-item-title-row">
+                                        <span class="check-item-name">Google Gemini 3.1 Flash Lite</span>
+                                        <span class="pricing-badge badge-flash-lite">Flash Lite (~$0.035/map)</span>
+                                    </div>
+                                    <span class="check-item-desc mono">google/gemini-3.1-flash-lite-image</span>
+                                </div>
+                            </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-model" value="meta/muse-image" checked>
+                                <div class="check-item-info">
+                                    <div class="check-item-title-row">
+                                        <span class="check-item-name">Meta Muse Image</span>
+                                        <span class="pricing-badge badge-muse">Muse ($0.01/map)</span>
+                                    </div>
+                                    <span class="check-item-desc mono">meta/muse-image</span>
+                                </div>
+                            </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-model" value="bytedance-seed/seedream-5-0-flash" checked>
+                                <div class="check-item-info">
+                                    <div class="check-item-title-row">
+                                        <span class="check-item-name">ByteDance Seedream 5.0 Flash</span>
+                                        <span class="pricing-badge badge-seedream">Seedream ($0.018/map)</span>
+                                    </div>
+                                    <span class="check-item-desc mono">bytedance-seed/seedream-5-0-flash</span>
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Prompts Section -->
+                    <div class="form-group">
+                        <div class="section-label-row">
+                            <label class="control-label">Benchmark Archetypes</label>
+                            <div class="quick-select-actions">
+                                <button type="button" id="btn-prompts-select-all" class="btn-link">All</button>
+                                <span class="action-divider-dot">·</span>
+                                <button type="button" id="btn-prompts-select-none" class="btn-link">None</button>
+                            </div>
+                        </div>
+                        <div class="checklist-container" id="benchmark-archetypes-list">
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-archetype" value="stone-crypt" checked>
+                                <div class="check-item-info">
+                                    <span class="check-item-name">Stone Crypt</span>
+                                    <span class="check-item-desc">Flat 2D stone dungeon crypt, central sarcophagus, poché masonry</span>
+                                </div>
+                            </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-archetype" value="riverside-ambush" checked>
+                                <div class="check-item-info">
+                                    <span class="check-item-name">Riverside Ambush</span>
+                                    <span class="check-item-desc">Flat 2D forest river crossing, wooden footbridge, rocky banks</span>
+                                </div>
+                            </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-archetype" value="tavern-common-room" checked>
+                                <div class="check-item-info">
+                                    <span class="check-item-name">Tavern Common Room</span>
+                                    <span class="check-item-desc">Flat 2D fantasy tavern interior, wooden tables, hearth fireplace</span>
+                                </div>
+                            </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-archetype" value="underdark-cavern" checked>
+                                <div class="check-item-info">
+                                    <span class="check-item-name">Underdark Cavern</span>
+                                    <span class="check-item-desc">Flat 2D subterranean cavern, bioluminescent mushrooms, stream</span>
+                                </div>
+                            </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-archetype" value="desert-ruins" checked>
+                                <div class="check-item-info">
+                                    <span class="check-item-name">Desert Ruins</span>
+                                    <span class="check-item-desc">Flat 2D ancient sandstone temple ruins, crumbling pillars, sand drifts</span>
+                                </div>
+                            </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-archetype" value="sewers-sluice" checked>
+                                <div class="check-item-info">
+                                    <span class="check-item-name">Sewers & Sluice</span>
+                                    <span class="check-item-desc">Flat 2D underground masonry sewer junction, iron grating, green water</span>
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Custom Prompt Input Option -->
+                    <div class="custom-prompt-section">
+                        <label class="custom-prompt-toggle-label" for="benchmark-enable-custom">
+                            <input type="checkbox" id="benchmark-enable-custom">
+                            <span class="toggle-text">Include Custom Prompt</span>
+                        </label>
+                        <div id="custom-prompt-fields" class="custom-prompt-fields hidden">
+                            <div class="form-group">
+                                <label for="benchmark-custom-name">Prompt Name</label>
+                                <input type="text" id="benchmark-custom-name" class="text-input" placeholder="e.g. Haunted Library" value="Custom Scenario">
+                            </div>
+                            <div class="form-group">
+                                <label for="benchmark-custom-prompt">Prompt Directives</label>
+                                <textarea id="benchmark-custom-prompt" class="text-input textarea-input" rows="2" placeholder="Flat 2D battlemap directives, gridless..."></textarea>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Dynamic Pre-Flight Cost Calculator Card -->
+                    <div class="calculator-card" id="preflight-calculator-card">
+                        <div class="calculator-header">
+                            <span class="calc-label">Pre-Flight Cost Projection</span>
+                            <span id="calc-badge-cost" class="calc-badge mono">$0.80</span>
+                        </div>
+                        <div class="calculator-body">
+                            <div id="calc-formula-display" class="calc-formula mono">
+                                4 models × 6 prompts = 24 images (~$0.80)
+                            </div>
+                            <div id="calc-warning-note" class="calc-note hidden">
+                                ⚠️ Exceeds $2.00 safety guardrail threshold — confirmation required
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Run Benchmark Action Button -->
+                    <div class="drawer-action-group">
+                        <button type="button" id="btn-start-benchmark" class="btn btn-primary btn-block btn-run-benchmark">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                            </svg>
+                            <span id="btn-start-benchmark-text">Run Benchmark ($0.80)</span>
+                        </button>
+                    </div>
+
+                    <!-- Live Progress & Cancellation Display -->
+                    <div id="benchmark-progress-container" class="benchmark-progress-container hidden">
+                        <div class="progress-bar-track">
+                            <div id="benchmark-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
+                        </div>
+                        <div class="progress-status-row">
+                            <span id="benchmark-progress-text" class="benchmark-progress-text mono">Initializing batch...</span>
+                            <button type="button" id="btn-cancel-benchmark-run" class="btn btn-sm btn-danger btn-cancel-run" title="Abort benchmark execution">
+                                <span>Cancel</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="drawer-footer">
+                    <button type="button" id="btn-cancel-benchmark-drawer" class="btn btn-secondary">
+                        <kbd>Esc</kbd>
+                        <span>Close</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Budget Safety Guard Modal -->
+        <div id="budget-guard-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="budget-guard-title">
+            <div class="modal-card budget-guard-card">
+                <div class="modal-header">
+                    <div class="guard-header-title">
+                        <span class="guard-warning-icon">⚠️</span>
+                        <h3 id="budget-guard-title">Budget Safety Guard</h3>
+                    </div>
+                    <button type="button" id="btn-close-budget-guard" class="btn-close" aria-label="Close modal">×</button>
+                </div>
+                <div class="modal-body">
+                    <p class="modal-description">
+                        The projected inference cost for this benchmark batch exceeds the safety guardrail limit of <strong>$2.00</strong>.
+                    </p>
+                    <div class="budget-guard-cost-box">
+                        <div class="guard-cost-label">Estimated Maximum Batch Spend</div>
+                        <div id="budget-guard-cost-amount" class="guard-cost-amount mono">$0.00</div>
+                        <div id="budget-guard-breakdown" class="guard-cost-sub mono">0 models × 0 prompts = 0 images</div>
+                    </div>
+                    <p class="guard-confirmation-hint">
+                        Please confirm to initiate OpenRouter API model generation and record charges to the telemetry ledger.
+                    </p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" id="btn-dismiss-budget-guard" class="btn btn-secondary">
+                        <kbd>Esc</kbd>
+                        <span>Cancel</span>
+                    </button>
+                    <button type="button" id="btn-confirm-budget-guard" class="btn btn-danger btn-affirmative">
+                        <span id="btn-confirm-budget-guard-text">Confirm & Run ($0.00)</span>
                     </button>
                 </div>
             </div>

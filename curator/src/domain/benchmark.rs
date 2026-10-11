@@ -120,6 +120,17 @@ impl BenchmarkModelSpec {
             _ => None,
         }
     }
+
+    /// Estimated cost per map in USD for UI pre-flight cost projections.
+    pub fn estimated_cost_per_map(&self) -> f64 {
+        match self.id.as_str() {
+            MODEL_GEMINI_31_FLASH => 0.07,
+            MODEL_GEMINI_31_FLASH_LITE => 0.035,
+            MODEL_MUSE => 0.01,
+            MODEL_SEEDREAM_50_FLASH => 0.018,
+            _ => 0.05,
+        }
+    }
 }
 
 /// The 6 standard battlemap benchmark archetypes.
@@ -368,6 +379,86 @@ pub fn generate_benchmark_id(model_id: &str, archetype_slug: &str) -> String {
     format!("bench_{clean_model}_{clean_slug}_{timestamp}_{counter}")
 }
 
+/// Helper to convert an arbitrary prompt name into a filesystem-safe slug.
+pub fn slugify_prompt_name(name: &str) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    for c in name.chars() {
+        if c == '\'' {
+            continue;
+        }
+        if c.is_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = slug.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "custom-prompt".to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// Custom prompt specification for ad-hoc benchmark generation runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomPrompt {
+    pub name: String,
+    pub prompt: String,
+}
+
+impl CustomPrompt {
+    pub fn new(name: impl Into<String>, prompt: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            prompt: prompt.into(),
+        }
+    }
+
+    pub fn slug(&self) -> String {
+        slugify_prompt_name(&self.name)
+    }
+}
+
+/// Unified batch benchmark item combining archetypes and custom prompts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchBenchmarkItem {
+    pub name: String,
+    pub prompt: String,
+    pub slug: String,
+}
+
+impl BatchBenchmarkItem {
+    pub fn from_archetype(archetype: &BenchmarkArchetype) -> Self {
+        Self {
+            name: archetype.name().to_string(),
+            prompt: archetype.prompt().to_string(),
+            slug: archetype.slug().to_string(),
+        }
+    }
+
+    pub fn from_custom(custom: &CustomPrompt) -> Self {
+        Self {
+            name: custom.name.clone(),
+            prompt: custom.prompt.clone(),
+            slug: custom.slug(),
+        }
+    }
+
+    pub fn new(name: impl Into<String>, prompt: impl Into<String>) -> Self {
+        let name_str = name.into();
+        let slug = slugify_prompt_name(&name_str);
+        Self {
+            name: name_str,
+            prompt: prompt.into(),
+            slug,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +558,37 @@ mod tests {
         let id2 = generate_benchmark_id(MODEL_GEMINI_31_FLASH, "stone-crypt");
         assert!(id1.starts_with("bench_google_gemini_3_1_flash_image_stone_crypt_"));
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_custom_prompt_and_batch_item() {
+        let custom = CustomPrompt::new("Dragon's Lair", "Flat 2D cavern with gold piles");
+        assert_eq!(custom.slug(), "dragons-lair");
+        assert_eq!(custom.name, "Dragon's Lair");
+
+        let batch_item = BatchBenchmarkItem::from_custom(&custom);
+        assert_eq!(batch_item.name, "Dragon's Lair");
+        assert_eq!(batch_item.slug, "dragons-lair");
+        assert_eq!(batch_item.prompt, "Flat 2D cavern with gold piles");
+
+        let arch_item = BatchBenchmarkItem::from_archetype(&BenchmarkArchetype::StoneCrypt);
+        assert_eq!(arch_item.name, "Stone Crypt");
+        assert_eq!(arch_item.slug, "stone-crypt");
+        assert!(arch_item.prompt.contains("stone dungeon crypt"));
+    }
+
+    #[test]
+    fn test_model_spec_estimated_costs() {
+        let flash = BenchmarkModelSpec::find(MODEL_GEMINI_31_FLASH).unwrap();
+        assert_eq!(flash.estimated_cost_per_map(), 0.07);
+
+        let flash_lite = BenchmarkModelSpec::find(MODEL_GEMINI_31_FLASH_LITE).unwrap();
+        assert_eq!(flash_lite.estimated_cost_per_map(), 0.035);
+
+        let muse = BenchmarkModelSpec::find(MODEL_MUSE).unwrap();
+        assert_eq!(muse.estimated_cost_per_map(), 0.01);
+
+        let seedream = BenchmarkModelSpec::find(MODEL_SEEDREAM_50_FLASH).unwrap();
+        assert_eq!(seedream.estimated_cost_per_map(), 0.018);
     }
 }

@@ -4,10 +4,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use thiserror::Error;
+use std::sync::atomic::{AtomicBool, Ordering};
+use serde::{Deserialize, Serialize};
 use tracing::{info, instrument};
 
 use crate::domain::{
-    BenchmarkArchetype, BenchmarkMetadata, BenchmarkResult, ALL_BENCHMARK_MODELS,
+    generate_benchmark_id, BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata,
+    BenchmarkResult, GenerationRequest, ALL_BENCHMARK_MODELS,
 };
 use crate::ports::cost_tracker::{CostTracker, CostTrackerError, GenerationCostRecord};
 use crate::ports::model_engine::{ModelEngine, ModelEngineError};
@@ -30,6 +33,22 @@ pub enum BenchmarkServiceError {
     Serialization(#[from] serde_json::Error),
 }
 
+
+/// Real-time progress update event emitted during benchmark batch execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkProgressUpdate {
+    pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    pub completed: usize,
+    pub total: usize,
+    pub current_spend: f64,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<BenchmarkMetadata>,
+}
 /// Service orchestrating battlemap benchmark execution across models and storage persistence.
 #[derive(Clone)]
 pub struct BenchmarkService {
@@ -168,6 +187,208 @@ impl BenchmarkService {
         let models: Vec<String> = ALL_BENCHMARK_MODELS.iter().map(|&m| m.to_string()).collect();
         self.run_suite_and_persist(&models, &BenchmarkArchetype::ALL)
             .await
+    }
+
+    /// Run a benchmark for a single item (archetype or custom prompt) and persist output.
+    #[instrument(skip(self), fields(model = %model, item = %item.name))]
+    pub async fn run_item_and_persist(
+        &self,
+        model: &str,
+        item: &BatchBenchmarkItem,
+    ) -> Result<BenchmarkResult, BenchmarkServiceError> {
+        let result = if let Ok(archetype) = item
+            .slug
+            .parse::<BenchmarkArchetype>()
+            .or_else(|_| item.name.parse::<BenchmarkArchetype>())
+        {
+            self.engine.run_benchmark(model, &archetype).await?
+        } else {
+            let request = GenerationRequest::new(model, &item.prompt);
+            let response = self.engine.generate_image(&request).await?;
+            let id = generate_benchmark_id(model, &item.slug);
+            let metadata = BenchmarkMetadata::new(
+                id,
+                model,
+                &item.name,
+                &item.prompt,
+                response.prompt_tokens,
+                response.completion_tokens,
+                response.latency_ms,
+                response.cost_usd,
+            );
+            BenchmarkResult::new(metadata, response.image_bytes)
+        };
+
+        self.record_cost(&result.metadata).await?;
+        self.storage
+            .save_staging_generated(&result.metadata, &result.image_bytes)?;
+
+        Ok(result)
+    }
+
+    /// Execute a benchmark batch across models and items with live progress reporting and cancellation.
+    pub async fn run_batch_with_progress<F>(
+        &self,
+        models: &[String],
+        items: &[BatchBenchmarkItem],
+        cancel_flag: Option<Arc<AtomicBool>>,
+        mut on_progress: F,
+    ) -> Result<Vec<BenchmarkResult>, BenchmarkServiceError>
+    where
+        F: FnMut(BenchmarkProgressUpdate) -> bool + Send,
+    {
+        let total = models.len() * items.len();
+        if total == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut completed = 0;
+        let mut current_spend = 0.0;
+        let mut results = Vec::with_capacity(total);
+
+        let is_cancelled = || {
+            if let Some(flag) = &cancel_flag {
+                if flag.load(Ordering::Relaxed) {
+                    return true;
+                }
+            }
+            false
+        };
+
+        // Emit starting phase
+        let cont = on_progress(BenchmarkProgressUpdate {
+            phase: "starting".to_string(),
+            model: None,
+            prompt: None,
+            completed: 0,
+            total,
+            current_spend: 0.0,
+            message: format!("Starting benchmark batch of {total} generations..."),
+            metadata: None,
+        });
+
+        if !cont || is_cancelled() {
+            on_progress(BenchmarkProgressUpdate {
+                phase: "cancelled".to_string(),
+                model: None,
+                prompt: None,
+                completed: 0,
+                total,
+                current_spend: 0.0,
+                message: "Benchmark batch cancelled before execution".to_string(),
+                metadata: None,
+            });
+            return Ok(results);
+        }
+
+        for model in models {
+            for item in items {
+                if is_cancelled() {
+                    on_progress(BenchmarkProgressUpdate {
+                        phase: "cancelled".to_string(),
+                        model: Some(model.clone()),
+                        prompt: Some(item.name.clone()),
+                        completed,
+                        total,
+                        current_spend,
+                        message: format!("Benchmark batch cancelled at {} / {}", item.name, model),
+                        metadata: None,
+                    });
+                    return Ok(results);
+                }
+
+                let cont = on_progress(BenchmarkProgressUpdate {
+                    phase: "generating".to_string(),
+                    model: Some(model.clone()),
+                    prompt: Some(item.name.clone()),
+                    completed,
+                    total,
+                    current_spend,
+                    message: format!("Generating {} with {}...", item.name, model),
+                    metadata: None,
+                });
+
+                if !cont || is_cancelled() {
+                    on_progress(BenchmarkProgressUpdate {
+                        phase: "cancelled".to_string(),
+                        model: Some(model.clone()),
+                        prompt: Some(item.name.clone()),
+                        completed,
+                        total,
+                        current_spend,
+                        message: format!("Benchmark batch cancelled at {} / {}", item.name, model),
+                        metadata: None,
+                    });
+                    return Ok(results);
+                }
+
+                match self.run_item_and_persist(model, item).await {
+                    Ok(result) => {
+                        completed += 1;
+                        current_spend += result.metadata.cost_usd;
+                        let meta = result.metadata.clone();
+                        results.push(result);
+
+                        let cont = on_progress(BenchmarkProgressUpdate {
+                            phase: "progress".to_string(),
+                            model: Some(model.clone()),
+                            prompt: Some(item.name.clone()),
+                            completed,
+                            total,
+                            current_spend,
+                            message: format!(
+                                "Completed {} for {} ({}/{})",
+                                item.name, model, completed, total
+                            ),
+                            metadata: Some(meta),
+                        });
+
+                        if !cont || is_cancelled() {
+                            on_progress(BenchmarkProgressUpdate {
+                                phase: "cancelled".to_string(),
+                                model: Some(model.clone()),
+                                prompt: Some(item.name.clone()),
+                                completed,
+                                total,
+                                current_spend,
+                                message: "Benchmark batch cancelled by user".to_string(),
+                                metadata: None,
+                            });
+                            return Ok(results);
+                        }
+                    }
+                    Err(err) => {
+                        on_progress(BenchmarkProgressUpdate {
+                            phase: "error".to_string(),
+                            model: Some(model.clone()),
+                            prompt: Some(item.name.clone()),
+                            completed,
+                            total,
+                            current_spend,
+                            message: format!("Failed {} for {}: {}", item.name, model, err),
+                            metadata: None,
+                        });
+                        return Err(err);
+                    }
+                }
+            }
+        }
+
+        on_progress(BenchmarkProgressUpdate {
+            phase: "complete".to_string(),
+            model: None,
+            prompt: None,
+            completed,
+            total,
+            current_spend,
+            message: format!(
+                "Benchmark batch completed: {}/{} generated (${:.4} total)",
+                completed, total, current_spend
+            ),
+            metadata: None,
+        });
+
+        Ok(results)
     }
 }
 
@@ -325,5 +546,73 @@ mod tests {
         assert_eq!(stats.history[0].id, result.metadata.id);
         assert_eq!(stats.history[0].prompt_name, "Stone Crypt");
         assert!(stats.by_model.contains_key("meta/muse-image"));
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_service_run_batch_with_progress() {
+        use crate::adapters::FilesystemStorage;
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
+        let engine = Arc::new(MockEngine::new());
+        let service = BenchmarkService::new(engine, storage.clone());
+
+        let models = vec!["meta/muse-image".to_string()];
+        let items = vec![
+            BatchBenchmarkItem::from_archetype(&BenchmarkArchetype::StoneCrypt),
+            BatchBenchmarkItem::new("Custom Tavern", "Flat 2D tavern interior with fireplace"),
+        ];
+
+        let mut updates = Vec::new();
+        let results = service
+            .run_batch_with_progress(&models, &items, None, |update| {
+                updates.push(update);
+                true
+            })
+            .await
+            .expect("run batch succeeds");
+
+        assert_eq!(results.len(), 2);
+        assert!(updates.iter().any(|u| u.phase == "starting"));
+        assert!(updates.iter().any(|u| u.phase == "generating"));
+        assert!(updates.iter().any(|u| u.phase == "progress"));
+        assert!(updates.iter().any(|u| u.phase == "complete"));
+
+        let candidates = storage.list_staging().expect("list staging succeeds");
+        assert_eq!(candidates.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_service_cancellation() {
+        use crate::adapters::FilesystemStorage;
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
+        let engine = Arc::new(MockEngine::new());
+        let service = BenchmarkService::new(engine, storage.clone());
+
+        let models = vec!["meta/muse-image".to_string(), "google/gemini-3.1-flash-image".to_string()];
+        let items = vec![
+            BatchBenchmarkItem::from_archetype(&BenchmarkArchetype::StoneCrypt),
+            BatchBenchmarkItem::from_archetype(&BenchmarkArchetype::DesertRuins),
+        ];
+
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_flag_clone = cancel_flag.clone();
+        let mut updates = Vec::new();
+
+        let results = service
+            .run_batch_with_progress(&models, &items, Some(cancel_flag), |update| {
+                updates.push(update.clone());
+                if update.completed == 1 {
+                    cancel_flag_clone.store(true, Ordering::Relaxed);
+                }
+                true
+            })
+            .await
+            .expect("batch with cancel succeeds");
+
+        assert_eq!(results.len(), 1);
+        assert!(updates.iter().any(|u| u.phase == "cancelled"));
     }
 }

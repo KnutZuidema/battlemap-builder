@@ -88,6 +88,7 @@ mod tests {
         assert!(html.contains("DUNGEON FORGE"));
         assert!(html.contains("triage-canvas"));
         assert!(html.contains("theme-selector"));
+        assert!(html.contains("data-theme=\"building\""));
         assert!(html.contains("rating-selector"));
         assert!(html.contains("btn-grid-toggle"));
         assert!(html.contains("btn-fit-screen"));
@@ -138,6 +139,7 @@ mod tests {
         assert!(js.contains("curateCurrentCandidate"));
         assert!(js.contains("confirmRejection"));
 
+        assert!(js.contains("\"building\""));
         // Ingestion drawer & live harvesting
         assert!(js.contains("/api/harvest/reddit"));
         assert!(js.contains("openIngestionDrawer"));
@@ -154,6 +156,7 @@ mod tests {
         assert!(css.contains("triage-viewport"));
         assert!(css.contains("theme-badge"));
         assert!(css.contains("rating-stars"));
+        assert!(css.contains("[data-theme=\"building\"]"));
         assert!(css.contains("modal-backdrop"));
         assert!(css.contains("toast-container"));
 

@@ -361,6 +361,11 @@ kbd {
     color: #d8b4fe;
 }
 
+.theme-badge[data-theme="building"].active {
+    border-color: rgba(244, 63, 94, 0.5);
+    color: #fda4af;
+}
+
 /* Rating Stars */
 .rating-stars {
     display: flex;

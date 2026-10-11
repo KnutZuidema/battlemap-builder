@@ -1284,6 +1284,7 @@
                 fetchCostStats();
             }
         } catch (err) {
+            document.getElementById("benchmark-active-generation-card")?.remove();
             if (err.name === "AbortError") {
                 if (benchmarkProgressText) benchmarkProgressText.textContent = "Benchmark run cancelled by user.";
                 if (benchmarkWindowCurrentStep) benchmarkWindowCurrentStep.textContent = "Benchmark batch cancelled by user.";
@@ -1310,6 +1311,7 @@
         } finally {
             state.isBenchmarking = false;
             state.benchmarkAbortController = null;
+            document.getElementById("benchmark-active-generation-card")?.remove();
             if (btnStartBenchmark) btnStartBenchmark.disabled = false;
             fetchCostStats();
         }
@@ -1480,6 +1482,7 @@
     }
 
     async function cancelBenchmarkExecution() {
+        document.getElementById("benchmark-active-generation-card")?.remove();
         if (state.benchmarkAbortController) {
             state.benchmarkAbortController.abort();
         }

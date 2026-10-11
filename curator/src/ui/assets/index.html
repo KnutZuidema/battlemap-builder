@@ -675,6 +675,92 @@
             </div>
         </div>
 
+        <!-- Floating Benchmark Progress Window -->
+        <div id="benchmark-progress-window" class="benchmark-progress-window hidden" role="region" aria-label="AI Benchmark Progress">
+            <div class="benchmark-window-header">
+                <div class="benchmark-window-title-group">
+                    <svg class="benchmark-window-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                    </svg>
+                    <span class="benchmark-window-title">AI Benchmark Runner</span>
+                    <span id="benchmark-window-status" class="benchmark-window-badge status-running">Running</span>
+                </div>
+                <div class="benchmark-window-header-actions">
+                    <button type="button" id="btn-benchmark-window-minimize" class="benchmark-window-action-btn" title="Minimize to pill" aria-label="Minimize">
+                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="5" y1="12" x2="19" y2="12"/>
+                        </svg>
+                    </button>
+                    <button type="button" id="btn-benchmark-window-close" class="benchmark-window-action-btn" title="Close window" aria-label="Close" disabled>
+                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"/>
+                            <line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <div class="benchmark-window-body">
+                <!-- Overall progress section -->
+                <div class="benchmark-window-progress-section">
+                    <div class="benchmark-window-progress-meta">
+                        <span id="benchmark-window-current-step" class="benchmark-window-current-step">Initializing batch...</span>
+                        <span id="benchmark-window-progress-stats" class="benchmark-window-progress-stats mono">0/0 (0%)</span>
+                    </div>
+                    <div class="progress-bar-track benchmark-window-progress-track">
+                        <div id="benchmark-window-progress-bar" class="progress-bar-fill benchmark-window-progress-fill" style="width: 0%"></div>
+                    </div>
+                </div>
+
+                <!-- Live preview strip / grid -->
+                <div class="benchmark-window-section">
+                    <div class="benchmark-window-section-header">
+                        <span class="benchmark-window-section-label">Live Previews</span>
+                        <span id="benchmark-window-preview-count" class="benchmark-window-section-sub mono">0 generated</span>
+                    </div>
+                    <div id="benchmark-window-previews" class="benchmark-window-previews">
+                        <div class="benchmark-previews-empty" id="benchmark-previews-empty">Waiting for first image completion...</div>
+                    </div>
+                </div>
+
+                <!-- Live Logs section -->
+                <div id="benchmark-window-logs-container" class="benchmark-window-logs-container">
+                    <div class="benchmark-window-section-header">
+                        <span class="benchmark-window-section-label">Execution Log</span>
+                        <button type="button" id="btn-benchmark-clear-logs" class="benchmark-window-clear-btn" title="Clear logs">Clear</button>
+                    </div>
+                    <div id="benchmark-window-logs" class="benchmark-window-logs mono"></div>
+                </div>
+            </div>
+
+            <div class="benchmark-window-footer">
+                <div class="benchmark-window-cost-box">
+                    <span class="cost-label">Batch Spend:</span>
+                    <span id="benchmark-window-cost" class="cost-val mono">$0.0000</span>
+                </div>
+                <div class="benchmark-window-footer-controls">
+                    <button type="button" id="btn-benchmark-window-cancel" class="btn btn-sm btn-danger btn-cancel-run">
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"/>
+                            <line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                        <span>Cancel Batch</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Minimized Floating Pill -->
+        <div id="benchmark-window-pill" class="benchmark-window-pill hidden" role="button" tabindex="0" title="Click to expand benchmark runner">
+            <span class="benchmark-pill-spinner"></span>
+            <svg class="benchmark-pill-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+            </svg>
+            <span class="benchmark-pill-title">Benchmark</span>
+            <span id="benchmark-pill-count" class="benchmark-pill-count mono">0/0</span>
+            <span id="benchmark-pill-cost" class="benchmark-pill-cost mono">$0.00</span>
+        </div>
+
         <!-- Toast Notifications Container -->
         <div id="toast-container" class="toast-container" aria-live="polite"></div>
     </div>

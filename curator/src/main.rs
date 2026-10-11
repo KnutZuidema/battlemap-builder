@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use curator::adapters::FilesystemStorage;
+use curator::adapters::{FileCostLedger, FilesystemStorage};
 use curator::api::{create_router, AppState};
 use curator::ports::storage::StorageRepository;
 use tracing_subscriber::EnvFilter;
@@ -44,7 +44,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let storage: Arc<dyn StorageRepository + Send + Sync> =
         Arc::new(FilesystemStorage::new(&data_dir));
 
-    let state = AppState::new(storage);
+    let cost_ledger_path = data_dir.join("telemetry/cost_ledger.json");
+    tracing::info!(
+        path = %cost_ledger_path.display(),
+        "Initializing persistent cost ledger..."
+    );
+    let cost_tracker = Arc::new(FileCostLedger::new(&cost_ledger_path));
+    let state = AppState::with_cost_tracker(storage, cost_tracker);
     let app = create_router(state);
 
     tracing::info!(

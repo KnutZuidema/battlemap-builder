@@ -8,8 +8,9 @@ use tempfile::tempdir;
 use tower::ServiceExt;
 
 use async_trait::async_trait;
-use curator::adapters::FilesystemStorage;
+use curator::adapters::{FileCostLedger, FilesystemStorage};
 use curator::api::{create_router, AppState};
+use curator::ports::cost_tracker::{CostTracker, GenerationCostRecord};
 use curator::domain::{
     Candidate, HarvestedMedia, ParsedTags, RedditHarvestQuery, RedditPost, Source, Theme,
 };
@@ -550,4 +551,105 @@ async fn test_api_harvest_reddit_sse_streaming() {
     let staging_list: Vec<Candidate> = serde_json::from_slice(&staging_bytes).unwrap();
     assert_eq!(staging_list.len(), 1);
     assert_eq!(staging_list[0].id, "sse_post_1");
+}
+
+#[tokio::test]
+async fn test_api_cost_stats_and_reset_session() {
+    let dir = tempdir().expect("tempdir");
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let ledger_path = dir.path().join("telemetry").join("cost_ledger.json");
+    let ledger = Arc::new(FileCostLedger::new(&ledger_path));
+    let state = AppState::with_cost_tracker(storage.clone(), ledger.clone());
+    let app = create_router(state);
+
+    // 1. Initial GET /api/cost/stats should be zeroed
+    let req = Request::builder()
+        .uri("/api/cost/stats")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["session_spend_usd"], 0.0);
+    assert_eq!(json["total_spend_usd"], 0.0);
+    assert_eq!(json["total_generations"], 0);
+    assert_eq!(json["session_generations"], 0);
+    assert_eq!(json["by_model"], json!({}));
+
+    // 2. Record generation into ledger
+    let record = GenerationCostRecord::new(
+        "bench_cost_test",
+        "google/gemini-3.1-flash-image",
+        "Ancient Tomb",
+        0.015,
+        Some(150),
+        Some(350),
+        420,
+    );
+    ledger.record_generation(record).await.unwrap();
+
+    // 3. GET /api/cost/stats should reflect new data
+    let req2 = Request::builder()
+        .uri("/api/cost/stats")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp2 = app.clone().oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK);
+    let body2 = to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
+    let json2: Value = serde_json::from_slice(&body2).unwrap();
+
+    assert_eq!(json2["total_generations"], 1);
+    assert_eq!(json2["session_generations"], 1);
+    assert!((json2["session_spend_usd"].as_f64().unwrap() - 0.015).abs() < 1e-6);
+    assert!((json2["total_spend_usd"].as_f64().unwrap() - 0.015).abs() < 1e-6);
+    assert_eq!(
+        json2["by_model"]["google/gemini-3.1-flash-image"]["generation_count"],
+        1
+    );
+    assert_eq!(
+        json2["by_model"]["google/gemini-3.1-flash-image"]["total_tokens"],
+        500
+    );
+
+    // 4. POST /api/cost/reset-session
+    let reset_req = Request::builder()
+        .uri("/api/cost/reset-session")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let reset_resp = app.clone().oneshot(reset_req).await.unwrap();
+    assert_eq!(reset_resp.status(), StatusCode::OK);
+    let reset_body = to_bytes(reset_resp.into_body(), usize::MAX).await.unwrap();
+    let reset_json: Value = serde_json::from_slice(&reset_body).unwrap();
+
+    assert_eq!(reset_json["status"], "ok");
+    assert_eq!(reset_json["session_spend_usd"], 0.0);
+
+    // 5. GET /api/cost/stats after reset confirms session is zeroed while persistent metrics remain
+    let req3 = Request::builder()
+        .uri("/api/cost/stats")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp3 = app.oneshot(req3).await.unwrap();
+    assert_eq!(resp3.status(), StatusCode::OK);
+    let body3 = to_bytes(resp3.into_body(), usize::MAX).await.unwrap();
+    let json3: Value = serde_json::from_slice(&body3).unwrap();
+
+    assert_eq!(json3["session_generations"], 0);
+    assert_eq!(json3["session_spend_usd"], 0.0);
+    assert_eq!(json3["total_generations"], 1);
+    assert!((json3["total_spend_usd"].as_f64().unwrap() - 0.015).abs() < 1e-6);
+    assert_eq!(
+        json3["by_model"]["google/gemini-3.1-flash-image"]["generation_count"],
+        1
+    );
 }

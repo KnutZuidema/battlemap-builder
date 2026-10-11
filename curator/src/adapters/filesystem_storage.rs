@@ -1,7 +1,10 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::domain::{Candidate, CuratedMap, RejectionReason, RejectionRecord, Theme};
+use chrono::{DateTime, Utc};
+
+use crate::domain::{Candidate, CuratedMap, RejectionReason, RejectionRecord, Source, Theme};
 use crate::ports::storage::{StorageError, StorageRepository};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -254,12 +257,19 @@ impl StorageRepository for FilesystemStorage {
         }
 
         let mut candidates = Vec::new();
-        for entry in std::fs::read_dir(&staging)? {
-            let entry = entry?;
+        let mut known_ids = HashSet::new();
+        let mut known_filenames = HashSet::new();
+
+        let entries: Vec<_> = std::fs::read_dir(&staging)?
+            .filter_map(|e| e.ok())
+            .collect();
+
+        // Pass 1: Read existing JSON sidecars
+        for entry in &entries {
             let path = entry.path();
             if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if ext == "json" {
+                    if ext.eq_ignore_ascii_case("json") {
                         let file_name = path
                             .file_name()
                             .and_then(|n| n.to_str())
@@ -267,6 +277,17 @@ impl StorageRepository for FilesystemStorage {
                         if !file_name.starts_with('.') {
                             if let Ok(content) = std::fs::read_to_string(&path) {
                                 if let Ok(candidate) = serde_json::from_str::<Candidate>(&content) {
+                                    known_ids.insert(candidate.id.clone());
+                                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                                        known_ids.insert(stem.to_string());
+                                    }
+                                    known_filenames.insert(candidate.filename.clone());
+                                    if let Some(img_stem) = Path::new(&candidate.filename)
+                                        .file_stem()
+                                        .and_then(|s| s.to_str())
+                                    {
+                                        known_ids.insert(img_stem.to_string());
+                                    }
                                     candidates.push(candidate);
                                 }
                             }
@@ -276,7 +297,71 @@ impl StorageRepository for FilesystemStorage {
             }
         }
 
-        candidates.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        // Pass 2: Discover raw image files without sidecars
+        for entry in &entries {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) if !name.starts_with('.') => name,
+                _ => continue,
+            };
+
+            let is_image = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|ext| {
+                    ext.eq_ignore_ascii_case("png")
+                        || ext.eq_ignore_ascii_case("jpg")
+                        || ext.eq_ignore_ascii_case("jpeg")
+                        || ext.eq_ignore_ascii_case("webp")
+                })
+                .unwrap_or(false);
+
+            if !is_image {
+                continue;
+            }
+
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) if !s.is_empty() => s,
+                _ => continue,
+            };
+
+            let sidecar_path = staging.join(format!("{stem}.json"));
+            if known_filenames.contains(file_name)
+                || known_ids.contains(stem)
+                || sidecar_path.is_file()
+            {
+                continue;
+            }
+
+            let dimensions = image::image_dimensions(&path).unwrap_or((0, 0));
+            let created_at = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(DateTime::<Utc>::from)
+                .unwrap_or_else(Utc::now);
+
+            let candidate = Candidate {
+                id: stem.to_string(),
+                source: Source::Manual,
+                filename: file_name.to_string(),
+                dimensions,
+                created_at,
+            };
+
+            if let Ok(sidecar_json) = serde_json::to_string_pretty(&candidate) {
+                let _ = Self::atomic_write(&sidecar_path, sidecar_json.as_bytes());
+            }
+            known_ids.insert(stem.to_string());
+            known_filenames.insert(file_name.to_string());
+            candidates.push(candidate);
+        }
+
+        candidates.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
         Ok(candidates)
     }
 
@@ -428,24 +513,25 @@ impl StorageRepository for FilesystemStorage {
 
         let staging = self.staging_dir();
         let staging_sidecar = staging.join(format!("{}.json", map.id));
-        if !staging_sidecar.is_file() {
-            return Err(StorageError::NotFound(format!(
-                "Candidate '{}' not found in staging",
-                map.id
-            )));
-        }
-
-        let sidecar_content = std::fs::read_to_string(&staging_sidecar)?;
-        let candidate: Candidate = serde_json::from_str(&sidecar_content)?;
-
-        let staging_image = self
-            .find_staging_image_path(&map.id, Some(&candidate))
-            .ok_or_else(|| {
-                StorageError::NotFound(format!(
-                    "Image for candidate '{}' not found in staging",
-                    map.id
-                ))
-            })?;
+        let staging_image = if staging_sidecar.is_file() {
+            let sidecar_content = std::fs::read_to_string(&staging_sidecar)?;
+            let candidate: Candidate = serde_json::from_str(&sidecar_content)?;
+            self.find_staging_image_path(&map.id, Some(&candidate))
+                .ok_or_else(|| {
+                    StorageError::NotFound(format!(
+                        "Image for candidate '{}' not found in staging",
+                        map.id
+                    ))
+                })?
+        } else {
+            self.find_staging_image_path(&map.id, None)
+                .ok_or_else(|| {
+                    StorageError::NotFound(format!(
+                        "Candidate '{}' not found in staging",
+                        map.id
+                    ))
+                })?
+        };
 
         let ext = staging_image
             .extension()
@@ -465,9 +551,10 @@ impl StorageRepository for FilesystemStorage {
         let curated_json = serde_json::to_string_pretty(map)?;
         Self::atomic_write(&target_sidecar, curated_json.as_bytes())?;
 
-        // Remove staging sidecar
-
-        let _ = std::fs::remove_file(staging_sidecar);
+        // Remove staging sidecar if it exists
+        if staging_sidecar.is_file() {
+            let _ = std::fs::remove_file(staging_sidecar);
+        }
 
         Ok(())
     }
@@ -733,5 +820,128 @@ mod tests {
 
         let res = storage.get_curated_image(&Theme::Ruins, "nonexistent");
         assert!(matches!(res, Err(StorageError::NotFound(_))));
+    }
+    fn create_test_png(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbImage::new(width, height);
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("failed to encode test png");
+        bytes
+    }
+
+    #[test]
+    fn test_raw_image_auto_discovery_and_curation() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+        let staging = storage.staging_dir();
+        std::fs::create_dir_all(&staging).unwrap();
+
+        let png_data = create_test_png(800, 600);
+        let image_path = staging.join("raw_map.png");
+        std::fs::write(&image_path, &png_data).unwrap();
+
+        // Ensure no sidecar JSON file exists initially
+        let sidecar_path = staging.join("raw_map.json");
+        assert!(!sidecar_path.exists());
+
+        // list_staging must discover the raw image as Candidate with Source::Manual and dimensions
+        let candidates = storage.list_staging().unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, "raw_map");
+        assert_eq!(candidates[0].source, Source::Manual);
+        assert_eq!(candidates[0].filename, "raw_map.png");
+        assert_eq!(candidates[0].dimensions, (800, 600));
+
+        // Sidecar must now be persisted on disk
+        assert!(sidecar_path.is_file());
+
+        // get_staging_image returns the raw image bytes
+        let retrieved = storage.get_staging_image("raw_map").unwrap();
+        assert_eq!(retrieved, png_data);
+
+        // curate_staging curates the raw image to Theme::Dungeon
+        let curated = CuratedMap::with_now(
+            "raw_map",
+            Theme::Dungeon,
+            5,
+            vec!["dungeon-crawl".into()],
+            (800, 600),
+        );
+        storage.curate_staging(&curated).unwrap();
+
+        // Staging should now be empty
+        assert_eq!(storage.list_staging().unwrap().len(), 0);
+        assert!(storage.get_staging_image("raw_map").is_err());
+        assert!(!image_path.exists());
+        assert!(!sidecar_path.exists());
+
+        // Curated image and metadata exist in curated theme folder
+        let curated_image = storage
+            .get_curated_image(&Theme::Dungeon, "raw_map")
+            .unwrap();
+        assert_eq!(curated_image, png_data);
+        let curated_maps = storage.list_curated(Some(&Theme::Dungeon)).unwrap();
+        assert_eq!(curated_maps.len(), 1);
+        assert_eq!(curated_maps[0].id, "raw_map");
+        assert_eq!(curated_maps[0].theme, Theme::Dungeon);
+        assert_eq!(curated_maps[0].rating, 5);
+    }
+
+    #[test]
+    fn test_raw_image_rejection_without_prior_sidecar() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+        let staging = storage.staging_dir();
+        std::fs::create_dir_all(&staging).unwrap();
+
+        let png_data = create_test_png(400, 300);
+        let image_path = staging.join("raw_bad_map.png");
+        std::fs::write(&image_path, &png_data).unwrap();
+        assert!(!staging.join("raw_bad_map.json").exists());
+
+        // Reject without calling list_staging first
+        storage
+            .reject_staging(
+                "raw_bad_map",
+                RejectionReason::BlurryLowRes,
+                Some("low resolution"),
+            )
+            .unwrap();
+
+        assert!(!image_path.exists());
+        assert!(!staging.join("raw_bad_map.json").exists());
+        assert!(storage.is_rejected("raw_bad_map").unwrap());
+        assert_eq!(storage.list_staging().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_raw_image_curation_without_prior_list_staging() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+        let staging = storage.staging_dir();
+        std::fs::create_dir_all(&staging).unwrap();
+
+        let png_data = create_test_png(500, 500);
+        let image_path = staging.join("direct_map.png");
+        std::fs::write(&image_path, &png_data).unwrap();
+        assert!(!staging.join("direct_map.json").exists());
+
+        // Curate directly when no sidecar was ever generated
+        let curated = CuratedMap::with_now(
+            "direct_map",
+            Theme::Cave,
+            4,
+            vec!["crystal-cave".into()],
+            (500, 500),
+        );
+        storage.curate_staging(&curated).unwrap();
+
+        assert!(!image_path.exists());
+        let curated_image = storage.get_curated_image(&Theme::Cave, "direct_map").unwrap();
+        assert_eq!(curated_image, png_data);
     }
 }

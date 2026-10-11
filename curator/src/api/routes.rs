@@ -1,16 +1,20 @@
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{header, HeaderValue, StatusCode},
-    response::Response,
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::{
+        sse::{Event, Sse},
+        IntoResponse, Response,
+    },
     Json,
 };
 use serde::{Deserialize, Serialize};
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
-use crate::domain::{Candidate, CuratedMap, RejectionReason, Theme};
-
+use crate::domain::{Candidate, CuratedMap, RedditHarvestRequest, RejectionReason, Theme};
+use crate::services::{IngestionSummary, RedditIngestionService};
 /// Inspects bytes and optional filename to determine image MIME type.
 pub fn detect_image_mime(bytes: &[u8], filename: Option<&str>) -> &'static str {
     if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
@@ -221,6 +225,77 @@ pub async fn post_reject(
         status: "ok",
         id: payload.id,
     }))
+}
+
+/// Response payload for harvest endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedditHarvestResponse {
+    pub processed: usize,
+    pub downloaded: usize,
+    pub skipped: usize,
+    pub summary: IngestionSummary,
+}
+
+impl From<IngestionSummary> for RedditHarvestResponse {
+    fn from(s: IngestionSummary) -> Self {
+        Self {
+            processed: s.processed,
+            downloaded: s.downloaded,
+            skipped: s.skipped,
+            summary: s,
+        }
+    }
+}
+
+/// POST /api/harvest/reddit - Harvest battlemaps from Reddit with live SSE streaming or JSON summary.
+pub async fn post_harvest_reddit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<RedditHarvestRequest>,
+) -> Result<Response, ApiError> {
+    let is_sse = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("text/event-stream"))
+        .unwrap_or(false);
+
+    let query = payload.to_query();
+    let gridless_only = payload.gridless_only;
+    let service = RedditIngestionService::new(state.harvester.clone(), state.storage.clone());
+
+    if is_sse {
+        let (tx, rx) =
+            tokio::sync::mpsc::unbounded_channel::<Result<Event, std::convert::Infallible>>();
+        tokio::spawn(async move {
+            let res = service
+                .ingest_query_progress(&query, gridless_only, |progress| {
+                    let json_data = serde_json::to_string(&progress).unwrap_or_default();
+                    let event_name = if progress.phase == "complete" {
+                        "complete"
+                    } else {
+                        "progress"
+                    };
+                    let event = Event::default().event(event_name).data(json_data);
+                    let _ = tx.send(Ok(event));
+                })
+                .await;
+
+            if let Err(err) = res {
+                let err_event = Event::default().event("error").data(
+                    serde_json::to_string(&serde_json::json!({ "error": err.to_string() }))
+                        .unwrap_or_default(),
+                );
+                let _ = tx.send(Ok(err_event));
+            }
+        });
+
+        let stream = UnboundedReceiverStream::new(rx);
+        Ok(Sse::new(stream).into_response())
+    } else {
+        let summary = service.ingest_query_filtered(&query, gridless_only).await?;
+        let response = RedditHarvestResponse::from(summary);
+        Ok(Json(response).into_response())
+    }
 }
 
 #[cfg(test)]

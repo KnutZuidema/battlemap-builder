@@ -7,11 +7,14 @@ use serde_json::{json, Value};
 use tempfile::tempdir;
 use tower::ServiceExt;
 
+use async_trait::async_trait;
 use curator::adapters::FilesystemStorage;
 use curator::api::{create_router, AppState};
-use curator::domain::{Candidate, Source, Theme};
+use curator::domain::{
+    Candidate, HarvestedMedia, ParsedTags, RedditHarvestQuery, RedditPost, Source, Theme,
+};
+use curator::ports::harvester::{HarvesterError, RedditHarvester};
 use curator::ports::storage::StorageRepository;
-
 fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
@@ -342,4 +345,209 @@ async fn test_curate_errors_and_edge_cases() {
         .unwrap();
     let resp_non_existent = app.oneshot(req_non_existent).await.unwrap();
     assert_eq!(resp_non_existent.status(), StatusCode::NOT_FOUND);
+}
+
+#[derive(Clone, Default)]
+struct MockHarvester {
+    posts: Vec<RedditPost>,
+}
+
+#[async_trait]
+impl RedditHarvester for MockHarvester {
+    async fn fetch_posts(
+        &self,
+        _query: &RedditHarvestQuery,
+    ) -> Result<Vec<RedditPost>, HarvesterError> {
+        Ok(self.posts.clone())
+    }
+}
+
+fn create_test_png() -> Vec<u8> {
+    let img = image::RgbaImage::new(1, 1);
+    let mut bytes = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut bytes);
+    img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+    bytes
+}
+
+#[tokio::test]
+async fn test_api_harvest_reddit_json_response() {
+    // 1. Mock image server
+    let png_bytes = create_test_png();
+    let app_image = axum::Router::new().route(
+        "/test_map.png",
+        axum::routing::get(move || {
+            let data = png_bytes.clone();
+            async move { (StatusCode::OK, [("content-type", "image/png")], data) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app_image).await.unwrap();
+    });
+    let image_url = format!("http://{addr}/test_map.png");
+
+    // 2. Setup mock harvester posts (1 gridless, 1 gridded)
+    let post_gridless = RedditPost {
+        id: "harvest_json_1".into(),
+        name: "t3_harvest_json_1".into(),
+        title: "[40x40] Ancient Crypt [Gridless]".into(),
+        author: "crypt_keeper".into(),
+        permalink: "/r/battlemaps/comments/harvest_json_1/".into(),
+        url: image_url.clone(),
+        score: 150,
+        created_utc: chrono::Utc::now(),
+        media: vec![HarvestedMedia::new(image_url.clone())],
+        tags: ParsedTags::parse_title("[40x40] Ancient Crypt [Gridless]"),
+    };
+
+    let post_gridded = RedditPost {
+        id: "harvest_json_2".into(),
+        name: "t3_harvest_json_2".into(),
+        title: "[40x40] Ancient Crypt [Gridded]".into(),
+        author: "crypt_keeper".into(),
+        permalink: "/r/battlemaps/comments/harvest_json_2/".into(),
+        url: image_url.clone(),
+        score: 150,
+        created_utc: chrono::Utc::now(),
+        media: vec![HarvestedMedia::new(image_url.clone())],
+        tags: ParsedTags::parse_title("[40x40] Ancient Crypt [Gridded]"),
+    };
+
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let harvester = Arc::new(MockHarvester {
+        posts: vec![post_gridless, post_gridded],
+    });
+    let state = AppState::with_harvester(storage.clone(), harvester);
+    let app = create_router(state);
+
+    // 3. Post harvest request with gridless_only: true
+    let harvest_req = Request::builder()
+        .uri("/api/harvest/reddit")
+        .method("POST")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "sort": "hot",
+                "limit": 25,
+                "gridless_only": true
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.clone().oneshot(harvest_req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json_resp: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+    assert_eq!(json_resp["downloaded"], 1);
+    assert_eq!(json_resp["skipped"], 1);
+    assert_eq!(json_resp["processed"], 2);
+
+    // 4. Verify newly harvested candidate immediately appears in /api/staging
+    let staging_req = Request::builder()
+        .uri("/api/staging")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let staging_resp = app.oneshot(staging_req).await.unwrap();
+    assert_eq!(staging_resp.status(), StatusCode::OK);
+
+    let staging_bytes = to_bytes(staging_resp.into_body(), usize::MAX).await.unwrap();
+    let staging_list: Vec<Candidate> = serde_json::from_slice(&staging_bytes).unwrap();
+    assert_eq!(staging_list.len(), 1);
+    assert_eq!(staging_list[0].id, "harvest_json_1");
+}
+
+#[tokio::test]
+async fn test_api_harvest_reddit_sse_streaming() {
+    // 1. Mock image server
+    let png_bytes = create_test_png();
+    let app_image = axum::Router::new().route(
+        "/sse_map.png",
+        axum::routing::get(move || {
+            let data = png_bytes.clone();
+            async move { (StatusCode::OK, [("content-type", "image/png")], data) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app_image).await.unwrap();
+    });
+    let image_url = format!("http://{addr}/sse_map.png");
+
+    // 2. Setup mock harvester
+    let post = RedditPost {
+        id: "sse_post_1".into(),
+        name: "t3_sse_post_1".into(),
+        title: "[25x25] Goblin Ambush [Gridless]".into(),
+        author: "ambusher".into(),
+        permalink: "/r/battlemaps/comments/sse_post_1/".into(),
+        url: image_url.clone(),
+        score: 200,
+        created_utc: chrono::Utc::now(),
+        media: vec![HarvestedMedia::new(image_url.clone())],
+        tags: ParsedTags::parse_title("[25x25] Goblin Ambush [Gridless]"),
+    };
+
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let harvester = Arc::new(MockHarvester { posts: vec![post] });
+    let state = AppState::with_harvester(storage.clone(), harvester);
+    let app = create_router(state);
+
+    // 3. Post harvest request with Accept: text/event-stream
+    let harvest_req = Request::builder()
+        .uri("/api/harvest/reddit")
+        .method("POST")
+        .header("content-type", "application/json")
+        .header("accept", "text/event-stream")
+        .body(Body::from(
+            json!({
+                "sort": "top",
+                "time": "year",
+                "limit": 10,
+                "gridless_only": false
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = app.clone().oneshot(harvest_req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("text/event-stream")
+    );
+
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let sse_text = std::str::from_utf8(&body_bytes).unwrap();
+
+    assert!(sse_text.contains("event: progress"));
+    assert!(sse_text.contains("event: complete"));
+    assert!(sse_text.contains("sse_post_1"));
+    // 4. Staging now has the candidate
+    let staging_req = Request::builder()
+        .uri("/api/staging")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let staging_resp = app.oneshot(staging_req).await.unwrap();
+    assert_eq!(staging_resp.status(), StatusCode::OK);
+    let staging_bytes = to_bytes(staging_resp.into_body(), usize::MAX).await.unwrap();
+    let staging_list: Vec<Candidate> = serde_json::from_slice(&staging_bytes).unwrap();
+    assert_eq!(staging_list.len(), 1);
+    assert_eq!(staging_list[0].id, "sse_post_1");
 }

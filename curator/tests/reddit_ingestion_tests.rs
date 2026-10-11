@@ -15,7 +15,7 @@ use curator::domain::{
 use curator::ports::harvester::{HarvesterError, RedditHarvester};
 use curator::ports::storage::StorageRepository;
 use curator::services::{
-    candidate_id_for_post, IngestionOutcome, RedditIngestionService, SkipReason,
+    candidate_id_for_post, IngestionOutcome, IngestionProgress, RedditIngestionService, SkipReason,
 };
 
 /// Mock harvester that returns pre-configured Reddit posts.
@@ -366,4 +366,147 @@ async fn test_multi_image_gallery_ingestion() {
             reason: SkipReason::Rejected,
         }
     );
+}
+
+#[tokio::test]
+async fn test_ingest_query_filtered_gridless_only() {
+    let png_bytes = create_test_png();
+    let app = Router::new().route(
+        "/image.png",
+        get(move || {
+            let data = png_bytes.clone();
+            async move { (axum::http::StatusCode::OK, [("content-type", "image/png")], data) }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let image_url = format!("http://{addr}/image.png");
+
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+
+    let post_gridless = RedditPost {
+        id: "gridless_1".into(),
+        name: "t3_gridless_1".into(),
+        title: "[30x30] Forest Clearing [Gridless]".into(),
+        author: "cartographer".into(),
+        permalink: "/r/battlemaps/comments/gridless_1/".into(),
+        url: image_url.clone(),
+        score: 100,
+        created_utc: Utc::now(),
+        media: vec![HarvestedMedia::new(image_url.clone())],
+        tags: ParsedTags::parse_title("[30x30] Forest Clearing [Gridless]"),
+    };
+
+    let post_gridded = RedditPost {
+        id: "gridded_1".into(),
+        name: "t3_gridded_1".into(),
+        title: "[30x30] Forest Clearing [Gridded]".into(),
+        author: "cartographer".into(),
+        permalink: "/r/battlemaps/comments/gridded_1/".into(),
+        url: image_url.clone(),
+        score: 100,
+        created_utc: Utc::now(),
+        media: vec![HarvestedMedia::new(image_url.clone())],
+        tags: ParsedTags::parse_title("[30x30] Forest Clearing [Gridded]"),
+    };
+
+    let post_unknown = RedditPost {
+        id: "unknown_1".into(),
+        name: "t3_unknown_1".into(),
+        title: "Dungeon Map".into(),
+        author: "cartographer".into(),
+        permalink: "/r/battlemaps/comments/unknown_1/".into(),
+        url: image_url.clone(),
+        score: 100,
+        created_utc: Utc::now(),
+        media: vec![HarvestedMedia::new(image_url.clone())],
+        tags: ParsedTags::parse_title("Dungeon Map"),
+    };
+
+    let harvester = MockHarvester::new(vec![post_gridless, post_gridded, post_unknown]);
+    let service = RedditIngestionService::new(harvester, storage.clone());
+
+    let query = RedditHarvestQuery::default();
+    let summary = service.ingest_query_filtered(&query, true).await.unwrap();
+
+    assert_eq!(summary.processed, 3);
+    assert_eq!(summary.downloaded, 1);
+    assert_eq!(summary.skipped, 2);
+
+    // Only gridless candidate should be in staging
+    assert!(storage.is_in_staging("gridless_1").unwrap());
+    assert!(!storage.is_in_staging("gridded_1").unwrap());
+    assert!(!storage.is_in_staging("unknown_1").unwrap());
+}
+
+#[tokio::test]
+async fn test_ingest_query_progress_events() {
+    let png_bytes = create_test_png();
+    let app = Router::new().route(
+        "/image.png",
+        get(move || {
+            let data = png_bytes.clone();
+            async move { (axum::http::StatusCode::OK, [("content-type", "image/png")], data) }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let image_url = format!("http://{addr}/image.png");
+
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+
+    let post1 = RedditPost {
+        id: "prog_1".into(),
+        name: "t3_prog_1".into(),
+        title: "Map 1 [Gridless]".into(),
+        author: "cartographer".into(),
+        permalink: "/r/battlemaps/comments/prog_1/".into(),
+        url: image_url.clone(),
+        score: 100,
+        created_utc: Utc::now(),
+        media: vec![HarvestedMedia::new(image_url.clone())],
+        tags: ParsedTags::parse_title("Map 1 [Gridless]"),
+    };
+
+    let post2 = RedditPost {
+        id: "prog_2".into(),
+        name: "t3_prog_2".into(),
+        title: "Map 2".into(),
+        author: "cartographer".into(),
+        permalink: "/r/battlemaps/comments/prog_2/".into(),
+        url: image_url.clone(),
+        score: 100,
+        created_utc: Utc::now(),
+        media: vec![HarvestedMedia::new(image_url.clone())],
+        tags: ParsedTags::parse_title("Map 2"),
+    };
+
+    let harvester = MockHarvester::new(vec![post1, post2]);
+    let service = RedditIngestionService::new(harvester, storage.clone());
+
+    let query = RedditHarvestQuery::default();
+    let mut events: Vec<IngestionProgress> = Vec::new();
+
+    let summary = service
+        .ingest_query_progress(&query, true, |progress| {
+            events.push(progress);
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(summary.downloaded, 1);
+    assert_eq!(summary.skipped, 1);
+    assert!(!events.is_empty());
+    assert_eq!(events[0].phase, "fetching");
+    assert_eq!(events.last().unwrap().phase, "complete");
 }

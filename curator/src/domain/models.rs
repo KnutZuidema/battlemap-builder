@@ -201,9 +201,21 @@ impl RejectionRecord {
 pub struct Candidate {
     pub id: String,
     pub source: Source,
+    #[serde(default)]
     pub filename: String,
+    #[serde(default)]
     pub dimensions: (u32, u32),
     pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parsed_gridless: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parsed_dimensions: Option<(u32, u32)>,
 }
 
 impl Candidate {
@@ -220,6 +232,11 @@ impl Candidate {
             filename: filename.into(),
             dimensions,
             created_at,
+            source_url: None,
+            title: None,
+            author: None,
+            parsed_gridless: None,
+            parsed_dimensions: None,
         }
     }
 
@@ -230,6 +247,112 @@ impl Candidate {
         dimensions: (u32, u32),
     ) -> Self {
         Self::new(id, source, filename, dimensions, Utc::now())
+    }
+
+    pub fn with_source_url(mut self, url: impl Into<String>) -> Self {
+        self.source_url = Some(url.into());
+        self
+    }
+
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    pub fn with_author(mut self, author: impl Into<String>) -> Self {
+        self.author = Some(author.into());
+        self
+    }
+
+    pub fn with_parsed_gridless(mut self, gridless: bool) -> Self {
+        self.parsed_gridless = Some(gridless);
+        self
+    }
+
+    pub fn with_parsed_dimensions(mut self, dimensions: (u32, u32)) -> Self {
+        self.parsed_dimensions = Some(dimensions);
+        self
+    }
+
+    /// Returns the assigned filename or fallback to `{id}.png`.
+    pub fn resolved_filename(&self) -> String {
+        if self.filename.is_empty() {
+            format!("{}.png", self.id)
+        } else {
+            self.filename.clone()
+        }
+    }
+}
+
+/// Formats Reddit permalink and direct media URL into a canonical source URL string.
+pub fn format_source_url(permalink: &str, direct_url: &str) -> String {
+    let p = permalink.trim();
+    let d = direct_url.trim();
+    if p.is_empty() || p == d {
+        d.to_string()
+    } else if d.is_empty() {
+        p.to_string()
+    } else {
+        format!("{p} | {d}")
+    }
+}
+
+/// Companion sidecar metadata for a harvested Reddit battlemap item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedditSidecarMetadata {
+    pub id: String,
+    pub source: Source,
+    pub source_url: String,
+    pub title: String,
+    pub author: String,
+    pub parsed_gridless: bool,
+    pub parsed_dimensions: Option<(u32, u32)>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl RedditSidecarMetadata {
+    pub fn to_candidate(&self) -> Candidate {
+        self.clone().into()
+    }
+}
+
+impl From<RedditSidecarMetadata> for Candidate {
+    fn from(meta: RedditSidecarMetadata) -> Self {
+        Self {
+            id: meta.id.clone(),
+            source: meta.source,
+            filename: format!("{}.png", meta.id),
+            dimensions: meta.parsed_dimensions.unwrap_or((0, 0)),
+            created_at: meta.created_at,
+            source_url: Some(meta.source_url),
+            title: Some(meta.title),
+            author: Some(meta.author),
+            parsed_gridless: Some(meta.parsed_gridless),
+            parsed_dimensions: meta.parsed_dimensions,
+        }
+    }
+}
+
+impl TryFrom<Candidate> for RedditSidecarMetadata {
+    type Error = &'static str;
+
+    fn try_from(c: Candidate) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: c.id,
+            source: c.source,
+            source_url: c.source_url.unwrap_or_default(),
+            title: c.title.unwrap_or_default(),
+            author: c.author.unwrap_or_default(),
+            parsed_gridless: c.parsed_gridless.unwrap_or(false),
+            parsed_dimensions: c.parsed_dimensions.or_else(|| {
+                if c.dimensions != (0, 0) {
+                    Some(c.dimensions)
+                } else {
+                    None
+                }
+            }),
+            created_at: c.created_at,
+        })
     }
 }
 
@@ -581,13 +704,44 @@ impl RedditPost {
             (Some(w), Some(h)) => (w, h),
             _ => self.tags.dimensions.unwrap_or((0, 0)),
         };
-        Some(Candidate::new(
+        let candidate = Candidate::new(
             format!("{}_{}", self.id, media_index),
             Source::Reddit,
             filename,
             dimensions,
             self.created_utc,
-        ))
+        )
+        .with_source_url(format_source_url(&self.permalink, &media.url))
+        .with_title(&self.title)
+        .with_author(&self.author)
+        .with_parsed_gridless(self.tags.is_gridless());
+
+        let candidate = if let Some(dims) = self.tags.dimensions {
+            candidate.with_parsed_dimensions(dims)
+        } else {
+            candidate
+        };
+
+        Some(candidate)
+    }
+
+    pub fn to_sidecar_metadata(&self, media_index: usize) -> Option<RedditSidecarMetadata> {
+        let media = self.media.get(media_index)?;
+        let id = if self.media.len() <= 1 {
+            self.id.clone()
+        } else {
+            format!("{}_{}", self.id, media_index)
+        };
+        Some(RedditSidecarMetadata {
+            id,
+            source: Source::Reddit,
+            source_url: format_source_url(&self.permalink, &media.url),
+            title: self.title.clone(),
+            author: self.author.clone(),
+            parsed_gridless: self.tags.is_gridless(),
+            parsed_dimensions: self.tags.dimensions,
+            created_at: Utc::now(),
+        })
     }
 }
 
@@ -664,6 +818,91 @@ mod tests {
         assert_eq!(parsed.created_at, candidate.created_at);
     }
 
+
+    #[test]
+    fn test_candidate_sidecar_serde_and_compatibility() {
+        // Sidecar JSON without filename and dimensions, matching Issue #25 schema
+        let json = r#"{
+            "id": "reddit_abc123",
+            "source": "Reddit",
+            "source_url": "https://reddit.com/r/battlemaps/comments/abc/ | https://i.redd.it/abc.png",
+            "title": "[40x30] Ancient Dungeon [Gridless]",
+            "author": "mapper_joe",
+            "parsed_gridless": true,
+            "parsed_dimensions": [40, 30],
+            "created_at": "2026-10-11T00:00:00Z"
+        }"#;
+
+        let parsed: Candidate = serde_json::from_str(json).expect("deserialize sidecar as Candidate");
+        assert_eq!(parsed.id, "reddit_abc123");
+        assert_eq!(parsed.source, Source::Reddit);
+        assert_eq!(parsed.filename, "");
+        assert_eq!(parsed.resolved_filename(), "reddit_abc123.png");
+        assert_eq!(parsed.dimensions, (0, 0));
+        assert_eq!(
+            parsed.source_url.as_deref(),
+            Some("https://reddit.com/r/battlemaps/comments/abc/ | https://i.redd.it/abc.png")
+        );
+        assert_eq!(parsed.title.as_deref(), Some("[40x30] Ancient Dungeon [Gridless]"));
+        assert_eq!(parsed.author.as_deref(), Some("mapper_joe"));
+        assert_eq!(parsed.parsed_gridless, Some(true));
+        assert_eq!(parsed.parsed_dimensions, Some((40, 30)));
+
+        // Reserialize Candidate and verify compatibility
+        let reserialized = serde_json::to_string(&parsed).expect("serialize candidate");
+        let roundtrip: Candidate = serde_json::from_str(&reserialized).expect("roundtrip");
+        assert_eq!(roundtrip.id, parsed.id);
+        assert_eq!(roundtrip.source_url, parsed.source_url);
+    }
+
+    #[test]
+    fn test_reddit_sidecar_metadata_conversions() {
+        let meta = RedditSidecarMetadata {
+            id: "red_42".to_string(),
+            source: Source::Reddit,
+            source_url: "https://i.redd.it/red42.png".to_string(),
+            title: "Crystal Cavern".to_string(),
+            author: "cave_builder".to_string(),
+            parsed_gridless: false,
+            parsed_dimensions: Some((50, 50)),
+            created_at: Utc::now(),
+        };
+
+        let json = serde_json::to_string_pretty(&meta).expect("serialize sidecar");
+        assert!(json.contains("\"id\": \"red_42\""));
+        assert!(json.contains("\"parsed_gridless\": false"));
+
+        let parsed_meta: RedditSidecarMetadata = serde_json::from_str(&json).expect("deserialize sidecar");
+        assert_eq!(parsed_meta, meta);
+
+        // Conversion to Candidate
+        let cand = meta.to_candidate();
+        assert_eq!(cand.id, "red_42");
+        assert_eq!(cand.filename, "red_42.png");
+        assert_eq!(cand.dimensions, (50, 50));
+        assert_eq!(cand.parsed_gridless, Some(false));
+
+        // Conversion from Candidate
+        let back: RedditSidecarMetadata = cand.try_into().expect("try_into metadata");
+        assert_eq!(back.id, meta.id);
+        assert_eq!(back.title, meta.title);
+    }
+
+    #[test]
+    fn test_format_source_url() {
+        assert_eq!(
+            format_source_url("https://reddit.com/post", "https://i.redd.it/img.png"),
+            "https://reddit.com/post | https://i.redd.it/img.png"
+        );
+        assert_eq!(
+            format_source_url("", "https://i.redd.it/img.png"),
+            "https://i.redd.it/img.png"
+        );
+        assert_eq!(
+            format_source_url("https://i.redd.it/img.png", "https://i.redd.it/img.png"),
+            "https://i.redd.it/img.png"
+        );
+    }
     #[test]
     fn test_curated_map_rating_and_serde() {
         let curated = CuratedMap::with_now(

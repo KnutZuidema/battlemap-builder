@@ -8,19 +8,299 @@
 </head>
 <body>
     <div id="app">
-        <header>
-            <div class="logo">
-                <span class="brand-title">DUNGEON FORGE</span>
-                <span class="badge">Curator</span>
+        <!-- Top HUD Navigation & Control Bar -->
+        <header class="hud-header">
+            <!-- Brand & Connection Status -->
+            <div class="hud-section hud-brand">
+                <div class="brand">
+                    <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="12 2 2 7 12 12 22 7 12 2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <polyline points="2 17 12 22 22 17" stroke-linecap="round" stroke-linejoin="round"/>
+                        <polyline points="2 12 12 17 22 12" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span class="brand-title">DUNGEON FORGE</span>
+                    <span class="badge badge-curator">Curator</span>
+                </div>
+                <div id="status-indicator" class="status-pill status-connecting" title="Curator API Status">
+                    <span class="status-dot"></span>
+                    <span id="status-text" class="status-text">Connecting...</span>
+                </div>
             </div>
-            <div id="status-bar" class="status-bar">Connecting to Curator API...</div>
+
+            <!-- Candidate Metadata & Queue Counter -->
+            <div class="hud-section hud-candidate-meta">
+                <div id="candidate-meta-box" class="candidate-meta-box hidden">
+                    <span id="queue-counter" class="meta-tag queue-counter" title="Queue Position">0 / 0</span>
+                    <span id="candidate-id" class="meta-tag candidate-id mono" title="Candidate ID">—</span>
+                    <span id="candidate-dimensions" class="meta-tag candidate-dim mono" title="Dimensions">—</span>
+                    <span id="candidate-source" class="meta-tag candidate-source badge-source" title="Source">—</span>
+                </div>
+            </div>
+
+            <!-- Theme Selection Hotkeys 1-7 -->
+            <div class="hud-section hud-themes">
+                <div id="theme-selector" class="theme-selector" role="radiogroup" aria-label="Theme Selection">
+                    <button type="button" class="theme-badge active" data-theme="dungeon" data-index="1" title="Hotkey: 1">
+                        <kbd>1</kbd><span>Dungeon</span>
+                    </button>
+                    <button type="button" class="theme-badge" data-theme="cave" data-index="2" title="Hotkey: 2">
+                        <kbd>2</kbd><span>Cave</span>
+                    </button>
+                    <button type="button" class="theme-badge" data-theme="tavern" data-index="3" title="Hotkey: 3">
+                        <kbd>3</kbd><span>Tavern</span>
+                    </button>
+                    <button type="button" class="theme-badge" data-theme="wilderness" data-index="4" title="Hotkey: 4">
+                        <kbd>4</kbd><span>Wilderness</span>
+                    </button>
+                    <button type="button" class="theme-badge" data-theme="ruins" data-index="5" title="Hotkey: 5">
+                        <kbd>5</kbd><span>Ruins</span>
+                    </button>
+                    <button type="button" class="theme-badge" data-theme="urban" data-index="6" title="Hotkey: 6">
+                        <kbd>6</kbd><span>Urban</span>
+                    </button>
+                    <button type="button" class="theme-badge" data-theme="scifi" data-index="7" title="Hotkey: 7">
+                        <kbd>7</kbd><span>SciFi</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Quality Rating 1-5 Stars -->
+            <div class="hud-section hud-rating">
+                <div id="rating-selector" class="rating-stars" role="radiogroup" aria-label="Rating Selection" title="Shift + 1-5 or click to rate">
+                    <button type="button" class="star-btn" data-rating="1" aria-label="1 Star">★</button>
+                    <button type="button" class="star-btn" data-rating="2" aria-label="2 Stars">★</button>
+                    <button type="button" class="star-btn" data-rating="3" aria-label="3 Stars">★</button>
+                    <button type="button" class="star-btn active" data-rating="4" aria-label="4 Stars">★</button>
+                    <button type="button" class="star-btn" data-rating="5" aria-label="5 Stars">★</button>
+                </div>
+            </div>
+
+            <!-- Viewport Tools & Triage Action Controls -->
+            <div class="hud-section hud-actions">
+                <div class="tool-group">
+                    <button type="button" id="btn-grid-toggle" class="btn btn-tool active" title="Toggle 64px VTT Grid (Hotkey: G)">
+                        <kbd>G</kbd>
+                        <span class="btn-label">Grid</span>
+                    </button>
+                    <button type="button" id="btn-fit-screen" class="btn btn-tool" title="Fit to Screen (Hotkey: F)">
+                        <kbd>F</kbd>
+                        <span class="btn-label">Fit</span>
+                    </button>
+                    <div class="zoom-controls">
+                        <button type="button" id="btn-zoom-out" class="btn btn-icon" title="Zoom Out (-)">−</button>
+                        <span id="zoom-level" class="zoom-level mono" title="Zoom Scale">100%</span>
+                        <button type="button" id="btn-zoom-in" class="btn btn-icon" title="Zoom In (+)">+</button>
+                    </div>
+                </div>
+
+                <div class="action-divider"></div>
+
+                <div class="nav-group">
+                    <button type="button" id="btn-prev" class="btn btn-secondary" title="Previous Candidate (Hotkey: K or Left)">
+                        <kbd>K</kbd>
+                        <span class="btn-label">Prev</span>
+                    </button>
+                    <button type="button" id="btn-next" class="btn btn-secondary" title="Next Candidate (Hotkey: J or Right)">
+                        <span class="btn-label">Next</span>
+                        <kbd>J</kbd>
+                    </button>
+                </div>
+
+                <div class="action-divider"></div>
+
+                <div class="triage-group">
+                    <button type="button" id="btn-reject" class="btn btn-danger" title="Reject Candidate (Hotkey: X or Delete)">
+                        <kbd>X</kbd>
+                        <span class="btn-label">Reject</span>
+                    </button>
+                    <button type="button" id="btn-curate" class="btn btn-success" title="Curate Candidate (Hotkey: A or Enter)">
+                        <kbd>A</kbd>
+                        <span class="btn-label">Curate</span>
+                    </button>
+                </div>
+
+                <button type="button" id="btn-help" class="btn btn-ghost btn-help" title="Hotkey Guide (Hotkey: ?)">
+                    <kbd>?</kbd>
+                </button>
+            </div>
         </header>
-        <main id="triage-container">
-            <div class="canvas-wrapper">
-                <canvas id="triage-canvas" width="800" height="600"></canvas>
+
+        <!-- Main Triage Viewport with Canvas 2D -->
+        <main id="triage-viewport" class="triage-viewport">
+            <div class="canvas-container" id="canvas-container">
+                <canvas id="triage-canvas"></canvas>
+            </div>
+
+            <!-- Floating Viewport Status HUD -->
+            <div id="viewport-hud" class="viewport-hud">
+                <span id="hud-pan-zoom" class="hud-item mono">Zoom: 100%</span>
+                <span class="hud-divider">|</span>
+                <span id="hud-grid-status" class="hud-item">Grid: 64px (5ft) [ON]</span>
+                <span class="hud-divider">|</span>
+                <span id="hud-resolution" class="hud-item mono">2048 × 2048</span>
+                <span class="hud-divider">|</span>
+                <span id="hud-prefetch-status" class="hud-item text-muted">Prefetch: 0 ready</span>
+            </div>
+
+            <!-- Empty State Display -->
+            <div id="empty-state" class="empty-state hidden">
+                <div class="empty-card">
+                    <div class="empty-icon">
+                        <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <circle cx="8.5" cy="8.5" r="1.5"/>
+                            <polyline points="21 15 16 10 5 21"/>
+                        </svg>
+                    </div>
+                    <h2>Staging Queue Empty</h2>
+                    <p>No uncurated battlemaps pending in staging. Ingest images to <code>data/staging/</code> or trigger a harvester batch to begin triage.</p>
+                    <div class="empty-actions">
+                        <button type="button" id="btn-refresh-staging" class="btn btn-primary">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="23 4 23 10 17 10"/>
+                                <polyline points="1 20 1 14 7 14"/>
+                                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                            </svg>
+                            <span>Refresh Queue</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Loading Spinner Overlay -->
+            <div id="loading-overlay" class="loading-overlay hidden">
+                <div class="spinner"></div>
+                <span id="loading-text" class="loading-text">Loading battlemap candidate...</span>
             </div>
         </main>
+
+        <!-- Rejection Reason Modal -->
+        <div id="rejection-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="rejection-modal-title">
+            <div class="modal-card">
+                <div class="modal-header">
+                    <h3 id="rejection-modal-title">Reject Battlemap Candidate</h3>
+                    <button type="button" id="btn-close-reject-modal" class="btn-close" aria-label="Close modal">×</button>
+                </div>
+                <div class="modal-body">
+                    <p class="modal-description">Select the primary rejection reason to catalog and prune from staging:</p>
+                    <div id="rejection-reasons" class="rejection-reasons-grid">
+                        <button type="button" class="reason-chip active" data-reason="GridBurnedIn" data-key="1">
+                            <kbd>1</kbd>
+                            <div class="reason-info">
+                                <span class="reason-name">Grid Burned In</span>
+                                <span class="reason-hint">Visible baked-in lines or baked hexes</span>
+                            </div>
+                        </button>
+                        <button type="button" class="reason-chip" data-reason="IsometricTilt" data-key="2">
+                            <kbd>2</kbd>
+                            <div class="reason-info">
+                                <span class="reason-name">Isometric / 3D Tilt</span>
+                                <span class="reason-hint">Non-orthographic camera angle</span>
+                            </div>
+                        </button>
+                        <button type="button" class="reason-chip" data-reason="BlurryLowRes" data-key="3">
+                            <kbd>3</kbd>
+                            <div class="reason-info">
+                                <span class="reason-name">Blurry / Low Res</span>
+                                <span class="reason-hint">JPEG compression artifacts, &lt;1024px</span>
+                            </div>
+                        </button>
+                        <button type="button" class="reason-chip" data-reason="BadGeometry" data-key="4">
+                            <kbd>4</kbd>
+                            <div class="reason-info">
+                                <span class="reason-name">Bad Geometry</span>
+                                <span class="reason-hint">Broken walls, impossible poché cuts</span>
+                            </div>
+                        </button>
+                        <button type="button" class="reason-chip" data-reason="Irrelevant" data-key="5">
+                            <kbd>5</kbd>
+                            <div class="reason-info">
+                                <span class="reason-name">Irrelevant</span>
+                                <span class="reason-hint">Character art, scenery, portrait</span>
+                            </div>
+                        </button>
+                    </div>
+                    <div class="form-group notes-group">
+                        <label for="rejection-notes">Optional Notes / Context:</label>
+                        <input type="text" id="rejection-notes" class="text-input" placeholder="e.g. visible watermarks, skewed perspective..." autocomplete="off">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" id="btn-cancel-reject" class="btn btn-secondary">
+                        <kbd>Esc</kbd>
+                        <span>Cancel</span>
+                    </button>
+                    <button type="button" id="btn-confirm-reject" class="btn btn-danger">
+                        <kbd>↵</kbd>
+                        <span>Confirm Reject</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Hotkey Guide Modal -->
+        <div id="help-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="help-modal-title">
+            <div class="modal-card help-modal-card">
+                <div class="modal-header">
+                    <h3 id="help-modal-title">Curator Hotkey Controls & Triage Guide</h3>
+                    <button type="button" id="btn-close-help-modal" class="btn-close" aria-label="Close modal">×</button>
+                </div>
+                <div class="modal-body help-body">
+                    <div class="help-section">
+                        <h4>Rapid Triage Actions</h4>
+                        <div class="help-grid">
+                            <div class="help-row"><kbd>A</kbd> or <kbd>Enter</kbd><span>Approve & Curate active map to selected theme</span></div>
+                            <div class="help-row"><kbd>X</kbd> or <kbd>Del</kbd><span>Open Rejection dialogue (quick-select reason with 1-5 + Enter)</span></div>
+                            <div class="help-row"><kbd>J</kbd> or <kbd>→</kbd><span>Advance to next candidate (without curating)</span></div>
+                            <div class="help-row"><kbd>K</kbd> or <kbd>←</kbd><span>Return to previous candidate</span></div>
+                        </div>
+                    </div>
+
+                    <div class="help-section">
+                        <h4>Theme Classification</h4>
+                        <div class="help-grid">
+                            <div class="help-row"><kbd>1</kbd><span>Dungeon</span></div>
+                            <div class="help-row"><kbd>2</kbd><span>Cave</span></div>
+                            <div class="help-row"><kbd>3</kbd><span>Tavern</span></div>
+                            <div class="help-row"><kbd>4</kbd><span>Wilderness</span></div>
+                            <div class="help-row"><kbd>5</kbd><span>Ruins</span></div>
+                            <div class="help-row"><kbd>6</kbd><span>Urban</span></div>
+                            <div class="help-row"><kbd>7</kbd><span>Sci-Fi</span></div>
+                        </div>
+                    </div>
+
+                    <div class="help-section">
+                        <h4>Quality Rating</h4>
+                        <div class="help-grid">
+                            <div class="help-row"><kbd>Shift</kbd> + <kbd>1-5</kbd><span>Set quality star rating (1 to 5 stars)</span></div>
+                        </div>
+                    </div>
+
+                    <div class="help-section">
+                        <h4>Canvas 2D Viewport Controls</h4>
+                        <div class="help-grid">
+                            <div class="help-row"><kbd>G</kbd><span>Toggle crisp 64px (5ft VTT scale) grid overlay</span></div>
+                            <div class="help-row"><kbd>F</kbd><span>Fit map to screen / center viewport</span></div>
+                            <div class="help-row"><kbd>+</kbd> / <kbd>−</kbd><span>Zoom in / zoom out</span></div>
+                            <div class="help-row"><kbd>Wheel</kbd><span>Smooth zoom centered on mouse pointer (10% to 500%)</span></div>
+                            <div class="help-row"><kbd>Drag</kbd><span>Pan map viewport (Left Click or Middle Click)</span></div>
+                            <div class="help-row"><kbd>?</kbd><span>Toggle this hotkey reference guide</span></div>
+                            <div class="help-row"><kbd>Esc</kbd><span>Close active modal dialog</span></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" id="btn-dismiss-help" class="btn btn-primary">
+                        <span>Close Guide</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toast Notifications Container -->
+        <div id="toast-container" class="toast-container" aria-live="polite"></div>
     </div>
+
     <script src="/app.js"></script>
 </body>
 </html>

@@ -22,6 +22,18 @@ pub enum HarvesterError {
     Io(#[from] std::io::Error),
 }
 
+impl HarvesterError {
+    /// Returns true if this error indicates an HTTP 403 Forbidden response.
+    pub fn is_forbidden(&self) -> bool {
+        match self {
+            HarvesterError::InvalidResponse(msg) => {
+                msg.contains("403 Forbidden") || msg.contains("403")
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Port defining operations for harvesting battlemaps from Reddit.
 #[async_trait]
 pub trait RedditHarvester: Send + Sync {

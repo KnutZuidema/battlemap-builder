@@ -18,7 +18,7 @@ impl AppState {
     pub fn new(storage: Arc<dyn StorageRepository + Send + Sync>) -> Self {
         Self {
             storage,
-            harvester: Arc::new(RedditCrawler::new()),
+            harvester: Arc::new(RedditCrawler::from_env()),
             start_time: Instant::now(),
         }
     }

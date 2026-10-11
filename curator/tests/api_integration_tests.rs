@@ -198,6 +198,81 @@ async fn test_api_curate_endpoint() {
 }
 
 #[tokio::test]
+async fn test_api_curate_building_theme_and_aliases() {
+    let (app, storage, _dir) = setup_test_app();
+
+    let img_bytes = b"\x89PNG\r\n\x1a\nisolated_cottage";
+    let cand1 = Candidate::with_now("cabin_map", Source::Reddit, "cabin.png", (2048, 2048));
+    storage.save_staging(&cand1, img_bytes).unwrap();
+
+    // Curate candidate with theme "building"
+    let curate_payload = json!({
+        "id": "cabin_map",
+        "theme": "building",
+        "rating": 5,
+        "tags": ["isolated-cabin", "timber-roof"]
+    });
+
+    let req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let res_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(res_json["status"], "ok");
+    assert_eq!(res_json["curated"]["id"], "cabin_map");
+    assert_eq!(res_json["curated"]["theme"], "building");
+    assert_eq!(res_json["curated"]["rating"], 5);
+
+    // Verify stored under Theme::Building
+    let curated = storage.list_curated(Some(&Theme::Building)).unwrap();
+    assert_eq!(curated.len(), 1);
+    assert_eq!(curated[0].id, "cabin_map");
+    assert_eq!(curated[0].theme, Theme::Building);
+
+    // Fetch the curated image via /api/image/curated/building/cabin_map
+    let req_img = Request::builder()
+        .uri("/api/image/curated/building/cabin_map")
+        .body(Body::empty())
+        .unwrap();
+    let resp_img = app.clone().oneshot(req_img).await.unwrap();
+    assert_eq!(resp_img.status(), StatusCode::OK);
+
+    // Test alias "outpost" also curates into Theme::Building
+    let cand2 = Candidate::with_now("outpost_map", Source::Generated, "outpost.png", (1024, 1024));
+    storage.save_staging(&cand2, img_bytes).unwrap();
+
+    let alias_payload = json!({
+        "id": "outpost_map",
+        "theme": "outpost",
+        "rating": 4,
+        "tags": ["watchtower"]
+    });
+
+    let req2 = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(alias_payload.to_string()))
+        .unwrap();
+
+    let resp2 = app.clone().oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK);
+    let body2 = to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
+    let res_json2: Value = serde_json::from_slice(&body2).unwrap();
+    assert_eq!(res_json2["curated"]["theme"], "building");
+
+    let building_list = storage.list_curated(Some(&Theme::Building)).unwrap();
+    assert_eq!(building_list.len(), 2);
+}
+
+#[tokio::test]
 async fn test_api_reject_endpoint() {
     let (app, storage, _dir) = setup_test_app();
 

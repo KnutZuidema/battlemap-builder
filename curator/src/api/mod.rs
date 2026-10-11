@@ -13,7 +13,7 @@ use axum::{
     Router,
 };
 use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 
 /// Builds the complete Axum application router mounting API endpoints,
 /// CORS and tracing middleware, and the static UI assets fallback.
@@ -32,7 +32,11 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .merge(api_routes)
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
+                .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+        )
         .fallback(crate::ui::static_handler)
         .with_state(state)
 }

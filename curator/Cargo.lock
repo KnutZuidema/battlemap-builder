@@ -365,6 +365,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "image",
+ "mime_guess",
  "rust-embed",
  "serde",
  "serde_json",

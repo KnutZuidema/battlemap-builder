@@ -297,6 +297,13 @@ kbd {
     padding: 0.15rem;
     border: 1px solid var(--border-subtle);
     border-radius: 6px;
+    transition: all 0.2s ease;
+}
+
+.theme-selector.selecting-mode {
+    border-color: var(--accent-cyan);
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.3), 0 0 16px rgba(56, 189, 248, 0.45);
+    animation: selecting-mode-pulse-cyan 1.5s infinite ease-in-out;
 }
 
 .theme-badge {
@@ -367,6 +374,7 @@ kbd {
 }
 
 /* Rating Stars */
+.rating-selector,
 .rating-stars {
     display: flex;
     gap: 0.05rem;
@@ -374,6 +382,32 @@ kbd {
     padding: 0.15rem 0.3rem;
     border: 1px solid var(--border-subtle);
     border-radius: 6px;
+    transition: all 0.2s ease;
+}
+
+.rating-selector.selecting-mode,
+.rating-stars.selecting-mode {
+    border-color: var(--accent-amber);
+    box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.3), 0 0 16px rgba(245, 158, 11, 0.45);
+    animation: selecting-mode-pulse-amber 1.5s infinite ease-in-out;
+}
+
+@keyframes selecting-mode-pulse-cyan {
+    0%, 100% {
+        box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.25), 0 0 12px rgba(56, 189, 248, 0.35);
+    }
+    50% {
+        box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.45), 0 0 20px rgba(56, 189, 248, 0.65);
+    }
+}
+
+@keyframes selecting-mode-pulse-amber {
+    0%, 100% {
+        box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.25), 0 0 12px rgba(245, 158, 11, 0.35);
+    }
+    50% {
+        box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.45), 0 0 20px rgba(245, 158, 11, 0.65);
+    }
 }
 
 .star-btn {

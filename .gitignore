@@ -10,3 +10,13 @@ client/dist/
 
 # OS noise
 .DS_Store
+
+# Rust / Curator build output
+curator/target/
+
+# Curator data pipeline
+data/staging/
+data/curated/
+data/rejected/
+data/telemetry/
+!data/battlemap-reference-*

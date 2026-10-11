@@ -44,7 +44,7 @@
         budgetGuardModalOpen: false,
         isBenchmarking: false,
         benchmarkAbortController: null,
-
+        benchmarkWindowMinimized: false,
         // Harvesting parameters
         harvestSort: "hot",
         harvestTime: "all",
@@ -106,6 +106,15 @@
     let benchmarkProgressContainer, benchmarkProgressBar, benchmarkProgressText, btnCancelBenchmarkRun;
     let budgetGuardModal, btnCloseBudgetGuard, btnDismissBudgetGuard, btnConfirmBudgetGuard, btnConfirmBudgetGuardText;
     let budgetGuardCostAmount, budgetGuardBreakdown;
+
+    // Floating Benchmark Progress Window & Pill Elements
+    let benchmarkProgressWindow, btnBenchmarkWindowMinimize, btnBenchmarkWindowClose;
+    let benchmarkWindowStatus, benchmarkWindowCurrentStep, benchmarkWindowProgressStats;
+    let benchmarkWindowProgressBar, benchmarkWindowPreviews, benchmarkWindowPreviewCount;
+    let benchmarkPreviewsEmpty, benchmarkWindowLogsContainer, benchmarkWindowLogs;
+    let btnBenchmarkClearLogs, benchmarkWindowCost, btnBenchmarkWindowCancel;
+    let benchmarkWindowPill, benchmarkPillCount, benchmarkPillCost;
+    let activeGenerationIndicatorCard;
 
     // ==========================================================================
     // Initialization & Bootstrap
@@ -209,6 +218,26 @@
         btnConfirmBudgetGuardText = document.getElementById("btn-confirm-budget-guard-text");
         budgetGuardCostAmount = document.getElementById("budget-guard-cost-amount");
         budgetGuardBreakdown = document.getElementById("budget-guard-breakdown");
+
+        // Floating Benchmark Progress Window & Pill Elements
+        benchmarkProgressWindow = document.getElementById("benchmark-progress-window");
+        btnBenchmarkWindowMinimize = document.getElementById("btn-benchmark-window-minimize");
+        btnBenchmarkWindowClose = document.getElementById("btn-benchmark-window-close");
+        benchmarkWindowStatus = document.getElementById("benchmark-window-status");
+        benchmarkWindowCurrentStep = document.getElementById("benchmark-window-current-step");
+        benchmarkWindowProgressStats = document.getElementById("benchmark-window-progress-stats");
+        benchmarkWindowProgressBar = document.getElementById("benchmark-window-progress-bar");
+        benchmarkWindowPreviews = document.getElementById("benchmark-window-previews");
+        benchmarkWindowPreviewCount = document.getElementById("benchmark-window-preview-count");
+        benchmarkPreviewsEmpty = document.getElementById("benchmark-previews-empty");
+        benchmarkWindowLogsContainer = document.getElementById("benchmark-window-logs-container");
+        benchmarkWindowLogs = document.getElementById("benchmark-window-logs");
+        btnBenchmarkClearLogs = document.getElementById("btn-benchmark-clear-logs");
+        benchmarkWindowCost = document.getElementById("benchmark-window-cost");
+        btnBenchmarkWindowCancel = document.getElementById("btn-benchmark-window-cancel");
+        benchmarkWindowPill = document.getElementById("benchmark-window-pill");
+        benchmarkPillCount = document.getElementById("benchmark-pill-count");
+        benchmarkPillCost = document.getElementById("benchmark-pill-cost");
     }
 
     // ==========================================================================
@@ -954,10 +983,225 @@
         }
     }
 
+    // ==========================================================================
+    // Floating Benchmark Progress Window & Live Logs
+    // ==========================================================================
+
+    function openBenchmarkProgressWindow(metrics) {
+        state.benchmarkWindowMinimized = false;
+        benchmarkWindowPill?.classList.add("hidden");
+        benchmarkProgressWindow?.classList.remove("hidden");
+
+        const total = metrics?.totalImages || 0;
+        if (benchmarkWindowStatus) {
+            benchmarkWindowStatus.textContent = "Running";
+            benchmarkWindowStatus.className = "benchmark-window-badge status-running";
+        }
+        if (benchmarkWindowCurrentStep) {
+            benchmarkWindowCurrentStep.textContent = "Initializing batch...";
+        }
+        if (benchmarkWindowProgressStats) {
+            benchmarkWindowProgressStats.textContent = `0/${total} (0%)`;
+        }
+        if (benchmarkWindowProgressBar) {
+            benchmarkWindowProgressBar.style.width = "0%";
+        }
+        if (btnBenchmarkWindowClose) {
+            btnBenchmarkWindowClose.disabled = true;
+        }
+        if (btnBenchmarkWindowCancel) {
+            btnBenchmarkWindowCancel.disabled = false;
+        }
+        if (benchmarkWindowCost) {
+            benchmarkWindowCost.textContent = "$0.0000";
+        }
+        if (benchmarkPillCount) {
+            benchmarkPillCount.textContent = `0/${total}`;
+        }
+        if (benchmarkPillCost) {
+            benchmarkPillCost.textContent = "$0.00";
+        }
+        if (benchmarkWindowPreviewCount) {
+            benchmarkWindowPreviewCount.textContent = "0 generated";
+        }
+
+        // Reset previews strip
+        if (benchmarkWindowPreviews) {
+            benchmarkWindowPreviews.innerHTML = `<div class="benchmark-previews-empty" id="benchmark-previews-empty">Waiting for first image completion...</div>`;
+        }
+
+        // Reset execution logs
+        if (benchmarkWindowLogs) {
+            benchmarkWindowLogs.innerHTML = "";
+        }
+        appendBenchmarkLog("INFO", `Initializing benchmark run: ${metrics?.modelCount || 0} model(s) × ${metrics?.promptCount || 0} prompt(s) = ${total} images.`);
+    }
+
+    function closeBenchmarkProgressWindow() {
+        benchmarkProgressWindow?.classList.add("hidden");
+        benchmarkWindowPill?.classList.add("hidden");
+    }
+
+    function minimizeBenchmarkWindow() {
+        state.benchmarkWindowMinimized = true;
+        benchmarkProgressWindow?.classList.add("hidden");
+        benchmarkWindowPill?.classList.remove("hidden");
+    }
+
+    function expandBenchmarkWindow() {
+        state.benchmarkWindowMinimized = false;
+        benchmarkWindowPill?.classList.add("hidden");
+        benchmarkProgressWindow?.classList.remove("hidden");
+    }
+
+    function toggleBenchmarkWindowMinimize() {
+        if (state.benchmarkWindowMinimized) {
+            expandBenchmarkWindow();
+        } else {
+            minimizeBenchmarkWindow();
+        }
+    }
+
+    function appendBenchmarkLog(type, message) {
+        if (!benchmarkWindowLogs) return;
+        const now = new Date();
+        const timeStr = now.toTimeString().split(" ")[0]; // "HH:MM:SS"
+        const row = document.createElement("div");
+        row.className = `log-entry log-${type.toLowerCase()}`;
+
+        const timeSpan = document.createElement("span");
+        timeSpan.className = "log-time";
+        timeSpan.textContent = `[${timeStr}]`;
+
+        const tagSpan = document.createElement("span");
+        tagSpan.className = `log-tag tag-${type.toLowerCase()}`;
+        tagSpan.textContent = `[${type}]`;
+
+        const msgSpan = document.createElement("span");
+        msgSpan.className = "log-message";
+        msgSpan.textContent = message;
+
+        row.appendChild(timeSpan);
+        row.appendChild(tagSpan);
+        row.appendChild(msgSpan);
+
+        benchmarkWindowLogs.appendChild(row);
+        benchmarkWindowLogs.scrollTop = benchmarkWindowLogs.scrollHeight;
+    }
+
+    function addBenchmarkThumbnailPreview(metadata) {
+        if (!benchmarkWindowPreviews || !metadata || !metadata.id) return;
+
+        const emptyPlaceholder = document.getElementById("benchmark-previews-empty");
+        emptyPlaceholder?.remove();
+
+        const existing = document.getElementById(`preview-card-${metadata.id}`);
+        if (existing) return;
+
+        const shortModel = (metadata.model || "").split("/").pop() || metadata.model || "Model";
+
+        const card = document.createElement("div");
+        card.id = `preview-card-${metadata.id}`;
+        card.className = "benchmark-preview-card preview-card-completed";
+        card.title = `Click to load in staging canvas\n${metadata.prompt_name} (${metadata.model})\nLatency: ${(metadata.latency_ms / 1000).toFixed(1)}s | Cost: $${metadata.cost_usd.toFixed(4)}`;
+
+        const img = document.createElement("img");
+        img.className = "preview-thumbnail-img";
+        img.src = `/api/image/staging/${encodeURIComponent(metadata.id)}`;
+        img.alt = metadata.prompt_name || "Benchmark Candidate";
+        img.loading = "lazy";
+
+        const overlay = document.createElement("div");
+        overlay.className = "preview-card-overlay";
+
+        const modelBadge = document.createElement("span");
+        modelBadge.className = "preview-model-badge";
+        modelBadge.textContent = shortModel;
+        modelBadge.title = metadata.model || "";
+
+        const promptSpan = document.createElement("span");
+        promptSpan.className = "preview-prompt-name";
+        promptSpan.textContent = metadata.prompt_name || "Scenario";
+        promptSpan.title = metadata.prompt_name || "";
+
+        const statsRow = document.createElement("div");
+        statsRow.className = "preview-card-stats";
+
+        const latencySpan = document.createElement("span");
+        latencySpan.className = "preview-stat-latency mono";
+        latencySpan.textContent = `${(metadata.latency_ms / 1000).toFixed(1)}s`;
+
+        const costSpan = document.createElement("span");
+        costSpan.className = "preview-stat-cost mono";
+        costSpan.textContent = `$${metadata.cost_usd.toFixed(4)}`;
+
+        statsRow.appendChild(latencySpan);
+        statsRow.appendChild(costSpan);
+
+        overlay.appendChild(modelBadge);
+        overlay.appendChild(promptSpan);
+        overlay.appendChild(statsRow);
+
+        card.appendChild(img);
+        card.appendChild(overlay);
+
+        card.addEventListener("click", () => {
+            focusCandidateById(metadata.id);
+        });
+
+        // Insert before active generation indicator card if present
+        const activeCard = document.getElementById("benchmark-active-generation-card");
+        if (activeCard && activeCard.parentNode === benchmarkWindowPreviews) {
+            benchmarkWindowPreviews.insertBefore(card, activeCard);
+        } else {
+            benchmarkWindowPreviews.appendChild(card);
+        }
+
+        // Auto-scroll strip to newest thumbnail
+        benchmarkWindowPreviews.scrollLeft = benchmarkWindowPreviews.scrollWidth;
+    }
+
+    async function focusCandidateById(id) {
+        if (!id) return;
+        let idx = state.candidates.findIndex((c) => String(c.id) === String(id));
+        if (idx !== -1) {
+            loadCandidate(idx);
+            showToast(`Loaded candidate #${id} into canvas`, "info");
+            return;
+        }
+
+        await fetchStagingQueue();
+        idx = state.candidates.findIndex((c) => String(c.id) === String(id));
+        if (idx !== -1) {
+            loadCandidate(idx);
+            showToast(`Loaded candidate #${id} into canvas`, "info");
+        } else {
+            const imgUrl = `/api/image/staging/${encodeURIComponent(id)}`;
+            const img = new Image();
+            img.src = imgUrl;
+            img.onload = () => {
+                state.imageCache.set(id, img);
+                state.currentImage = img;
+                showLoading(false);
+                fitToScreen();
+                showEmptyState(false);
+                updateHud();
+                showToast(`Displaying candidate #${id}`, "info");
+            };
+            img.onerror = () => {
+                showToast(`Failed to load image for candidate #${id}`, "danger");
+            };
+        }
+    }
+
     async function startBenchmarkExecution(metrics) {
         closeBudgetGuardModal();
         if (state.isBenchmarking) return;
         state.isBenchmarking = true;
+
+        // Automatically close the benchmark configuration drawer so user is free to curate
+        closeBenchmarkDrawer();
+        openBenchmarkProgressWindow(metrics);
 
         if (btnStartBenchmark) btnStartBenchmark.disabled = true;
         benchmarkProgressContainer?.classList.remove("hidden");
@@ -1030,54 +1274,226 @@
                 const msg = `Benchmark complete: ${data.completed}/${data.total} generated ($${(data.total_cost_usd || 0).toFixed(4)})`;
                 if (benchmarkProgressBar) benchmarkProgressBar.style.width = "100%";
                 if (benchmarkProgressText) benchmarkProgressText.textContent = msg;
+
+                if (benchmarkWindowProgressBar) benchmarkWindowProgressBar.style.width = "100%";
+                if (benchmarkWindowProgressStats) benchmarkWindowProgressStats.textContent = `${data.completed}/${data.total} (100%)`;
+                if (benchmarkWindowCurrentStep) benchmarkWindowCurrentStep.textContent = msg;
+                if (benchmarkWindowStatus) {
+                    benchmarkWindowStatus.textContent = "Complete";
+                    benchmarkWindowStatus.className = "benchmark-window-badge status-complete";
+                }
+                if (benchmarkWindowCost) benchmarkWindowCost.textContent = `$${(data.total_cost_usd || 0).toFixed(4)}`;
+                if (benchmarkPillCount) benchmarkPillCount.textContent = `${data.completed}/${data.total}`;
+                if (benchmarkPillCost) benchmarkPillCost.textContent = `$${(data.total_cost_usd || 0).toFixed(2)}`;
+                if (btnBenchmarkWindowClose) btnBenchmarkWindowClose.disabled = false;
+                if (btnBenchmarkWindowCancel) btnBenchmarkWindowCancel.disabled = true;
+
+                appendBenchmarkLog("SUCCESS", `Benchmark batch completed! (${data.completed}/${data.total} images)`);
                 showToast(msg, "success");
                 await fetchStagingQueue();
                 fetchStatus();
                 fetchCostStats();
             }
         } catch (err) {
+            document.getElementById("benchmark-active-generation-card")?.remove();
             if (err.name === "AbortError") {
                 if (benchmarkProgressText) benchmarkProgressText.textContent = "Benchmark run cancelled by user.";
+                if (benchmarkWindowCurrentStep) benchmarkWindowCurrentStep.textContent = "Benchmark batch cancelled by user.";
+                if (benchmarkWindowStatus) {
+                    benchmarkWindowStatus.textContent = "Cancelled";
+                    benchmarkWindowStatus.className = "benchmark-window-badge status-cancelled";
+                }
+                appendBenchmarkLog("CANCEL", "Benchmark run cancelled by user.");
+                if (btnBenchmarkWindowClose) btnBenchmarkWindowClose.disabled = false;
+                if (btnBenchmarkWindowCancel) btnBenchmarkWindowCancel.disabled = true;
                 showToast("Benchmark execution cancelled", "info");
             } else {
                 if (benchmarkProgressText) benchmarkProgressText.textContent = `Benchmark failed: ${err.message}`;
+                if (benchmarkWindowCurrentStep) benchmarkWindowCurrentStep.textContent = `Failed: ${err.message}`;
+                if (benchmarkWindowStatus) {
+                    benchmarkWindowStatus.textContent = "Error";
+                    benchmarkWindowStatus.className = "benchmark-window-badge status-error";
+                }
+                appendBenchmarkLog("ERROR", `Benchmark failed: ${err.message}`);
+                if (btnBenchmarkWindowClose) btnBenchmarkWindowClose.disabled = false;
+                if (btnBenchmarkWindowCancel) btnBenchmarkWindowCancel.disabled = true;
                 showToast(`Benchmark error: ${err.message}`, "danger");
             }
         } finally {
             state.isBenchmarking = false;
             state.benchmarkAbortController = null;
+            document.getElementById("benchmark-active-generation-card")?.remove();
             if (btnStartBenchmark) btnStartBenchmark.disabled = false;
             fetchCostStats();
         }
     }
 
     function handleBenchmarkEvent(event, data) {
-        if (event === "progress") {
-            const pct = data.total > 0 ? Math.round((data.completed / data.total) * 100) : 5;
-            if (benchmarkProgressBar) benchmarkProgressBar.style.width = `${Math.max(5, Math.min(100, pct))}%`;
-            if (benchmarkProgressText) {
-                const spendStr = data.current_spend ? ` ($${data.current_spend.toFixed(4)})` : "";
-                benchmarkProgressText.textContent = `${data.message}${spendStr}`;
+        if (!data) return;
+        const phase = data.phase || (event === "complete" ? "complete" : event === "cancelled" ? "cancelled" : event === "error" ? "error" : "progress");
+
+        if (phase === "starting") {
+            const total = data.total || 0;
+            if (benchmarkWindowCurrentStep) benchmarkWindowCurrentStep.textContent = data.message || "Starting benchmark batch...";
+            if (benchmarkWindowProgressStats) benchmarkWindowProgressStats.textContent = `0/${total} (0%)`;
+            if (benchmarkPillCount) benchmarkPillCount.textContent = `0/${total}`;
+            if (benchmarkProgressText) benchmarkProgressText.textContent = data.message || "Starting benchmark batch...";
+            appendBenchmarkLog("INFO", data.message || `Starting benchmark batch (${total} tasks queued)`);
+        } else if (phase === "generating") {
+            const promptName = data.prompt || "Scenario";
+            const modelName = data.model || "Model";
+            const shortModel = modelName.split("/").pop() || modelName;
+
+            if (benchmarkWindowCurrentStep) {
+                benchmarkWindowCurrentStep.textContent = data.message || `Generating ${promptName} with ${modelName}...`;
             }
+            if (benchmarkProgressText) {
+                benchmarkProgressText.textContent = data.message || `Generating ${promptName}...`;
+            }
+
+            // Remove empty placeholder in previews
+            document.getElementById("benchmark-previews-empty")?.remove();
+
+            // Display or update active generation indicator card
+            let activeCard = document.getElementById("benchmark-active-generation-card");
+            if (!activeCard) {
+                activeCard = document.createElement("div");
+                activeCard.id = "benchmark-active-generation-card";
+                activeCard.className = "benchmark-preview-card preview-card-generating";
+                benchmarkWindowPreviews?.appendChild(activeCard);
+            }
+            activeCard.innerHTML = `
+                <div class="preview-spinner-pulse"></div>
+                <div class="preview-card-info">
+                    <span class="preview-badge-generating">GENERATING</span>
+                    <span class="preview-model-badge" title="${modelName}">${shortModel}</span>
+                    <span class="preview-prompt-name" title="${promptName}">${promptName}</span>
+                </div>
+            `;
+
+            appendBenchmarkLog("GEN", `Generating ${promptName} with ${modelName}...`);
+        } else if (phase === "progress") {
+            // Remove active generation card
+            document.getElementById("benchmark-active-generation-card")?.remove();
+
+            const completed = data.completed || 0;
+            const total = data.total || 1;
+            const pct = Math.round((completed / total) * 100);
+            const spend = data.current_spend || 0;
+
+            if (benchmarkWindowProgressBar) {
+                benchmarkWindowProgressBar.style.width = `${Math.min(100, Math.max(5, pct))}%`;
+            }
+            if (benchmarkProgressBar) {
+                benchmarkProgressBar.style.width = `${Math.min(100, Math.max(5, pct))}%`;
+            }
+            if (benchmarkWindowProgressStats) {
+                benchmarkWindowProgressStats.textContent = `${completed}/${total} (${pct}%)`;
+            }
+            if (benchmarkWindowCurrentStep) {
+                benchmarkWindowCurrentStep.textContent = data.message || `Completed ${completed}/${total}`;
+            }
+            if (benchmarkProgressText) {
+                const spendStr = spend ? ` ($${spend.toFixed(4)})` : "";
+                benchmarkProgressText.textContent = `${data.message || `Generated ${completed}/${total}`}${spendStr}`;
+            }
+            if (benchmarkPillCount) {
+                benchmarkPillCount.textContent = `${completed}/${total}`;
+            }
+            if (benchmarkPillCost) {
+                benchmarkPillCost.textContent = `$${spend.toFixed(2)}`;
+            }
+            if (benchmarkWindowCost) {
+                benchmarkWindowCost.textContent = `$${spend.toFixed(4)}`;
+            }
+
+            if (data.metadata) {
+                addBenchmarkThumbnailPreview(data.metadata);
+                const latencySec = (data.metadata.latency_ms / 1000).toFixed(1);
+                const costStr = data.metadata.cost_usd.toFixed(4);
+                appendBenchmarkLog("DONE", `Completed ${data.metadata.prompt_name} (${data.metadata.model}) in ${latencySec}s ($${costStr})`);
+                if (benchmarkWindowPreviewCount) {
+                    benchmarkWindowPreviewCount.textContent = `${completed} generated`;
+                }
+            }
+
             fetchCostStats();
-        } else if (event === "complete") {
+        } else if (phase === "complete") {
+            document.getElementById("benchmark-active-generation-card")?.remove();
+
+            const total = data.total || data.completed || 0;
+            const completed = data.completed || total;
+            const spend = data.current_spend || data.total_cost_usd || 0;
+
+            if (benchmarkWindowProgressBar) benchmarkWindowProgressBar.style.width = "100%";
             if (benchmarkProgressBar) benchmarkProgressBar.style.width = "100%";
-            if (benchmarkProgressText) benchmarkProgressText.textContent = data.message;
-            showToast(data.message, "success");
+            if (benchmarkWindowProgressStats) benchmarkWindowProgressStats.textContent = `${completed}/${total} (100%)`;
+            if (benchmarkWindowCurrentStep) benchmarkWindowCurrentStep.textContent = data.message || "Benchmark batch completed!";
+            if (benchmarkProgressText) benchmarkProgressText.textContent = data.message || "Benchmark complete!";
+
+            if (benchmarkWindowStatus) {
+                benchmarkWindowStatus.textContent = "Complete";
+                benchmarkWindowStatus.className = "benchmark-window-badge status-complete";
+            }
+            if (benchmarkWindowCost) {
+                benchmarkWindowCost.textContent = `$${spend.toFixed(4)}`;
+            }
+            if (benchmarkPillCount) {
+                benchmarkPillCount.textContent = `${completed}/${total}`;
+            }
+            if (benchmarkPillCost) {
+                benchmarkPillCost.textContent = `$${spend.toFixed(2)}`;
+            }
+
+            if (btnBenchmarkWindowClose) btnBenchmarkWindowClose.disabled = false;
+            if (btnBenchmarkWindowCancel) btnBenchmarkWindowCancel.disabled = true;
+
+            appendBenchmarkLog("SUCCESS", `Benchmark batch completed! (${completed}/${total} images, $${spend.toFixed(4)})`);
+            showToast(data.message || "Benchmark batch completed!", "success");
+
             fetchStagingQueue();
             fetchStatus();
             fetchCostStats();
-        } else if (event === "cancelled") {
-            if (benchmarkProgressText) benchmarkProgressText.textContent = data.message;
-            showToast(data.message, "info");
+        } else if (phase === "cancelled") {
+            document.getElementById("benchmark-active-generation-card")?.remove();
+
+            if (benchmarkWindowCurrentStep) benchmarkWindowCurrentStep.textContent = data.message || "Benchmark run cancelled.";
+            if (benchmarkProgressText) benchmarkProgressText.textContent = data.message || "Cancelled";
+            if (benchmarkWindowStatus) {
+                benchmarkWindowStatus.textContent = "Cancelled";
+                benchmarkWindowStatus.className = "benchmark-window-badge status-cancelled";
+            }
+            if (btnBenchmarkWindowClose) btnBenchmarkWindowClose.disabled = false;
+            if (btnBenchmarkWindowCancel) btnBenchmarkWindowCancel.disabled = true;
+
+            appendBenchmarkLog("CANCEL", data.message || "Benchmark batch execution cancelled.");
+            showToast(data.message || "Benchmark cancelled", "info");
+
+            fetchStagingQueue();
+            fetchStatus();
             fetchCostStats();
-        } else if (event === "error") {
-            if (benchmarkProgressText) benchmarkProgressText.textContent = `Error: ${data.message || data.error || "Unknown"}`;
-            showToast(`Benchmark failed: ${data.message || data.error || "Unknown"}`, "danger");
+        } else if (phase === "error") {
+            document.getElementById("benchmark-active-generation-card")?.remove();
+
+            const errMsg = data.message || data.error || "Unknown error";
+            if (benchmarkWindowCurrentStep) benchmarkWindowCurrentStep.textContent = `Error: ${errMsg}`;
+            if (benchmarkProgressText) benchmarkProgressText.textContent = `Error: ${errMsg}`;
+            if (benchmarkWindowStatus) {
+                benchmarkWindowStatus.textContent = "Error";
+                benchmarkWindowStatus.className = "benchmark-window-badge status-error";
+            }
+            if (btnBenchmarkWindowClose) btnBenchmarkWindowClose.disabled = false;
+            if (btnBenchmarkWindowCancel) btnBenchmarkWindowCancel.disabled = true;
+
+            appendBenchmarkLog("ERROR", `Benchmark error: ${errMsg}`);
+            showToast(`Benchmark error: ${errMsg}`, "danger");
+
+            fetchCostStats();
         }
     }
 
     async function cancelBenchmarkExecution() {
+        document.getElementById("benchmark-active-generation-card")?.remove();
         if (state.benchmarkAbortController) {
             state.benchmarkAbortController.abort();
         }
@@ -1085,6 +1501,8 @@
             await fetch("/api/benchmark/cancel", { method: "POST" });
         } catch (_) {}
         if (benchmarkProgressText) benchmarkProgressText.textContent = "Cancelling benchmark batch...";
+        if (benchmarkWindowCurrentStep) benchmarkWindowCurrentStep.textContent = "Cancelling benchmark batch...";
+        appendBenchmarkLog("CANCEL", "Cancellation requested by user.");
         showToast("Benchmark batch cancellation requested", "info");
     }
     function setupDrawerControls() {
@@ -1169,6 +1587,15 @@
 
         btnStartBenchmark?.addEventListener("click", () => handleStartBenchmarkClick());
         btnCancelBenchmarkRun?.addEventListener("click", () => cancelBenchmarkExecution());
+
+        // Floating Benchmark Progress Window & Pill Controls
+        btnBenchmarkWindowMinimize?.addEventListener("click", () => minimizeBenchmarkWindow());
+        btnBenchmarkWindowClose?.addEventListener("click", () => closeBenchmarkProgressWindow());
+        btnBenchmarkWindowCancel?.addEventListener("click", () => cancelBenchmarkExecution());
+        benchmarkWindowPill?.addEventListener("click", () => expandBenchmarkWindow());
+        btnBenchmarkClearLogs?.addEventListener("click", () => {
+            if (benchmarkWindowLogs) benchmarkWindowLogs.innerHTML = "";
+        });
 
         btnCloseBudgetGuard?.addEventListener("click", () => closeBudgetGuardModal());
         btnDismissBudgetGuard?.addEventListener("click", () => closeBudgetGuardModal());

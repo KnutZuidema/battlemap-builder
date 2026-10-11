@@ -94,6 +94,8 @@ mod tests {
         assert!(html.contains("btn-fit-screen"));
         assert!(html.contains("btn-reject"));
         assert!(html.contains("btn-curate"));
+        assert!(html.contains("title=\"Curate Candidate (Hotkey: Enter)\""));
+        assert!(html.contains("title=\"Reject Candidate (Hotkey: Esc)\""));
         assert!(html.contains("rejection-modal"));
         assert!(html.contains("help-modal"));
         assert!(html.contains("toast-container"));
@@ -127,7 +129,12 @@ mod tests {
         assert!(js.contains("VTT_GRID_SIZE"));
         assert!(js.contains("drawVttGrid"));
         assert!(js.contains("fitToScreen"));
-
+        assert!(js.contains("panStep"));
+        assert!(js.contains("zoomStep"));
+        assert!(js.contains("panStep(0, -64)"));
+        assert!(js.contains("panStep(-64, 0)"));
+        assert!(js.contains("panStep(0, 64)"));
+        assert!(js.contains("panStep(64, 0)"));
         // In-memory prefetching
         assert!(js.contains("imageCache"));
         assert!(js.contains("prefetchUpcoming"));

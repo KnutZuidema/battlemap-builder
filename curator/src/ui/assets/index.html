@@ -25,6 +25,15 @@
                     <span class="status-dot"></span>
                     <span id="status-text" class="status-text">Connecting...</span>
                 </div>
+                <button type="button" id="btn-open-drawer" class="btn btn-tool btn-harvest" title="Harvest battlemaps from Reddit (Hotkey: H)">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="7 10 12 15 17 10"/>
+                        <line x1="12" y1="15" x2="12" y2="3"/>
+                    </svg>
+                    <span>Harvest</span>
+                    <kbd>H</kbd>
+                </button>
             </div>
 
             <!-- Candidate Metadata & Queue Counter -->
@@ -163,6 +172,14 @@
                             </svg>
                             <span>Refresh Queue</span>
                         </button>
+                        <button type="button" id="btn-empty-harvest" class="btn btn-secondary">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            <span>Harvest from Reddit</span>
+                        </button>
                     </div>
                 </div>
             </div>
@@ -292,6 +309,116 @@
                 <div class="modal-footer">
                     <button type="button" id="btn-dismiss-help" class="btn btn-primary">
                         <span>Close Guide</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Ingestion Drawer (Reddit Harvesting Controls) -->
+        <div id="ingestion-drawer" class="drawer-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+            <div class="drawer-panel" id="drawer-panel">
+                <div class="drawer-header">
+                    <div class="drawer-title-group">
+                        <svg class="drawer-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        <h3 id="drawer-title">Reddit Ingestion</h3>
+                    </div>
+                    <button type="button" id="btn-close-drawer" class="btn-close" aria-label="Close drawer">×</button>
+                </div>
+
+                <div class="drawer-body">
+                    <p class="drawer-description">
+                        Harvest community battlemaps from <code>r/battlemaps</code> directly into your staging triage queue.
+                    </p>
+
+                    <!-- Sort Order Selector -->
+                    <div class="form-group">
+                        <label class="control-label">Sort Order</label>
+                        <div id="harvest-sort-group" class="drawer-btn-group" role="radiogroup" aria-label="Sort Order">
+                            <button type="button" class="btn-toggle active" data-sort="hot">
+                                <span>Hot</span>
+                            </button>
+                            <button type="button" class="btn-toggle" data-sort="top">
+                                <span>Top</span>
+                            </button>
+                            <button type="button" class="btn-toggle" data-sort="new">
+                                <span>New</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Time Interval Filter -->
+                    <div class="form-group" id="harvest-time-section">
+                        <label class="control-label" id="harvest-time-label">Time Filter</label>
+                        <div id="harvest-time-group" class="drawer-btn-group" role="radiogroup" aria-label="Time Filter">
+                            <button type="button" class="btn-toggle" data-time="month">
+                                <span>Month</span>
+                            </button>
+                            <button type="button" class="btn-toggle" data-time="year">
+                                <span>Year</span>
+                            </button>
+                            <button type="button" class="btn-toggle active" data-time="all">
+                                <span>All Time</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Max Count Slider (10 to 100 with live number display) -->
+                    <div class="form-group slider-group">
+                        <div class="slider-header">
+                            <label for="harvest-limit" class="control-label">Max Harvest Count</label>
+                            <span id="harvest-limit-value" class="slider-value mono">25</span>
+                        </div>
+                        <input type="range" id="harvest-limit" min="10" max="100" value="25" step="5" class="slider-input">
+                        <div class="slider-ticks">
+                            <span>10</span>
+                            <span>25</span>
+                            <span>50</span>
+                            <span>75</span>
+                            <span>100</span>
+                        </div>
+                    </div>
+
+                    <!-- Gridless Only Toggle -->
+                    <div class="form-group toggle-group">
+                        <div class="toggle-info">
+                            <span class="control-label">Gridless Only</span>
+                            <span class="toggle-hint">Skip battlemaps with burned-in square or hex grids</span>
+                        </div>
+                        <label class="switch" for="harvest-gridless-only">
+                            <input type="checkbox" id="harvest-gridless-only">
+                            <span class="slider-switch"></span>
+                        </label>
+                    </div>
+
+                    <!-- Trigger Button -->
+                    <div class="drawer-action-group">
+                        <button type="button" id="btn-start-harvest" class="btn btn-primary btn-block btn-harvest-action">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="23 4 23 10 17 10"/>
+                                <polyline points="1 20 1 14 7 14"/>
+                                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                            </svg>
+                            <span>Harvest from Reddit</span>
+                        </button>
+                    </div>
+
+                    <!-- Live Progress Display -->
+                    <div id="harvest-progress-container" class="harvest-progress-container hidden">
+                        <div class="progress-bar-track">
+                            <div id="harvest-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
+                        </div>
+                        <div id="harvest-progress-text" class="harvest-progress-text mono">Ready to harvest...</div>
+                    </div>
+                </div>
+
+                <div class="drawer-footer">
+                    <button type="button" id="btn-cancel-drawer" class="btn btn-secondary">
+                        <kbd>Esc</kbd>
+                        <span>Close</span>
                     </button>
                 </div>
             </div>

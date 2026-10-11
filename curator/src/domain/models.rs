@@ -568,6 +568,78 @@ impl RedditHarvestQuery {
     }
 }
 
+/// Request parameters for harvesting Reddit posts via the UI drawer or API.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedditHarvestRequest {
+    #[serde(default)]
+    pub sort: RedditSort,
+    #[serde(default)]
+    pub time: Option<RedditTimeRange>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub gridless_only: bool,
+    #[serde(default)]
+    pub subreddit: Option<String>,
+}
+
+impl Default for RedditHarvestRequest {
+    fn default() -> Self {
+        Self {
+            sort: RedditSort::Hot,
+            time: Some(RedditTimeRange::All),
+            limit: Some(25),
+            gridless_only: false,
+            subreddit: None,
+        }
+    }
+}
+
+impl RedditHarvestRequest {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_sort(mut self, sort: RedditSort) -> Self {
+        self.sort = sort;
+        self
+    }
+
+    pub fn with_time(mut self, time: RedditTimeRange) -> Self {
+        self.time = Some(time);
+        self
+    }
+
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    pub fn with_gridless_only(mut self, gridless_only: bool) -> Self {
+        self.gridless_only = gridless_only;
+        self
+    }
+
+    pub fn with_subreddit(mut self, subreddit: impl Into<String>) -> Self {
+        self.subreddit = Some(subreddit.into());
+        self
+    }
+
+    /// Convert the harvest request into a standard crawler query.
+    pub fn to_query(&self) -> RedditHarvestQuery {
+        let subreddit = self.subreddit.as_deref().unwrap_or("battlemaps");
+        let limit = self.limit.unwrap_or(25).clamp(1, 100);
+        let mut query = RedditHarvestQuery::battlemaps()
+            .with_subreddit(subreddit)
+            .with_sort(self.sort)
+            .with_limit(limit);
+        if let Some(time) = self.time {
+            query = query.with_time(time);
+        }
+        query
+    }
+}
+
 /// Grid overlay status inferred from title metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -1054,5 +1126,50 @@ mod tests {
         assert_eq!(candidate.source, Source::Reddit);
         assert_eq!(candidate.filename, "xyz123_0.png");
         assert_eq!(candidate.dimensions, (3000, 4000));
+    }
+
+    #[test]
+    fn test_reddit_harvest_request_defaults_and_conversion() {
+        let req = RedditHarvestRequest::default();
+        assert_eq!(req.sort, RedditSort::Hot);
+        assert_eq!(req.time, Some(RedditTimeRange::All));
+        assert_eq!(req.limit, Some(25));
+        assert!(!req.gridless_only);
+        assert_eq!(req.subreddit, None);
+
+        let query = req.to_query();
+        assert_eq!(query.subreddit, "battlemaps");
+        assert_eq!(query.sort, RedditSort::Hot);
+        assert_eq!(query.time, Some(RedditTimeRange::All));
+        assert_eq!(query.limit, 25);
+
+        let custom = RedditHarvestRequest::new()
+            .with_sort(RedditSort::Top)
+            .with_time(RedditTimeRange::Month)
+            .with_limit(50)
+            .with_gridless_only(true)
+            .with_subreddit("dndmaps");
+
+        assert!(custom.gridless_only);
+        let custom_query = custom.to_query();
+        assert_eq!(custom_query.subreddit, "dndmaps");
+        assert_eq!(custom_query.sort, RedditSort::Top);
+        assert_eq!(custom_query.time, Some(RedditTimeRange::Month));
+        assert_eq!(custom_query.limit, 50);
+    }
+
+    #[test]
+    fn test_reddit_harvest_request_serde() {
+        let json_str = r#"{"sort":"top","time":"year","limit":30,"gridless_only":true}"#;
+        let req: RedditHarvestRequest = serde_json::from_str(json_str).expect("deserialize");
+        assert_eq!(req.sort, RedditSort::Top);
+        assert_eq!(req.time, Some(RedditTimeRange::Year));
+        assert_eq!(req.limit, Some(30));
+        assert!(req.gridless_only);
+
+        let query = req.to_query();
+        assert_eq!(query.sort, RedditSort::Top);
+        assert_eq!(query.time, Some(RedditTimeRange::Year));
+        assert_eq!(query.limit, 30);
     }
 }

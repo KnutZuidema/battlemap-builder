@@ -46,6 +46,26 @@ impl From<StorageError> for ApiError {
     }
 }
 
+impl From<crate::services::IngestionError> for ApiError {
+    fn from(err: crate::services::IngestionError) -> Self {
+        match err {
+            crate::services::IngestionError::Storage(storage_err) => storage_err.into(),
+            crate::services::IngestionError::Harvester(harvester_err) => {
+                ApiError::Internal(format!("Harvester error: {harvester_err}"))
+            }
+            crate::services::IngestionError::Http(http_err) => {
+                ApiError::Internal(format!("HTTP error: {http_err}"))
+            }
+            crate::services::IngestionError::Serialization(ser_err) => {
+                ApiError::Internal(format!("Serialization error: {ser_err}"))
+            }
+            crate::services::IngestionError::Io(io_err) => {
+                ApiError::Internal(format!("I/O error: {io_err}"))
+            }
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {

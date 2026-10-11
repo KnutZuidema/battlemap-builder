@@ -35,7 +35,13 @@
         // Modal and UI dialog state
         rejectionModalOpen: false,
         helpModalOpen: false,
+        drawerOpen: false,
         isSubmitting: false,
+        isHarvesting: false,
+
+        // Harvesting parameters
+        harvestSort: "hot",
+        harvestTime: "all",
     };
 
     // Constants
@@ -70,6 +76,9 @@
     let btnGridToggle, btnFitScreen, btnPrev, btnNext, btnReject, btnCurate;
     let emptyState, loadingOverlay, loadingText;
     let rejectionModal, rejectionNotesInput, helpModal;
+    let ingestionDrawer, drawerPanel, btnOpenDrawer, btnEmptyHarvest, btnCloseDrawer, btnCancelDrawer;
+    let harvestSortGroup, harvestTimeGroup, harvestLimitInput, harvestLimitValue, harvestGridlessOnly;
+    let btnStartHarvest, harvestProgressContainer, harvestProgressBar, harvestProgressText;
 
     // ==========================================================================
     // Initialization & Bootstrap
@@ -116,6 +125,24 @@
         rejectionModal = document.getElementById("rejection-modal");
         rejectionNotesInput = document.getElementById("rejection-notes");
         helpModal = document.getElementById("help-modal");
+
+        ingestionDrawer = document.getElementById("ingestion-drawer");
+        drawerPanel = document.getElementById("drawer-panel");
+        btnOpenDrawer = document.getElementById("btn-open-drawer");
+        btnEmptyHarvest = document.getElementById("btn-empty-harvest");
+        btnCloseDrawer = document.getElementById("btn-close-drawer");
+        btnCancelDrawer = document.getElementById("btn-cancel-drawer");
+
+        harvestSortGroup = document.getElementById("harvest-sort-group");
+        harvestTimeGroup = document.getElementById("harvest-time-group");
+        harvestLimitInput = document.getElementById("harvest-limit");
+        harvestLimitValue = document.getElementById("harvest-limit-value");
+        harvestGridlessOnly = document.getElementById("harvest-gridless-only");
+
+        btnStartHarvest = document.getElementById("btn-start-harvest");
+        harvestProgressContainer = document.getElementById("harvest-progress-container");
+        harvestProgressBar = document.getElementById("harvest-progress-bar");
+        harvestProgressText = document.getElementById("harvest-progress-text");
     }
 
     // ==========================================================================
@@ -585,6 +612,169 @@
     }
 
     // ==========================================================================
+    // Ingestion Drawer Controls & Live Harvesting
+    // ==========================================================================
+
+    function toggleIngestionDrawer() {
+        if (state.drawerOpen) {
+            closeIngestionDrawer();
+        } else {
+            openIngestionDrawer();
+        }
+    }
+
+    function openIngestionDrawer() {
+        if (state.rejectionModalOpen) closeRejectionModal();
+        if (state.helpModalOpen) closeHelpModal();
+        state.drawerOpen = true;
+        ingestionDrawer?.classList.remove("hidden");
+        btnStartHarvest?.focus();
+    }
+
+    function closeIngestionDrawer() {
+        state.drawerOpen = false;
+        ingestionDrawer?.classList.add("hidden");
+        canvas.focus();
+    }
+
+    async function startRedditHarvest() {
+        if (state.isHarvesting) return;
+        state.isHarvesting = true;
+        btnStartHarvest.disabled = true;
+        harvestProgressContainer.classList.remove("hidden");
+        harvestProgressBar.style.width = "5%";
+        harvestProgressText.textContent = "Connecting to Reddit harvester...";
+
+        const payload = {
+            sort: state.harvestSort,
+            time: state.harvestTime,
+            limit: parseInt(harvestLimitInput.value, 10),
+            gridless_only: harvestGridlessOnly.checked,
+        };
+
+        try {
+            const res = await fetch("/api/harvest/reddit", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                body: JSON.stringify(payload),
+            });
+
+            if (!res.ok) {
+                const errJson = await res.json().catch(() => ({}));
+                throw new Error(errJson.error || `HTTP ${res.status}`);
+            }
+
+            const contentType = res.headers.get("content-type") || "";
+
+            if (contentType.includes("text/event-stream") && res.body) {
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = "";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+
+                    const lines = buffer.split("\n");
+                    buffer = lines.pop(); // preserve trailing partial line
+
+                    let currentEvent = "message";
+                    for (const line of lines) {
+                        const trimmed = line.trim();
+                        if (trimmed.startsWith("event:")) {
+                            currentEvent = trimmed.slice(6).trim();
+                        } else if (trimmed.startsWith("data:")) {
+                            const dataStr = trimmed.slice(5).trim();
+                            try {
+                                const data = JSON.parse(dataStr);
+                                handleHarvestEvent(currentEvent, data);
+                            } catch (_) {
+                                // Ignore json parse errors on malformed lines
+                            }
+                        }
+                    }
+                }
+            } else {
+                const data = await res.json();
+                const msg = `Harvest complete: ${data.downloaded} downloaded, ${data.skipped} skipped.`;
+                harvestProgressBar.style.width = "100%";
+                harvestProgressText.textContent = msg;
+                showToast(msg, "success");
+                await fetchStagingQueue();
+                fetchStatus();
+            }
+        } catch (err) {
+            harvestProgressText.textContent = `Harvest failed: ${err.message}`;
+            showToast(`Harvest error: ${err.message}`, "danger");
+        } finally {
+            state.isHarvesting = false;
+            btnStartHarvest.disabled = false;
+        }
+    }
+
+    function handleHarvestEvent(event, data) {
+        if (event === "progress") {
+            const pct = data.total > 0 ? Math.round((data.processed / data.total) * 100) : 10;
+            harvestProgressBar.style.width = `${Math.max(5, Math.min(100, pct))}%`;
+            harvestProgressText.textContent = data.message;
+        } else if (event === "complete") {
+            harvestProgressBar.style.width = "100%";
+            harvestProgressText.textContent = data.message;
+            showToast(data.message, "success");
+            fetchStagingQueue();
+            fetchStatus();
+        } else if (event === "error") {
+            harvestProgressText.textContent = `Error: ${data.error || "Unknown"}`;
+            showToast(`Harvest failed: ${data.error || "Unknown"}`, "danger");
+        }
+    }
+
+    function setupDrawerControls() {
+        btnOpenDrawer?.addEventListener("click", () => openIngestionDrawer());
+        btnEmptyHarvest?.addEventListener("click", () => openIngestionDrawer());
+        btnCloseDrawer?.addEventListener("click", () => closeIngestionDrawer());
+        btnCancelDrawer?.addEventListener("click", () => closeIngestionDrawer());
+
+        ingestionDrawer?.addEventListener("click", (e) => {
+            if (e.target === ingestionDrawer) {
+                closeIngestionDrawer();
+            }
+        });
+
+        harvestLimitInput?.addEventListener("input", () => {
+            harvestLimitValue.textContent = harvestLimitInput.value;
+        });
+
+        const sortBtns = harvestSortGroup?.querySelectorAll(".btn-toggle");
+        sortBtns?.forEach((btn) => {
+            btn.addEventListener("click", () => {
+                const sort = btn.getAttribute("data-sort");
+                if (sort) {
+                    state.harvestSort = sort;
+                    sortBtns.forEach((b) => b.classList.toggle("active", b === btn));
+                }
+            });
+        });
+
+        const timeBtns = harvestTimeGroup?.querySelectorAll(".btn-toggle");
+        timeBtns?.forEach((btn) => {
+            btn.addEventListener("click", () => {
+                const time = btn.getAttribute("data-time");
+                if (time) {
+                    state.harvestTime = time;
+                    timeBtns.forEach((b) => b.classList.toggle("active", b === btn));
+                }
+            });
+        });
+
+        btnStartHarvest?.addEventListener("click", () => startRedditHarvest());
+    }
+
+    // ==========================================================================
     // UI Event Listeners & Hotkeys
     // ==========================================================================
 
@@ -691,6 +881,8 @@
         helpModal.addEventListener("click", (e) => {
             if (e.target === helpModal) closeHelpModal();
         });
+        setupDrawerControls();
+
 
         // --- Keyboard Hotkey Dispatcher ---
         window.addEventListener("keydown", handleKeydown);
@@ -702,6 +894,11 @@
 
         // Global Modal Dismiss: Escape
         if (e.key === "Escape") {
+            if (state.drawerOpen) {
+                closeIngestionDrawer();
+                e.preventDefault();
+                return;
+            }
             if (state.rejectionModalOpen) {
                 closeRejectionModal();
                 e.preventDefault();
@@ -734,6 +931,13 @@
 
         // Ignore triage hotkeys if typing in an input
         if (isInputFocused) return;
+        // Ingestion drawer hotkey: H
+        if (e.key === "h" || e.key === "H") {
+            toggleIngestionDrawer();
+            e.preventDefault();
+            return;
+        }
+
 
         // Help modal hotkey: ?
         if (e.key === "?" || (e.shiftKey && e.key === "/")) {

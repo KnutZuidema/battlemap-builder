@@ -47,6 +47,46 @@ pub enum SkipReason {
     AlreadyCurated,
     NoMedia,
     InvalidMediaIndex,
+    NotGridless,
+}
+
+/// Progress event emitted during Reddit harvesting pipeline execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IngestionProgress {
+    pub phase: String,
+    pub message: String,
+    pub processed: usize,
+    pub downloaded: usize,
+    pub skipped: usize,
+    pub total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+}
+
+impl IngestionProgress {
+    pub fn new(
+        phase: impl Into<String>,
+        message: impl Into<String>,
+        processed: usize,
+        downloaded: usize,
+        skipped: usize,
+        total: usize,
+    ) -> Self {
+        Self {
+            phase: phase.into(),
+            message: message.into(),
+            processed,
+            downloaded,
+            skipped,
+            total,
+            candidate_id: None,
+        }
+    }
+
+    pub fn with_candidate_id(mut self, candidate_id: impl Into<String>) -> Self {
+        self.candidate_id = Some(candidate_id.into());
+        self
+    }
 }
 
 /// Errors arising during ingestion pipeline operations.
@@ -128,18 +168,154 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
         &self,
         query: &RedditHarvestQuery,
     ) -> Result<IngestionSummary, IngestionError> {
-        let posts = self.harvester.fetch_posts(query).await?;
-        self.ingest_posts(&posts).await
+        self.ingest_query_filtered(query, false).await
     }
 
-    /// Ingest a batch of Reddit posts.
+    /// Ingest battlemaps matching a Reddit query with optional gridless-only filtering.
+    pub async fn ingest_query_filtered(
+        &self,
+        query: &RedditHarvestQuery,
+        gridless_only: bool,
+    ) -> Result<IngestionSummary, IngestionError> {
+        let posts = self.harvester.fetch_posts(query).await?;
+        self.ingest_posts_filtered(&posts, gridless_only).await
+    }
+
+    /// Ingest battlemaps matching a Reddit query with real-time progress updates.
+    pub async fn ingest_query_progress<F>(
+        &self,
+        query: &RedditHarvestQuery,
+        gridless_only: bool,
+        mut on_progress: F,
+    ) -> Result<IngestionSummary, IngestionError>
+    where
+        F: FnMut(IngestionProgress) + Send,
+    {
+        on_progress(IngestionProgress::new(
+            "fetching",
+            format!(
+                "Fetching posts from r/{} (sort: {}, limit: {})...",
+                query.subreddit, query.sort, query.limit
+            ),
+            0,
+            0,
+            0,
+            0,
+        ));
+
+        let posts = self.harvester.fetch_posts(query).await?;
+        let total_items: usize = posts
+            .iter()
+            .map(|p| if p.media.is_empty() { 1 } else { p.media.len() })
+            .sum();
+
+        if posts.is_empty() {
+            let summary = IngestionSummary::default();
+            on_progress(IngestionProgress::new(
+                "complete",
+                format!("No posts found in r/{}", query.subreddit),
+                0,
+                0,
+                0,
+                0,
+            ));
+            return Ok(summary);
+        }
+
+        let mut summary = IngestionSummary::default();
+
+        for post in &posts {
+            if post.media.is_empty() {
+                summary.record_skipped();
+                on_progress(
+                    IngestionProgress::new(
+                        "skipped",
+                        format!(
+                            "Harvesting: {}/{} maps downloaded ({} duplicates skipped)...",
+                            summary.downloaded, total_items, summary.skipped
+                        ),
+                        summary.processed,
+                        summary.downloaded,
+                        summary.skipped,
+                        total_items,
+                    )
+                    .with_candidate_id(post.id.clone()),
+                );
+                continue;
+            }
+
+            for idx in 0..post.media.len() {
+                match self.ingest_media_filtered(post, idx, gridless_only).await? {
+                    IngestionOutcome::Downloaded(cid) => {
+                        summary.record_downloaded();
+                        on_progress(
+                            IngestionProgress::new(
+                                "downloaded",
+                                format!(
+                                    "Harvesting: {}/{} maps downloaded ({} duplicates skipped)...",
+                                    summary.downloaded, total_items, summary.skipped
+                                ),
+                                summary.processed,
+                                summary.downloaded,
+                                summary.skipped,
+                                total_items,
+                            )
+                            .with_candidate_id(cid),
+                        );
+                    }
+                    IngestionOutcome::Skipped { id, reason: _ } => {
+                        summary.record_skipped();
+                        on_progress(
+                            IngestionProgress::new(
+                                "skipped",
+                                format!(
+                                    "Harvesting: {}/{} maps downloaded ({} duplicates skipped)...",
+                                    summary.downloaded, total_items, summary.skipped
+                                ),
+                                summary.processed,
+                                summary.downloaded,
+                                summary.skipped,
+                                total_items,
+                            )
+                            .with_candidate_id(id),
+                        );
+                    }
+                }
+            }
+        }
+
+        on_progress(IngestionProgress::new(
+            "complete",
+            format!(
+                "Harvest complete: {} maps downloaded ({} duplicates skipped)...",
+                summary.downloaded, summary.skipped
+            ),
+            summary.processed,
+            summary.downloaded,
+            summary.skipped,
+            total_items,
+        ));
+
+        Ok(summary)
+    }
+
+    /// Ingest a batch of Reddit posts without filter.
     pub async fn ingest_posts(
         &self,
         posts: &[RedditPost],
     ) -> Result<IngestionSummary, IngestionError> {
+        self.ingest_posts_filtered(posts, false).await
+    }
+
+    /// Ingest a batch of Reddit posts with optional gridless-only filter.
+    pub async fn ingest_posts_filtered(
+        &self,
+        posts: &[RedditPost],
+        gridless_only: bool,
+    ) -> Result<IngestionSummary, IngestionError> {
         let mut summary = IngestionSummary::default();
         for post in posts {
-            let post_summary = self.ingest_post(post).await?;
+            let post_summary = self.ingest_post_filtered(post, gridless_only).await?;
             summary.processed += post_summary.processed;
             summary.downloaded += post_summary.downloaded;
             summary.skipped += post_summary.skipped;
@@ -147,8 +323,17 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
         Ok(summary)
     }
 
-    /// Ingest all media items from a single Reddit post.
+    /// Ingest all media items from a single Reddit post without filter.
     pub async fn ingest_post(&self, post: &RedditPost) -> Result<IngestionSummary, IngestionError> {
+        self.ingest_post_filtered(post, false).await
+    }
+
+    /// Ingest all media items from a single Reddit post with optional gridless-only filter.
+    pub async fn ingest_post_filtered(
+        &self,
+        post: &RedditPost,
+        gridless_only: bool,
+    ) -> Result<IngestionSummary, IngestionError> {
         let mut summary = IngestionSummary::default();
         if post.media.is_empty() {
             summary.record_skipped();
@@ -156,7 +341,7 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
         }
 
         for idx in 0..post.media.len() {
-            match self.ingest_media(post, idx).await? {
+            match self.ingest_media_filtered(post, idx, gridless_only).await? {
                 IngestionOutcome::Downloaded(_) => summary.record_downloaded(),
                 IngestionOutcome::Skipped { .. } => summary.record_skipped(),
             }
@@ -165,13 +350,21 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
         Ok(summary)
     }
 
-    /// Ingest a specific media item from a Reddit post.
-    /// Checks deduplication against rejected records, staging, and curated storage.
-    /// If not duplicate, downloads the image and saves image + sidecar to `staging/reddit/`.
+    /// Ingest a specific media item from a Reddit post without filter.
     pub async fn ingest_media(
         &self,
         post: &RedditPost,
         media_index: usize,
+    ) -> Result<IngestionOutcome, IngestionError> {
+        self.ingest_media_filtered(post, media_index, false).await
+    }
+
+    /// Ingest a specific media item from a Reddit post with optional gridless-only filter.
+    pub async fn ingest_media_filtered(
+        &self,
+        post: &RedditPost,
+        media_index: usize,
+        gridless_only: bool,
     ) -> Result<IngestionOutcome, IngestionError> {
         let media = match post.media.get(media_index) {
             Some(m) => m,
@@ -184,6 +377,14 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
         };
 
         let candidate_id = candidate_id_for_post(&post.id, media_index, post.media.len());
+
+        // 0. Filter if gridless only requested and post is not gridless
+        if gridless_only && !post.tags.is_gridless() {
+            return Ok(IngestionOutcome::Skipped {
+                id: candidate_id,
+                reason: SkipReason::NotGridless,
+            });
+        }
 
         // 1. Check if candidate ID or post base ID has been rejected
         if self.storage.is_rejected(&candidate_id)? || self.storage.is_rejected(&post.id)? {

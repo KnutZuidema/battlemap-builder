@@ -100,6 +100,24 @@ mod tests {
     }
 
     #[test]
+    fn test_embedded_index_html_contains_ingestion_drawer_elements() {
+        let file = Assets::get("index.html").expect("index.html must be embedded");
+        let html = std::str::from_utf8(file.data.as_ref()).expect("index.html must be valid utf8");
+
+        assert!(html.contains("btn-open-drawer"));
+        assert!(html.contains("ingestion-drawer"));
+        assert!(html.contains("harvest-sort-group"));
+        assert!(html.contains("harvest-time-group"));
+        assert!(html.contains("harvest-limit"));
+        assert!(html.contains("harvest-limit-value"));
+        assert!(html.contains("harvest-gridless-only"));
+        assert!(html.contains("btn-start-harvest"));
+        assert!(html.contains("harvest-progress-container"));
+        assert!(html.contains("harvest-progress-bar"));
+        assert!(html.contains("harvest-progress-text"));
+    }
+
+    #[test]
     fn test_embedded_app_js_contains_triage_engine_and_hotkeys() {
         let file = Assets::get("app.js").expect("app.js must be embedded");
         let js = std::str::from_utf8(file.data.as_ref()).expect("app.js must be valid utf8");
@@ -119,6 +137,13 @@ mod tests {
         assert!(js.contains("/api/reject"));
         assert!(js.contains("curateCurrentCandidate"));
         assert!(js.contains("confirmRejection"));
+
+        // Ingestion drawer & live harvesting
+        assert!(js.contains("/api/harvest/reddit"));
+        assert!(js.contains("openIngestionDrawer"));
+        assert!(js.contains("closeIngestionDrawer"));
+        assert!(js.contains("startRedditHarvest"));
+        assert!(js.contains("handleHarvestEvent"));
     }
 
     #[test]
@@ -131,6 +156,13 @@ mod tests {
         assert!(css.contains("rating-stars"));
         assert!(css.contains("modal-backdrop"));
         assert!(css.contains("toast-container"));
+
+        // Ingestion drawer & harvesting styling
+        assert!(css.contains("drawer-backdrop"));
+        assert!(css.contains("drawer-panel"));
+        assert!(css.contains("btn-harvest"));
+        assert!(css.contains("slider-switch"));
+        assert!(css.contains("progress-bar-fill"));
     }
 
     #[tokio::test]

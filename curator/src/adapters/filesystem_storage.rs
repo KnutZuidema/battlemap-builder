@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 
-use crate::domain::{Candidate, CuratedMap, RejectionReason, RejectionRecord, Source, Theme};
+use crate::domain::{
+    Candidate, CuratedMap, RedditSidecarMetadata, RejectionReason, RejectionRecord, Source, Theme,
+};
 use crate::ports::storage::{StorageError, StorageRepository};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -106,43 +108,165 @@ impl FilesystemStorage {
         }
     }
 
-    /// Locate candidate image in staging by ID and candidate metadata.
-    fn find_staging_image_path(&self, id: &str, candidate: Option<&Candidate>) -> Option<PathBuf> {
+    /// Locate candidate metadata sidecar in staging or any subdirectories by ID.
+    fn find_staging_sidecar_path(&self, id: &str) -> Option<PathBuf> {
         let staging = self.staging_dir();
-        if let Some(cand) = candidate {
-            let direct = staging.join(&cand.filename);
-            if direct.is_file() {
-                return Some(direct);
-            }
+        let target_name = format!("{id}.json");
+
+        // 1. Check direct in staging/
+        let direct = staging.join(&target_name);
+        if direct.is_file() {
+            return Some(direct);
         }
 
-        // Check common extensions
-        for ext in &["png", "jpg", "jpeg", "webp"] {
-            let candidate_path = staging.join(format!("{id}.{ext}"));
-            if candidate_path.is_file() {
-                return Some(candidate_path);
-            }
+        // 2. Check direct in staging/reddit/
+        let reddit_path = staging.join("reddit").join(&target_name);
+        if reddit_path.is_file() {
+            return Some(reddit_path);
         }
 
-        // Scan staging directory for any file with stem matching id
-        if let Ok(entries) = std::fs::read_dir(&staging) {
+        // 3. Recursive search in staging subdirectories
+        Self::find_file_recursive(&staging, &target_name)
+    }
+
+    /// Recursively search for a file named `target_name` in `dir`, skipping hidden paths.
+    fn find_file_recursive(dir: &Path, target_name: &str) -> Option<PathBuf> {
+        if !dir.is_dir() {
+            return None;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
+                let file_name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                if file_name.starts_with('.') {
+                    continue;
+                }
+                if path.is_file() && file_name == target_name {
+                    return Some(path);
+                } else if path.is_dir() {
+                    if let Some(found) = Self::find_file_recursive(&path, target_name) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Recursively search for an image file whose stem matches `id`.
+    fn find_image_by_stem_recursive(dir: &Path, id: &str) -> Option<PathBuf> {
+        if !dir.is_dir() {
+            return None;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let file_name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                if file_name.starts_with('.') {
+                    continue;
+                }
                 if path.is_file() {
                     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                         if stem == id {
                             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                                if ext != "json" && ext != "tmp" {
+                                if ext != "json" && ext != "tmp" && ext != "txt" {
                                     return Some(path);
                                 }
                             }
+                        }
+                    }
+                } else if path.is_dir() {
+                    if let Some(found) = Self::find_image_by_stem_recursive(&path, id) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Recursively collect all non-hidden files under a directory.
+    fn collect_files_recursive(dir: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                if name.starts_with('.') {
+                    continue;
+                }
+                if path.is_dir() {
+                    files.extend(Self::collect_files_recursive(&path));
+                } else if path.is_file() {
+                    files.push(path);
+                }
+            }
+        }
+        files
+    }
+
+    /// Locate candidate image in staging or any subdirectories by ID and candidate metadata.
+    fn find_staging_image_path(&self, id: &str, candidate: Option<&Candidate>) -> Option<PathBuf> {
+        let staging = self.staging_dir();
+        if let Some(cand) = candidate {
+            if !cand.filename.is_empty() {
+                // Check direct in staging
+                let direct = staging.join(&cand.filename);
+                if direct.is_file() {
+                    return Some(direct);
+                }
+                // Check direct in staging/reddit
+                let reddit_cand = staging.join("reddit").join(&cand.filename);
+                if reddit_cand.is_file() {
+                    return Some(reddit_cand);
+                }
+                // Check in same directory as sidecar if sidecar exists
+                if let Some(sidecar_path) = self.find_staging_sidecar_path(id) {
+                    if let Some(parent) = sidecar_path.parent() {
+                        let in_parent = parent.join(&cand.filename);
+                        if in_parent.is_file() {
+                            return Some(in_parent);
                         }
                     }
                 }
             }
         }
 
-        None
+        // Check common extensions in staging root and staging/reddit
+        for ext in &["png", "jpg", "jpeg", "webp"] {
+            let direct = staging.join(format!("{id}.{ext}"));
+            if direct.is_file() {
+                return Some(direct);
+            }
+            let reddit_path = staging.join("reddit").join(format!("{id}.{ext}"));
+            if reddit_path.is_file() {
+                return Some(reddit_path);
+            }
+        }
+
+        // Check in same directory as sidecar
+        if let Some(sidecar_path) = self.find_staging_sidecar_path(id) {
+            if let Some(parent) = sidecar_path.parent() {
+                for ext in &["png", "jpg", "jpeg", "webp"] {
+                    let in_parent = parent.join(format!("{id}.{ext}"));
+                    if in_parent.is_file() {
+                        return Some(in_parent);
+                    }
+                }
+            }
+        }
+
+        // Recursively search for any file with stem matching id and an image extension
+        Self::find_image_by_stem_recursive(&staging, id)
     }
 
     /// Locate curated image in a theme directory by ID.
@@ -229,12 +353,62 @@ impl StorageRepository for FilesystemStorage {
         Ok(())
     }
 
-    fn get_staging_image(&self, id: &str) -> Result<Vec<u8>, StorageError> {
-        let staging = self.staging_dir();
-        let sidecar_path = staging.join(format!("{id}.json"));
+    fn save_staging_subfolder(
+        &self,
+        subfolder: &str,
+        candidate: &Candidate,
+        data: &[u8],
+    ) -> Result<(), StorageError> {
+        if candidate.id.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "Candidate ID cannot be empty".into(),
+            ));
+        }
 
-        let candidate: Option<Candidate> = if sidecar_path.is_file() {
-            let content = std::fs::read_to_string(&sidecar_path)?;
+        let target_dir = self.staging_dir().join(subfolder);
+        std::fs::create_dir_all(&target_dir)?;
+
+        let filename = Self::sanitize_filename(&candidate.filename, &candidate.id);
+        let image_path = target_dir.join(&filename);
+        let sidecar_path = target_dir.join(format!("{}.json", candidate.id));
+
+        Self::atomic_write(&image_path, data)?;
+
+        let sidecar_json = serde_json::to_string_pretty(candidate)?;
+        Self::atomic_write(&sidecar_path, sidecar_json.as_bytes())?;
+
+        Ok(())
+    }
+
+    fn save_staging_reddit(
+        &self,
+        metadata: &RedditSidecarMetadata,
+        data: &[u8],
+    ) -> Result<(), StorageError> {
+        if metadata.id.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "Metadata ID cannot be empty".into(),
+            ));
+        }
+
+        let reddit_dir = self.staging_dir().join("reddit");
+        std::fs::create_dir_all(&reddit_dir)?;
+
+        let image_path = reddit_dir.join(format!("{}.png", metadata.id));
+        let sidecar_path = reddit_dir.join(format!("{}.json", metadata.id));
+
+        Self::atomic_write(&image_path, data)?;
+
+        let sidecar_json = serde_json::to_string_pretty(metadata)?;
+        Self::atomic_write(&sidecar_path, sidecar_json.as_bytes())?;
+
+        Ok(())
+    }
+
+    fn get_staging_image(&self, id: &str) -> Result<Vec<u8>, StorageError> {
+        let sidecar_path = self.find_staging_sidecar_path(id);
+        let candidate: Option<Candidate> = if let Some(p) = &sidecar_path {
+            let content = std::fs::read_to_string(p)?;
             serde_json::from_str(&content).ok()
         } else {
             None
@@ -260,36 +434,57 @@ impl StorageRepository for FilesystemStorage {
         let mut known_ids = HashSet::new();
         let mut known_filenames = HashSet::new();
 
-        let entries: Vec<_> = std::fs::read_dir(&staging)?
-            .filter_map(|e| e.ok())
-            .collect();
+        let entries = Self::collect_files_recursive(&staging);
 
-        // Pass 1: Read existing JSON sidecars
-        for entry in &entries {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if ext.eq_ignore_ascii_case("json") {
-                        let file_name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or_default();
-                        if !file_name.starts_with('.') {
-                            if let Ok(content) = std::fs::read_to_string(&path) {
-                                if let Ok(candidate) = serde_json::from_str::<Candidate>(&content) {
-                                    known_ids.insert(candidate.id.clone());
-                                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                                        known_ids.insert(stem.to_string());
+        // Pass 1: Read existing JSON sidecars (in staging and all subdirectories)
+        for path in &entries {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if ext.eq_ignore_ascii_case("json") {
+                    let file_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default();
+                    if !file_name.starts_with('.') {
+                        if let Ok(content) = std::fs::read_to_string(path) {
+                            if let Ok(mut candidate) = serde_json::from_str::<Candidate>(&content) {
+                                // If filename is missing or empty, resolve it relative to staging
+                                if candidate.filename.is_empty() {
+                                    if let Ok(rel) = path.strip_prefix(&staging) {
+                                        if let Some(parent) = rel.parent() {
+                                            if parent.as_os_str().is_empty() {
+                                                candidate.filename = format!("{}.png", candidate.id);
+                                            } else {
+                                                candidate.filename = parent
+                                                    .join(format!("{}.png", candidate.id))
+                                                    .to_string_lossy()
+                                                    .to_string();
+                                            }
+                                        } else {
+                                            candidate.filename = format!("{}.png", candidate.id);
+                                        }
+                                    } else {
+                                        candidate.filename = format!("{}.png", candidate.id);
                                     }
-                                    known_filenames.insert(candidate.filename.clone());
-                                    if let Some(img_stem) = Path::new(&candidate.filename)
-                                        .file_stem()
-                                        .and_then(|s| s.to_str())
-                                    {
-                                        known_ids.insert(img_stem.to_string());
-                                    }
-                                    candidates.push(candidate);
                                 }
+
+                                if candidate.dimensions == (0, 0) {
+                                    if let Some(dims) = candidate.parsed_dimensions {
+                                        candidate.dimensions = dims;
+                                    }
+                                }
+
+                                 known_ids.insert(candidate.id.clone());
+                                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                                     known_ids.insert(stem.to_string());
+                                 }
+                                 known_filenames.insert(candidate.filename.clone());
+                                 if let Some(img_stem) = Path::new(&candidate.filename)
+                                     .file_stem()
+                                     .and_then(|s| s.to_str())
+                                 {
+                                     known_ids.insert(img_stem.to_string());
+                                 }
+                                 candidates.push(candidate);
                             }
                         }
                     }
@@ -298,17 +493,7 @@ impl StorageRepository for FilesystemStorage {
         }
 
         // Pass 2: Discover raw image files without sidecars
-        for entry in &entries {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-
-            let file_name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(name) if !name.starts_with('.') => name,
-                _ => continue,
-            };
-
+        for path in &entries {
             let is_image = path
                 .extension()
                 .and_then(|e| e.to_str())
@@ -329,34 +514,46 @@ impl StorageRepository for FilesystemStorage {
                 _ => continue,
             };
 
-            let sidecar_path = staging.join(format!("{stem}.json"));
-            if known_filenames.contains(file_name)
+            let sidecar_path = path.with_extension("json");
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+
+            let rel_filename = path
+                .strip_prefix(&staging)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| file_name.to_string());
+
+            if known_filenames.contains(&rel_filename)
+                || known_filenames.contains(file_name)
                 || known_ids.contains(stem)
                 || sidecar_path.is_file()
             {
                 continue;
             }
 
-            let dimensions = image::image_dimensions(&path).unwrap_or((0, 0));
-            let created_at = entry
+            let dimensions = image::image_dimensions(path).unwrap_or((0, 0));
+            let created_at = path
                 .metadata()
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .map(DateTime::<Utc>::from)
                 .unwrap_or_else(Utc::now);
 
-            let candidate = Candidate {
-                id: stem.to_string(),
-                source: Source::Manual,
-                filename: file_name.to_string(),
+            let candidate = Candidate::new(
+                stem.to_string(),
+                Source::Manual,
+                rel_filename.clone(),
                 dimensions,
                 created_at,
-            };
+            );
 
             if let Ok(sidecar_json) = serde_json::to_string_pretty(&candidate) {
                 let _ = Self::atomic_write(&sidecar_path, sidecar_json.as_bytes());
             }
             known_ids.insert(stem.to_string());
+            known_filenames.insert(rel_filename);
             known_filenames.insert(file_name.to_string());
             candidates.push(candidate);
         }
@@ -373,9 +570,9 @@ impl StorageRepository for FilesystemStorage {
             )));
         }
 
-        let sidecar_path = staging.join(format!("{id}.json"));
-        let candidate: Option<Candidate> = if sidecar_path.is_file() {
-            let content = std::fs::read_to_string(&sidecar_path).ok();
+        let sidecar_path = self.find_staging_sidecar_path(id);
+        let candidate: Option<Candidate> = if let Some(p) = &sidecar_path {
+            let content = std::fs::read_to_string(p).ok();
             content.and_then(|c| serde_json::from_str(&c).ok())
         } else {
             None
@@ -391,8 +588,8 @@ impl StorageRepository for FilesystemStorage {
         }
 
         // Delete sidecar json
-        if sidecar_path.is_file() {
-            if std::fs::remove_file(&sidecar_path).is_ok() {
+        if let Some(p) = &sidecar_path {
+            if std::fs::remove_file(p).is_ok() {
                 deleted_any = true;
             }
         }
@@ -500,7 +697,58 @@ impl StorageRepository for FilesystemStorage {
 
     fn is_rejected(&self, id: &str) -> Result<bool, StorageError> {
         let records = self.read_rejections()?;
-        Ok(records.iter().any(|r| r.id == id))
+        if records.iter().any(|r| r.id == id) {
+            return Ok(true);
+        }
+        if let Some((base_id, suffix)) = id.rsplit_once('_') {
+            if suffix.chars().all(|c| c.is_ascii_digit()) && records.iter().any(|r| r.id == base_id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn is_in_staging(&self, id: &str) -> Result<bool, StorageError> {
+        if self.find_staging_sidecar_path(id).is_some() {
+            return Ok(true);
+        }
+        if self.find_staging_image_path(id, None).is_some() {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn is_curated(&self, id: &str) -> Result<bool, StorageError> {
+        for theme in Theme::ALL {
+            let sidecar = self.curated_theme_dir(&theme).join(format!("{id}.json"));
+            if sidecar.is_file() {
+                return Ok(true);
+            }
+            if self.find_curated_image_path(&theme, id).is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn is_duplicate(&self, id: &str) -> Result<bool, StorageError> {
+        if self.is_rejected(id)? {
+            return Ok(true);
+        }
+        if self.is_in_staging(id)? {
+            return Ok(true);
+        }
+        if self.is_curated(id)? {
+            return Ok(true);
+        }
+        if let Some((base_id, suffix)) = id.rsplit_once('_') {
+            if suffix.chars().all(|c| c.is_ascii_digit()) {
+                if self.is_rejected(base_id)? || self.is_in_staging(base_id)? || self.is_curated(base_id)? {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     fn curate_staging(&self, map: &CuratedMap) -> Result<(), StorageError> {
@@ -511,12 +759,16 @@ impl StorageRepository for FilesystemStorage {
             )));
         }
 
-        let staging = self.staging_dir();
-        let staging_sidecar = staging.join(format!("{}.json", map.id));
-        let staging_image = if staging_sidecar.is_file() {
-            let sidecar_content = std::fs::read_to_string(&staging_sidecar)?;
-            let candidate: Candidate = serde_json::from_str(&sidecar_content)?;
-            self.find_staging_image_path(&map.id, Some(&candidate))
+        let staging_sidecar = self.find_staging_sidecar_path(&map.id);
+        let candidate: Option<Candidate> = if let Some(sc) = &staging_sidecar {
+            let sidecar_content = std::fs::read_to_string(sc)?;
+            serde_json::from_str(&sidecar_content).ok()
+        } else {
+            None
+        };
+
+        let staging_image = if let Some(cand) = &candidate {
+            self.find_staging_image_path(&map.id, Some(cand))
                 .ok_or_else(|| {
                     StorageError::NotFound(format!(
                         "Image for candidate '{}' not found in staging",
@@ -552,8 +804,10 @@ impl StorageRepository for FilesystemStorage {
         Self::atomic_write(&target_sidecar, curated_json.as_bytes())?;
 
         // Remove staging sidecar if it exists
-        if staging_sidecar.is_file() {
-            let _ = std::fs::remove_file(staging_sidecar);
+        if let Some(sc) = &staging_sidecar {
+            if sc.is_file() {
+                let _ = std::fs::remove_file(sc);
+            }
         }
 
         Ok(())
@@ -943,5 +1197,124 @@ mod tests {
         assert!(!image_path.exists());
         let curated_image = storage.get_curated_image(&Theme::Cave, "direct_map").unwrap();
         assert_eq!(curated_image, png_data);
+    }
+
+    #[test]
+    fn test_staging_reddit_subfolder_lifecycle() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+
+        let meta = RedditSidecarMetadata {
+            id: "reddit_dungeon_1".to_string(),
+            source: Source::Reddit,
+            source_url: "https://reddit.com/r/battlemaps/comments/123/ | https://i.redd.it/123.png".to_string(),
+            title: "[40x30] Forgotten Dungeon [No Grid]".to_string(),
+            author: "dungeon_artist".to_string(),
+            parsed_gridless: true,
+            parsed_dimensions: Some((40, 30)),
+            created_at: Utc::now(),
+        };
+
+        let png_bytes = create_test_png(800, 600);
+        storage.save_staging_reddit(&meta, &png_bytes).unwrap();
+
+        // Verify files exist in staging/reddit/
+        let reddit_dir = storage.staging_dir().join("reddit");
+        assert!(reddit_dir.join("reddit_dungeon_1.png").is_file());
+        assert!(reddit_dir.join("reddit_dungeon_1.json").is_file());
+
+        // Test is_in_staging
+        assert!(storage.is_in_staging("reddit_dungeon_1").unwrap());
+        assert!(storage.is_duplicate("reddit_dungeon_1").unwrap());
+        assert!(!storage.is_curated("reddit_dungeon_1").unwrap());
+
+        // Test get_staging_image
+        let retrieved_bytes = storage.get_staging_image("reddit_dungeon_1").unwrap();
+        assert_eq!(retrieved_bytes, png_bytes);
+
+        // Test list_staging discovers subfolder candidate
+        let candidates = storage.list_staging().unwrap();
+        assert_eq!(candidates.len(), 1);
+        let cand = &candidates[0];
+        assert_eq!(cand.id, "reddit_dungeon_1");
+        assert_eq!(cand.source, Source::Reddit);
+        assert_eq!(cand.dimensions, (40, 30));
+        assert_eq!(cand.parsed_gridless, Some(true));
+        assert_eq!(cand.author.as_deref(), Some("dungeon_artist"));
+
+        // Test curate_staging from staging/reddit/
+        let curated = CuratedMap::with_now(
+            "reddit_dungeon_1",
+            Theme::Dungeon,
+            5,
+            vec!["gridless".into(), "40x30".into()],
+            (40, 30),
+        );
+        storage.curate_staging(&curated).unwrap();
+
+        // Verify staging files deleted
+        assert!(!reddit_dir.join("reddit_dungeon_1.png").exists());
+        assert!(!reddit_dir.join("reddit_dungeon_1.json").exists());
+        assert!(!storage.is_in_staging("reddit_dungeon_1").unwrap());
+
+        // Verify curated storage has files
+        assert!(storage.is_curated("reddit_dungeon_1").unwrap());
+        let curated_image = storage.get_curated_image(&Theme::Dungeon, "reddit_dungeon_1").unwrap();
+        assert_eq!(curated_image, png_bytes);
+    }
+
+    #[test]
+    fn test_reject_staging_in_subfolder() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+
+        let meta = RedditSidecarMetadata {
+            id: "bad_reddit_map".to_string(),
+            source: Source::Reddit,
+            source_url: "https://i.redd.it/bad.png".to_string(),
+            title: "Bad Map".to_string(),
+            author: "spammer".to_string(),
+            parsed_gridless: false,
+            parsed_dimensions: None,
+            created_at: Utc::now(),
+        };
+
+        let png_bytes = create_test_png(400, 400);
+        storage.save_staging_reddit(&meta, &png_bytes).unwrap();
+
+        let reddit_dir = storage.staging_dir().join("reddit");
+        assert!(reddit_dir.join("bad_reddit_map.png").is_file());
+        assert!(reddit_dir.join("bad_reddit_map.json").is_file());
+
+        storage
+            .reject_staging("bad_reddit_map", RejectionReason::Irrelevant, Some("Not a battlemap"))
+            .unwrap();
+
+        assert!(!reddit_dir.join("bad_reddit_map.png").exists());
+        assert!(!reddit_dir.join("bad_reddit_map.json").exists());
+        assert!(storage.is_rejected("bad_reddit_map").unwrap());
+        assert!(storage.is_duplicate("bad_reddit_map").unwrap());
+    }
+
+    #[test]
+    fn test_deduplication_checks_and_indexed_id_support() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+
+        // Initially not rejected or duplicate
+        assert!(!storage.is_rejected("post_xyz").unwrap());
+        assert!(!storage.is_duplicate("post_xyz").unwrap());
+        assert!(!storage.is_duplicate("post_xyz_0").unwrap());
+
+        // Log rejection for base post id
+        storage
+            .log_rejection("post_xyz", RejectionReason::BlurryLowRes, None)
+            .unwrap();
+
+        assert!(storage.is_rejected("post_xyz").unwrap());
+        assert!(storage.is_rejected("post_xyz_0").unwrap());
+        assert!(storage.is_rejected("post_xyz_1").unwrap());
+        assert!(storage.is_duplicate("post_xyz").unwrap());
+        assert!(storage.is_duplicate("post_xyz_0").unwrap());
     }
 }

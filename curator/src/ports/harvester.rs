@@ -40,3 +40,13 @@ pub trait RedditHarvester: Send + Sync {
         Ok(posts.into_iter().filter(|p| p.has_media()).collect())
     }
 }
+
+#[async_trait]
+impl<T: ?Sized + RedditHarvester> RedditHarvester for std::sync::Arc<T> {
+    async fn fetch_posts(
+        &self,
+        query: &RedditHarvestQuery,
+    ) -> Result<Vec<RedditPost>, HarvesterError> {
+        (**self).fetch_posts(query).await
+    }
+}

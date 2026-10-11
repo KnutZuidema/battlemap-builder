@@ -380,6 +380,14 @@
         updateHud();
     }
 
+    function panStep(dx, dy) {
+        if (!state.currentImage) return;
+        state.pan.x += dx;
+        state.pan.y += dy;
+        requestRender();
+        updateHud();
+    }
+
     // ==========================================================================
     // Pre-fetching & Candidate Queue Management
     // ==========================================================================
@@ -1315,6 +1323,9 @@
                 e.preventDefault();
                 return;
             }
+            openRejectionModal();
+            e.preventDefault();
+            return;
         }
 
         // Hotkeys inside Rejection Modal
@@ -1391,13 +1402,37 @@
             return;
         }
 
-        // Zoom: + or = / - or _
-        if (e.key === "+" || e.key === "=") {
+        // Viewport Panning: WASD
+        if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+            if (e.key === "w" || e.key === "W") {
+                panStep(0, -64);
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "a" || e.key === "A") {
+                panStep(-64, 0);
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "s" || e.key === "S") {
+                panStep(0, 64);
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "d" || e.key === "D") {
+                panStep(64, 0);
+                e.preventDefault();
+                return;
+            }
+        }
+
+        // Zoom: + or = or ] / - or _ or [
+        if (e.key === "+" || e.key === "=" || e.key === "]") {
             zoomStep(1.2);
             e.preventDefault();
             return;
         }
-        if (e.key === "-" || e.key === "_") {
+        if (e.key === "-" || e.key === "_" || e.key === "[") {
             zoomStep(1 / 1.2);
             e.preventDefault();
             return;
@@ -1417,8 +1452,8 @@
             return;
         }
 
-        // Curate action: A or Enter
-        if (e.key === "a" || e.key === "A" || e.key === "Enter") {
+        // Curate action: Enter
+        if (e.key === "Enter") {
             curateCurrentCandidate();
             e.preventDefault();
             return;

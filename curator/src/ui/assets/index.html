@@ -114,9 +114,9 @@
                         <span class="btn-label">Fit</span>
                     </button>
                     <div class="zoom-controls">
-                        <button type="button" id="btn-zoom-out" class="btn btn-icon" title="Zoom Out (-)">−</button>
+                        <button type="button" id="btn-zoom-out" class="btn btn-icon" title="Zoom Out (Hotkey: [ or -)">−</button>
                         <span id="zoom-level" class="zoom-level mono" title="Zoom Scale">100%</span>
-                        <button type="button" id="btn-zoom-in" class="btn btn-icon" title="Zoom In (+)">+</button>
+                        <button type="button" id="btn-zoom-in" class="btn btn-icon" title="Zoom In (Hotkey: ] or +)">+</button>
                     </div>
                 </div>
 
@@ -136,12 +136,12 @@
                 <div class="action-divider"></div>
 
                 <div class="triage-group">
-                    <button type="button" id="btn-reject" class="btn btn-danger" title="Reject Candidate (Hotkey: X or Delete)">
-                        <kbd>X</kbd>
+                    <button type="button" id="btn-reject" class="btn btn-danger" title="Reject Candidate (Hotkey: Esc)">
+                        <kbd>Esc</kbd>
                         <span class="btn-label">Reject</span>
                     </button>
-                    <button type="button" id="btn-curate" class="btn btn-success" title="Curate Candidate (Hotkey: A or Enter)">
-                        <kbd>A</kbd>
+                    <button type="button" id="btn-curate" class="btn btn-success" title="Curate Candidate (Hotkey: Enter)">
+                        <kbd>Enter</kbd>
                         <span class="btn-label">Curate</span>
                     </button>
                 </div>
@@ -284,8 +284,8 @@
                     <div class="help-section">
                         <h4>Rapid Triage Actions</h4>
                         <div class="help-grid">
-                            <div class="help-row"><kbd>A</kbd> or <kbd>Enter</kbd><span>Approve & Curate active map to selected theme</span></div>
-                            <div class="help-row"><kbd>X</kbd> or <kbd>Del</kbd><span>Open Rejection dialogue (quick-select reason with 1-5 + Enter)</span></div>
+                            <div class="help-row"><kbd>Enter</kbd><span>Approve & Curate active map to selected theme</span></div>
+                            <div class="help-row"><kbd>Esc</kbd><span>Open Rejection dialogue (quick-select reason with 1-5 + Enter)</span></div>
                             <div class="help-row"><kbd>J</kbd> or <kbd>→</kbd><span>Advance to next candidate (without curating)</span></div>
                             <div class="help-row"><kbd>K</kbd> or <kbd>←</kbd><span>Return to previous candidate</span></div>
                             <div class="help-row"><kbd>B</kbd><span>Open AI Benchmark Suite drawer</span></div>
@@ -319,7 +319,8 @@
                         <div class="help-grid">
                             <div class="help-row"><kbd>G</kbd><span>Toggle crisp 64px (5ft VTT scale) grid overlay</span></div>
                             <div class="help-row"><kbd>F</kbd><span>Fit map to screen / center viewport</span></div>
-                            <div class="help-row"><kbd>+</kbd> / <kbd>−</kbd><span>Zoom in / zoom out</span></div>
+                            <div class="help-row"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>Pan map viewport (Up, Left, Down, Right)</span></div>
+                            <div class="help-row"><kbd>]</kbd> / <kbd>[</kbd><span>Zoom in / zoom out</span></div>
                             <div class="help-row"><kbd>Wheel</kbd><span>Smooth zoom centered on mouse pointer (10% to 500%)</span></div>
                             <div class="help-row"><kbd>Drag</kbd><span>Pan map viewport (Left Click or Middle Click)</span></div>
                             <div class="help-row"><kbd>?</kbd><span>Toggle this hotkey reference guide</span></div>

@@ -25,7 +25,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/image/curated/{theme}/{id}", get(get_curated_image))
         .route("/api/curate", post(post_curate))
         .route("/api/reject", post(post_reject))
-        .route("/api/harvest/reddit", post(post_harvest_reddit));
+        .route("/api/harvest/reddit", post(post_harvest_reddit))
+        .route("/api/cost/stats", get(get_cost_stats))
+        .route("/api/cost/reset-session", post(post_reset_cost_session));
 
     Router::new()
         .merge(api_routes)

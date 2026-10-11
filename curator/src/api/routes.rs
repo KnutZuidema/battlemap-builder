@@ -14,6 +14,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{Candidate, CuratedMap, RedditHarvestRequest, RejectionReason, Theme};
+use crate::ports::cost_tracker::CostStats;
 use crate::services::{IngestionSummary, RedditIngestionService};
 /// Inspects bytes and optional filename to determine image MIME type.
 pub fn detect_image_mime(bytes: &[u8], filename: Option<&str>) -> &'static str {
@@ -296,6 +297,41 @@ pub async fn post_harvest_reddit(
         let response = RedditHarvestResponse::from(summary);
         Ok(Json(response).into_response())
     }
+}
+
+/// Response payload for resetting the session spend counter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResetSessionResponse {
+    pub status: &'static str,
+    pub session_spend_usd: f64,
+}
+
+/// GET /api/cost/stats - Returns telemetry, session spend, cumulative spend, and per-model breakdown.
+pub async fn get_cost_stats(
+    State(state): State<AppState>,
+) -> Result<Json<CostStats>, ApiError> {
+    let stats = state
+        .cost_tracker
+        .get_stats()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(stats))
+}
+
+/// POST /api/cost/reset-session - Resets the in-memory session spend counters.
+pub async fn post_reset_cost_session(
+    State(state): State<AppState>,
+) -> Result<Json<ResetSessionResponse>, ApiError> {
+    state
+        .cost_tracker
+        .reset_session()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(Json(ResetSessionResponse {
+        status: "ok",
+        session_spend_usd: 0.0,
+    }))
 }
 
 #[cfg(test)]

@@ -9,9 +9,9 @@ use tracing::{info, instrument};
 use crate::domain::{
     BenchmarkArchetype, BenchmarkMetadata, BenchmarkResult, ALL_BENCHMARK_MODELS,
 };
+use crate::ports::cost_tracker::{CostTracker, CostTrackerError, GenerationCostRecord};
 use crate::ports::model_engine::{ModelEngine, ModelEngineError};
 use crate::ports::storage::{StorageError, StorageRepository};
-
 /// Errors arising from benchmark service execution.
 #[derive(Debug, Error)]
 pub enum BenchmarkServiceError {
@@ -21,6 +21,8 @@ pub enum BenchmarkServiceError {
     #[error("Storage repository error: {0}")]
     Storage(#[from] StorageError),
 
+    #[error("Cost tracker error: {0}")]
+    CostTracker(#[from] CostTrackerError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -33,6 +35,7 @@ pub enum BenchmarkServiceError {
 pub struct BenchmarkService {
     engine: Arc<dyn ModelEngine + Send + Sync>,
     storage: Arc<dyn StorageRepository + Send + Sync>,
+    cost_tracker: Option<Arc<dyn CostTracker + Send + Sync>>,
 }
 
 impl BenchmarkService {
@@ -41,7 +44,24 @@ impl BenchmarkService {
         engine: Arc<dyn ModelEngine + Send + Sync>,
         storage: Arc<dyn StorageRepository + Send + Sync>,
     ) -> Self {
-        Self { engine, storage }
+        Self {
+            engine,
+            storage,
+            cost_tracker: None,
+        }
+    }
+
+    /// Creates a new `BenchmarkService` with an attached cost tracker port.
+    pub fn with_cost_tracker(
+        engine: Arc<dyn ModelEngine + Send + Sync>,
+        storage: Arc<dyn StorageRepository + Send + Sync>,
+        cost_tracker: Arc<dyn CostTracker + Send + Sync>,
+    ) -> Self {
+        Self {
+            engine,
+            storage,
+            cost_tracker: Some(cost_tracker),
+        }
     }
 
     /// Reference to the underlying model engine.
@@ -54,6 +74,20 @@ impl BenchmarkService {
         &self.storage
     }
 
+
+    /// Reference to the optional cost tracker.
+    pub fn cost_tracker(&self) -> Option<&Arc<dyn CostTracker + Send + Sync>> {
+        self.cost_tracker.as_ref()
+    }
+
+    /// Helper to record benchmark generation cost into the attached tracker if present.
+    async fn record_cost(&self, metadata: &BenchmarkMetadata) -> Result<(), BenchmarkServiceError> {
+        if let Some(cost_tracker) = &self.cost_tracker {
+            let record = GenerationCostRecord::from(metadata);
+            cost_tracker.record_generation(record).await?;
+        }
+        Ok(())
+    }
     /// Run a benchmark for a single archetype on a specific model without persisting.
     pub async fn run_archetype(
         &self,
@@ -61,6 +95,7 @@ impl BenchmarkService {
         archetype: &BenchmarkArchetype,
     ) -> Result<BenchmarkResult, BenchmarkServiceError> {
         let result = self.engine.run_benchmark(model, archetype).await?;
+        self.record_cost(&result.metadata).await?;
         Ok(result)
     }
 
@@ -73,7 +108,7 @@ impl BenchmarkService {
         archetype: &BenchmarkArchetype,
     ) -> Result<BenchmarkResult, BenchmarkServiceError> {
         let result = self.engine.run_benchmark(model, archetype).await?;
-
+        self.record_cost(&result.metadata).await?;
         info!(
             id = %result.metadata.id,
             model = %result.metadata.model,
@@ -96,6 +131,9 @@ impl BenchmarkService {
         archetypes: &[BenchmarkArchetype],
     ) -> Result<Vec<BenchmarkResult>, BenchmarkServiceError> {
         let results = self.engine.run_benchmark_suite(models, archetypes).await?;
+        for result in &results {
+            self.record_cost(&result.metadata).await?;
+        }
         Ok(results)
     }
 
@@ -109,6 +147,7 @@ impl BenchmarkService {
         let results = self.engine.run_benchmark_suite(models, archetypes).await?;
 
         for result in &results {
+            self.record_cost(&result.metadata).await?;
             self.storage
                 .save_staging_generated(&result.metadata, &result.image_bytes)?;
         }
@@ -256,5 +295,35 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].id, result.metadata.id);
         assert_eq!(candidates[0].source, crate::domain::Source::Generated);
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_service_with_cost_tracker() {
+        use crate::adapters::{FileCostLedger, FilesystemStorage};
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
+        let engine = Arc::new(MockEngine::new());
+        let ledger_path = temp_dir.path().join("telemetry").join("cost_ledger.json");
+        let cost_tracker: Arc<dyn CostTracker + Send + Sync> =
+            Arc::new(FileCostLedger::new(&ledger_path));
+
+        let service =
+            BenchmarkService::with_cost_tracker(engine, storage, cost_tracker.clone());
+
+        let result = service
+            .run_and_persist("meta/muse-image", &BenchmarkArchetype::StoneCrypt)
+            .await
+            .expect("run and persist succeeds");
+
+        let stats = cost_tracker.get_stats().await.expect("stats succeeds");
+        assert_eq!(stats.total_generations, 1);
+        assert_eq!(stats.session_generations, 1);
+        assert!((stats.total_spend_usd - result.metadata.cost_usd).abs() < 1e-6);
+        assert!((stats.session_spend_usd - result.metadata.cost_usd).abs() < 1e-6);
+        assert_eq!(stats.history.len(), 1);
+        assert_eq!(stats.history[0].id, result.metadata.id);
+        assert_eq!(stats.history[0].prompt_name, "Stone Crypt");
+        assert!(stats.by_model.contains_key("meta/muse-image"));
     }
 }

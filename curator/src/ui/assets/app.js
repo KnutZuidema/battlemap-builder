@@ -39,6 +39,12 @@
         isSubmitting: false,
         isHarvesting: false,
 
+        // Benchmark Drawer & Budget Guardrails
+        benchmarkDrawerOpen: false,
+        budgetGuardModalOpen: false,
+        isBenchmarking: false,
+        benchmarkAbortController: null,
+
         // Harvesting parameters
         harvestSort: "hot",
         harvestTime: "all",
@@ -50,6 +56,14 @@
     const MAX_ZOOM = 5.0;
     const PREFETCH_AHEAD = 3;
 
+
+    const MODEL_PRICES = {
+        "google/gemini-3.1-flash-image": 0.07,
+        "google/gemini-3.1-flash-lite-image": 0.035,
+        "meta/muse-image": 0.01,
+        "bytedance-seed/seedream-5-0-flash": 0.018,
+    };
+    const BUDGET_GUARDRAIL_THRESHOLD = 2.00;
     const THEMES = [
         "dungeon",
         "cave",
@@ -80,6 +94,18 @@
     let harvestSortGroup, harvestTimeGroup, harvestLimitInput, harvestLimitValue, harvestGridlessOnly;
     let btnStartHarvest, harvestProgressContainer, harvestProgressBar, harvestProgressText;
 
+    // Benchmark Drawer & Guardrails DOM Elements
+    let btnOpenBenchmarkDrawer;
+    let costMonitorHud, costMonitorText;
+    let benchmarkDrawer, btnCloseBenchmarkDrawer, btnCancelBenchmarkDrawer;
+    let btnModelsSelectAll, btnModelsSelectNone, btnPromptsSelectAll, btnPromptsSelectNone;
+    let benchmarkEnableCustom, customPromptFields, benchmarkCustomName, benchmarkCustomPrompt;
+    let calcBadgeCost, calcFormulaDisplay, calcWarningNote;
+    let btnStartBenchmark, btnStartBenchmarkText;
+    let benchmarkProgressContainer, benchmarkProgressBar, benchmarkProgressText, btnCancelBenchmarkRun;
+    let budgetGuardModal, btnCloseBudgetGuard, btnDismissBudgetGuard, btnConfirmBudgetGuard, btnConfirmBudgetGuardText;
+    let budgetGuardCostAmount, budgetGuardBreakdown;
+
     // ==========================================================================
     // Initialization & Bootstrap
     // ==========================================================================
@@ -89,6 +115,7 @@
         setupCanvas();
         setupEventListeners();
         fetchStatus();
+        fetchCostStats();
         fetchStagingQueue();
     }
 
@@ -98,7 +125,6 @@
 
         statusIndicator = document.getElementById("status-indicator");
         statusText = document.getElementById("status-text");
-
         candidateMetaBox = document.getElementById("candidate-meta-box");
         queueCounter = document.getElementById("queue-counter");
         candidateId = document.getElementById("candidate-id");
@@ -143,6 +169,45 @@
         harvestProgressContainer = document.getElementById("harvest-progress-container");
         harvestProgressBar = document.getElementById("harvest-progress-bar");
         harvestProgressText = document.getElementById("harvest-progress-text");
+
+        // Benchmark Drawer & HUD Elements
+        btnOpenBenchmarkDrawer = document.getElementById("btn-open-benchmark-drawer");
+        costMonitorHud = document.getElementById("cost-monitor-hud");
+        costMonitorText = document.getElementById("cost-monitor-text");
+
+        benchmarkDrawer = document.getElementById("benchmark-drawer");
+        btnCloseBenchmarkDrawer = document.getElementById("btn-close-benchmark-drawer");
+        btnCancelBenchmarkDrawer = document.getElementById("btn-cancel-benchmark-drawer");
+
+        btnModelsSelectAll = document.getElementById("btn-models-select-all");
+        btnModelsSelectNone = document.getElementById("btn-models-select-none");
+        btnPromptsSelectAll = document.getElementById("btn-prompts-select-all");
+        btnPromptsSelectNone = document.getElementById("btn-prompts-select-none");
+
+        benchmarkEnableCustom = document.getElementById("benchmark-enable-custom");
+        customPromptFields = document.getElementById("custom-prompt-fields");
+        benchmarkCustomName = document.getElementById("benchmark-custom-name");
+        benchmarkCustomPrompt = document.getElementById("benchmark-custom-prompt");
+
+        calcBadgeCost = document.getElementById("calc-badge-cost");
+        calcFormulaDisplay = document.getElementById("calc-formula-display");
+        calcWarningNote = document.getElementById("calc-warning-note");
+
+        btnStartBenchmark = document.getElementById("btn-start-benchmark");
+        btnStartBenchmarkText = document.getElementById("btn-start-benchmark-text");
+
+        benchmarkProgressContainer = document.getElementById("benchmark-progress-container");
+        benchmarkProgressBar = document.getElementById("benchmark-progress-bar");
+        benchmarkProgressText = document.getElementById("benchmark-progress-text");
+        btnCancelBenchmarkRun = document.getElementById("btn-cancel-benchmark-run");
+
+        budgetGuardModal = document.getElementById("budget-guard-modal");
+        btnCloseBudgetGuard = document.getElementById("btn-close-budget-guard");
+        btnDismissBudgetGuard = document.getElementById("btn-dismiss-budget-guard");
+        btnConfirmBudgetGuard = document.getElementById("btn-confirm-budget-guard");
+        btnConfirmBudgetGuardText = document.getElementById("btn-confirm-budget-guard-text");
+        budgetGuardCostAmount = document.getElementById("budget-guard-cost-amount");
+        budgetGuardBreakdown = document.getElementById("budget-guard-breakdown");
     }
 
     // ==========================================================================
@@ -733,6 +798,283 @@
         }
     }
 
+
+    // ==========================================================================
+    // AI Benchmark Suite, Dynamic Calculator & Budget Guardrails
+    // ==========================================================================
+
+    async function fetchCostStats() {
+        try {
+            const res = await fetch("/api/cost/stats");
+            if (!res.ok) return;
+            const stats = await res.json();
+            const sessionSpend = (stats.session_spend_usd || 0).toFixed(2);
+            const totalSpend = (stats.total_spend_usd || 0).toFixed(2);
+            const totalGens = stats.total_generations || 0;
+            const mapWord = totalGens === 1 ? "map" : "maps";
+            if (costMonitorText) {
+                costMonitorText.textContent = `Session: $${sessionSpend} · Total: $${totalSpend} (${totalGens} ${mapWord} generated)`;
+            }
+            if (costMonitorHud) {
+                costMonitorHud.title = `Session Spend: $${sessionSpend} | Lifetime Spend: $${totalSpend} | Total Maps: ${totalGens}`;
+            }
+        } catch (_) {
+            // Silently ignore telemetry refresh failure
+        }
+    }
+
+    function getSelectedBenchmarkModels() {
+        const checkboxes = document.querySelectorAll('input[name="benchmark-model"]:checked');
+        return Array.from(checkboxes).map((cb) => cb.value);
+    }
+
+    function getSelectedBenchmarkArchetypes() {
+        const checkboxes = document.querySelectorAll('input[name="benchmark-archetype"]:checked');
+        return Array.from(checkboxes).map((cb) => cb.value);
+    }
+
+    function calculatePreflightMetrics() {
+        const models = getSelectedBenchmarkModels();
+        const archetypes = getSelectedBenchmarkArchetypes();
+        const hasCustom = benchmarkEnableCustom?.checked && (benchmarkCustomPrompt?.value.trim().length > 0 || benchmarkCustomName?.value.trim().length > 0);
+        const promptCount = archetypes.length + (hasCustom ? 1 : 0);
+        const modelCount = models.length;
+        const totalImages = modelCount * promptCount;
+
+        let costPerSet = 0;
+        for (const m of models) {
+            costPerSet += MODEL_PRICES[m] || 0.05;
+        }
+        const estimatedCost = promptCount * costPerSet;
+
+        return {
+            models,
+            archetypes,
+            hasCustom,
+            modelCount,
+            promptCount,
+            totalImages,
+            estimatedCost,
+        };
+    }
+
+    function updatePreflightCost() {
+        const metrics = calculatePreflightMetrics();
+        const { modelCount, promptCount, totalImages, estimatedCost } = metrics;
+
+        const costStr = `$${estimatedCost.toFixed(2)}`;
+        if (calcBadgeCost) calcBadgeCost.textContent = costStr;
+
+        if (calcFormulaDisplay) {
+            calcFormulaDisplay.textContent = `${modelCount} model${modelCount === 1 ? "" : "s"} × ${promptCount} prompt${promptCount === 1 ? "" : "s"} = ${totalImages} image${totalImages === 1 ? "" : "s"} (~${costStr})`;
+        }
+
+        const exceedsGuardrail = estimatedCost > BUDGET_GUARDRAIL_THRESHOLD;
+        if (calcWarningNote) {
+            calcWarningNote.classList.toggle("hidden", !exceedsGuardrail);
+        }
+
+        if (btnStartBenchmarkText) {
+            btnStartBenchmarkText.textContent = `Run Benchmark (${costStr})`;
+        }
+
+        if (btnStartBenchmark) {
+            btnStartBenchmark.disabled = (modelCount === 0 || promptCount === 0 || state.isBenchmarking);
+        }
+    }
+
+    function toggleBenchmarkDrawer() {
+        if (state.benchmarkDrawerOpen) {
+            closeBenchmarkDrawer();
+        } else {
+            openBenchmarkDrawer();
+        }
+    }
+
+    function openBenchmarkDrawer() {
+        if (state.rejectionModalOpen) closeRejectionModal();
+        if (state.helpModalOpen) closeHelpModal();
+        if (state.drawerOpen) closeIngestionDrawer();
+        state.benchmarkDrawerOpen = true;
+        benchmarkDrawer?.classList.remove("hidden");
+        updatePreflightCost();
+    }
+
+    function closeBenchmarkDrawer() {
+        state.benchmarkDrawerOpen = false;
+        benchmarkDrawer?.classList.add("hidden");
+        canvas.focus();
+    }
+
+    function openBudgetGuardModal(estimatedCost, modelCount, promptCount, totalImages) {
+        state.budgetGuardModalOpen = true;
+        const costStr = `$${estimatedCost.toFixed(2)}`;
+        if (budgetGuardCostAmount) budgetGuardCostAmount.textContent = costStr;
+        if (budgetGuardBreakdown) {
+            budgetGuardBreakdown.textContent = `${modelCount} models × ${promptCount} prompts = ${totalImages} images`;
+        }
+        if (btnConfirmBudgetGuardText) {
+            btnConfirmBudgetGuardText.textContent = `Confirm & Run (${costStr})`;
+        }
+        budgetGuardModal?.classList.remove("hidden");
+    }
+
+    function closeBudgetGuardModal() {
+        state.budgetGuardModalOpen = false;
+        budgetGuardModal?.classList.add("hidden");
+    }
+
+    function handleStartBenchmarkClick() {
+        const metrics = calculatePreflightMetrics();
+        if (metrics.modelCount === 0) {
+            showToast("Please select at least 1 model", "danger");
+            return;
+        }
+        if (metrics.promptCount === 0) {
+            showToast("Please select at least 1 benchmark archetype or enter a custom prompt", "danger");
+            return;
+        }
+
+        if (metrics.estimatedCost > BUDGET_GUARDRAIL_THRESHOLD) {
+            openBudgetGuardModal(metrics.estimatedCost, metrics.modelCount, metrics.promptCount, metrics.totalImages);
+        } else {
+            startBenchmarkExecution(metrics);
+        }
+    }
+
+    async function startBenchmarkExecution(metrics) {
+        closeBudgetGuardModal();
+        if (state.isBenchmarking) return;
+        state.isBenchmarking = true;
+
+        if (btnStartBenchmark) btnStartBenchmark.disabled = true;
+        benchmarkProgressContainer?.classList.remove("hidden");
+        if (benchmarkProgressBar) benchmarkProgressBar.style.width = "5%";
+        if (benchmarkProgressText) benchmarkProgressText.textContent = "Connecting to benchmark runner...";
+
+        state.benchmarkAbortController = new AbortController();
+
+        const customPrompts = [];
+        if (metrics.hasCustom) {
+            customPrompts.push({
+                name: benchmarkCustomName?.value.trim() || "Custom Scenario",
+                prompt: benchmarkCustomPrompt?.value.trim() || "",
+            });
+        }
+
+        const payload = {
+            models: metrics.models,
+            archetypes: metrics.archetypes,
+            custom_prompts: customPrompts,
+        };
+
+        try {
+            const res = await fetch("/api/benchmark/run", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                },
+                body: JSON.stringify(payload),
+                signal: state.benchmarkAbortController.signal,
+            });
+
+            if (!res.ok) {
+                const errJson = await res.json().catch(() => ({}));
+                throw new Error(errJson.error || errJson.message || `HTTP ${res.status}`);
+            }
+
+            const contentType = res.headers.get("content-type") || "";
+
+            if (contentType.includes("text/event-stream") && res.body) {
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = "";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+
+                    const lines = buffer.split("\n");
+                    buffer = lines.pop();
+
+                    let currentEvent = "message";
+                    for (const line of lines) {
+                        const trimmed = line.trim();
+                        if (trimmed.startsWith("event:")) {
+                            currentEvent = trimmed.slice(6).trim();
+                        } else if (trimmed.startsWith("data:")) {
+                            const dataStr = trimmed.slice(5).trim();
+                            try {
+                                const data = JSON.parse(dataStr);
+                                handleBenchmarkEvent(currentEvent, data);
+                            } catch (_) {}
+                        }
+                    }
+                }
+            } else {
+                const data = await res.json();
+                const msg = `Benchmark complete: ${data.completed}/${data.total} generated ($${(data.total_cost_usd || 0).toFixed(4)})`;
+                if (benchmarkProgressBar) benchmarkProgressBar.style.width = "100%";
+                if (benchmarkProgressText) benchmarkProgressText.textContent = msg;
+                showToast(msg, "success");
+                await fetchStagingQueue();
+                fetchStatus();
+                fetchCostStats();
+            }
+        } catch (err) {
+            if (err.name === "AbortError") {
+                if (benchmarkProgressText) benchmarkProgressText.textContent = "Benchmark run cancelled by user.";
+                showToast("Benchmark execution cancelled", "info");
+            } else {
+                if (benchmarkProgressText) benchmarkProgressText.textContent = `Benchmark failed: ${err.message}`;
+                showToast(`Benchmark error: ${err.message}`, "danger");
+            }
+        } finally {
+            state.isBenchmarking = false;
+            state.benchmarkAbortController = null;
+            if (btnStartBenchmark) btnStartBenchmark.disabled = false;
+            fetchCostStats();
+        }
+    }
+
+    function handleBenchmarkEvent(event, data) {
+        if (event === "progress") {
+            const pct = data.total > 0 ? Math.round((data.completed / data.total) * 100) : 5;
+            if (benchmarkProgressBar) benchmarkProgressBar.style.width = `${Math.max(5, Math.min(100, pct))}%`;
+            if (benchmarkProgressText) {
+                const spendStr = data.current_spend ? ` ($${data.current_spend.toFixed(4)})` : "";
+                benchmarkProgressText.textContent = `${data.message}${spendStr}`;
+            }
+            fetchCostStats();
+        } else if (event === "complete") {
+            if (benchmarkProgressBar) benchmarkProgressBar.style.width = "100%";
+            if (benchmarkProgressText) benchmarkProgressText.textContent = data.message;
+            showToast(data.message, "success");
+            fetchStagingQueue();
+            fetchStatus();
+            fetchCostStats();
+        } else if (event === "cancelled") {
+            if (benchmarkProgressText) benchmarkProgressText.textContent = data.message;
+            showToast(data.message, "info");
+            fetchCostStats();
+        } else if (event === "error") {
+            if (benchmarkProgressText) benchmarkProgressText.textContent = `Error: ${data.message || data.error || "Unknown"}`;
+            showToast(`Benchmark failed: ${data.message || data.error || "Unknown"}`, "danger");
+        }
+    }
+
+    async function cancelBenchmarkExecution() {
+        if (state.benchmarkAbortController) {
+            state.benchmarkAbortController.abort();
+        }
+        try {
+            await fetch("/api/benchmark/cancel", { method: "POST" });
+        } catch (_) {}
+        if (benchmarkProgressText) benchmarkProgressText.textContent = "Cancelling benchmark batch...";
+        showToast("Benchmark batch cancellation requested", "info");
+    }
     function setupDrawerControls() {
         btnOpenDrawer?.addEventListener("click", () => openIngestionDrawer());
         btnEmptyHarvest?.addEventListener("click", () => openIngestionDrawer());
@@ -772,6 +1114,59 @@
         });
 
         btnStartHarvest?.addEventListener("click", () => startRedditHarvest());
+
+        // Benchmark Drawer Controls
+        btnOpenBenchmarkDrawer?.addEventListener("click", () => openBenchmarkDrawer());
+        btnCloseBenchmarkDrawer?.addEventListener("click", () => closeBenchmarkDrawer());
+        btnCancelBenchmarkDrawer?.addEventListener("click", () => closeBenchmarkDrawer());
+
+        benchmarkDrawer?.addEventListener("click", (e) => {
+            if (e.target === benchmarkDrawer) closeBenchmarkDrawer();
+        });
+
+        btnModelsSelectAll?.addEventListener("click", () => {
+            document.querySelectorAll('input[name="benchmark-model"]').forEach((cb) => (cb.checked = true));
+            updatePreflightCost();
+        });
+        btnModelsSelectNone?.addEventListener("click", () => {
+            document.querySelectorAll('input[name="benchmark-model"]').forEach((cb) => (cb.checked = false));
+            updatePreflightCost();
+        });
+        btnPromptsSelectAll?.addEventListener("click", () => {
+            document.querySelectorAll('input[name="benchmark-archetype"]').forEach((cb) => (cb.checked = true));
+            updatePreflightCost();
+        });
+        btnPromptsSelectNone?.addEventListener("click", () => {
+            document.querySelectorAll('input[name="benchmark-archetype"]').forEach((cb) => (cb.checked = false));
+            updatePreflightCost();
+        });
+
+        document.querySelectorAll('input[name="benchmark-model"]').forEach((cb) => {
+            cb.addEventListener("change", () => updatePreflightCost());
+        });
+        document.querySelectorAll('input[name="benchmark-archetype"]').forEach((cb) => {
+            cb.addEventListener("change", () => updatePreflightCost());
+        });
+
+        benchmarkEnableCustom?.addEventListener("change", () => {
+            customPromptFields?.classList.toggle("hidden", !benchmarkEnableCustom.checked);
+            updatePreflightCost();
+        });
+        benchmarkCustomName?.addEventListener("input", () => updatePreflightCost());
+        benchmarkCustomPrompt?.addEventListener("input", () => updatePreflightCost());
+
+        btnStartBenchmark?.addEventListener("click", () => handleStartBenchmarkClick());
+        btnCancelBenchmarkRun?.addEventListener("click", () => cancelBenchmarkExecution());
+
+        btnCloseBudgetGuard?.addEventListener("click", () => closeBudgetGuardModal());
+        btnDismissBudgetGuard?.addEventListener("click", () => closeBudgetGuardModal());
+        budgetGuardModal?.addEventListener("click", (e) => {
+            if (e.target === budgetGuardModal) closeBudgetGuardModal();
+        });
+        btnConfirmBudgetGuard?.addEventListener("click", () => {
+            const metrics = calculatePreflightMetrics();
+            startBenchmarkExecution(metrics);
+        });
     }
 
     // ==========================================================================
@@ -894,6 +1289,16 @@
 
         // Global Modal Dismiss: Escape
         if (e.key === "Escape") {
+            if (state.budgetGuardModalOpen) {
+                closeBudgetGuardModal();
+                e.preventDefault();
+                return;
+            }
+            if (state.benchmarkDrawerOpen) {
+                closeBenchmarkDrawer();
+                e.preventDefault();
+                return;
+            }
             if (state.drawerOpen) {
                 closeIngestionDrawer();
                 e.preventDefault();
@@ -938,6 +1343,12 @@
             return;
         }
 
+        // Benchmark drawer hotkey: B
+        if (e.key === "b" || e.key === "B") {
+            toggleBenchmarkDrawer();
+            e.preventDefault();
+            return;
+        }
 
         // Help modal hotkey: ?
         if (e.key === "?" || (e.shiftKey && e.key === "/")) {

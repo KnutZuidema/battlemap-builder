@@ -8,12 +8,16 @@ use axum::{
     },
     Json,
 };
+use std::sync::atomic::Ordering;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
-use crate::domain::{Candidate, CuratedMap, RedditHarvestRequest, RejectionReason, Theme};
+use crate::domain::{
+    BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CuratedMap,
+    CustomPrompt, RedditHarvestRequest, RejectionReason, Theme,
+};
 use crate::ports::cost_tracker::CostStats;
 use crate::services::{IngestionSummary, RedditIngestionService};
 /// Inspects bytes and optional filename to determine image MIME type.
@@ -351,6 +355,157 @@ pub async fn post_reset_cost_session(
     Ok(Json(ResetSessionResponse {
         status: "ok",
         session_spend_usd: 0.0,
+    }))
+}
+
+/// Request payload for initiating a batch AI benchmark run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkRunRequest {
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub archetypes: Vec<String>,
+    #[serde(default)]
+    pub custom_prompts: Vec<CustomPrompt>,
+}
+
+/// Response payload for completed non-streaming benchmark runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkRunResponse {
+    pub status: &'static str,
+    pub total: usize,
+    pub completed: usize,
+    pub results: Vec<BenchmarkMetadata>,
+    pub total_cost_usd: f64,
+}
+
+/// Response payload for benchmark cancellation requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkCancelResponse {
+    pub status: &'static str,
+    pub message: &'static str,
+}
+
+/// POST /api/benchmark/run - Execute multi-model, multi-prompt benchmarks with SSE or JSON output.
+pub async fn post_benchmark_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<BenchmarkRunRequest>,
+) -> Result<Response, ApiError> {
+    if payload.models.is_empty() {
+        return Err(ApiError::bad_request("At least one model must be selected"));
+    }
+
+    if payload.archetypes.is_empty() && payload.custom_prompts.is_empty() {
+        return Err(ApiError::bad_request(
+            "At least one benchmark archetype or custom prompt must be selected",
+        ));
+    }
+
+    // Resolve items from archetypes and custom prompts
+    let mut items = Vec::new();
+    for arch_str in &payload.archetypes {
+        let trimmed = arch_str.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(arch) = trimmed.parse::<BenchmarkArchetype>() {
+            items.push(BatchBenchmarkItem::from_archetype(&arch));
+        } else {
+            items.push(BatchBenchmarkItem::new(trimmed, trimmed));
+        }
+    }
+    for custom in &payload.custom_prompts {
+        if !custom.prompt.trim().is_empty() {
+            items.push(BatchBenchmarkItem::from_custom(custom));
+        }
+    }
+
+    if items.is_empty() {
+        return Err(ApiError::bad_request(
+            "No valid archetypes or custom prompts provided",
+        ));
+    }
+
+    let service = state.get_or_create_benchmark_service()?;
+
+    let is_sse = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("text/event-stream"))
+        .unwrap_or(false);
+
+    let models = payload.models;
+    let cancel_flag = state.benchmark_cancelled.clone();
+    cancel_flag.store(false, Ordering::Relaxed);
+
+    if is_sse {
+        let (tx, rx) =
+            tokio::sync::mpsc::unbounded_channel::<Result<Event, std::convert::Infallible>>();
+        let flag_clone = cancel_flag.clone();
+
+        tokio::spawn(async move {
+            let res = service
+                .run_batch_with_progress(&models, &items, Some(flag_clone), |progress| {
+                    if tx.is_closed() {
+                        return false;
+                    }
+                    let json_data = serde_json::to_string(&progress).unwrap_or_default();
+                    let event_name = match progress.phase.as_str() {
+                        "complete" => "complete",
+                        "cancelled" => "cancelled",
+                        "error" => "error",
+                        _ => "progress",
+                    };
+                    let event = Event::default().event(event_name).data(json_data);
+                    tx.send(Ok(event)).is_ok()
+                })
+                .await;
+
+            if let Err(err) = res {
+                if !tx.is_closed() {
+                    let err_event = Event::default().event("error").data(
+                        serde_json::to_string(&serde_json::json!({ "error": err.to_string() }))
+                            .unwrap_or_default(),
+                    );
+                    let _ = tx.send(Ok(err_event));
+                }
+            }
+        });
+
+        let stream = UnboundedReceiverStream::new(rx);
+        Ok(Sse::new(stream).into_response())
+    } else {
+        let results = service
+            .run_batch_with_progress(&models, &items, Some(cancel_flag), |_| true)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+
+        let total = models.len() * items.len();
+        let completed = results.len();
+        let total_cost_usd = results.iter().map(|r| r.metadata.cost_usd).sum();
+        let metadatas = results.into_iter().map(|r| r.metadata).collect();
+
+        let response = BenchmarkRunResponse {
+            status: "ok",
+            total,
+            completed,
+            results: metadatas,
+            total_cost_usd,
+        };
+
+        Ok(Json(response).into_response())
+    }
+}
+
+/// POST /api/benchmark/cancel - Request mid-flight abort of active benchmark execution.
+pub async fn post_benchmark_cancel(
+    State(state): State<AppState>,
+) -> Result<Json<BenchmarkCancelResponse>, ApiError> {
+    state.benchmark_cancelled.store(true, Ordering::Relaxed);
+    Ok(Json(BenchmarkCancelResponse {
+        status: "ok",
+        message: "Benchmark batch cancellation requested",
     }))
 }
 

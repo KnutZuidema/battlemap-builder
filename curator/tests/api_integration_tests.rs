@@ -653,3 +653,219 @@ async fn test_api_cost_stats_and_reset_session() {
         1
     );
 }
+
+// ==========================================================================
+// Benchmark API Integration Tests
+// ==========================================================================
+
+struct MockBenchmarkEngine {
+    dummy_png: Vec<u8>,
+}
+
+#[async_trait]
+impl curator::ports::model_engine::ModelEngine for MockBenchmarkEngine {
+    async fn generate_image(
+        &self,
+        request: &curator::domain::GenerationRequest,
+    ) -> Result<curator::domain::GenerationResponse, curator::ports::model_engine::ModelEngineError> {
+        Ok(curator::domain::GenerationResponse {
+            image_bytes: self.dummy_png.clone(),
+            model: request.model.clone(),
+            prompt: request.prompt.clone(),
+            prompt_tokens: Some(150),
+            completion_tokens: Some(350),
+            latency_ms: 200,
+            cost_usd: 0.02,
+        })
+    }
+
+    async fn run_benchmark(
+        &self,
+        model: &str,
+        archetype: &curator::domain::BenchmarkArchetype,
+    ) -> Result<curator::domain::BenchmarkResult, curator::ports::model_engine::ModelEngineError> {
+        let id = format!("test_{}_{}", model.replace('/', "_"), archetype.slug());
+        let metadata = curator::domain::BenchmarkMetadata::new(
+            id,
+            model,
+            archetype.name(),
+            archetype.prompt(),
+            Some(150),
+            Some(350),
+            200,
+            0.02,
+        );
+        Ok(curator::domain::BenchmarkResult::new(metadata, self.dummy_png.clone()))
+    }
+
+    async fn run_benchmark_suite(
+        &self,
+        models: &[String],
+        archetypes: &[curator::domain::BenchmarkArchetype],
+    ) -> Result<Vec<curator::domain::BenchmarkResult>, curator::ports::model_engine::ModelEngineError> {
+        let mut results = Vec::new();
+        for m in models {
+            for a in archetypes {
+                results.push(self.run_benchmark(m, a).await?);
+            }
+        }
+        Ok(results)
+    }
+}
+
+fn setup_benchmark_test_app() -> (
+    axum::Router,
+    Arc<FilesystemStorage>,
+    Arc<FileCostLedger>,
+    tempfile::TempDir,
+) {
+    let dir = tempdir().expect("Failed to create tempdir");
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let ledger_path = dir.path().join("telemetry/cost_ledger.json");
+    let ledger = Arc::new(FileCostLedger::new(&ledger_path));
+    let engine = Arc::new(MockBenchmarkEngine {
+        dummy_png: vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+    });
+    let benchmark_service = Arc::new(curator::services::BenchmarkService::with_cost_tracker(
+        engine,
+        storage.clone(),
+        ledger.clone(),
+    ));
+    let state = AppState::with_benchmark_service(storage.clone(), benchmark_service, ledger.clone());
+    let router = create_router(state);
+    (router, storage, ledger, dir)
+}
+
+#[tokio::test]
+async fn test_api_benchmark_validation() {
+    let (app, _storage, _ledger, _dir) = setup_benchmark_test_app();
+
+    // 1. Empty models should fail with 400
+    let req1 = Request::builder()
+        .uri("/api/benchmark/run")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({
+            "models": [],
+            "archetypes": ["stone-crypt"]
+        }).to_string()))
+        .unwrap();
+    let resp1 = app.clone().oneshot(req1).await.unwrap();
+    assert_eq!(resp1.status(), StatusCode::BAD_REQUEST);
+
+    // 2. Empty archetypes and custom_prompts should fail with 400
+    let req2 = Request::builder()
+        .uri("/api/benchmark/run")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({
+            "models": ["meta/muse-image"],
+            "archetypes": [],
+            "custom_prompts": []
+        }).to_string()))
+        .unwrap();
+    let resp2 = app.oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_api_benchmark_run_json_and_cost_recording() {
+    let (app, storage, ledger, _dir) = setup_benchmark_test_app();
+
+    let payload = json!({
+        "models": ["meta/muse-image"],
+        "archetypes": ["stone-crypt"],
+        "custom_prompts": [
+            {
+                "name": "Custom Crypt",
+                "prompt": "Flat 2D ancient dungeon crypt, gridless"
+            }
+        ]
+    });
+
+    let req = Request::builder()
+        .uri("/api/benchmark/run")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["total"], 2);
+    assert_eq!(json["completed"], 2);
+    assert!((json["total_cost_usd"].as_f64().unwrap() - 0.04).abs() < 1e-6);
+
+    // Verify staging discovered candidates
+    let candidates = storage.list_staging().expect("list staging succeeds");
+    assert_eq!(candidates.len(), 2);
+
+    // Verify cost ledger tracked both generations
+    let stats = ledger.get_stats().await.expect("stats succeeds");
+    assert_eq!(stats.total_generations, 2);
+    assert_eq!(stats.session_generations, 2);
+    assert!((stats.session_spend_usd - 0.04).abs() < 1e-6);
+
+    // Verify GET /api/cost/stats endpoint returns the spend
+    let stats_req = Request::builder()
+        .uri("/api/cost/stats")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let stats_resp = app.oneshot(stats_req).await.unwrap();
+    assert_eq!(stats_resp.status(), StatusCode::OK);
+    let stats_body = to_bytes(stats_resp.into_body(), usize::MAX).await.unwrap();
+    let stats_json: Value = serde_json::from_slice(&stats_body).unwrap();
+    assert_eq!(stats_json["total_generations"], 2);
+    assert!((stats_json["session_spend_usd"].as_f64().unwrap() - 0.04).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn test_api_benchmark_run_sse_streaming() {
+    let (app, _storage, _ledger, _dir) = setup_benchmark_test_app();
+
+    let payload = json!({
+        "models": ["meta/muse-image"],
+        "archetypes": ["stone-crypt"]
+    });
+
+    let req = Request::builder()
+        .uri("/api/benchmark/run")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "text/event-stream")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let content_type = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+    assert!(content_type.contains("text/event-stream"));
+
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body_str = String::from_utf8_lossy(&body);
+    assert!(body_str.contains("event: progress"));
+    assert!(body_str.contains("event: complete"));
+}
+
+#[tokio::test]
+async fn test_api_benchmark_cancel() {
+    let (app, _storage, _ledger, _dir) = setup_benchmark_test_app();
+
+    let req = Request::builder()
+        .uri("/api/benchmark/cancel")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "ok");
+}

@@ -1,5 +1,6 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use tracing::{error, info};
 
 use crate::adapters::reddit::{unescape_xml_entities, DEFAULT_USER_AGENT};
 use crate::domain::{
@@ -177,8 +178,28 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
         query: &RedditHarvestQuery,
         gridless_only: bool,
     ) -> Result<IngestionSummary, IngestionError> {
+        info!(
+            subreddit = %query.subreddit,
+            sort = %query.sort,
+            limit = query.limit,
+            gridless_only = gridless_only,
+            "Starting Reddit harvest"
+        );
         let posts = self.harvester.fetch_posts(query).await?;
-        self.ingest_posts_filtered(&posts, gridless_only).await
+        info!(
+            subreddit = %query.subreddit,
+            count = posts.len(),
+            "Fetched raw posts from Reddit"
+        );
+        let summary = self.ingest_posts_filtered(&posts, gridless_only).await?;
+        info!(
+            downloaded = summary.downloaded,
+            skipped = summary.skipped,
+            processed = summary.processed,
+            errors = 0,
+            "Reddit harvest completed"
+        );
+        Ok(summary)
     }
 
     /// Ingest battlemaps matching a Reddit query with real-time progress updates.
@@ -191,6 +212,13 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
     where
         F: FnMut(IngestionProgress) + Send,
     {
+        info!(
+            subreddit = %query.subreddit,
+            sort = %query.sort,
+            limit = query.limit,
+            gridless_only = gridless_only,
+            "Starting Reddit harvest"
+        );
         on_progress(IngestionProgress::new(
             "fetching",
             format!(
@@ -203,7 +231,20 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
             0,
         ));
 
-        let posts = self.harvester.fetch_posts(query).await?;
+        let posts = match self.harvester.fetch_posts(query).await {
+            Ok(posts) => {
+                info!(
+                    subreddit = %query.subreddit,
+                    count = posts.len(),
+                    "Fetched raw posts from Reddit"
+                );
+                posts
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to fetch posts from Reddit");
+                return Err(e.into());
+            }
+        };
         let total_items: usize = posts
             .iter()
             .map(|p| if p.media.is_empty() { 1 } else { p.media.len() })
@@ -226,6 +267,11 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
 
         for post in &posts {
             if post.media.is_empty() {
+                info!(
+                    post_id = %post.id,
+                    reason = "no_media",
+                    "Skipping post with no media"
+                );
                 summary.record_skipped();
                 on_progress(
                     IngestionProgress::new(
@@ -283,6 +329,13 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
                 }
             }
         }
+        info!(
+            downloaded = summary.downloaded,
+            skipped = summary.skipped,
+            processed = summary.processed,
+            errors = 0,
+            "Reddit harvest completed"
+        );
 
         on_progress(IngestionProgress::new(
             "complete",
@@ -336,6 +389,11 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
     ) -> Result<IngestionSummary, IngestionError> {
         let mut summary = IngestionSummary::default();
         if post.media.is_empty() {
+            info!(
+                post_id = %post.id,
+                reason = "no_media",
+                "Skipping post with no media"
+            );
             summary.record_skipped();
             return Ok(summary);
         }
@@ -380,6 +438,12 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
 
         // 0. Filter if gridless only requested and post is not gridless
         if gridless_only && !post.tags.is_gridless() {
+            info!(
+                post_id = %post.id,
+                candidate_id = %candidate_id,
+                reason = "not_gridless",
+                "Skipping post media: not gridless"
+            );
             return Ok(IngestionOutcome::Skipped {
                 id: candidate_id,
                 reason: SkipReason::NotGridless,
@@ -388,6 +452,12 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
 
         // 1. Check if candidate ID or post base ID has been rejected
         if self.storage.is_rejected(&candidate_id)? || self.storage.is_rejected(&post.id)? {
+            info!(
+                post_id = %post.id,
+                candidate_id = %candidate_id,
+                reason = "rejected",
+                "Skipping post media: previously rejected"
+            );
             return Ok(IngestionOutcome::Skipped {
                 id: candidate_id,
                 reason: SkipReason::Rejected,
@@ -396,6 +466,12 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
 
         // 2. Check if candidate ID or post base ID is already in staging
         if self.storage.is_in_staging(&candidate_id)? || self.storage.is_in_staging(&post.id)? {
+            info!(
+                post_id = %post.id,
+                candidate_id = %candidate_id,
+                reason = "already_in_staging",
+                "Skipping post media: already in staging"
+            );
             return Ok(IngestionOutcome::Skipped {
                 id: candidate_id,
                 reason: SkipReason::AlreadyInStaging,
@@ -404,6 +480,12 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
 
         // 3. Check if candidate ID or post base ID is already in curated
         if self.storage.is_curated(&candidate_id)? || self.storage.is_curated(&post.id)? {
+            info!(
+                post_id = %post.id,
+                candidate_id = %candidate_id,
+                reason = "already_curated",
+                "Skipping post media: already curated"
+            );
             return Ok(IngestionOutcome::Skipped {
                 id: candidate_id,
                 reason: SkipReason::AlreadyCurated,
@@ -436,6 +518,12 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
 
         // 6. Persist to data/staging/reddit/{reddit_id}.png and {reddit_id}.json
         self.storage.save_staging_reddit(&sidecar, &image_bytes)?;
+        info!(
+            post_id = %post.id,
+            title = %post.title,
+            candidate_id = %candidate_id,
+            "Downloaded and staged candidate image"
+        );
 
         Ok(IngestionOutcome::Downloaded(candidate_id))
     }

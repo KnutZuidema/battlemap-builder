@@ -187,6 +187,12 @@ pub async fn post_curate(
 
     state.storage.curate_staging(&curated)?;
 
+    tracing::info!(
+        id = %payload.id,
+        theme = %payload.theme,
+        "Curated candidate image"
+    );
+
     Ok(Json(CurateResponse {
         status: "ok",
         curated,
@@ -221,6 +227,12 @@ pub async fn post_reject(
     state
         .storage
         .reject_staging(&payload.id, payload.reason, payload.notes.as_deref())?;
+
+    tracing::info!(
+        id = %payload.id,
+        reason = ?payload.reason,
+        "Rejected candidate image"
+    );
 
     Ok(Json(RejectResponse {
         status: "ok",
@@ -263,6 +275,14 @@ pub async fn post_harvest_reddit(
     let query = payload.to_query();
     let gridless_only = payload.gridless_only;
     let service = RedditIngestionService::new(state.harvester.clone(), state.storage.clone());
+
+    tracing::info!(
+        subreddit = %query.subreddit,
+        sort = %query.sort,
+        limit = query.limit,
+        streaming = if is_sse { "SSE" } else { "JSON" },
+        "Handling Reddit harvest request"
+    );
 
     if is_sse {
         let (tx, rx) =

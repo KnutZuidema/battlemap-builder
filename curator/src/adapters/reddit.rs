@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{debug, warn};
+use tracing::{info, warn};
 
 use crate::domain::{
     HarvestedMedia, ParsedTags, RedditHarvestQuery, RedditPost,
@@ -297,7 +297,7 @@ impl RedditCrawler {
         &self,
         creds: &RedditCredentials,
     ) -> Result<CachedToken, HarvesterError> {
-        debug!(url = %self.token_url, "Requesting Reddit OAuth2 access token");
+        info!(url = %self.token_url, "Requesting Reddit OAuth2 access token");
 
         let res = self
             .client
@@ -319,6 +319,10 @@ impl RedditCrawler {
         }
 
         let token_resp: RedditTokenResponse = res.json().await?;
+        info!(
+            "Reddit OAuth2 access token acquired successfully (expires in {}s)",
+            token_resp.expires_in
+        );
         let expires_at = Instant::now() + Duration::from_secs(token_resp.expires_in);
 
         Ok(CachedToken {
@@ -583,7 +587,12 @@ impl RedditHarvester for RedditCrawler {
         let mut attempts = 0;
 
         loop {
-            debug!(attempt = attempts, url = %url, "Sending Reddit HTTP request");
+            info!(
+                url = %url,
+                authenticated = self.credentials.is_some(),
+                attempt = attempts,
+                "Dispatching Reddit API request"
+            );
 
             let mut req = self
                 .client

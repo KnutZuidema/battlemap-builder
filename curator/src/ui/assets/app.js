@@ -409,6 +409,65 @@
         updateHud();
     }
 
+    // ==========================================================================
+    // Viewport Panning Loop & Hotkey Controls
+    // ==========================================================================
+
+    const activePanKeys = { w: false, a: false, s: false, d: false };
+    let panAnimationId = null;
+    let lastPanTimestamp = 0;
+    const PAN_SPEED = 700; // pixels per second
+
+    function panLoop(timestamp) {
+        if (!lastPanTimestamp) lastPanTimestamp = timestamp;
+        const dt = Math.min((timestamp - lastPanTimestamp) / 1000, 0.1);
+        lastPanTimestamp = timestamp;
+
+        let moveX = 0;
+        let moveY = 0;
+        if (activePanKeys.w) moveY += 1;
+        if (activePanKeys.s) moveY -= 1;
+        if (activePanKeys.a) moveX += 1;
+        if (activePanKeys.d) moveX -= 1;
+
+        if (moveX !== 0 || moveY !== 0) {
+            if (moveX !== 0 && moveY !== 0) {
+                const invSqrt2 = 0.70710678;
+                moveX *= invSqrt2;
+                moveY *= invSqrt2;
+            }
+            if (state.currentImage) {
+                state.pan.x += moveX * PAN_SPEED * dt;
+                state.pan.y += moveY * PAN_SPEED * dt;
+                requestRender();
+                updateHud();
+            }
+            panAnimationId = requestAnimationFrame(panLoop);
+        } else {
+            panAnimationId = null;
+            lastPanTimestamp = 0;
+        }
+    }
+
+    function startPanLoop() {
+        if (!panAnimationId) {
+            lastPanTimestamp = performance.now();
+            panAnimationId = requestAnimationFrame(panLoop);
+        }
+    }
+
+    function stopPanLoop() {
+        if (panAnimationId) {
+            cancelAnimationFrame(panAnimationId);
+            panAnimationId = null;
+        }
+        lastPanTimestamp = 0;
+        activePanKeys.w = false;
+        activePanKeys.a = false;
+        activePanKeys.s = false;
+        activePanKeys.d = false;
+    }
+
     function panStep(dx, dy) {
         if (!state.currentImage) return;
         state.pan.x += dx;
@@ -666,6 +725,7 @@
     }
 
     function openRejectionModal() {
+        stopPanLoop();
         exitLabelingMode();
         if (state.currentIndex < 0 || state.currentIndex >= state.candidates.length) return;
         state.rejectionModalOpen = true;
@@ -679,6 +739,7 @@
     }
 
     function closeRejectionModal() {
+        stopPanLoop();
         state.rejectionModalOpen = false;
         rejectionModal.classList.add("hidden");
         canvas.focus();
@@ -702,6 +763,7 @@
     }
 
     function toggleHelpModal() {
+        stopPanLoop();
         state.helpModalOpen = !state.helpModalOpen;
         if (state.helpModalOpen) {
             helpModal.classList.remove("hidden");
@@ -712,6 +774,7 @@
     }
 
     function closeHelpModal() {
+        stopPanLoop();
         state.helpModalOpen = false;
         helpModal.classList.add("hidden");
         canvas.focus();
@@ -730,6 +793,7 @@
     }
 
     function openIngestionDrawer() {
+        stopPanLoop();
         if (state.rejectionModalOpen) closeRejectionModal();
         if (state.helpModalOpen) closeHelpModal();
         state.drawerOpen = true;
@@ -738,6 +802,7 @@
     }
 
     function closeIngestionDrawer() {
+        stopPanLoop();
         state.drawerOpen = false;
         ingestionDrawer?.classList.add("hidden");
         canvas.focus();
@@ -933,6 +998,7 @@
     }
 
     function openBenchmarkDrawer() {
+        stopPanLoop();
         if (state.rejectionModalOpen) closeRejectionModal();
         if (state.helpModalOpen) closeHelpModal();
         if (state.drawerOpen) closeIngestionDrawer();
@@ -942,12 +1008,14 @@
     }
 
     function closeBenchmarkDrawer() {
+        stopPanLoop();
         state.benchmarkDrawerOpen = false;
         benchmarkDrawer?.classList.add("hidden");
         canvas.focus();
     }
 
     function openBudgetGuardModal(estimatedCost, modelCount, promptCount, totalImages) {
+        stopPanLoop();
         state.budgetGuardModalOpen = true;
         const costStr = `$${estimatedCost.toFixed(2)}`;
         if (budgetGuardCostAmount) budgetGuardCostAmount.textContent = costStr;
@@ -961,6 +1029,7 @@
     }
 
     function closeBudgetGuardModal() {
+        stopPanLoop();
         state.budgetGuardModalOpen = false;
         budgetGuardModal?.classList.add("hidden");
     }
@@ -988,6 +1057,7 @@
     // ==========================================================================
 
     function openBenchmarkProgressWindow(metrics) {
+        stopPanLoop();
         state.benchmarkWindowMinimized = false;
         benchmarkWindowPill?.classList.add("hidden");
         benchmarkProgressWindow?.classList.remove("hidden");
@@ -1720,6 +1790,14 @@
 
         // --- Keyboard Hotkey Dispatcher ---
         window.addEventListener("keydown", handleKeydown);
+        window.addEventListener("keyup", handleKeyup);
+        window.addEventListener("blur", stopPanLoop);
+        window.addEventListener("focusin", (e) => {
+            const tag = e.target?.tagName?.toLowerCase();
+            if (tag === "input" || tag === "textarea" || tag === "select") {
+                stopPanLoop();
+            }
+        });
     }
 
     function handleKeydown(e) {
@@ -1728,6 +1806,7 @@
 
         // Global Modal Dismiss: Escape
         if (e.key === "Escape") {
+            stopPanLoop();
             if (state.labelingMode) {
                 exitLabelingMode();
                 e.preventDefault();
@@ -1858,24 +1937,13 @@
         }
 
         // Viewport Panning: WASD
-        if (!e.ctrlKey && !e.metaKey && !e.altKey) {
-            if (e.key === "w" || e.key === "W") {
-                panStep(0, 64);
-                e.preventDefault();
-                return;
-            }
-            if (e.key === "a" || e.key === "A") {
-                panStep(64, 0);
-                e.preventDefault();
-                return;
-            }
-            if (e.key === "s" || e.key === "S") {
-                panStep(0, -64);
-                e.preventDefault();
-                return;
-            }
-            if (e.key === "d" || e.key === "D") {
-                panStep(-64, 0);
+        if (!isInputFocused && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            const key = e.key.toLowerCase();
+            if (key === "w" || key === "a" || key === "s" || key === "d") {
+                if (!activePanKeys[key]) {
+                    activePanKeys[key] = true;
+                    startPanLoop();
+                }
                 e.preventDefault();
                 return;
             }
@@ -1922,6 +1990,16 @@
         }
     }
 
+    function handleKeyup(e) {
+        const key = e.key.toLowerCase();
+        if (key === "w" || key === "a" || key === "s" || key === "d") {
+            activePanKeys[key] = false;
+            if (!activePanKeys.w && !activePanKeys.a && !activePanKeys.s && !activePanKeys.d) {
+                stopPanLoop();
+            }
+        }
+    }
+
     function toggleGrid() {
         state.gridVisible = !state.gridVisible;
         if (state.gridVisible) {
@@ -1935,6 +2013,7 @@
     }
 
     function enterLabelingMode(mode) {
+        stopPanLoop();
         state.labelingMode = mode;
         const themeSelector = document.getElementById("theme-selector");
         const ratingSelector = document.getElementById("rating-selector");
@@ -1951,6 +2030,7 @@
     }
 
     function exitLabelingMode() {
+        stopPanLoop();
         state.labelingMode = null;
         const themeSelector = document.getElementById("theme-selector");
         const ratingSelector = document.getElementById("rating-selector");

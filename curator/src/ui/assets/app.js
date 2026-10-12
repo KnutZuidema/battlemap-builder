@@ -1860,22 +1860,22 @@
         // Viewport Panning: WASD
         if (!e.ctrlKey && !e.metaKey && !e.altKey) {
             if (e.key === "w" || e.key === "W") {
-                panStep(0, -64);
-                e.preventDefault();
-                return;
-            }
-            if (e.key === "a" || e.key === "A") {
-                panStep(-64, 0);
-                e.preventDefault();
-                return;
-            }
-            if (e.key === "s" || e.key === "S") {
                 panStep(0, 64);
                 e.preventDefault();
                 return;
             }
-            if (e.key === "d" || e.key === "D") {
+            if (e.key === "a" || e.key === "A") {
                 panStep(64, 0);
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "s" || e.key === "S") {
+                panStep(0, -64);
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "d" || e.key === "D") {
+                panStep(-64, 0);
                 e.preventDefault();
                 return;
             }

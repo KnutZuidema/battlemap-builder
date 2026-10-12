@@ -133,10 +133,10 @@ mod tests {
         assert!(js.contains("fitToScreen"));
         assert!(js.contains("panStep"));
         assert!(js.contains("zoomStep"));
-        assert!(js.contains("panStep(0, -64)"));
-        assert!(js.contains("panStep(-64, 0)"));
         assert!(js.contains("panStep(0, 64)"));
         assert!(js.contains("panStep(64, 0)"));
+        assert!(js.contains("panStep(0, -64)"));
+        assert!(js.contains("panStep(-64, 0)"));
         // In-memory prefetching
         assert!(js.contains("imageCache"));
         assert!(js.contains("prefetchUpcoming"));

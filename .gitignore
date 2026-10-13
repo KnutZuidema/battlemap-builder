@@ -7,6 +7,7 @@ client/dist/
 # Secrets — the server key lives in server/.env, never in the repo
 .env
 *.local
+deploy/curator/secret.yaml
 
 # OS noise
 .DS_Store

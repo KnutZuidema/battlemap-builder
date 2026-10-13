@@ -1,0 +1,83 @@
+name: Curator CD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'curator/**'
+      - 'deploy/curator/**'
+      - '.github/workflows/curator-cd.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: ${{ github.repository_owner }}/curator
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: curator/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/curator:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/curator:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Deploy to Kubernetes Cluster
+        if: "${{ env.KUBECONFIG_EXISTS != '' }}"
+        env:
+          KUBECONFIG_EXISTS: ${{ secrets.KUBECONFIG }}
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG }}" > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+          # Apply base infrastructure
+          kubectl apply -f deploy/curator/namespace.yaml
+          kubectl apply -f deploy/curator/pvc.yaml
+          kubectl apply -f deploy/curator/service.yaml
+
+          # Create/update ghcr-secret using current GITHUB_TOKEN
+          kubectl create secret docker-registry ghcr-secret \
+            --namespace=curator \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # Apply deployment with current immutable image tag
+          IMAGE_TAG="ghcr.io/${{ github.repository_owner }}/curator:${{ github.sha }}"
+          kubectl set image -f deploy/curator/deployment.yaml curator="${IMAGE_TAG}" --local -o yaml | kubectl apply -f -
+
+          # Verify rollout status
+          kubectl rollout status deployment/curator -n curator --timeout=180s

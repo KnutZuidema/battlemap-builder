@@ -1,0 +1,33 @@
+set shell := ["bash", "-uc"]
+
+# Apply all manifests and wait for rollout
+deploy:
+    kubectl apply -f namespace.yaml
+    kubectl apply -f pvc.yaml
+    if [ -f secret.yaml ]; then kubectl apply -f secret.yaml; fi
+    kubectl apply -f deployment.yaml
+    kubectl apply -f service.yaml
+    kubectl rollout status deployment/curator -n curator
+
+# View resource status
+status:
+    kubectl get all,pvc -n curator
+
+# View pod logs
+logs:
+    kubectl logs -n curator deployment/curator
+
+# Follow pod logs
+tail-logs:
+    kubectl logs -n curator deployment/curator -f
+
+# Port-forward curator service to localhost:3002
+port-forward:
+    kubectl port-forward service/curator 3002:3002 -n curator
+
+# Delete deployed manifests
+delete:
+    kubectl delete -f service.yaml --ignore-not-found
+    kubectl delete -f deployment.yaml --ignore-not-found
+    kubectl delete -f pvc.yaml --ignore-not-found
+    kubectl delete -f namespace.yaml --ignore-not-found

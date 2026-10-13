@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REGISTRY: ghcr.io
-      IMAGE_NAME: ${{ github.repository_owner }}/curator
+      IMAGE_NAME: knutzuidema/curator
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -45,8 +45,8 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/curator:${{ github.sha }}
-            ghcr.io/${{ github.repository_owner }}/curator:latest
+            ghcr.io/knutzuidema/curator:${{ github.sha }}
+            ghcr.io/knutzuidema/curator:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -54,9 +54,7 @@ jobs:
         uses: azure/setup-kubectl@v4
 
       - name: Deploy to Kubernetes Cluster
-        if: "${{ env.KUBECONFIG_EXISTS != '' }}"
-        env:
-          KUBECONFIG_EXISTS: ${{ secrets.KUBECONFIG }}
+        if: ${{ secrets.KUBECONFIG != '' }}
         run: |
           mkdir -p $HOME/.kube
           echo "${{ secrets.KUBECONFIG }}" > $HOME/.kube/config
@@ -76,7 +74,7 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
 
           # Apply deployment with current immutable image tag
-          IMAGE_TAG="ghcr.io/${{ github.repository_owner }}/curator:${{ github.sha }}"
+          IMAGE_TAG="ghcr.io/knutzuidema/curator:${{ github.sha }}"
           kubectl set image -f deploy/curator/deployment.yaml curator="${IMAGE_TAG}" --local -o yaml | kubectl apply -f -
 
           # Verify rollout status

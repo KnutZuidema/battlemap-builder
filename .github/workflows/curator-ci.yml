@@ -1,0 +1,59 @@
+name: Curator CI
+
+on:
+  pull_request:
+    paths:
+      - 'curator/**'
+      - 'deploy/curator/**'
+      - '.github/workflows/curator-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: curator -> target
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
+
+      - name: Check & Test
+        run: cargo test --manifest-path curator/Cargo.toml
+
+      - name: Clippy
+        run: cargo clippy --manifest-path curator/Cargo.toml -- -D warnings
+
+  build-container:
+    name: Build Container
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Test build container image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: curator/Dockerfile
+          platforms: linux/arm64,linux/amd64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

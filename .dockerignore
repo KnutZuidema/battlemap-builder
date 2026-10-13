@@ -1,0 +1,20 @@
+# Target directories and build outputs
+curator/target
+target/
+dist
+node_modules
+
+# Data directory
+data/
+
+# Environment and secrets
+.env*
+
+# Git and CI/CD
+.git
+.gitignore
+.github
+
+# Logs and OS metadata
+*.log
+.DS_Store

@@ -5,9 +5,10 @@ use axum::routing::{get, post};
 use axum::Router;
 use base64::prelude::*;
 use curator::adapters::reddit::{
-    BackoffConfig, RedditAuthStrategy, RedditCrawler, RedditCredentials,
-    DEFAULT_REDDIT_BASE_URL, DEFAULT_REDDIT_OAUTH_BASE_URL,
+    parse_rate_limit_delay, BackoffConfig, RedditAuthStrategy, RedditCrawler,
+    RedditCredentials, DEFAULT_REDDIT_BASE_URL, DEFAULT_REDDIT_OAUTH_BASE_URL,
     DEFAULT_REDDIT_PUBLIC_CLIENT_ID, DEFAULT_REDDIT_TOKEN_URL, DEFAULT_USER_AGENT,
+    MAX_RATE_LIMIT_DELAY,
 };
 use curator::domain::{GridStatus, RedditHarvestQuery, RedditSort, RedditTimeRange};
 use curator::ports::harvester::{HarvesterError, RedditHarvester};
@@ -807,4 +808,267 @@ async fn test_refresh_token_builder_and_from_env_configuration() {
     std::env::remove_var("REDDIT_REFRESH_TOKEN");
     std::env::remove_var("REDDIT_CLIENT_ID");
     std::env::remove_var("REDDIT_CLIENT_SECRET");
+}
+
+#[test]
+fn test_parse_rate_limit_delay_scenarios() {
+    use reqwest::header::{HeaderMap, HeaderValue};
+
+    let fallback = Duration::from_secs(3);
+
+    // 1. Neither header present -> fallback delay returned
+    let headers = HeaderMap::new();
+    assert_eq!(parse_rate_limit_delay(&headers, fallback), Duration::from_secs(3));
+
+    // 2. Retry-After with integer seconds
+    let mut headers = HeaderMap::new();
+    headers.insert("Retry-After", HeaderValue::from_static("10"));
+    assert_eq!(parse_rate_limit_delay(&headers, fallback), Duration::from_secs(10));
+
+    // When Retry-After is smaller than fallback, max(header, fallback) is taken
+    let mut headers = HeaderMap::new();
+    headers.insert("Retry-After", HeaderValue::from_static("1"));
+    assert_eq!(parse_rate_limit_delay(&headers, fallback), Duration::from_secs(3));
+
+    // 3. Retry-After with float seconds
+    let mut headers = HeaderMap::new();
+    headers.insert("Retry-After", HeaderValue::from_static("4.2"));
+    assert_eq!(parse_rate_limit_delay(&headers, fallback), Duration::from_secs(5));
+
+    // 4. X-Ratelimit-Reset with integer seconds
+    let mut headers = HeaderMap::new();
+    headers.insert("x-ratelimit-reset", HeaderValue::from_static("45"));
+    assert_eq!(parse_rate_limit_delay(&headers, fallback), Duration::from_secs(45));
+
+    // Standard casing
+    let mut headers = HeaderMap::new();
+    headers.insert("X-Ratelimit-Reset", HeaderValue::from_static("20"));
+    assert_eq!(parse_rate_limit_delay(&headers, fallback), Duration::from_secs(20));
+
+    // 5. X-Ratelimit-Reset with float seconds (rounded up using .ceil() as u64)
+    let mut headers = HeaderMap::new();
+    headers.insert("x-ratelimit-reset", HeaderValue::from_static("14.2"));
+    assert_eq!(parse_rate_limit_delay(&headers, fallback), Duration::from_secs(15));
+
+    let mut headers = HeaderMap::new();
+    headers.insert("X-Ratelimit-Reset", HeaderValue::from_static("0.1"));
+    assert_eq!(parse_rate_limit_delay(&headers, Duration::from_secs(0)), Duration::from_secs(1));
+
+    // 6. Both Retry-After and X-Ratelimit-Reset present (takes the max of both and fallback)
+    let mut headers = HeaderMap::new();
+    headers.insert("Retry-After", HeaderValue::from_static("10"));
+    headers.insert("x-ratelimit-reset", HeaderValue::from_static("25.3"));
+    assert_eq!(parse_rate_limit_delay(&headers, fallback), Duration::from_secs(26));
+
+    let mut headers = HeaderMap::new();
+    headers.insert("Retry-After", HeaderValue::from_static("50"));
+    headers.insert("x-ratelimit-reset", HeaderValue::from_static("12"));
+    assert_eq!(parse_rate_limit_delay(&headers, fallback), Duration::from_secs(50));
+
+    // 7. Clamped to upper bound of 300 seconds (5 minutes)
+    let mut headers = HeaderMap::new();
+    headers.insert("Retry-After", HeaderValue::from_static("9999"));
+    assert_eq!(parse_rate_limit_delay(&headers, fallback), Duration::from_secs(300));
+    assert_eq!(parse_rate_limit_delay(&headers, fallback), MAX_RATE_LIMIT_DELAY);
+
+    let mut headers = HeaderMap::new();
+    headers.insert("x-ratelimit-reset", HeaderValue::from_static("1200.5"));
+    assert_eq!(parse_rate_limit_delay(&headers, fallback), Duration::from_secs(300));
+
+    // Fallback itself exceeding 300s is also clamped
+    let headers = HeaderMap::new();
+    assert_eq!(
+        parse_rate_limit_delay(&headers, Duration::from_secs(600)),
+        Duration::from_secs(300)
+    );
+
+    // 8. Invalid or negative headers are ignored, falling back safely
+    let mut headers = HeaderMap::new();
+    headers.insert("Retry-After", HeaderValue::from_static("invalid_delay"));
+    assert_eq!(parse_rate_limit_delay(&headers, fallback), Duration::from_secs(3));
+
+    let mut headers = HeaderMap::new();
+    headers.insert("x-ratelimit-reset", HeaderValue::from_static("-10.5"));
+    assert_eq!(parse_rate_limit_delay(&headers, fallback), Duration::from_secs(3));
+}
+
+#[tokio::test]
+async fn test_fetch_access_token_429_backoff_and_recovery() {
+    let attempts = Arc::new(AtomicU32::new(0));
+    let attempts_clone = attempts.clone();
+
+    let app = Router::new().route(
+        "/api/v1/access_token",
+        post(move || {
+            let attempts = attempts_clone.clone();
+            async move {
+                let count = attempts.fetch_add(1, Ordering::SeqCst);
+                if count < 2 {
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("Retry-After", "0"), ("X-Ratelimit-Reset", "0.01")],
+                        "Rate limited",
+                    )
+                        .into_response()
+                } else {
+                    let resp = serde_json::json!({
+                        "access_token": "token_recovered_after_429",
+                        "token_type": "bearer",
+                        "expires_in": 3600
+                    });
+                    (StatusCode::OK, resp.to_string()).into_response()
+                }
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let token_url = format!("http://{}/api/v1/access_token", addr);
+    let backoff = BackoffConfig::new(Duration::from_millis(5), 3, 2.0);
+    let crawler = RedditCrawler::new()
+        .with_token_url(token_url)
+        .with_client_credentials("test_id", "test_secret")
+        .with_backoff(backoff);
+
+    let token = crawler
+        .get_or_refresh_token()
+        .await
+        .expect("OAuth token acquired after retry");
+    assert_eq!(token, "token_recovered_after_429");
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn test_fetch_access_token_429_exhausted_retries() {
+    let attempts = Arc::new(AtomicU32::new(0));
+    let attempts_clone = attempts.clone();
+
+    let app = Router::new().route(
+        "/api/v1/access_token",
+        post(move || {
+            let attempts = attempts_clone.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [("Retry-After", "0")],
+                    "Always rate limited",
+                )
+                    .into_response()
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let token_url = format!("http://{}/api/v1/access_token", addr);
+    let backoff = BackoffConfig::new(Duration::from_millis(5), 2, 2.0);
+    let crawler = RedditCrawler::new()
+        .with_token_url(token_url)
+        .with_client_credentials("test_id", "test_secret")
+        .with_backoff(backoff);
+
+    let err = crawler
+        .get_or_refresh_token()
+        .await
+        .expect_err("should exhaust retries");
+    match err {
+        HarvesterError::RateLimited { retries } => {
+            assert_eq!(retries, 2);
+        }
+        other => panic!("expected HarvesterError::RateLimited, got: {other:?}"),
+    }
+    assert_eq!(attempts.load(Ordering::SeqCst), 3); // initial + 2 retries
+}
+
+#[tokio::test]
+async fn test_fetch_posts_rate_limit_with_x_ratelimit_reset_header() {
+    let attempts = Arc::new(AtomicU32::new(0));
+    let attempts_clone = attempts.clone();
+
+    let app = Router::new().route(
+        "/r/battlemaps/hot.json",
+        get(move || {
+            let attempts = attempts_clone.clone();
+            async move {
+                let count = attempts.fetch_add(1, Ordering::SeqCst);
+                if count < 1 {
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("X-Ratelimit-Reset", "0.01")],
+                        "Rate limited with reset header",
+                    )
+                        .into_response()
+                } else {
+                    (StatusCode::OK, MOCK_LISTING_JSON).into_response()
+                }
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let base_url = format!("http://{}", addr);
+    let backoff = BackoffConfig::new(Duration::from_millis(5), 3, 2.0);
+    let crawler = RedditCrawler::new()
+        .with_base_url(base_url)
+        .with_backoff(backoff);
+
+    let query = RedditHarvestQuery::battlemaps().with_sort(RedditSort::Hot);
+
+    let posts = crawler
+        .fetch_posts(&query)
+        .await
+        .expect("succeeds after backoff driven by x-ratelimit-reset");
+    assert_eq!(posts.len(), 2);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn test_backoff_config_from_env_configuration() {
+    let _guard = ENV_TEST_MUTEX.lock().await;
+
+    // 1. Defaults when environment variables are not set
+    std::env::remove_var("REDDIT_BACKOFF_INITIAL_SECS");
+    std::env::remove_var("REDDIT_BACKOFF_MAX_RETRIES");
+    std::env::remove_var("REDDIT_BACKOFF_FACTOR");
+
+    let default_crawler = RedditCrawler::from_env();
+    assert_eq!(
+        default_crawler.backoff().initial_delay,
+        Duration::from_secs(3)
+    );
+    assert_eq!(default_crawler.backoff().max_retries, 5);
+    assert_eq!(default_crawler.backoff().backoff_factor, 2.0);
+
+    // 2. Custom environment variable configuration
+    std::env::set_var("REDDIT_BACKOFF_INITIAL_SECS", "10");
+    std::env::set_var("REDDIT_BACKOFF_MAX_RETRIES", "7");
+    std::env::set_var("REDDIT_BACKOFF_FACTOR", "2.5");
+
+    let custom_crawler = RedditCrawler::from_env();
+    assert_eq!(
+        custom_crawler.backoff().initial_delay,
+        Duration::from_secs(10)
+    );
+    assert_eq!(custom_crawler.backoff().max_retries, 7);
+    assert_eq!(custom_crawler.backoff().backoff_factor, 2.5);
+
+    // Clean up
+    std::env::remove_var("REDDIT_BACKOFF_INITIAL_SECS");
+    std::env::remove_var("REDDIT_BACKOFF_MAX_RETRIES");
+    std::env::remove_var("REDDIT_BACKOFF_FACTOR");
 }

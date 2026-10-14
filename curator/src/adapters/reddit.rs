@@ -82,7 +82,7 @@ impl Default for BackoffConfig {
     fn default() -> Self {
         Self {
             initial_delay: Duration::from_secs(3),
-            max_retries: 3,
+            max_retries: 5,
             backoff_factor: 2.0,
         }
     }
@@ -102,6 +102,55 @@ impl BackoffConfig {
         let factor = self.backoff_factor.powi(attempt as i32);
         self.initial_delay.mul_f64(factor)
     }
+}
+
+/// Maximum delay allowed for rate limit backoff (5 minutes).
+pub const MAX_RATE_LIMIT_DELAY: Duration = Duration::from_secs(300);
+
+/// Parse rate limit delay from HTTP response headers, inspecting `Retry-After`
+/// and `X-Ratelimit-Reset` (or `x-ratelimit-reset`), taking the maximum of any valid
+/// header delay and `fallback_delay`, clamped to at most 300 seconds.
+pub fn parse_rate_limit_delay(
+    headers: &reqwest::header::HeaderMap,
+    fallback_delay: Duration,
+) -> Duration {
+    let mut delay = fallback_delay;
+
+    fn parse_seconds_header(val: &reqwest::header::HeaderValue) -> Option<Duration> {
+        let s = val.to_str().ok()?.trim();
+        if let Ok(secs) = s.parse::<u64>() {
+            Some(Duration::from_secs(secs))
+        } else if let Ok(secs_f) = s.parse::<f64>() {
+            if secs_f.is_finite() && secs_f >= 0.0 {
+                Some(Duration::from_secs(secs_f.ceil() as u64))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    if let Some(val) = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .or_else(|| headers.get("retry-after"))
+        .or_else(|| headers.get("Retry-After"))
+    {
+        if let Some(parsed) = parse_seconds_header(val) {
+            delay = delay.max(parsed);
+        }
+    }
+
+    if let Some(val) = headers
+        .get("x-ratelimit-reset")
+        .or_else(|| headers.get("X-Ratelimit-Reset"))
+    {
+        if let Some(parsed) = parse_seconds_header(val) {
+            delay = delay.max(parsed);
+        }
+    }
+
+    delay.min(MAX_RATE_LIMIT_DELAY)
 }
 
 /// Crawler and harvester adapter for public and authenticated Reddit JSON endpoints.
@@ -147,6 +196,9 @@ impl RedditCrawler {
     /// - `REDDIT_BASE_URL`: override unauthenticated base URL
     /// - `REDDIT_OAUTH_BASE_URL`: override OAuth base URL
     /// - `REDDIT_TOKEN_URL`: override OAuth token endpoint URL
+    /// - `REDDIT_BACKOFF_INITIAL_SECS`: initial backoff delay in seconds (default: 3)
+    /// - `REDDIT_BACKOFF_MAX_RETRIES`: maximum backoff retry attempts (default: 5)
+    /// - `REDDIT_BACKOFF_FACTOR`: exponential backoff multiplier (default: 2.0)
     pub fn from_env() -> Self {
         let mut crawler = Self::new();
 
@@ -197,6 +249,24 @@ impl RedditCrawler {
             let token_url = token_url.trim();
             if !token_url.is_empty() {
                 crawler = crawler.with_token_url(token_url);
+            }
+        }
+
+        if let Ok(initial_secs_str) = std::env::var("REDDIT_BACKOFF_INITIAL_SECS") {
+            if let Ok(secs) = initial_secs_str.trim().parse::<u64>() {
+                crawler.backoff.initial_delay = Duration::from_secs(secs);
+            }
+        }
+
+        if let Ok(max_retries_str) = std::env::var("REDDIT_BACKOFF_MAX_RETRIES") {
+            if let Ok(retries) = max_retries_str.trim().parse::<u32>() {
+                crawler.backoff.max_retries = retries;
+            }
+        }
+
+        if let Ok(factor_str) = std::env::var("REDDIT_BACKOFF_FACTOR") {
+            if let Ok(factor) = factor_str.trim().parse::<f64>() {
+                crawler.backoff.backoff_factor = factor;
             }
         }
 
@@ -363,58 +433,85 @@ impl RedditCrawler {
     ) -> Result<CachedToken, HarvesterError> {
         info!(url = %self.token_url, "Requesting Reddit OAuth2 access token");
 
-        let req = match auth {
-            RedditAuthStrategy::ClientCredentials(creds) => self
-                .client
-                .post(&self.token_url)
-                .basic_auth(&creds.client_id, Some(&creds.client_secret))
-                .header(reqwest::header::USER_AGENT, &self.user_agent)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .form(&[("grant_type", "client_credentials")]),
-            RedditAuthStrategy::RefreshToken {
-                client_id,
-                refresh_token,
-            } => self
-                .client
-                .post(&self.token_url)
-                .basic_auth(client_id, Some(""))
-                .header(reqwest::header::USER_AGENT, &self.user_agent)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .form(&[
-                    ("grant_type", "refresh_token"),
-                    ("refresh_token", refresh_token),
-                ]),
-        };
+        let mut delay = self.backoff.initial_delay;
+        let mut attempts = 0;
 
-        let res = req.send().await?;
+        loop {
+            let req = match auth {
+                RedditAuthStrategy::ClientCredentials(creds) => self
+                    .client
+                    .post(&self.token_url)
+                    .basic_auth(&creds.client_id, Some(&creds.client_secret))
+                    .header(reqwest::header::USER_AGENT, &self.user_agent)
+                    .header(reqwest::header::ACCEPT, "application/json")
+                    .form(&[("grant_type", "client_credentials")]),
+                RedditAuthStrategy::RefreshToken {
+                    client_id,
+                    refresh_token,
+                } => self
+                    .client
+                    .post(&self.token_url)
+                    .basic_auth(client_id, Some(""))
+                    .header(reqwest::header::USER_AGENT, &self.user_agent)
+                    .header(reqwest::header::ACCEPT, "application/json")
+                    .form(&[
+                        ("grant_type", "refresh_token"),
+                        ("refresh_token", refresh_token),
+                    ]),
+            };
 
-        let status = res.status();
-        if !status.is_success() {
-            let body = res.text().await.unwrap_or_default();
-            return Err(HarvesterError::InvalidResponse(format!(
-                "Failed to obtain Reddit OAuth access token (HTTP {status}) for URL {}: {body}",
-                self.token_url
-            )));
+            let res = req.send().await?;
+
+            let status = res.status();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                if attempts >= self.backoff.max_retries {
+                    warn!(
+                        retries = attempts,
+                        "Exceeded max retries requesting Reddit OAuth token after HTTP 429 rate limit"
+                    );
+                    return Err(HarvesterError::RateLimited { retries: attempts });
+                }
+
+                let wait_time = parse_rate_limit_delay(res.headers(), delay);
+                warn!(
+                    attempt = attempts,
+                    wait_secs = ?wait_time,
+                    "Received HTTP 429 Too Many Requests while requesting Reddit OAuth token; backing off"
+                );
+
+                tokio::time::sleep(wait_time).await;
+                delay = delay.mul_f64(self.backoff.backoff_factor);
+                attempts += 1;
+                continue;
+            }
+
+            if !status.is_success() {
+                let body = res.text().await.unwrap_or_default();
+                return Err(HarvesterError::InvalidResponse(format!(
+                    "Failed to obtain Reddit OAuth access token (HTTP {status}) for URL {}: {body}",
+                    self.token_url
+                )));
+            }
+
+            let token_resp: RedditTokenResponse = res.json().await?;
+            info!(
+                "Reddit OAuth2 access token acquired successfully (expires in {}s)",
+                token_resp.expires_in
+            );
+
+            const TOKEN_SAFETY_BUFFER_SECS: u64 = 60;
+            let ttl = if token_resp.expires_in > TOKEN_SAFETY_BUFFER_SECS {
+                Duration::from_secs(token_resp.expires_in - TOKEN_SAFETY_BUFFER_SECS)
+            } else {
+                Duration::from_secs(token_resp.expires_in)
+            };
+            let expires_at = Instant::now() + ttl;
+
+            return Ok(CachedToken {
+                access_token: token_resp.access_token,
+                expires_at,
+            });
         }
-
-        let token_resp: RedditTokenResponse = res.json().await?;
-        info!(
-            "Reddit OAuth2 access token acquired successfully (expires in {}s)",
-            token_resp.expires_in
-        );
-
-        const TOKEN_SAFETY_BUFFER_SECS: u64 = 60;
-        let ttl = if token_resp.expires_in > TOKEN_SAFETY_BUFFER_SECS {
-            Duration::from_secs(token_resp.expires_in - TOKEN_SAFETY_BUFFER_SECS)
-        } else {
-            Duration::from_secs(token_resp.expires_in)
-        };
-        let expires_at = Instant::now() + ttl;
-
-        Ok(CachedToken {
-            access_token: token_resp.access_token,
-            expires_at,
-        })
     }
 
     /// Construct the full target URL for querying Reddit listings.
@@ -702,18 +799,7 @@ impl RedditHarvester for RedditCrawler {
                     return Err(HarvesterError::RateLimited { retries: attempts });
                 }
 
-                // Check Retry-After header if supplied by server
-                let wait_time =
-                    if let Some(retry_after) = res.headers().get(reqwest::header::RETRY_AFTER) {
-                        if let Ok(secs) = retry_after.to_str().unwrap_or("").parse::<u64>() {
-                            Duration::from_secs(secs).max(delay)
-                        } else {
-                            delay
-                        }
-                    } else {
-                        delay
-                    };
-
+                let wait_time = parse_rate_limit_delay(res.headers(), delay);
                 warn!(
                     attempt = attempts,
                     wait_secs = ?wait_time,

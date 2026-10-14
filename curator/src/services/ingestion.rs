@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
@@ -8,9 +7,7 @@ pub use crate::adapters::reddit::BackoffConfig;
 use crate::adapters::reddit::{
     parse_rate_limit_delay, unescape_xml_entities, DEFAULT_USER_AGENT,
 };
-use crate::domain::{
-    format_source_url, RedditHarvestQuery, RedditPost, RedditSidecarMetadata, Source,
-};
+use crate::domain::{RedditHarvestQuery, RedditPost};
 use crate::ports::harvester::{HarvesterError, RedditHarvester};
 use crate::ports::storage::{StorageError, StorageRepository};
 /// Summary of an ingestion execution.
@@ -54,6 +51,7 @@ pub enum SkipReason {
     InvalidMediaIndex,
     NotGridless,
     DownloadFailed,
+    Duplicate,
 }
 
 /// Progress event emitted during Reddit harvesting pipeline execution.
@@ -300,10 +298,7 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
                 return Err(e.into());
             }
         };
-        let total_items: usize = posts
-            .iter()
-            .map(|p| if p.media.is_empty() { 1 } else { p.media.len() })
-            .sum();
+        let total_items = posts.len();
 
         if posts.is_empty() {
             let summary = IngestionSummary::default();
@@ -321,115 +316,86 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
         let mut summary = IngestionSummary::default();
 
         for post in &posts {
-            if post.media.is_empty() {
-                info!(
-                    post_id = %post.id,
-                    reason = "no_media",
-                    "Skipping post with no media"
-                );
-                summary.record_skipped();
-                on_progress(
-                    IngestionProgress::new(
-                        "skipped",
-                        format!(
-                            "Harvesting: {}/{} maps downloaded ({} duplicates skipped)...",
-                            summary.downloaded, total_items, summary.skipped
-                        ),
-                        summary.processed,
-                        summary.downloaded,
-                        summary.skipped,
-                        total_items,
-                    )
-                    .with_candidate_id(post.id.clone()),
-                );
-                continue;
-            }
-
-            for idx in 0..post.media.len() {
-                let mut rate_limit_hook =
-                    |cid: &str, wait_time: Duration, attempt: u32, max_retries: u32| {
-                        let wait_secs =
-                            if wait_time.as_secs() == 0 && wait_time.subsec_millis() == 0 {
-                                0
-                            } else {
-                                wait_time.as_secs().max(1)
-                            };
-                        on_progress(
-                            IngestionProgress::new(
-                                "rate_limited",
-                                format!(
-                                    "Rate limited downloading candidate {cid}; waiting {wait_secs}s (attempt {attempt}/{max_retries})..."
-                                ),
-                                summary.processed,
-                                summary.downloaded,
-                                summary.skipped,
-                                total_items,
-                            )
-                            .with_candidate_id(cid)
-                            .with_rate_limit(wait_secs, attempt, max_retries),
-                        );
-                    };
-
-                let outcome = match self
-                    .ingest_media_filtered_inner(
-                        post,
-                        idx,
-                        gridless_only,
-                        Some(&mut rate_limit_hook),
-                    )
-                    .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(e) => {
-                        warn!(
-                            post_id = %post.id,
-                            media_index = idx,
-                            error = %e,
-                            "Image ingestion failed, skipping candidate"
-                        );
-                        let cid = candidate_id_for_post(&post.id, idx, post.media.len());
-                        IngestionOutcome::Skipped {
-                            id: cid,
-                            reason: SkipReason::DownloadFailed,
-                        }
-                    }
+            let mut rate_limit_hook =
+                |cid: &str, wait_time: Duration, attempt: u32, max_retries: u32| {
+                    let wait_secs =
+                        if wait_time.as_secs() == 0 && wait_time.subsec_millis() == 0 {
+                            0
+                        } else {
+                            wait_time.as_secs().max(1)
+                        };
+                    on_progress(
+                        IngestionProgress::new(
+                            "rate_limited",
+                            format!(
+                                "Rate limited downloading candidate {cid}; waiting {wait_secs}s (attempt {attempt}/{max_retries})..."
+                            ),
+                            summary.processed,
+                            summary.downloaded,
+                            summary.skipped,
+                            total_items,
+                        )
+                        .with_candidate_id(cid)
+                        .with_rate_limit(wait_secs, attempt, max_retries),
+                    );
                 };
 
-                match outcome {
-                    IngestionOutcome::Downloaded(cid) => {
-                        summary.record_downloaded();
-                        on_progress(
-                            IngestionProgress::new(
-                                "downloaded",
-                                format!(
-                                    "Harvesting: {}/{} maps downloaded ({} duplicates skipped)...",
-                                    summary.downloaded, total_items, summary.skipped
-                                ),
-                                summary.processed,
-                                summary.downloaded,
-                                summary.skipped,
-                                total_items,
-                            )
-                            .with_candidate_id(cid),
-                        );
+            let outcome = match self
+                .ingest_post_filtered_inner(
+                    post,
+                    gridless_only,
+                    Some(&mut rate_limit_hook),
+                )
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    warn!(
+                        post_id = %post.id,
+                        error = %e,
+                        "Bundle ingestion failed, skipping candidate"
+                    );
+                    IngestionOutcome::Skipped {
+                        id: post.id.clone(),
+                        reason: SkipReason::DownloadFailed,
                     }
-                    IngestionOutcome::Skipped { id, reason: _ } => {
-                        summary.record_skipped();
-                        on_progress(
-                            IngestionProgress::new(
-                                "skipped",
-                                format!(
-                                    "Harvesting: {}/{} maps downloaded ({} duplicates skipped)...",
-                                    summary.downloaded, total_items, summary.skipped
-                                ),
-                                summary.processed,
-                                summary.downloaded,
-                                summary.skipped,
-                                total_items,
-                            )
-                            .with_candidate_id(id),
-                        );
-                    }
+                }
+            };
+
+            match outcome {
+                IngestionOutcome::Downloaded(cid) => {
+                    summary.record_downloaded();
+                    on_progress(
+                        IngestionProgress::new(
+                            "downloaded",
+                            format!(
+                                "Harvesting: {}/{} maps downloaded ({} duplicates skipped)...",
+                                summary.downloaded, total_items, summary.skipped
+                            ),
+                            summary.processed,
+                            summary.downloaded,
+                            summary.skipped,
+                            total_items,
+                        )
+                        .with_candidate_id(cid),
+                    );
+                }
+                IngestionOutcome::Skipped { id, reason: _ } => {
+                    summary.record_skipped();
+                    on_progress(
+                        IngestionProgress::new(
+                            "skipped",
+                            format!(
+                                "Harvesting: {}/{} maps downloaded ({} duplicates skipped)...",
+                                summary.downloaded, total_items, summary.skipped
+                            ),
+                            summary.processed,
+                            summary.downloaded,
+                            summary.skipped,
+                            total_items,
+                        )
+                        .with_candidate_id(id),
+                    );
                 }
             }
         }
@@ -492,33 +458,48 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
         gridless_only: bool,
     ) -> Result<IngestionSummary, IngestionError> {
         let mut summary = IngestionSummary::default();
-        if post.media.is_empty() {
-            info!(
-                post_id = %post.id,
-                reason = "no_media",
-                "Skipping post with no media"
-            );
-            summary.record_skipped();
-            return Ok(summary);
-        }
-
-        for idx in 0..post.media.len() {
-            match self.ingest_media_filtered(post, idx, gridless_only).await {
-                Ok(IngestionOutcome::Downloaded(_)) => summary.record_downloaded(),
-                Ok(IngestionOutcome::Skipped { .. }) => summary.record_skipped(),
-                Err(e) => {
-                    warn!(
-                        post_id = %post.id,
-                        media_index = idx,
-                        error = %e,
-                        "Image ingestion failed, skipping candidate"
-                    );
-                    summary.record_skipped();
-                }
+        match self
+            .ingest_post_filtered_inner(
+                post,
+                gridless_only,
+                None::<fn(&str, Duration, u32, u32)>,
+            )
+            .await
+        {
+            Ok(IngestionOutcome::Downloaded(_)) => summary.record_downloaded(),
+            Ok(IngestionOutcome::Skipped { .. }) => summary.record_skipped(),
+            Err(e) => {
+                warn!(
+                    post_id = %post.id,
+                    error = %e,
+                    "Bundle ingestion failed, skipping post"
+                );
+                summary.record_skipped();
             }
         }
-
         Ok(summary)
+    }
+
+    /// Ingest a Reddit post as a multi-layer map bundle without filter.
+    pub async fn ingest_post_bundle(
+        &self,
+        post: &RedditPost,
+    ) -> Result<IngestionOutcome, IngestionError> {
+        self.ingest_post_bundle_filtered(post, false).await
+    }
+
+    /// Ingest a Reddit post as a multi-layer map bundle with optional gridless-only filter.
+    pub async fn ingest_post_bundle_filtered(
+        &self,
+        post: &RedditPost,
+        gridless_only: bool,
+    ) -> Result<IngestionOutcome, IngestionError> {
+        self.ingest_post_filtered_inner(
+            post,
+            gridless_only,
+            None::<fn(&str, Duration, u32, u32)>,
+        )
+        .await
     }
 
     /// Ingest a specific media item from a Reddit post without filter.
@@ -537,112 +518,94 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
         media_index: usize,
         gridless_only: bool,
     ) -> Result<IngestionOutcome, IngestionError> {
-        self.ingest_media_filtered_inner(
+        if media_index >= post.media.len() {
+            return Ok(IngestionOutcome::Skipped {
+                id: format!("{}_{}", post.id, media_index),
+                reason: SkipReason::InvalidMediaIndex,
+            });
+        }
+        self.ingest_post_filtered_inner(
             post,
-            media_index,
             gridless_only,
             None::<fn(&str, Duration, u32, u32)>,
         )
         .await
     }
 
-    async fn ingest_media_filtered_inner<Hook>(
+    fn check_deduplication(&self, post: &RedditPost) -> Result<Option<SkipReason>, StorageError> {
+        let child_0 = format!("{}_0", post.id);
+
+        // 1. Check if post or any split child was rejected
+        if self.storage.is_rejected(&post.id)? || self.storage.is_rejected(&child_0)? {
+            return Ok(Some(SkipReason::Rejected));
+        }
+        for idx in 1..post.media.len() {
+            let child = format!("{}_{idx}", post.id);
+            if self.storage.is_rejected(&child)? {
+                return Ok(Some(SkipReason::Rejected));
+            }
+        }
+
+        // 2. Check if post or any split child is in staging
+        if self.storage.is_in_staging(&post.id)? || self.storage.is_in_staging(&child_0)? {
+            return Ok(Some(SkipReason::AlreadyInStaging));
+        }
+        for idx in 1..post.media.len() {
+            let child = format!("{}_{idx}", post.id);
+            if self.storage.is_in_staging(&child)? {
+                return Ok(Some(SkipReason::AlreadyInStaging));
+            }
+        }
+
+        // 3. Check if post or any split child is in curated
+        if self.storage.is_curated(&post.id)? || self.storage.is_curated(&child_0)? {
+            return Ok(Some(SkipReason::AlreadyCurated));
+        }
+        for idx in 1..post.media.len() {
+            let child = format!("{}_{idx}", post.id);
+            if self.storage.is_curated(&child)? {
+                return Ok(Some(SkipReason::AlreadyCurated));
+            }
+        }
+
+        // 4. Fallback duplicate check
+        if self.storage.is_duplicate(&post.id)? || self.storage.is_duplicate(&child_0)? {
+            return Ok(Some(SkipReason::Duplicate));
+        }
+        for idx in 1..post.media.len() {
+            let child = format!("{}_{idx}", post.id);
+            if self.storage.is_duplicate(&child)? {
+                return Ok(Some(SkipReason::Duplicate));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn download_media_bytes<Hook>(
         &self,
-        post: &RedditPost,
-        media_index: usize,
-        gridless_only: bool,
-        mut on_rate_limit: Option<Hook>,
-    ) -> Result<IngestionOutcome, IngestionError>
+        post_id: &str,
+        media_url: &str,
+        mut on_rate_limit: Option<&mut Hook>,
+    ) -> Result<Vec<u8>, SkipReason>
     where
         Hook: FnMut(&str, Duration, u32, u32) + Send,
     {
-        let media = match post.media.get(media_index) {
-            Some(m) => m,
-            None => {
-                return Ok(IngestionOutcome::Skipped {
-                    id: format!("{}_{}", post.id, media_index),
-                    reason: SkipReason::InvalidMediaIndex,
-                });
-            }
-        };
-
-        let candidate_id = candidate_id_for_post(&post.id, media_index, post.media.len());
-
-        // 0. Filter if gridless only requested and post is not gridless
-        if gridless_only && !post.tags.is_gridless() {
-            info!(
-                post_id = %post.id,
-                candidate_id = %candidate_id,
-                reason = "not_gridless",
-                "Skipping post media: not gridless"
-            );
-            return Ok(IngestionOutcome::Skipped {
-                id: candidate_id,
-                reason: SkipReason::NotGridless,
-            });
-        }
-
-        // 1. Check if candidate ID or post base ID has been rejected
-        if self.storage.is_rejected(&candidate_id)? || self.storage.is_rejected(&post.id)? {
-            info!(
-                post_id = %post.id,
-                candidate_id = %candidate_id,
-                reason = "rejected",
-                "Skipping post media: previously rejected"
-            );
-            return Ok(IngestionOutcome::Skipped {
-                id: candidate_id,
-                reason: SkipReason::Rejected,
-            });
-        }
-
-        // 2. Check if candidate ID or post base ID is already in staging
-        if self.storage.is_in_staging(&candidate_id)? || self.storage.is_in_staging(&post.id)? {
-            info!(
-                post_id = %post.id,
-                candidate_id = %candidate_id,
-                reason = "already_in_staging",
-                "Skipping post media: already in staging"
-            );
-            return Ok(IngestionOutcome::Skipped {
-                id: candidate_id,
-                reason: SkipReason::AlreadyInStaging,
-            });
-        }
-
-        // 3. Check if candidate ID or post base ID is already in curated
-        if self.storage.is_curated(&candidate_id)? || self.storage.is_curated(&post.id)? {
-            info!(
-                post_id = %post.id,
-                candidate_id = %candidate_id,
-                reason = "already_curated",
-                "Skipping post media: already curated"
-            );
-            return Ok(IngestionOutcome::Skipped {
-                id: candidate_id,
-                reason: SkipReason::AlreadyCurated,
-            });
-        }
-
-        // 4. Download image bytes with exponential backoff on HTTP 429
-        let download_url = unescape_xml_entities(&media.url);
+        let download_url = unescape_xml_entities(media_url);
         let mut attempts: u32 = 0;
         let mut delay = self.backoff.initial_delay;
 
-        let image_bytes = loop {
+        loop {
             let response = match self.http_client.get(&download_url).send().await {
                 Ok(res) => res,
                 Err(err) => {
                     warn!(
-                        post_id = %post.id,
-                        candidate_id = %candidate_id,
+                        post_id = %post_id,
+                        media_url = %media_url,
                         error = %err,
                         "Failed to request image download"
                     );
-                    return Ok(IngestionOutcome::Skipped {
-                        id: candidate_id,
-                        reason: SkipReason::DownloadFailed,
-                    });
+                    return Err(SkipReason::DownloadFailed);
                 }
             };
 
@@ -650,15 +613,12 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 if attempts >= self.backoff.max_retries {
                     warn!(
-                        post_id = %post.id,
-                        candidate_id = %candidate_id,
+                        post_id = %post_id,
+                        media_url = %media_url,
                         retries = attempts,
                         "Exceeded max retries downloading image after HTTP 429 rate limit"
                     );
-                    return Ok(IngestionOutcome::Skipped {
-                        id: candidate_id,
-                        reason: SkipReason::DownloadFailed,
-                    });
+                    return Err(SkipReason::DownloadFailed);
                 }
 
                 let wait_time = parse_rate_limit_delay(response.headers(), delay);
@@ -670,16 +630,16 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
                 };
 
                 warn!(
-                    post_id = %post.id,
-                    candidate_id = %candidate_id,
+                    post_id = %post_id,
+                    media_url = %media_url,
                     attempt = attempt_num,
                     max_retries = self.backoff.max_retries,
                     wait_secs = wait_secs,
                     "Received HTTP 429 Too Many Requests while downloading media; backing off"
                 );
 
-                if let Some(hook) = &mut on_rate_limit {
-                    hook(&candidate_id, wait_time, attempt_num, self.backoff.max_retries);
+                if let Some(hook) = on_rate_limit.as_deref_mut() {
+                    hook(post_id, wait_time, attempt_num, self.backoff.max_retries);
                 }
 
                 tokio::time::sleep(wait_time).await;
@@ -690,56 +650,114 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
 
             if !status.is_success() {
                 warn!(
-                    post_id = %post.id,
-                    candidate_id = %candidate_id,
+                    post_id = %post_id,
+                    media_url = %media_url,
                     status = %status,
                     "Non-success HTTP status encountered while downloading image"
                 );
-                return Ok(IngestionOutcome::Skipped {
-                    id: candidate_id,
-                    reason: SkipReason::DownloadFailed,
-                });
+                return Err(SkipReason::DownloadFailed);
             }
 
             match response.bytes().await {
-                Ok(bytes) => break bytes,
+                Ok(bytes) => return Ok(bytes.to_vec()),
                 Err(err) => {
                     warn!(
-                        post_id = %post.id,
-                        candidate_id = %candidate_id,
+                        post_id = %post_id,
+                        media_url = %media_url,
                         error = %err,
                         "Failed to read image response bytes"
                     );
+                    return Err(SkipReason::DownloadFailed);
+                }
+            }
+        }
+    }
+
+    async fn ingest_post_filtered_inner<Hook>(
+        &self,
+        post: &RedditPost,
+        gridless_only: bool,
+        mut on_rate_limit: Option<Hook>,
+    ) -> Result<IngestionOutcome, IngestionError>
+    where
+        Hook: FnMut(&str, Duration, u32, u32) + Send,
+    {
+        // 0. Filter if post has no media
+        if post.media.is_empty() {
+            info!(
+                post_id = %post.id,
+                reason = "no_media",
+                "Skipping post: no media"
+            );
+            return Ok(IngestionOutcome::Skipped {
+                id: post.id.clone(),
+                reason: SkipReason::NoMedia,
+            });
+        }
+
+        // 1. Filter if gridless only requested and post is not gridless
+        if gridless_only && !post.tags.is_gridless() {
+            info!(
+                post_id = %post.id,
+                reason = "not_gridless",
+                "Skipping post: not gridless"
+            );
+            return Ok(IngestionOutcome::Skipped {
+                id: post.id.clone(),
+                reason: SkipReason::NotGridless,
+            });
+        }
+
+        // 2. Check deduplication against storage
+        if let Some(reason) = self.check_deduplication(post)? {
+            info!(
+                post_id = %post.id,
+                reason = ?reason,
+                "Skipping post: deduplication check hit"
+            );
+            return Ok(IngestionOutcome::Skipped {
+                id: post.id.clone(),
+                reason,
+            });
+        }
+
+        // 3. Download all media items for the post
+        let mut layer_bytes_list: Vec<Vec<u8>> = Vec::with_capacity(post.media.len());
+        for media in &post.media {
+            match self
+                .download_media_bytes(&post.id, &media.url, on_rate_limit.as_mut())
+                .await
+            {
+                Ok(bytes) => layer_bytes_list.push(bytes),
+                Err(reason) => {
+                    warn!(
+                        post_id = %post.id,
+                        media_url = %media.url,
+                        reason = ?reason,
+                        "Failed to download post media item; skipping bundle"
+                    );
                     return Ok(IngestionOutcome::Skipped {
-                        id: candidate_id,
-                        reason: SkipReason::DownloadFailed,
+                        id: post.id.clone(),
+                        reason,
                     });
                 }
             }
-        };
+        }
 
-        // 5. Build sidecar metadata according to Issue #25 schema
-        let source_url = format_source_url(&post.permalink, &media.url);
-        let sidecar = RedditSidecarMetadata {
-            id: candidate_id.clone(),
-            source: Source::Reddit,
-            source_url,
-            title: post.title.clone(),
-            author: post.author.clone(),
-            parsed_gridless: post.tags.is_gridless(),
-            parsed_dimensions: post.tags.dimensions,
-            created_at: Utc::now(),
-        };
+        // 4. Assemble candidate bundle
+        let candidate = post.to_bundle_candidate();
 
-        // 6. Persist to data/staging/reddit/{reddit_id}.png and {reddit_id}.json
-        self.storage.save_staging_reddit(&sidecar, &image_bytes)?;
+        // 5. Persist staged bundle to data/staging/reddit/{post_id}/
+        self.storage
+            .save_staging_bundle(Some("reddit"), &candidate, &layer_bytes_list)?;
+
         info!(
             post_id = %post.id,
             title = %post.title,
-            candidate_id = %candidate_id,
-            "Downloaded and staged candidate image"
+            layer_count = layer_bytes_list.len(),
+            "Downloaded and staged candidate bundle"
         );
 
-        Ok(IngestionOutcome::Downloaded(candidate_id))
+        Ok(IngestionOutcome::Downloaded(post.id.clone()))
     }
 }

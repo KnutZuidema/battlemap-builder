@@ -11,13 +11,13 @@ use chrono::Utc;
 use curator::adapters::filesystem_storage::FilesystemStorage;
 use curator::adapters::reddit::BackoffConfig;
 use curator::domain::{
-    CuratedMap, HarvestedMedia, ParsedTags, RedditHarvestQuery, RedditPost, RejectionReason,
-    Source, Theme,
+    CuratedMap, HarvestedMedia, LayerRole, ParsedTags, RedditHarvestQuery, RedditPost,
+    RejectionReason, Source, Theme,
 };
 use curator::ports::harvester::{HarvesterError, RedditHarvester};
 use curator::ports::storage::StorageRepository;
 use curator::services::{
-    candidate_id_for_post, IngestionOutcome, IngestionProgress, RedditIngestionService, SkipReason,
+    IngestionOutcome, IngestionProgress, RedditIngestionService, SkipReason,
 };
 
 /// Mock harvester that returns pre-configured Reddit posts.
@@ -326,56 +326,204 @@ async fn test_multi_image_gallery_ingestion() {
         score: 150,
         created_utc: Utc::now(),
         media: vec![
-            HarvestedMedia::new(img_url.clone()),
-            HarvestedMedia::new(img_url.clone()),
+            HarvestedMedia::new(img_url.clone()).with_caption("Ground Floor"),
+            HarvestedMedia::new(img_url.clone()).with_caption("Upper Floor"),
         ],
         tags: ParsedTags::parse_title("[20x20] Forest Encounter [Gridless]"),
     };
-
-    assert_eq!(candidate_id_for_post(&gallery_post.id, 0, 2), "gallery_post_0");
-    assert_eq!(candidate_id_for_post(&gallery_post.id, 1, 2), "gallery_post_1");
 
     let harvester = MockHarvester::new(vec![gallery_post.clone()]);
     let service = RedditIngestionService::new(harvester, storage.clone());
 
     let summary = service.ingest_post(&gallery_post).await.unwrap();
-    assert_eq!(summary.processed, 2);
-    assert_eq!(summary.downloaded, 2);
+    assert_eq!(summary.processed, 1);
+    assert_eq!(summary.downloaded, 1);
     assert_eq!(summary.skipped, 0);
 
     let reddit_staging = storage.staging_dir().join("reddit");
-    let b0 = reddit_staging.join("gallery_post_0");
-    let b1 = reddit_staging.join("gallery_post_1");
-    assert!(b0.join("0.png").is_file() || reddit_staging.join("gallery_post_0.png").is_file());
-    assert!(b0.join("manifest.json").is_file() || reddit_staging.join("gallery_post_0.json").is_file());
-    assert!(b1.join("0.png").is_file() || reddit_staging.join("gallery_post_1.png").is_file());
-    assert!(b1.join("manifest.json").is_file() || reddit_staging.join("gallery_post_1.json").is_file());
-    // Reject gallery_post_1
-    storage
-        .reject_staging("gallery_post_1", RejectionReason::BlurryLowRes, Some("Blurry variant"))
-        .unwrap();
+    let bundle_dir = reddit_staging.join("gallery_post");
+    assert!(bundle_dir.join("0.png").is_file());
+    assert!(bundle_dir.join("1.png").is_file());
+    assert!(bundle_dir.join("manifest.json").is_file());
 
-    assert!(!b1.exists());
-    assert!(!reddit_staging.join("gallery_post_1.png").exists());
-    assert!(!reddit_staging.join("gallery_post_1.json").exists());
-    assert!(storage.is_rejected("gallery_post_1").unwrap());
+    // Verify staged candidate metadata and layers
+    let staged = storage.list_staging().unwrap();
+    assert_eq!(staged.len(), 1);
+    let cand = &staged[0];
+    assert_eq!(cand.id, "gallery_post");
+    assert_eq!(cand.source, Source::Reddit);
+    assert_eq!(cand.dimensions, (20, 20));
+    assert_eq!(cand.parsed_gridless, Some(true));
+    assert_eq!(cand.layers.len(), 2);
 
-    // Subsequent harvest skips both (item 0 in staging, item 1 rejected)
-    let re_outcome_0 = service.ingest_media(&gallery_post, 0).await.unwrap();
+    assert_eq!(cand.layers[0].index, 0);
+    assert_eq!(cand.layers[0].filename, "0.png");
+    assert_eq!(cand.layers[0].role, LayerRole::Ground);
+    assert_eq!(cand.layers[0].elevation, Some(0));
+    assert_eq!(cand.layers[0].caption.as_deref(), Some("Ground Floor"));
+
+    assert_eq!(cand.layers[1].index, 1);
+    assert_eq!(cand.layers[1].filename, "1.png");
+    assert_eq!(cand.layers[1].role, LayerRole::UpperFloor);
+    assert_eq!(cand.layers[1].elevation, Some(1));
+    assert_eq!(cand.layers[1].caption.as_deref(), Some("Upper Floor"));
+
+    // Subsequent harvest skips because already in staging
+    let re_summary = service.ingest_post(&gallery_post).await.unwrap();
+    assert_eq!(re_summary.processed, 1);
+    assert_eq!(re_summary.downloaded, 0);
+    assert_eq!(re_summary.skipped, 1);
+
+    let re_outcome = service.ingest_media(&gallery_post, 0).await.unwrap();
     assert_eq!(
-        re_outcome_0,
+        re_outcome,
         IngestionOutcome::Skipped {
-            id: "gallery_post_0".into(),
+            id: "gallery_post".into(),
             reason: SkipReason::AlreadyInStaging,
         }
     );
 
-    let re_outcome_1 = service.ingest_media(&gallery_post, 1).await.unwrap();
+    // Reject gallery_post
+    storage
+        .reject_staging("gallery_post", RejectionReason::BlurryLowRes, Some("Blurry variant"))
+        .unwrap();
+
+    assert!(!bundle_dir.exists());
+    assert!(storage.is_rejected("gallery_post").unwrap());
+
+    // Subsequent harvest skips because rejected
+    let re_outcome_rej = service.ingest_media(&gallery_post, 0).await.unwrap();
     assert_eq!(
-        re_outcome_1,
+        re_outcome_rej,
         IngestionOutcome::Skipped {
-            id: "gallery_post_1".into(),
+            id: "gallery_post".into(),
             reason: SkipReason::Rejected,
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_split_post_deduplication() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+
+    // Case 1: Split child gallery_split_0 exists in staging
+    let split_child_post = RedditPost {
+        id: "gallery_split".into(),
+        name: "t3_gallery_split".into(),
+        title: "[30x30] Forest Split [Gridless]".into(),
+        author: "druid_mapper".into(),
+        permalink: "https://www.reddit.com/r/battlemaps/comments/gallery_split/".into(),
+        url: "http://127.0.0.1/fake.png".into(),
+        score: 150,
+        created_utc: Utc::now(),
+        media: vec![
+            HarvestedMedia::new("http://127.0.0.1/fake0.png"),
+            HarvestedMedia::new("http://127.0.0.1/fake1.png"),
+        ],
+        tags: ParsedTags::parse_title("[30x30] Forest Split [Gridless]"),
+    };
+
+    // Pre-populate split child "gallery_split_0" into staging
+    let child_sidecar = split_child_post.to_sidecar_metadata(0).unwrap();
+    assert_eq!(child_sidecar.id, "gallery_split_0");
+    storage
+        .save_staging_reddit(&child_sidecar, &create_test_png())
+        .unwrap();
+    assert!(storage.is_in_staging("gallery_split_0").unwrap());
+
+    let harvester = MockHarvester::new(vec![split_child_post.clone()]);
+    let service = RedditIngestionService::new(harvester, storage.clone());
+
+    // Harvest should skip gallery_split because child gallery_split_0 is already in staging
+    let summary = service.ingest_post(&split_child_post).await.unwrap();
+    assert_eq!(summary.processed, 1);
+    assert_eq!(summary.downloaded, 0);
+    assert_eq!(summary.skipped, 1);
+
+    let outcome = service.ingest_media(&split_child_post, 0).await.unwrap();
+    assert_eq!(
+        outcome,
+        IngestionOutcome::Skipped {
+            id: "gallery_split".into(),
+            reason: SkipReason::AlreadyInStaging,
+        }
+    );
+
+    // Case 2: Split child rejected in rejections.json
+    storage
+        .log_rejection(
+            "gallery_rejected_0",
+            RejectionReason::GridBurnedIn,
+            Some("Burned grid on layer 0"),
+        )
+        .unwrap();
+    assert!(storage.is_rejected("gallery_rejected_0").unwrap());
+
+    let split_rejected_post = RedditPost {
+        id: "gallery_rejected".into(),
+        name: "t3_gallery_rejected".into(),
+        title: "[25x25] Ruined Tower".into(),
+        author: "mapper".into(),
+        permalink: "/comments/gallery_rejected/".into(),
+        url: "http://127.0.0.1/rej.png".into(),
+        score: 100,
+        created_utc: Utc::now(),
+        media: vec![
+            HarvestedMedia::new("http://127.0.0.1/rej0.png"),
+            HarvestedMedia::new("http://127.0.0.1/rej1.png"),
+        ],
+        tags: ParsedTags::parse_title("[25x25] Ruined Tower"),
+    };
+
+    let outcome_rej = service
+        .ingest_media(&split_rejected_post, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome_rej,
+        IngestionOutcome::Skipped {
+            id: "gallery_rejected".into(),
+            reason: SkipReason::Rejected,
+        }
+    );
+
+    // Case 3: Split child curated
+    let curated = CuratedMap::with_now(
+        "gallery_curated_0",
+        Theme::Dungeon,
+        4,
+        vec!["dungeon".into()],
+        (25, 25),
+    );
+    storage.save_curated(&curated, &create_test_png()).unwrap();
+    assert!(storage.is_curated("gallery_curated_0").unwrap());
+
+    let split_curated_post = RedditPost {
+        id: "gallery_curated".into(),
+        name: "t3_gallery_curated".into(),
+        title: "[25x25] Curated Dungeon".into(),
+        author: "mapper".into(),
+        permalink: "/comments/gallery_curated/".into(),
+        url: "http://127.0.0.1/cur.png".into(),
+        score: 100,
+        created_utc: Utc::now(),
+        media: vec![
+            HarvestedMedia::new("http://127.0.0.1/cur0.png"),
+            HarvestedMedia::new("http://127.0.0.1/cur1.png"),
+        ],
+        tags: ParsedTags::parse_title("[25x25] Curated Dungeon"),
+    };
+
+    let outcome_cur = service
+        .ingest_media(&split_curated_post, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome_cur,
+        IngestionOutcome::Skipped {
+            id: "gallery_curated".into(),
+            reason: SkipReason::AlreadyCurated,
         }
     );
 }

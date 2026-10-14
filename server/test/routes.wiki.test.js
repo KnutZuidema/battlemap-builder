@@ -35,15 +35,6 @@ test('POST /api/wiki/regions/suggest validation', async () => {
   }
 });
 
-  const tmpWiki = fs.mkdtempSync(path.join(os.tmpdir(), 'dungeon-forge-wiki-route-test-'));
-  process.env.WIKI_PATH = tmpWiki;
-  const placesDir = path.join(tmpWiki, 'Regions', 'Aeloria', 'Places');
-  fs.mkdirSync(placesDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(placesDir, "Storm's Eye Temple.md"),
-    "# Storm's Eye Temple\n\nAncient stone temple on a flooded crag.",
-    'utf8'
-  );
 
 test('GET /api/wiki/tree returns regions, adventures, and custom sections', async () => {
   const { server, baseUrl } = await startTestServer(app);

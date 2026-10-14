@@ -2371,4 +2371,406 @@ mod tests {
         assert!(storage.is_duplicate("post_xyz").unwrap());
         assert!(storage.is_duplicate("post_xyz_0").unwrap());
     }
+
+    #[test]
+    fn test_uniform_bundle_directory_layout_staging() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+
+        let mut candidate = Candidate::with_now(
+            "castle_bundle",
+            Source::Reddit,
+            "castle_bundle/0.png",
+            (1920, 1080),
+        );
+        candidate.layers = vec![
+            CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1920, 1080)),
+            CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1920, 1080)),
+        ];
+        let img0 = b"png-bytes-ground-layer";
+        let img1 = b"png-bytes-upper-layer";
+
+        storage
+            .save_staging_bundle(None, &candidate, &[img0.to_vec(), img1.to_vec()])
+            .unwrap();
+
+        // Verify uniform staging bundle directory layout: <id>/manifest.json + 0.png, 1.png
+        let bundle_dir = storage.staging_dir().join("castle_bundle");
+        assert!(bundle_dir.is_dir());
+        let manifest_path = bundle_dir.join("manifest.json");
+        assert!(manifest_path.is_file());
+        let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest_content.contains("castle_bundle"));
+        assert!(manifest_content.contains("upper_floor"));
+
+        let img0_path = bundle_dir.join("0.png");
+        assert!(img0_path.is_file());
+        assert_eq!(std::fs::read(&img0_path).unwrap(), img0);
+
+        let img1_path = bundle_dir.join("1.png");
+        assert!(img1_path.is_file());
+        assert_eq!(std::fs::read(&img1_path).unwrap(), img1);
+
+        // Verify retrieval via storage repository methods
+        assert_eq!(
+            storage.get_staging_layer_image("castle_bundle", 0).unwrap(),
+            img0
+        );
+        assert_eq!(
+            storage.get_staging_layer_image("castle_bundle", 1).unwrap(),
+            img1
+        );
+
+        let staged_list = storage.list_staging().unwrap();
+        assert_eq!(staged_list.len(), 1);
+        assert_eq!(staged_list[0].id, "castle_bundle");
+        assert_eq!(staged_list[0].resolved_layers().len(), 2);
+    }
+
+    #[test]
+    fn test_uniform_bundle_directory_layout_curated() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+
+        let mut candidate = Candidate::with_now(
+            "keep_bundle",
+            Source::Reddit,
+            "keep_bundle/0.png",
+            (2048, 2048),
+        );
+        candidate.layers = vec![
+            CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (2048, 2048)),
+            CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (2048, 2048)),
+            CandidateLayer::new(2, "2.png", LayerRole::Exclude, None, (2048, 2048)),
+        ];
+        let img0 = b"keep-ground-bytes";
+        let img1 = b"keep-upper-bytes";
+        let img2 = b"keep-exclude-grid-bytes";
+
+        storage
+            .save_staging_bundle(
+                None,
+                &candidate,
+                &[img0.to_vec(), img1.to_vec(), img2.to_vec()],
+            )
+            .unwrap();
+
+        let curated = CuratedMap::with_now(
+            "keep_bundle",
+            Theme::Dungeon,
+            5,
+            vec!["stronghold".into()],
+            (2048, 2048),
+        );
+        storage.curate_staging(&curated).unwrap();
+
+        // Staging bundle directory is cleaned up
+        assert!(!storage.staging_dir().join("keep_bundle").exists());
+
+        // Curated directory layout: <theme>/<id>/manifest.json + deterministic included layer filenames
+        let curated_bundle_dir = storage.curated_theme_dir(&Theme::Dungeon).join("keep_bundle");
+        assert!(curated_bundle_dir.is_dir());
+
+        let manifest_path = curated_bundle_dir.join("manifest.json");
+        assert!(manifest_path.is_file());
+        let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest_content.contains("keep_bundle"));
+
+        // Included layers: 0_ground.png and 1_upper_1.png
+        let dest_img0 = curated_bundle_dir.join("0_ground.png");
+        assert!(dest_img0.is_file());
+        assert_eq!(std::fs::read(&dest_img0).unwrap(), img0);
+
+        let dest_img1 = curated_bundle_dir.join("1_upper_1.png");
+        assert!(dest_img1.is_file());
+        assert_eq!(std::fs::read(&dest_img1).unwrap(), img1);
+
+        // Excluded layer is not stored in curated bundle
+        assert!(!curated_bundle_dir.join("2.png").exists());
+        assert!(!curated_bundle_dir.join("2_exclude.png").exists());
+
+        // Verify retrieval via storage repository methods
+        assert_eq!(
+            storage
+                .get_curated_layer_image(&Theme::Dungeon, "keep_bundle", 0)
+                .unwrap(),
+            img0
+        );
+        assert_eq!(
+            storage
+                .get_curated_layer_image(&Theme::Dungeon, "keep_bundle", 1)
+                .unwrap(),
+            img1
+        );
+
+        let curated_list = storage.list_curated(Some(&Theme::Dungeon)).unwrap();
+        assert_eq!(curated_list.len(), 1);
+        assert_eq!(curated_list[0].id, "keep_bundle");
+        assert_eq!(curated_list[0].layers.len(), 2);
+    }
+
+    #[test]
+    fn test_idempotent_startup_migration_legacy_storage() {
+        let dir = tempdir().unwrap();
+        let staging_reddit = dir.path().join("staging").join("reddit");
+        std::fs::create_dir_all(&staging_reddit).unwrap();
+        let staging_root = dir.path().join("staging");
+        let curated_dungeon = dir.path().join("curated").join("dungeon");
+        std::fs::create_dir_all(&curated_dungeon).unwrap();
+
+        // 1. Legacy Reddit multi-part staging flat files: {post_id}_0 and {post_id}_1
+        let cand0 = Candidate {
+            id: "legacy_post_0".to_string(),
+            source: Source::Reddit,
+            filename: "legacy_post_0.png".to_string(),
+            dimensions: (1000, 1000),
+            created_at: Utc::now(),
+            source_url: None,
+            title: Some("Castle Siege".to_string()),
+            author: Some("Cartographer".to_string()),
+            parsed_gridless: Some(true),
+            parsed_dimensions: Some((1000, 1000)),
+            layers: vec![CandidateLayer {
+                index: 0,
+                filename: "legacy_post_0.png".to_string(),
+                role: LayerRole::Ground,
+                elevation: Some(0),
+                caption: Some("Ground floor".to_string()),
+                source_url: None,
+                dimensions: (1000, 1000),
+            }],
+            parent_group_id: None,
+        };
+        let cand1 = Candidate {
+            id: "legacy_post_1".to_string(),
+            source: Source::Reddit,
+            filename: "legacy_post_1.png".to_string(),
+            dimensions: (1000, 1000),
+            created_at: Utc::now(),
+            source_url: None,
+            title: Some("Castle Siege".to_string()),
+            author: Some("Cartographer".to_string()),
+            parsed_gridless: Some(true),
+            parsed_dimensions: Some((1000, 1000)),
+            layers: vec![CandidateLayer {
+                index: 0,
+                filename: "legacy_post_1.png".to_string(),
+                role: LayerRole::UpperFloor,
+                elevation: Some(1),
+                caption: Some("2nd floor".to_string()),
+                source_url: None,
+                dimensions: (1000, 1000),
+            }],
+            parent_group_id: None,
+        };
+        let img0_bytes = b"legacy-ground-image";
+        let img1_bytes = b"legacy-upper-image";
+        std::fs::write(staging_reddit.join("legacy_post_0.png"), img0_bytes).unwrap();
+        std::fs::write(
+            staging_reddit.join("legacy_post_0.json"),
+            serde_json::to_string_pretty(&cand0).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(staging_reddit.join("legacy_post_1.png"), img1_bytes).unwrap();
+        std::fs::write(
+            staging_reddit.join("legacy_post_1.json"),
+            serde_json::to_string_pretty(&cand1).unwrap(),
+        )
+        .unwrap();
+
+        // 2. Standalone legacy flat staging map
+        let cand_standalone = Candidate::with_now(
+            "standalone_map",
+            Source::Reddit,
+            "standalone_map.png",
+            (800, 600),
+        );
+        let standalone_bytes = b"standalone-image-bytes";
+        std::fs::write(staging_root.join("standalone_map.png"), standalone_bytes).unwrap();
+        std::fs::write(
+            staging_root.join("standalone_map.json"),
+            serde_json::to_string_pretty(&cand_standalone).unwrap(),
+        )
+        .unwrap();
+
+        // 3. Legacy flat curated map
+        let curated_map = CuratedMap::with_now(
+            "legacy_dungeon_flat",
+            Theme::Dungeon,
+            4,
+            vec!["crypt".into()],
+            (1200, 1200),
+        );
+        let curated_bytes = b"curated-crypt-image-bytes";
+        std::fs::write(curated_dungeon.join("legacy_dungeon_flat.png"), curated_bytes).unwrap();
+        std::fs::write(
+            curated_dungeon.join("legacy_dungeon_flat.json"),
+            serde_json::to_string_pretty(&curated_map).unwrap(),
+        )
+        .unwrap();
+
+        // Initialize FilesystemStorage: constructor automatically invokes migrate_legacy_storage()
+        let storage = FilesystemStorage::new(dir.path());
+
+        // Verify flat files have been removed
+        assert!(!staging_reddit.join("legacy_post_0.png").exists());
+        assert!(!staging_reddit.join("legacy_post_0.json").exists());
+        assert!(!staging_reddit.join("legacy_post_1.png").exists());
+        assert!(!staging_reddit.join("legacy_post_1.json").exists());
+        assert!(!staging_root.join("standalone_map.png").exists());
+        assert!(!staging_root.join("standalone_map.json").exists());
+        assert!(!curated_dungeon.join("legacy_dungeon_flat.png").exists());
+        assert!(!curated_dungeon.join("legacy_dungeon_flat.json").exists());
+
+        // Verify Reddit sibling files were regrouped into uniform bundle directory: staging/reddit/legacy_post/
+        let reddit_bundle = staging_reddit.join("legacy_post");
+        assert!(reddit_bundle.is_dir());
+        assert!(reddit_bundle.join("manifest.json").is_file());
+        assert_eq!(
+            std::fs::read(reddit_bundle.join("0.png")).unwrap(),
+            img0_bytes
+        );
+        assert_eq!(
+            std::fs::read(reddit_bundle.join("1.png")).unwrap(),
+            img1_bytes
+        );
+
+        // Verify standalone map migrated into uniform bundle: staging/standalone_map/
+        let standalone_bundle = staging_root.join("standalone_map");
+        assert!(standalone_bundle.is_dir());
+        assert!(standalone_bundle.join("manifest.json").is_file());
+        assert_eq!(
+            std::fs::read(standalone_bundle.join("0.png")).unwrap(),
+            standalone_bytes
+        );
+
+        // Verify curated flat map migrated into uniform bundle: curated/dungeon/legacy_dungeon_flat/
+        let curated_bundle = curated_dungeon.join("legacy_dungeon_flat");
+        assert!(curated_bundle.is_dir());
+        assert!(curated_bundle.join("manifest.json").is_file());
+        assert_eq!(
+            std::fs::read(curated_bundle.join("0_ground.png")).unwrap(),
+            curated_bytes
+        );
+
+        // Verify storage queries work on migrated bundles
+        assert_eq!(
+            storage.get_staging_layer_image("legacy_post", 0).unwrap(),
+            img0_bytes
+        );
+        assert_eq!(
+            storage.get_staging_layer_image("legacy_post", 1).unwrap(),
+            img1_bytes
+        );
+        assert_eq!(
+            storage
+                .get_curated_layer_image(&Theme::Dungeon, "legacy_dungeon_flat", 0)
+                .unwrap(),
+            curated_bytes
+        );
+
+        // Verify idempotence: running migration again succeeds and preserves the bundles
+        assert!(storage.migrate_legacy_storage().is_ok());
+        assert!(reddit_bundle.join("manifest.json").is_file());
+        assert!(standalone_bundle.join("manifest.json").is_file());
+        assert!(curated_bundle.join("manifest.json").is_file());
+    }
+
+    #[test]
+    fn test_reversible_bundle_split_and_regroup() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+
+        let mut candidate = Candidate::with_now(
+            "split_regroup_parent",
+            Source::Reddit,
+            "split_regroup_parent/0.png",
+            (1920, 1080),
+        );
+        candidate.title = Some("Two-story tavern".to_string());
+        let mut layer0 = CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1920, 1080));
+        layer0.caption = Some("1st Floor Tavern".to_string());
+        let mut layer1 =
+            CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1920, 1080));
+        layer1.caption = Some("2nd Floor Rooms".to_string());
+        candidate.layers = vec![layer0, layer1];
+
+        let img0 = b"layer-0-tavern-bytes";
+        let img1 = b"layer-1-rooms-bytes";
+
+        storage
+            .save_staging_bundle(None, &candidate, &[img0.to_vec(), img1.to_vec()])
+            .unwrap();
+
+        // 1. Split bundle
+        let split_candidates = storage
+            .split_staging_bundle("split_regroup_parent")
+            .unwrap();
+        assert_eq!(split_candidates.len(), 2);
+        assert_eq!(split_candidates[0].id, "split_regroup_parent_0");
+        assert_eq!(split_candidates[1].id, "split_regroup_parent_1");
+        assert_eq!(
+            split_candidates[0].parent_group_id.as_deref(),
+            Some("split_regroup_parent")
+        );
+        assert_eq!(
+            split_candidates[1].parent_group_id.as_deref(),
+            Some("split_regroup_parent")
+        );
+
+        // Original parent bundle directory should be removed
+        assert!(!storage.staging_dir().join("split_regroup_parent").exists());
+
+        // Split child bundle directories exist and hold their images
+        assert_eq!(
+            storage
+                .get_staging_layer_image("split_regroup_parent_0", 0)
+                .unwrap(),
+            img0
+        );
+        assert_eq!(
+            storage
+                .get_staging_layer_image("split_regroup_parent_1", 0)
+                .unwrap(),
+            img1
+        );
+
+        // 2. Regroup bundle
+        let regrouped = storage
+            .regroup_staging_bundle("split_regroup_parent")
+            .unwrap();
+        assert_eq!(regrouped.id, "split_regroup_parent");
+        assert_eq!(regrouped.layers.len(), 2);
+        assert_eq!(regrouped.layers[0].role, LayerRole::Ground);
+        assert_eq!(regrouped.layers[0].elevation, Some(0));
+        assert_eq!(regrouped.layers[1].role, LayerRole::UpperFloor);
+        assert_eq!(regrouped.layers[1].elevation, Some(1));
+
+        // Split child directories should be cleaned up
+        assert!(!storage
+            .staging_dir()
+            .join("split_regroup_parent_0")
+            .exists());
+        assert!(!storage
+            .staging_dir()
+            .join("split_regroup_parent_1")
+            .exists());
+
+        // Parent bundle restored and retrievable
+        let parent_dir = storage.staging_dir().join("split_regroup_parent");
+        assert!(parent_dir.is_dir());
+        assert!(parent_dir.join("manifest.json").is_file());
+        assert_eq!(
+            storage
+                .get_staging_layer_image("split_regroup_parent", 0)
+                .unwrap(),
+            img0
+        );
+        assert_eq!(
+            storage
+                .get_staging_layer_image("split_regroup_parent", 1)
+                .unwrap(),
+            img1
+        );
+    }
 }

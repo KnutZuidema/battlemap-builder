@@ -8,6 +8,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{Candidate, Source, Theme};
+pub use crate::domain::prompts::{base64_bytes, ReferenceImage, SYSTEM_INSTRUCTION_GENERATE};
 
 static BENCHMARK_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -249,6 +250,8 @@ pub struct GenerationRequest {
     pub system_instruction: Option<String>,
     #[serde(default = "default_aspect_ratio")]
     pub aspect_ratio: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ReferenceImage>,
 }
 
 fn default_aspect_ratio() -> String {
@@ -262,6 +265,7 @@ impl GenerationRequest {
             prompt: prompt.into(),
             system_instruction: None,
             aspect_ratio: default_aspect_ratio(),
+            images: Vec::new(),
         }
     }
 
@@ -273,6 +277,25 @@ impl GenerationRequest {
     pub fn with_aspect_ratio(mut self, aspect_ratio: impl Into<String>) -> Self {
         self.aspect_ratio = aspect_ratio.into();
         self
+    }
+
+    pub fn with_image(mut self, image: ReferenceImage) -> Self {
+        self.images.push(image);
+        self
+    }
+
+    pub fn with_images(mut self, images: impl IntoIterator<Item = ReferenceImage>) -> Self {
+        self.images.extend(images);
+        self
+    }
+
+    pub fn with_battlemap_defaults(mut self) -> Self {
+        self.system_instruction = Some(SYSTEM_INSTRUCTION_GENERATE.to_string());
+        self
+    }
+
+    pub fn with_default_battlemap_system_instruction(self) -> Self {
+        self.with_battlemap_defaults()
     }
 }
 
@@ -590,5 +613,47 @@ mod tests {
 
         let seedream = BenchmarkModelSpec::find(MODEL_SEEDREAM_50_FLASH).unwrap();
         assert_eq!(seedream.estimated_cost_per_map(), 0.018);
+    }
+
+    #[test]
+    fn test_generation_request_battlemap_defaults_and_images() {
+        let req = GenerationRequest::new(MODEL_GEMINI_31_FLASH, "A dark crypt")
+            .with_battlemap_defaults()
+            .with_aspect_ratio("1:1")
+            .with_image(ReferenceImage::png("ref1", vec![1, 2, 3]))
+            .with_images([ReferenceImage::jpeg("ref2", vec![4, 5, 6])]);
+
+        assert_eq!(req.model, MODEL_GEMINI_31_FLASH);
+        assert_eq!(req.prompt, "A dark crypt");
+        assert_eq!(req.aspect_ratio, "1:1");
+        assert_eq!(
+            req.system_instruction,
+            Some(SYSTEM_INSTRUCTION_GENERATE.to_string())
+        );
+        assert_eq!(req.images.len(), 2);
+        assert_eq!(req.images[0].label, "ref1");
+        assert_eq!(req.images[1].label, "ref2");
+
+        // Check serialization
+        let json = serde_json::to_string(&req).expect("serialize req");
+        assert!(json.contains("\"images\":["));
+        assert!(json.contains("\"system_instruction\":"));
+
+        let deserialized: GenerationRequest =
+            serde_json::from_str(&json).expect("deserialize req");
+        assert_eq!(deserialized, req);
+
+        // Also verify with_default_battlemap_system_instruction alias
+        let req_alias = GenerationRequest::new(MODEL_MUSE, "Cave")
+            .with_default_battlemap_system_instruction();
+        assert_eq!(
+            req_alias.system_instruction,
+            Some(SYSTEM_INSTRUCTION_GENERATE.to_string())
+        );
+        assert!(req_alias.images.is_empty());
+
+        // Serialized without images should omit images field
+        let json_no_images = serde_json::to_string(&req_alias).expect("serialize");
+        assert!(!json_no_images.contains("\"images\""));
     }
 }

@@ -22,6 +22,9 @@
         selectedRating: 4,
         selectedReason: "GridBurnedIn",
         labelingMode: null,
+        currentLayerIndex: 0,
+        onionSkinActive: false,
+        lastSplitParentId: null,
         // Canvas transform
         pan: { x: 0, y: 0 },
         zoom: 1.0,
@@ -95,6 +98,11 @@
     let harvestSortGroup, harvestTimeGroup, harvestLimitInput, harvestLimitValue, harvestGridlessOnly;
     let btnStartHarvest, harvestProgressContainer, harvestProgressBar, harvestProgressText;
 
+    // Layer Deck & Filmstrip DOM Elements
+    let layerDeck, layerDeckCount, layerDeckBundleTag, roleSelector, layerFilmstrip;
+    let btnOnionSkin, btnSplitBundle, btnSplitBundleHud, btnSplitHudText, btnSplitLabel;
+    let onionSkinBadge;
+
     // Benchmark Drawer & Guardrails DOM Elements
     let btnOpenBenchmarkDrawer;
     let costMonitorHud, costMonitorText;
@@ -157,6 +165,18 @@
         emptyState = document.getElementById("empty-state");
         loadingOverlay = document.getElementById("loading-overlay");
         loadingText = document.getElementById("loading-text");
+
+        layerDeck = document.getElementById("layer-deck");
+        layerDeckCount = document.getElementById("layer-deck-count");
+        layerDeckBundleTag = document.getElementById("layer-deck-bundle-tag");
+        roleSelector = document.getElementById("role-selector");
+        layerFilmstrip = document.getElementById("layer-filmstrip");
+        btnOnionSkin = document.getElementById("btn-onion-skin");
+        btnSplitBundle = document.getElementById("btn-split-bundle");
+        btnSplitBundleHud = document.getElementById("btn-split-bundle-hud");
+        btnSplitHudText = document.getElementById("btn-split-hud-text");
+        btnSplitLabel = document.getElementById("btn-split-label");
+        onionSkinBadge = document.getElementById("onion-skin-badge");
 
         rejectionModal = document.getElementById("rejection-modal");
         rejectionNotesInput = document.getElementById("rejection-notes");
@@ -313,8 +333,26 @@
             ctx.imageSmoothingEnabled = state.zoom < 2.0;
             ctx.imageSmoothingQuality = "high";
 
-            // Draw battlemap at origin (0, 0)
-            ctx.drawImage(img, 0, 0, imgW, imgH);
+            // Onion-skin overlay: draw base Ground / layer 0 image with 50% opacity
+            if (state.onionSkinActive && state.currentLayerIndex !== 0 && state.currentIndex >= 0) {
+                const curCand = state.candidates[state.currentIndex];
+                if (curCand) {
+                    const groundKey = `${curCand.id}_layer_0`;
+                    const groundImg = state.imageCache.get(groundKey) || state.imageCache.get(curCand.id);
+                    if (groundImg && groundImg.complete && groundImg.naturalWidth > 0) {
+                        const gW = groundImg.naturalWidth || groundImg.width;
+                        const gH = groundImg.naturalHeight || groundImg.height;
+                        ctx.save();
+                        ctx.globalAlpha = 0.5;
+                        ctx.drawImage(groundImg, 0, 0, gW, gH);
+                        ctx.restore();
+                    }
+                }
+            }
+
+            // Draw active layer battlemap at origin (0, 0)
+            ctx.globalAlpha = 1.0;
+
 
             // Draw crisp 64px VTT grid overlay in image space
             if (state.gridVisible) {
@@ -514,8 +552,10 @@
         exitLabelingMode();
         if (index < 0 || index >= state.candidates.length) {
             state.currentIndex = -1;
+            state.currentLayerIndex = 0;
             state.currentImage = null;
             requestRender();
+            renderLayerDeck();
             updateHud();
             showEmptyState(state.candidates.length === 0);
             return;
@@ -523,24 +563,27 @@
 
         showEmptyState(false);
         state.currentIndex = index;
+        state.currentLayerIndex = 0;
         const candidate = state.candidates[index];
-        const imageUrl = `/api/image/staging/${encodeURIComponent(candidate.id)}`;
+        const cacheKey = `${candidate.id}_layer_0`;
 
-        // Check if image is already cached in memory
-        let cachedImg = state.imageCache.get(candidate.id);
+        // Check if layer 0 (or candidate) is already cached in memory
+        let cachedImg = state.imageCache.get(cacheKey) || state.imageCache.get(candidate.id);
 
         if (cachedImg && cachedImg.complete && cachedImg.naturalWidth > 0) {
             // Instant 0ms visual delay transition!
             state.currentImage = cachedImg;
             showLoading(false);
             fitToScreen();
+            renderLayerDeck();
             prefetchUpcoming();
             updateHud();
         } else {
             showLoading(true, `Loading candidate #${candidate.id}...`);
             if (!cachedImg) {
                 cachedImg = new Image();
-                cachedImg.src = imageUrl;
+                cachedImg.src = `/api/image/staging/${encodeURIComponent(candidate.id)}/0`;
+                state.imageCache.set(cacheKey, cachedImg);
                 state.imageCache.set(candidate.id, cachedImg);
             }
 
@@ -550,6 +593,7 @@
                     state.currentImage = cachedImg;
                     showLoading(false);
                     fitToScreen();
+                    renderLayerDeck();
                     prefetchUpcoming();
                     updateHud();
                 }
@@ -565,27 +609,53 @@
     }
 
     /**
-     * In-memory pre-fetching of the next 3 candidate images and prior 1 image
-     * for instant, zero-latency transitions upon J/K hotkeys.
+     * In-memory pre-fetching of all layers for active candidate, upcoming 3 candidates,
+     * and previous 1 candidate for instant, zero-latency transitions upon hotkeys.
      */
     function prefetchUpcoming() {
         let readyCount = 0;
 
-        // Prefetch next 3 candidates
+        // Prefetch all layers of current candidate
+        if (state.currentIndex >= 0 && state.currentIndex < state.candidates.length) {
+            const curCand = state.candidates[state.currentIndex];
+            const curLayers = getCandidateLayers(curCand);
+            curLayers.forEach((l, idx) => {
+                const key = `${curCand.id}_layer_${idx}`;
+                let img = state.imageCache.get(key);
+                if (!img) {
+                    img = new Image();
+                    img.src = `/api/image/staging/${encodeURIComponent(curCand.id)}/${idx}`;
+                    state.imageCache.set(key, img);
+                    img.addEventListener("load", () => updateHud(), { once: true });
+                }
+                if (img.complete && img.naturalWidth > 0) readyCount++;
+            });
+            if (!state.imageCache.get(curCand.id)) {
+                const l0 = state.imageCache.get(`${curCand.id}_layer_0`);
+                if (l0) state.imageCache.set(curCand.id, l0);
+            }
+        }
+
+        // Prefetch next candidates
         for (let offset = 1; offset <= PREFETCH_AHEAD; offset++) {
             const nextIdx = state.currentIndex + offset;
             if (nextIdx < state.candidates.length) {
                 const nextCand = state.candidates[nextIdx];
-                let img = state.imageCache.get(nextCand.id);
-                if (!img) {
-                    img = new Image();
-                    img.src = `/api/image/staging/${encodeURIComponent(nextCand.id)}`;
-                    state.imageCache.set(nextCand.id, img);
-                }
-                if (img.complete && img.naturalWidth > 0) {
-                    readyCount++;
-                } else {
-                    img.addEventListener("load", () => updateHud(), { once: true });
+                const layers = getCandidateLayers(nextCand);
+                layers.forEach((l, idx) => {
+                    const key = `${nextCand.id}_layer_${idx}`;
+                    let img = state.imageCache.get(key);
+                    if (!img) {
+                        img = new Image();
+                        img.src = `/api/image/staging/${encodeURIComponent(nextCand.id)}/${idx}`;
+                        state.imageCache.set(key, img);
+                        img.addEventListener("load", () => updateHud(), { once: true });
+                    }
+                    if (img.complete && img.naturalWidth > 0) readyCount++;
+                });
+                if (!state.imageCache.get(nextCand.id)) {
+                    const l0 = state.imageCache.get(`${nextCand.id}_layer_0`);
+                    if (l0) state.imageCache.set(nextCand.id, l0);
                 }
             }
         }
@@ -593,14 +663,21 @@
         // Prefetch previous 1 candidate
         if (state.currentIndex > 0) {
             const prevCand = state.candidates[state.currentIndex - 1];
-            let prevImg = state.imageCache.get(prevCand.id);
-            if (!prevImg) {
-                prevImg = new Image();
-                prevImg.src = `/api/image/staging/${encodeURIComponent(prevCand.id)}`;
-                state.imageCache.set(prevCand.id, prevImg);
-            }
-            if (prevImg.complete && prevImg.naturalWidth > 0) {
-                readyCount++;
+            const layers = getCandidateLayers(prevCand);
+            layers.forEach((l, idx) => {
+                const key = `${prevCand.id}_layer_${idx}`;
+                let prevImg = state.imageCache.get(key);
+                if (!prevImg) {
+                    prevImg = new Image();
+                    prevImg.src = `/api/image/staging/${encodeURIComponent(prevCand.id)}/${idx}`;
+                    state.imageCache.set(key, prevImg);
+                    prevImg.addEventListener("load", () => updateHud(), { once: true });
+                }
+                if (prevImg.complete && prevImg.naturalWidth > 0) readyCount++;
+            });
+            if (!state.imageCache.get(prevCand.id)) {
+                const l0 = state.imageCache.get(`${prevCand.id}_layer_0`);
+                if (l0) state.imageCache.set(prevCand.id, l0);
             }
         }
 
@@ -624,6 +701,545 @@
     }
 
     // ==========================================================================
+    // Multi-Layer Canvas Triage Deck & Hotkey Controls
+    // ==========================================================================
+
+    function getCandidateLayers(candidate) {
+        if (!candidate) return [];
+        if (candidate.layers && candidate.layers.length > 0) {
+            return candidate.layers;
+        }
+        return [{
+            index: 0,
+            filename: candidate.filename || `${candidate.id}.png`,
+            role: "ground",
+            elevation: 0,
+            dimensions: candidate.dimensions || [2048, 2048],
+        }];
+    }
+
+    function formatRoleName(role, elevation) {
+        const r = (role || "unassigned").toLowerCase().replace(/[-_]/g, "");
+        if (r === "ground") return "Ground (0)";
+        if (r === "upperfloor" || r === "upper") {
+            const elev = typeof elevation === "number" ? elevation : 1;
+            return `Upper (${elev >= 0 ? `+${elev}` : elev})`;
+        }
+        if (r === "basement" || r === "lower" || r === "lowerfloor" || r === "cellar") {
+            const elev = typeof elevation === "number" ? elevation : -1;
+            return `Basement (${elev >= 0 ? `+${elev}` : elev})`;
+        }
+        if (r === "roof") return "Roof";
+        if (r === "variant") return "Variant";
+        if (r === "exclude" || r === "excluded") return "Exclude";
+        return "Unassigned";
+    }
+
+    function getRoleCssClass(role) {
+        const r = (role || "").toLowerCase().replace(/[-_]/g, "");
+        if (r === "ground") return "ground";
+        if (r === "upperfloor" || r === "upper") return "upper_floor";
+        if (r === "basement" || r === "lower" || r === "lowerfloor" || r === "cellar") return "basement";
+        if (r === "roof") return "roof";
+        if (r === "variant") return "variant";
+        if (r === "exclude" || r === "excluded") return "exclude";
+        return "unassigned";
+    }
+
+    /**
+     * Synchronized in-place layer switching.
+     * Preserves state.pan and state.zoom exactly without resetting the viewport!
+     */
+    function setLayer(layerIndex) {
+        if (state.currentIndex < 0 || state.currentIndex >= state.candidates.length) return;
+        const candidate = state.candidates[state.currentIndex];
+        const layers = getCandidateLayers(candidate);
+        if (layerIndex < 0 || layerIndex >= layers.length) return;
+
+        state.currentLayerIndex = layerIndex;
+        const cacheKey = `${candidate.id}_layer_${layerIndex}`;
+        let cachedImg = state.imageCache.get(cacheKey);
+
+        if (cachedImg && cachedImg.complete && cachedImg.naturalWidth > 0) {
+            // Instant 0ms transition with camera pan and zoom preserved!
+            state.currentImage = cachedImg;
+            requestRender();
+            renderLayerDeck();
+            updateHud();
+        } else {
+            showLoading(true, `Loading layer #${layerIndex}...`);
+            if (!cachedImg) {
+                cachedImg = new Image();
+                cachedImg.src = `/api/image/staging/${encodeURIComponent(candidate.id)}/${layerIndex}`;
+                state.imageCache.set(cacheKey, cachedImg);
+            }
+            cachedImg.onload = () => {
+                if (state.candidates[state.currentIndex]?.id === candidate.id && state.currentLayerIndex === layerIndex) {
+                    state.currentImage = cachedImg;
+                    showLoading(false);
+                    requestRender();
+                    renderLayerDeck();
+                    updateHud();
+                }
+            };
+            cachedImg.onerror = () => {
+                if (state.candidates[state.currentIndex]?.id === candidate.id) {
+                    showLoading(false);
+                    showToast(`Error loading layer ${layerIndex}`, "danger");
+                }
+            };
+        }
+    }
+
+    /**
+     * Cycles to next or previous layer within the current bundle without resetting camera.
+     */
+    function cycleLayer(delta) {
+        if (state.currentIndex < 0 || state.currentIndex >= state.candidates.length) return;
+        const candidate = state.candidates[state.currentIndex];
+        const layers = getCandidateLayers(candidate);
+        if (!layers || layers.length <= 1) return;
+
+        const nextIdx = (state.currentLayerIndex + delta + layers.length) % layers.length;
+        setLayer(nextIdx);
+    }
+
+    /**
+     * Renders the bottom layer deck, filmstrip cards, and role selectors.
+     */
+    function renderLayerDeck() {
+        if (!layerDeck) return;
+        if (state.currentIndex < 0 || state.currentIndex >= state.candidates.length) {
+            layerDeck.classList.add("hidden");
+            if (btnSplitBundleHud) btnSplitBundleHud.classList.add("hidden");
+            return;
+        }
+
+        const candidate = state.candidates[state.currentIndex];
+        const layers = getCandidateLayers(candidate);
+
+        // Update counter
+        if (layerDeckCount) {
+            layerDeckCount.textContent = `${state.currentLayerIndex + 1} / ${layers.length}`;
+        }
+
+        const isSplitChild = Boolean(candidate.parent_group_id);
+        const isMultiLayer = layers.length > 1;
+
+        if (layerDeckBundleTag) {
+            if (isSplitChild) {
+                layerDeckBundleTag.textContent = "Split Child";
+                layerDeckBundleTag.className = "badge badge-bundle";
+            } else if (isMultiLayer) {
+                layerDeckBundleTag.textContent = "Multi-Layer Bundle";
+                layerDeckBundleTag.className = "badge badge-bundle";
+            } else {
+                layerDeckBundleTag.textContent = "Standalone Map";
+                layerDeckBundleTag.className = "badge";
+            }
+        }
+
+        if (btnSplitBundle) {
+            if (isSplitChild) {
+                btnSplitBundle.classList.remove("hidden");
+                if (btnSplitLabel) btnSplitLabel.textContent = "Regroup Bundle";
+                btnSplitBundle.title = "Regroup split candidates back into bundle (Hotkey: U)";
+            } else if (isMultiLayer) {
+                btnSplitBundle.classList.remove("hidden");
+                if (btnSplitLabel) btnSplitLabel.textContent = "Split Bundle";
+                btnSplitBundle.title = "Split multi-layer bundle into standalone maps (Hotkey: U)";
+            } else {
+                btnSplitBundle.classList.add("hidden");
+            }
+        }
+
+        if (btnSplitBundleHud) {
+            if (isSplitChild) {
+                btnSplitBundleHud.classList.remove("hidden");
+                if (btnSplitHudText) btnSplitHudText.textContent = "Regroup";
+                btnSplitBundleHud.title = "Regroup split candidates back into bundle (Hotkey: U)";
+            } else if (isMultiLayer) {
+                btnSplitBundleHud.classList.remove("hidden");
+                if (btnSplitHudText) btnSplitHudText.textContent = "Split";
+                btnSplitBundleHud.title = "Split multi-layer bundle into standalone maps (Hotkey: U)";
+            } else {
+                btnSplitBundleHud.classList.add("hidden");
+            }
+        }
+
+        // Show layer deck container
+        layerDeck.classList.remove("hidden");
+
+        // Sync active state in Role Selector HUD
+        const activeLayer = layers[state.currentLayerIndex] || layers[0];
+        const activeRoleCls = getRoleCssClass(activeLayer?.role);
+        const roleBadges = roleSelector ? roleSelector.querySelectorAll(".role-badge") : [];
+        roleBadges.forEach((b) => {
+            if (b.getAttribute("data-role") === activeRoleCls) {
+                b.classList.add("active");
+            } else {
+                b.classList.remove("active");
+            }
+        });
+
+        // Sync Onion-Skin button
+        if (btnOnionSkin) {
+            if (state.onionSkinActive) {
+                btnOnionSkin.classList.add("active");
+            } else {
+                btnOnionSkin.classList.remove("active");
+            }
+        }
+        if (onionSkinBadge) {
+            if (state.onionSkinActive) {
+                onionSkinBadge.classList.remove("hidden");
+            } else {
+                onionSkinBadge.classList.add("hidden");
+            }
+        }
+
+        // Render layer cards into filmstrip
+        if (!layerFilmstrip) return;
+        layerFilmstrip.innerHTML = "";
+
+        layers.forEach((l, idx) => {
+            const card = document.createElement("div");
+            const roleCls = getRoleCssClass(l.role);
+            const isUnassigned = roleCls === "unassigned";
+            const isExcluded = roleCls === "exclude";
+            const isActive = idx === state.currentLayerIndex;
+
+            card.className = `layer-card${isActive ? " active" : ""}${isUnassigned ? " unassigned" : ""}${isExcluded ? " excluded" : ""}`;
+            card.setAttribute("role", "tab");
+            card.setAttribute("aria-selected", isActive ? "true" : "false");
+            card.title = `Layer #${idx}: ${formatRoleName(l.role, l.elevation)}${l.caption ? ` — ${l.caption}` : ""}`;
+
+            const thumbContainer = document.createElement("div");
+            thumbContainer.className = "layer-thumb-container";
+
+            const idxBadge = document.createElement("span");
+            idxBadge.className = "layer-index-badge";
+            idxBadge.textContent = `#${l.index !== undefined ? l.index : idx}`;
+            thumbContainer.appendChild(idxBadge);
+
+            const img = document.createElement("img");
+            img.className = "layer-thumb-img";
+            img.src = `/api/image/staging/${encodeURIComponent(candidate.id)}/${idx}`;
+            img.alt = `Layer ${idx}`;
+            img.loading = "lazy";
+            thumbContainer.appendChild(img);
+            card.appendChild(thumbContainer);
+
+            if (l.caption) {
+                const captionEl = document.createElement("div");
+                captionEl.className = "layer-caption-tooltip";
+                captionEl.textContent = l.caption;
+                card.appendChild(captionEl);
+            }
+
+            const metaEl = document.createElement("div");
+            metaEl.className = "layer-meta";
+
+            const pill = document.createElement("span");
+            pill.className = `layer-role-pill role-${roleCls}`;
+            pill.textContent = formatRoleName(l.role, l.elevation);
+            pill.title = "Click to set role (Hotkey: 3)";
+            pill.addEventListener("click", (e) => {
+                e.stopPropagation();
+                setLayer(idx);
+                enterLabelingMode("role");
+            });
+            metaEl.appendChild(pill);
+
+            const steppers = document.createElement("div");
+            steppers.className = "layer-elevation-steppers";
+
+            const btnDown = document.createElement("button");
+            btnDown.type = "button";
+            btnDown.className = "btn-elev-stepper";
+            btnDown.textContent = "−";
+            btnDown.title = "Lower elevation (Alt+Down)";
+            btnDown.addEventListener("click", (e) => {
+                e.stopPropagation();
+                setLayer(idx);
+                stepLayerElevation(-1, idx);
+            });
+            steppers.appendChild(btnDown);
+
+            const btnUp = document.createElement("button");
+            btnUp.type = "button";
+            btnUp.className = "btn-elev-stepper";
+            btnUp.textContent = "+";
+            btnUp.title = "Raise elevation (Alt+Up)";
+            btnUp.addEventListener("click", (e) => {
+                e.stopPropagation();
+                setLayer(idx);
+                stepLayerElevation(1, idx);
+            });
+            steppers.appendChild(btnUp);
+
+            metaEl.appendChild(steppers);
+            card.appendChild(metaEl);
+
+            card.addEventListener("click", () => {
+                setLayer(idx);
+            });
+
+            layerFilmstrip.appendChild(card);
+        });
+    }
+
+    /**
+     * Stepper adjustment for active layer floor elevation (Alt+Up / Alt+Down).
+     */
+    async function stepLayerElevation(delta, targetIndex) {
+        if (state.currentIndex < 0 || state.currentIndex >= state.candidates.length) return;
+        const candidate = state.candidates[state.currentIndex];
+        const layers = getCandidateLayers(candidate);
+        const idx = targetIndex !== undefined ? targetIndex : state.currentLayerIndex;
+        if (idx < 0 || idx >= layers.length) return;
+
+        const layer = layers[idx];
+        const curElev = typeof layer.elevation === "number" ? layer.elevation : 0;
+        const newElev = curElev + delta;
+        layer.elevation = newElev;
+
+        // Auto-adjust role based on elevation if currently Upper, Basement, Ground, or Unassigned
+        const r = (layer.role || "").toLowerCase().replace(/[-_]/g, "");
+        if (newElev > 0 && (r === "ground" || r === "basement" || r === "unassigned")) {
+            layer.role = "upper_floor";
+        } else if (newElev < 0 && (r === "ground" || r === "upperfloor" || r === "upper" || r === "unassigned")) {
+            layer.role = "basement";
+        } else if (newElev === 0 && (r === "upperfloor" || r === "upper" || r === "basement" || r === "unassigned")) {
+            layer.role = "ground";
+        }
+
+        candidate.layers = layers;
+        renderLayerDeck();
+        await persistCandidateLayers(candidate);
+    }
+
+    /**
+     * Assigns role to current layer with auto-increment/decrement of floor numbers.
+     */
+    async function assignRole(roleName, targetIndex) {
+        if (state.currentIndex < 0 || state.currentIndex >= state.candidates.length) return;
+        const candidate = state.candidates[state.currentIndex];
+        const layers = getCandidateLayers(candidate);
+        const idx = targetIndex !== undefined ? targetIndex : state.currentLayerIndex;
+        if (idx < 0 || idx >= layers.length) return;
+
+        const layer = layers[idx];
+        const r = roleName.toLowerCase().replace(/[-_]/g, "");
+
+        let elevation = null;
+        if (r === "ground") {
+            elevation = 0;
+        } else if (r === "upperfloor" || r === "upper") {
+            // Auto-increment: find highest existing UpperFloor in bundle
+            let maxUpper = 0;
+            layers.forEach((l, i) => {
+                if (i !== idx) {
+                    const lr = (l.role || "").toLowerCase().replace(/[-_]/g, "");
+                    if (lr === "upperfloor" || lr === "upper") {
+                        const elev = typeof l.elevation === "number" ? l.elevation : 0;
+                        if (elev > maxUpper) maxUpper = elev;
+                    }
+                }
+            });
+            elevation = maxUpper + 1;
+        } else if (r === "basement" || r === "lower" || r === "lowerfloor" || r === "cellar") {
+            // Auto-decrement: find lowest existing Basement in bundle
+            let minBasement = 0;
+            layers.forEach((l, i) => {
+                if (i !== idx) {
+                    const lr = (l.role || "").toLowerCase().replace(/[-_]/g, "");
+                    if (lr === "basement" || lr === "lower" || lr === "lowerfloor" || lr === "cellar") {
+                        const elev = typeof l.elevation === "number" ? l.elevation : 0;
+                        if (elev < minBasement) minBasement = elev;
+                    }
+                }
+            });
+            elevation = minBasement - 1;
+        } else {
+            // Roof, Variant, Exclude, Unassigned
+            elevation = null;
+        }
+
+        layer.role = roleName;
+        layer.elevation = elevation;
+        candidate.layers = layers;
+        exitLabelingMode();
+        renderLayerDeck();
+        await persistCandidateLayers(candidate);
+    }
+
+    /**
+     * Space hotkey: Quick-toggle current layer between Exclude and assigned/inferred role.
+     */
+    async function toggleActiveLayerExclude() {
+        if (state.currentIndex < 0 || state.currentIndex >= state.candidates.length) return;
+        const candidate = state.candidates[state.currentIndex];
+        const layers = getCandidateLayers(candidate);
+        if (!layers || layers.length === 0) return;
+
+        const layer = layers[state.currentLayerIndex];
+        if (!layer) return;
+
+        const r = (layer.role || "").toLowerCase().replace(/[-_]/g, "");
+        if (r === "exclude" || r === "excluded") {
+            // Re-include layer
+            const prevRole = layer._prevRole || (layer.index === 0 ? "ground" : "upper_floor");
+            const prevElev = layer._prevElevation !== undefined ? layer._prevElevation : (prevRole === "ground" ? 0 : 1);
+            layer.role = prevRole;
+            layer.elevation = prevElev;
+            showToast(`Layer #${state.currentLayerIndex} included as ${formatRoleName(prevRole, prevElev)}`, "info");
+        } else {
+            // Exclude layer
+            layer._prevRole = layer.role;
+            layer._prevElevation = layer.elevation;
+            layer.role = "exclude";
+            layer.elevation = null;
+            showToast(`Layer #${state.currentLayerIndex} marked as Exclude`, "info");
+        }
+
+        candidate.layers = layers;
+        renderLayerDeck();
+        await persistCandidateLayers(candidate);
+    }
+
+    /**
+     * Persists updated layer metadata to /api/staging/{id}/layers.
+     */
+    async function persistCandidateLayers(candidate) {
+        try {
+            const res = await fetch(`/api/staging/${encodeURIComponent(candidate.id)}/layers`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ layers: candidate.layers }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.message || `HTTP ${res.status}`);
+            }
+            const updated = await res.json();
+            candidate.layers = updated.layers;
+            renderLayerDeck();
+        } catch (err) {
+            showToast(`Failed to persist layer metadata: ${err.message}`, "danger");
+        }
+    }
+
+    /**
+     * Decomposes multi-layer bundle into standalone candidates via /api/staging/{id}/split.
+     */
+    async function splitCandidate(id) {
+        if (state.isSubmitting) return;
+        state.isSubmitting = true;
+        showLoading(true, "Splitting bundle into standalone maps...");
+        try {
+            const res = await fetch(`/api/staging/${encodeURIComponent(id)}/split`, {
+                method: "POST",
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.message || `HTTP ${res.status}`);
+            }
+            const splitCandidates = await res.json();
+            const idx = state.candidates.findIndex((c) => c.id === id);
+            if (idx !== -1) {
+                state.candidates.splice(idx, 1, ...splitCandidates);
+                state.lastSplitParentId = id;
+                loadCandidate(idx);
+                showToast("Bundle split into standalone maps. Press U or click Undo to regroup.", "info");
+            }
+        } catch (err) {
+            showToast(`Split failed: ${err.message}`, "danger");
+        } finally {
+            state.isSubmitting = false;
+            showLoading(false);
+        }
+    }
+
+    /**
+     * Recombines split candidates back into single bundle via /api/staging/{parent_id}/regroup.
+     */
+    async function regroupCandidate(parentId) {
+        if (state.isSubmitting) return;
+        state.isSubmitting = true;
+        showLoading(true, "Regrouping multi-layer bundle...");
+        try {
+            const res = await fetch(`/api/staging/${encodeURIComponent(parentId)}/regroup`, {
+                method: "POST",
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.message || `HTTP ${res.status}`);
+            }
+            const regroupedCandidate = await res.json();
+
+            // Find all split children belonging to parentId
+            const firstIdx = state.candidates.findIndex(
+                (c) => c.parent_group_id === parentId || c.id === parentId || c.id.startsWith(`${parentId}_`)
+            );
+            if (firstIdx !== -1) {
+                const count = state.candidates.filter(
+                    (c) => c.parent_group_id === parentId || c.id === parentId || c.id.startsWith(`${parentId}_`)
+                ).length;
+                state.candidates.splice(firstIdx, Math.max(1, count), regroupedCandidate);
+                state.lastSplitParentId = null;
+                loadCandidate(firstIdx);
+                showToast("Regrouped multi-layer bundle", "success");
+            }
+        } catch (err) {
+            showToast(`Regroup failed: ${err.message}`, "danger");
+        } finally {
+            state.isSubmitting = false;
+            showLoading(false);
+        }
+    }
+
+    /**
+     * Toggles between split bundle and regroup depending on current candidate state.
+     */
+    function handleSplitOrRegroup() {
+        if (state.currentIndex < 0 || state.currentIndex >= state.candidates.length) return;
+        const candidate = state.candidates[state.currentIndex];
+        if (candidate.parent_group_id) {
+            regroupCandidate(candidate.parent_group_id);
+        } else if (candidate.layers && candidate.layers.length > 1) {
+            splitCandidate(candidate.id);
+        } else if (state.lastSplitParentId) {
+            regroupCandidate(state.lastSplitParentId);
+        } else {
+            showToast("Candidate is not a multi-layer bundle", "info");
+        }
+    }
+
+    /**
+     * Toggles 50% opacity Onion-Skin overlay of base Ground layer.
+     */
+    function toggleOnionSkin() {
+        state.onionSkinActive = !state.onionSkinActive;
+        if (btnOnionSkin) {
+            if (state.onionSkinActive) {
+                btnOnionSkin.classList.add("active");
+            } else {
+                btnOnionSkin.classList.remove("active");
+            }
+        }
+        if (onionSkinBadge) {
+            if (state.onionSkinActive) {
+                onionSkinBadge.classList.remove("hidden");
+            } else {
+                onionSkinBadge.classList.add("hidden");
+            }
+        }
+        requestRender();
+        showToast(`Onion-Skin overlay: ${state.onionSkinActive ? "Active (50% Ground)" : "Disabled"}`, "info");
+    }
+
+    // ==========================================================================
     // Curation & Rejection Actions
     // ==========================================================================
 
@@ -634,6 +1250,33 @@
         }
 
         const candidate = state.candidates[state.currentIndex];
+        const layers = getCandidateLayers(candidate);
+
+        // Curate Validation Gate:
+        // 1. If all layers are Exclude, block curation
+        const allExcluded = layers.length > 0 && layers.every((l) => {
+            const r = (l.role || "").toLowerCase().replace(/[-_]/g, "");
+            return r === "exclude" || r === "excluded";
+        });
+        if (allExcluded) {
+            showToast("Cannot curate: at least 1 layer must be included", "danger");
+            return;
+        }
+
+        // 2. If any included layer has role Unassigned, block curation
+        const unassignedIdx = layers.findIndex((l) => {
+            const r = (l.role || "").toLowerCase().replace(/[-_]/g, "");
+            return r !== "exclude" && r !== "excluded" && (r === "unassigned" || !r);
+        });
+        if (unassignedIdx !== -1) {
+            const unassignedLayer = layers[unassignedIdx];
+            const layerNum = unassignedLayer.index !== undefined ? unassignedLayer.index : unassignedIdx;
+            showToast(`Cannot curate: layer ${layerNum} is Unassigned. Please assign a role.`, "danger");
+            setLayer(unassignedIdx);
+            enterLabelingMode("role");
+            return;
+        }
+
         state.isSubmitting = true;
         btnCurate.disabled = true;
 
@@ -643,6 +1286,7 @@
                 theme: state.selectedTheme,
                 rating: state.selectedRating,
                 tags: [],
+                layers: candidate.layers && candidate.layers.length > 0 ? candidate.layers : undefined,
             };
 
             const res = await fetch("/api/curate", {
@@ -661,6 +1305,11 @@
 
             // Remove curated item from local queue and memory cache
             state.imageCache.delete(candidate.id);
+            if (candidate.layers) {
+                candidate.layers.forEach((_, idx) => {
+                    state.imageCache.delete(`${candidate.id}_layer_${idx}`);
+                });
+            }
             state.candidates.splice(state.currentIndex, 1);
 
             // Maintain index within remaining bounds
@@ -710,6 +1359,11 @@
 
             // Remove rejected item from local queue and cache
             state.imageCache.delete(candidate.id);
+            if (candidate.layers) {
+                candidate.layers.forEach((_, idx) => {
+                    state.imageCache.delete(`${candidate.id}_layer_${idx}`);
+                });
+            }
             state.candidates.splice(state.currentIndex, 1);
 
             if (state.currentIndex >= state.candidates.length) {
@@ -1780,6 +2434,25 @@
             });
         });
 
+        // Filmstrip deck buttons & role badges
+        if (btnOnionSkin) {
+            btnOnionSkin.addEventListener("click", () => toggleOnionSkin());
+        }
+        if (btnSplitBundle) {
+            btnSplitBundle.addEventListener("click", () => handleSplitOrRegroup());
+        }
+        if (btnSplitBundleHud) {
+            btnSplitBundleHud.addEventListener("click", () => handleSplitOrRegroup());
+        }
+
+        const roleBadges = document.querySelectorAll(".role-badge");
+        roleBadges.forEach((badge) => {
+            badge.addEventListener("click", () => {
+                const role = badge.getAttribute("data-role");
+                if (role) assignRole(role);
+            });
+        });
+
         // Modal backdrop click to close
         rejectionModal.addEventListener("click", (e) => {
             if (e.target === rejectionModal) closeRejectionModal();
@@ -1892,6 +2565,26 @@
             }
         }
 
+        if (state.labelingMode === "role") {
+            const roleKeys = {
+                "1": "ground",
+                "2": "upper_floor",
+                "3": "basement",
+                "4": "roof",
+                "5": "variant",
+                "6": "exclude",
+            };
+            if (roleKeys[e.key]) {
+                assignRole(roleKeys[e.key]);
+                e.preventDefault();
+                return;
+            }
+            if (["7", "8", "9"].includes(e.key)) {
+                e.preventDefault();
+                return;
+            }
+        }
+
         // Ingestion drawer hotkey: H
         if (e.key === "h" || e.key === "H") {
             toggleIngestionDrawer();
@@ -1924,6 +2617,11 @@
             e.preventDefault();
             return;
         }
+        if (e.key === "3" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+            enterLabelingMode("role");
+            e.preventDefault();
+            return;
+        }
         // 64px VTT Grid toggle: G
         if (e.key === "g" || e.key === "G") {
             toggleGrid();
@@ -1946,6 +2644,62 @@
                     activePanKeys[key] = true;
                     startPanLoop();
                 }
+                e.preventDefault();
+                return;
+            }
+        }
+
+        // Layer Navigation: Tab / Shift+Tab or Up / Down arrows
+        if (e.key === "Tab") {
+            cycleLayer(e.shiftKey ? -1 : 1);
+            e.preventDefault();
+            return;
+        }
+        if (e.altKey && (e.key === "ArrowUp" || e.key === "Up")) {
+            stepLayerElevation(1);
+            e.preventDefault();
+            return;
+        }
+        if (e.altKey && (e.key === "ArrowDown" || e.key === "Down")) {
+            stepLayerElevation(-1);
+            e.preventDefault();
+            return;
+        }
+        if (!e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "Up")) {
+            cycleLayer(-1);
+            e.preventDefault();
+            return;
+        }
+        if (!e.altKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowDown" || e.key === "Down")) {
+            cycleLayer(1);
+            e.preventDefault();
+            return;
+        }
+
+        // Space hotkey: Quick toggle Exclude on active layer
+        if (e.key === " " || e.code === "Space") {
+            toggleActiveLayerExclude();
+            e.preventDefault();
+            return;
+        }
+
+        // Onion-skin overlay toggle: O
+        if (e.key === "o" || e.key === "O") {
+            toggleOnionSkin();
+            e.preventDefault();
+            return;
+        }
+
+        // Split / Regroup bundle: U or Ctrl+Z
+        if ((e.key === "u" || e.key === "U") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            handleSplitOrRegroup();
+            e.preventDefault();
+            return;
+        }
+        if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z")) {
+            const currentCand = state.candidates[state.currentIndex];
+            if (currentCand?.parent_group_id || state.lastSplitParentId) {
+                handleSplitOrRegroup();
                 e.preventDefault();
                 return;
             }
@@ -2019,8 +2773,10 @@
         state.labelingMode = mode;
         const themeSelector = document.getElementById("theme-selector");
         const ratingSelector = document.getElementById("rating-selector");
+        const roleSelectorEl = document.getElementById("role-selector");
         if (themeSelector) themeSelector.classList.remove("selecting-mode");
         if (ratingSelector) ratingSelector.classList.remove("selecting-mode");
+        if (roleSelectorEl) roleSelectorEl.classList.remove("selecting-mode");
 
         if (mode === "theme" && themeSelector) {
             themeSelector.classList.add("selecting-mode");
@@ -2028,6 +2784,9 @@
         } else if (mode === "rating" && ratingSelector) {
             ratingSelector.classList.add("selecting-mode");
             showToast("Select Rating: press 1-5 (Esc to cancel)", "info");
+        } else if (mode === "role" && roleSelectorEl) {
+            roleSelectorEl.classList.add("selecting-mode");
+            showToast("Assign Layer Role: 1 Ground, 2 Upper, 3 Basement, 4 Roof, 5 Variant, 6 Exclude (Esc to cancel)", "info");
         }
     }
 
@@ -2036,8 +2795,10 @@
         state.labelingMode = null;
         const themeSelector = document.getElementById("theme-selector");
         const ratingSelector = document.getElementById("rating-selector");
+        const roleSelectorEl = document.getElementById("role-selector");
         if (themeSelector) themeSelector.classList.remove("selecting-mode");
         if (ratingSelector) ratingSelector.classList.remove("selecting-mode");
+        if (roleSelectorEl) roleSelectorEl.classList.remove("selecting-mode");
     }
 
     function setTheme(theme) {
@@ -2106,14 +2867,9 @@
 
         // Count cached prefetch images
         let readyCount = 0;
-        for (let i = 1; i <= PREFETCH_AHEAD; i++) {
-            const idx = state.currentIndex + i;
-            if (idx < state.candidates.length) {
-                const cand = state.candidates[idx];
-                const img = state.imageCache.get(cand.id);
-                if (img && img.complete && img.naturalWidth > 0) readyCount++;
-            }
-        }
+        state.imageCache.forEach((img) => {
+            if (img && img.complete && img.naturalWidth > 0) readyCount++;
+        });
         hudPrefetchStatus.textContent = `Prefetch: ${readyCount} ready`;
 
         // Update candidate metadata box in topbar

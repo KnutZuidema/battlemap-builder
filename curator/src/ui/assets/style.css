@@ -646,6 +646,426 @@ kbd {
     color: var(--border-medium);
 }
 
+/* ==========================================================================
+   Canvas Triage Deck: Layer Filmstrip, Role Hotkeys, Onion-Skin & Split
+   ========================================================================== */
+
+/* Bundle Badge */
+.badge-bundle {
+    background: rgba(168, 85, 247, 0.15);
+    color: #c084fc;
+    border: 1px solid rgba(168, 85, 247, 0.35);
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.15rem 0.45rem;
+    border-radius: 4px;
+}
+
+/* Onion-Skin Alignment Floating Badge */
+.onion-skin-badge {
+    position: absolute;
+    top: 1rem;
+    left: 1rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.85rem;
+    background: rgba(15, 23, 42, 0.88);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(168, 85, 247, 0.55);
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #e9d5ff;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), 0 0 15px rgba(168, 85, 247, 0.35);
+    pointer-events: none;
+    user-select: none;
+    z-index: 25;
+    animation: onion-badge-fadein 0.2s ease-out;
+}
+
+.onion-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #c084fc;
+    box-shadow: 0 0 8px #c084fc;
+    animation: onion-pulse 1.5s infinite ease-in-out;
+}
+
+@keyframes onion-badge-fadein {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes onion-pulse {
+    0%, 100% {
+        transform: scale(1);
+        opacity: 0.8;
+    }
+    50% {
+        transform: scale(1.3);
+        opacity: 1;
+        box-shadow: 0 0 12px #d8b4fe;
+    }
+}
+
+/* Layer Filmstrip Deck Container */
+.layer-deck {
+    position: absolute;
+    bottom: 1rem;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.6rem 0.85rem;
+    background: rgba(15, 23, 42, 0.88);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--border-medium);
+    border-radius: 12px;
+    box-shadow: var(--shadow-glass);
+    z-index: 15;
+    max-width: calc(100vw - 2rem);
+    user-select: none;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.layer-deck-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    width: 100%;
+}
+
+.layer-deck-title-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.layer-deck-icon {
+    color: var(--accent-violet);
+}
+
+.layer-deck-title {
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-primary);
+}
+
+.layer-deck-count {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.layer-deck-center {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+}
+
+.layer-deck-tools {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+/* Role Selector (Two-Step Workflow 3, then 1-6) */
+.role-selector {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.2rem;
+    background: rgba(7, 10, 16, 0.6);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    transition: all 0.2s ease;
+}
+
+.role-selector.selecting-mode {
+    border-color: var(--accent-violet);
+    box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.3), 0 0 16px rgba(168, 85, 247, 0.45);
+    animation: selecting-mode-pulse-violet 1.5s infinite ease-in-out;
+}
+
+@keyframes selecting-mode-pulse-violet {
+    0%, 100% {
+        box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.25), 0 0 12px rgba(168, 85, 247, 0.35);
+    }
+    50% {
+        box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.45), 0 0 20px rgba(168, 85, 247, 0.65);
+    }
+}
+
+.role-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.role-badge:hover {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+}
+
+.role-badge.active {
+    background: rgba(168, 85, 247, 0.25);
+    border-color: var(--accent-violet);
+    color: #f8fafc;
+    box-shadow: 0 0 8px rgba(168, 85, 247, 0.3);
+}
+
+/* Filmstrip Cards Row */
+.layer-filmstrip {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    overflow-x: auto;
+    padding: 0.25rem 0.1rem;
+    max-width: 82vw;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-medium) transparent;
+}
+
+.layer-filmstrip::-webkit-scrollbar {
+    height: 6px;
+}
+
+.layer-filmstrip::-webkit-scrollbar-thumb {
+    background: var(--border-medium);
+    border-radius: 3px;
+}
+
+.layer-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.4rem;
+    background: var(--bg-surface-card);
+    border: 1.5px solid var(--border-subtle);
+    border-radius: 8px;
+    cursor: pointer;
+    min-width: 96px;
+    transition: all 0.15s ease;
+    user-select: none;
+    position: relative;
+}
+
+.layer-card:hover {
+    border-color: var(--border-focus);
+    background: var(--bg-surface-hover);
+    transform: translateY(-2px);
+}
+
+.layer-card.active {
+    border-color: var(--accent-cyan);
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.35), 0 4px 14px rgba(56, 189, 248, 0.25);
+    background: rgba(56, 189, 248, 0.08);
+}
+
+.layer-card.unassigned {
+    border-color: var(--accent-amber);
+    animation: pulse-warning-card 2s infinite ease-in-out;
+}
+
+.layer-card.excluded {
+    opacity: 0.55;
+    filter: grayscale(70%);
+}
+
+@keyframes pulse-warning-card {
+    0%, 100% {
+        border-color: rgba(245, 158, 11, 0.4);
+        box-shadow: 0 0 4px rgba(245, 158, 11, 0.2);
+    }
+    50% {
+        border-color: rgba(245, 158, 11, 0.9);
+        box-shadow: 0 0 12px rgba(245, 158, 11, 0.45);
+    }
+}
+
+.layer-thumb-container {
+    position: relative;
+    width: 88px;
+    height: 62px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: #070a10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border-subtle);
+}
+
+.layer-thumb-img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.layer-index-badge {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    background: rgba(15, 23, 42, 0.85);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 4px;
+    border-radius: 3px;
+    color: var(--text-primary);
+    border: 1px solid var(--border-subtle);
+}
+
+.layer-caption-tooltip {
+    max-width: 90px;
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: center;
+}
+
+.layer-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    gap: 0.25rem;
+}
+
+.layer-role-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 2px 5px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.layer-role-pill.role-ground {
+    background: rgba(16, 185, 129, 0.2);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.layer-role-pill.role-upper_floor {
+    background: rgba(56, 189, 248, 0.2);
+    color: #38bdf8;
+    border: 1px solid rgba(56, 189, 248, 0.4);
+}
+
+.layer-role-pill.role-basement {
+    background: rgba(245, 158, 11, 0.2);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+.layer-role-pill.role-roof {
+    background: rgba(168, 85, 247, 0.2);
+    color: #c084fc;
+    border: 1px solid rgba(168, 85, 247, 0.4);
+}
+
+.layer-role-pill.role-variant {
+    background: rgba(45, 212, 191, 0.2);
+    color: #2dd4bf;
+    border: 1px solid rgba(45, 212, 191, 0.4);
+}
+
+.layer-role-pill.role-exclude {
+    background: rgba(244, 63, 94, 0.2);
+    color: #fb7185;
+    border: 1px solid rgba(244, 63, 94, 0.4);
+}
+
+.layer-role-pill.role-unassigned {
+    background: rgba(239, 68, 68, 0.25);
+    color: #f87171;
+    border: 1px solid #ef4444;
+    animation: pulse-warning-pill 1.5s infinite ease-in-out;
+}
+
+@keyframes pulse-warning-pill {
+    0%, 100% {
+        opacity: 0.85;
+        box-shadow: 0 0 4px rgba(239, 68, 68, 0.3);
+    }
+    50% {
+        opacity: 1;
+        box-shadow: 0 0 10px rgba(239, 68, 68, 0.7);
+    }
+}
+
+.layer-elevation-steppers {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+}
+
+.btn-elev-stepper {
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    line-height: 1;
+    font-size: 11px;
+    font-weight: 700;
+    background: rgba(15, 23, 42, 0.8);
+    border: 1px solid var(--border-medium);
+    border-radius: 3px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.1s ease;
+}
+
+.btn-elev-stepper:hover {
+    background: var(--bg-surface-hover);
+    color: var(--text-primary);
+    border-color: var(--accent-cyan);
+}
+
+.btn-onion-skin.active {
+    background: rgba(168, 85, 247, 0.25);
+    border-color: var(--accent-violet);
+    color: #e9d5ff;
+    box-shadow: 0 0 10px rgba(168, 85, 247, 0.35);
+}
+
 /* Empty State */
 .empty-state {
     position: absolute;

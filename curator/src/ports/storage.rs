@@ -1,5 +1,6 @@
 use crate::domain::{
-    BenchmarkMetadata, Candidate, CuratedMap, RedditSidecarMetadata, RejectionReason, Theme,
+    BenchmarkMetadata, Candidate, CandidateLayer, CuratedMap, RedditSidecarMetadata,
+    RejectionReason, Theme,
 };
 use thiserror::Error;
 
@@ -58,6 +59,33 @@ pub trait StorageRepository: Send + Sync {
         self.save_staging_subfolder("generated", &candidate, data)
     }
 
+    /// Save a multi-layer candidate bundle (`manifest.json` and `0.png`, `1.png`, ...) to staging.
+    fn save_staging_bundle(
+        &self,
+        subfolder: Option<&str>,
+        candidate: &Candidate,
+        layer_images: &[Vec<u8>],
+    ) -> Result<(), StorageError> {
+        let first = layer_images
+            .first()
+            .ok_or_else(|| StorageError::InvalidData("Bundle must contain at least one layer image".into()))?;
+        match subfolder {
+            Some(sub) => self.save_staging_subfolder(sub, candidate, first),
+            None => self.save_staging(candidate, first),
+        }
+    }
+
+    /// Retrieve the raw image bytes for a specific layer of a staged candidate by ID and layer index.
+    fn get_staging_layer_image(&self, id: &str, layer_index: usize) -> Result<Vec<u8>, StorageError> {
+        if layer_index == 0 {
+            self.get_staging_image(id)
+        } else {
+            Err(StorageError::NotFound(format!(
+                "Staging layer {layer_index} for candidate '{id}' not found"
+            )))
+        }
+    }
+
     /// Retrieve the raw image bytes for a staged candidate by ID.
     fn get_staging_image(&self, id: &str) -> Result<Vec<u8>, StorageError>;
 
@@ -92,6 +120,22 @@ pub trait StorageRepository: Send + Sync {
 
     /// Retrieve the raw image bytes for a curated map by theme and ID.
     fn get_curated_image(&self, theme: &Theme, id: &str) -> Result<Vec<u8>, StorageError>;
+
+    /// Retrieve the raw image bytes for a specific layer of a curated map by theme, ID, and layer index.
+    fn get_curated_layer_image(
+        &self,
+        theme: &Theme,
+        id: &str,
+        layer_index: usize,
+    ) -> Result<Vec<u8>, StorageError> {
+        if layer_index == 0 {
+            self.get_curated_image(theme, id)
+        } else {
+            Err(StorageError::NotFound(format!(
+                "Curated layer {layer_index} for map '{id}' not found"
+            )))
+        }
+    }
 
     /// List curated maps, optionally filtered by theme (or all if None).
     fn list_curated(&self, theme: Option<&Theme>) -> Result<Vec<CuratedMap>, StorageError>;
@@ -132,8 +176,36 @@ pub trait StorageRepository: Send + Sync {
     ) -> Result<(), StorageError> {
         self.reject_staging(id, reason, notes)
     }
-}
+    /// Update the layer assignments (`role`, `elevation`, etc.) for a staged candidate and persist to its manifest.
+    fn update_staging_layers(
+        &self,
+        id: &str,
+        layers: Vec<CandidateLayer>,
+    ) -> Result<Candidate, StorageError> {
+        let _ = (id, layers);
+        Err(StorageError::InvalidData(
+            "update_staging_layers not implemented".into(),
+        ))
+    }
 
+    /// Split a multi-layer staged bundle (`layers.len() > 1`) into standalone 1-layer candidates (`{id}_0`, `{id}_1`, ...)
+    /// with `parent_group_id: Some(id)`.
+    fn split_staging_bundle(&self, id: &str) -> Result<Vec<Candidate>, StorageError> {
+        let _ = id;
+        Err(StorageError::InvalidData(
+            "split_staging_bundle not implemented".into(),
+        ))
+    }
+
+    /// Regroup all remaining staged candidates with `parent_group_id == Some(parent_id)` back into a single
+    /// multi-layer bundle `{parent_id}` with re-inferred layer roles.
+    fn regroup_staging_bundle(&self, parent_id: &str) -> Result<Candidate, StorageError> {
+        let _ = parent_id;
+        Err(StorageError::InvalidData(
+            "regroup_staging_bundle not implemented".into(),
+        ))
+    }
+}
 impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
     fn save_staging(&self, candidate: &Candidate, data: &[u8]) -> Result<(), StorageError> {
         (**self).save_staging(candidate, data)
@@ -164,6 +236,19 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
         (**self).save_staging_generated(metadata, data)
     }
 
+
+    fn save_staging_bundle(
+        &self,
+        subfolder: Option<&str>,
+        candidate: &Candidate,
+        layer_images: &[Vec<u8>],
+    ) -> Result<(), StorageError> {
+        (**self).save_staging_bundle(subfolder, candidate, layer_images)
+    }
+
+    fn get_staging_layer_image(&self, id: &str, layer_index: usize) -> Result<Vec<u8>, StorageError> {
+        (**self).get_staging_layer_image(id, layer_index)
+    }
     fn get_staging_image(&self, id: &str) -> Result<Vec<u8>, StorageError> {
         (**self).get_staging_image(id)
     }
@@ -184,6 +269,15 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
         (**self).get_curated_image(theme, id)
     }
 
+
+    fn get_curated_layer_image(
+        &self,
+        theme: &Theme,
+        id: &str,
+        layer_index: usize,
+    ) -> Result<Vec<u8>, StorageError> {
+        (**self).get_curated_layer_image(theme, id, layer_index)
+    }
     fn list_curated(&self, theme: Option<&Theme>) -> Result<Vec<CuratedMap>, StorageError> {
         (**self).list_curated(theme)
     }
@@ -224,5 +318,21 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
         notes: Option<&str>,
     ) -> Result<(), StorageError> {
         (**self).reject_staging(id, reason, notes)
+    }
+
+    fn update_staging_layers(
+        &self,
+        id: &str,
+        layers: Vec<CandidateLayer>,
+    ) -> Result<Candidate, StorageError> {
+        (**self).update_staging_layers(id, layers)
+    }
+
+    fn split_staging_bundle(&self, id: &str) -> Result<Vec<Candidate>, StorageError> {
+        (**self).split_staging_bundle(id)
+    }
+
+    fn regroup_staging_bundle(&self, parent_id: &str) -> Result<Candidate, StorageError> {
+        (**self).regroup_staging_bundle(parent_id)
     }
 }

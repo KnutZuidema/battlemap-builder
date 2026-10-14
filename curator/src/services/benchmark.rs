@@ -687,8 +687,17 @@ mod tests {
             .expect("run and persist succeeds");
 
         let generated_dir = temp_dir.path().join("staging").join("generated");
-        let png_file = generated_dir.join(format!("{}.png", result.metadata.id));
-        let json_file = generated_dir.join(format!("{}.json", result.metadata.id));
+        let bundle_dir = generated_dir.join(&result.metadata.id);
+        let png_file = if bundle_dir.join("0.png").is_file() {
+            bundle_dir.join("0.png")
+        } else {
+            generated_dir.join(format!("{}.png", result.metadata.id))
+        };
+        let json_file = if bundle_dir.join("manifest.json").is_file() {
+            bundle_dir.join("manifest.json")
+        } else {
+            generated_dir.join(format!("{}.json", result.metadata.id))
+        };
 
         assert!(png_file.is_file(), "PNG file was created in staging/generated/");
         assert!(json_file.is_file(), "JSON file was created in staging/generated/");

@@ -292,12 +292,20 @@ async fn test_benchmark_persistence_to_staging_generated() {
         .expect("benchmark execution and persistence succeeds");
 
     let generated_dir = temp_dir.path().join("staging").join("generated");
-    let png_path = generated_dir.join(format!("{}.png", bench_result.metadata.id));
-    let json_path = generated_dir.join(format!("{}.json", bench_result.metadata.id));
+    let bundle_dir = generated_dir.join(&bench_result.metadata.id);
+    let png_path = if bundle_dir.join("0.png").is_file() {
+        bundle_dir.join("0.png")
+    } else {
+        generated_dir.join(format!("{}.png", bench_result.metadata.id))
+    };
+    let json_path = if bundle_dir.join("manifest.json").is_file() {
+        bundle_dir.join("manifest.json")
+    } else {
+        generated_dir.join(format!("{}.json", bench_result.metadata.id))
+    };
 
-    assert!(png_path.is_file(), "PNG output exists in data/staging/generated/{{id}}.png");
-    assert!(json_path.is_file(), "JSON metadata exists in data/staging/generated/{{id}}.json");
-
+    assert!(png_path.is_file(), "PNG output exists in data/staging/generated");
+    assert!(json_path.is_file(), "JSON metadata exists in data/staging/generated");
     // Read companion JSON and verify fields match specifications
     let json_str = std::fs::read_to_string(&json_path).expect("read metadata json");
     let meta: BenchmarkMetadata = serde_json::from_str(&json_str).expect("parsed benchmark metadata");
@@ -356,8 +364,17 @@ async fn test_benchmark_suite_execution_and_persistence() {
 
     let generated_dir = temp_dir.path().join("staging").join("generated");
     for res in &results {
-        let png = generated_dir.join(format!("{}.png", res.metadata.id));
-        let json = generated_dir.join(format!("{}.json", res.metadata.id));
+        let bundle_dir = generated_dir.join(&res.metadata.id);
+        let png = if bundle_dir.join("0.png").is_file() {
+            bundle_dir.join("0.png")
+        } else {
+            generated_dir.join(format!("{}.png", res.metadata.id))
+        };
+        let json = if bundle_dir.join("manifest.json").is_file() {
+            bundle_dir.join("manifest.json")
+        } else {
+            generated_dir.join(format!("{}.json", res.metadata.id))
+        };
         assert!(png.is_file());
         assert!(json.is_file());
     }

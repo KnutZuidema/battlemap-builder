@@ -1334,6 +1334,67 @@ impl RedditPost {
             created_at: Utc::now(),
         })
     }
+
+    pub fn to_bundle_candidate(&self) -> Candidate {
+        let primary_media = self.media.first();
+        let primary_dimensions = match primary_media.and_then(|m| match (m.width, m.height) {
+            (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
+            _ => None,
+        }) {
+            Some(dims) => dims,
+            None => self.tags.dimensions.unwrap_or((0, 0)),
+        };
+
+        let captions: Vec<Option<String>> = self.media.iter().map(|m| m.caption.clone()).collect();
+        let roles = infer_bundle_layer_roles(&captions, Some(&self.title));
+
+        let layers: Vec<CandidateLayer> = self
+            .media
+            .iter()
+            .zip(roles)
+            .enumerate()
+            .map(|(idx, (media, (role, elevation)))| {
+                let layer_dims = match (media.width, media.height) {
+                    (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+                    _ => primary_dimensions,
+                };
+                let mut layer = CandidateLayer::new(
+                    idx,
+                    format!("{idx}.png"),
+                    role,
+                    elevation,
+                    layer_dims,
+                );
+                if let Some(caption) = &media.caption {
+                    layer = layer.with_caption(caption.clone());
+                }
+                layer.with_source_url(format_source_url(&self.permalink, &media.url))
+            })
+            .collect();
+
+        let source_url = match self.media.first() {
+            Some(first) => format_source_url(&self.permalink, &first.url),
+            None => self.permalink.clone(),
+        };
+
+        let mut candidate = Candidate::new(
+            self.id.clone(),
+            Source::Reddit,
+            format!("{}.png", self.id),
+            primary_dimensions,
+            self.created_utc,
+        )
+        .with_source_url(source_url)
+        .with_title(&self.title)
+        .with_author(&self.author)
+        .with_parsed_gridless(self.tags.is_gridless());
+
+        if let Some(dims) = self.tags.dimensions {
+            candidate = candidate.with_parsed_dimensions(dims);
+        }
+        candidate.layers = layers;
+        candidate
+    }
 }
 
 #[cfg(test)]
@@ -1661,6 +1722,55 @@ mod tests {
         assert_eq!(candidate.source, Source::Reddit);
         assert_eq!(candidate.filename, "xyz123_0.png");
         assert_eq!(candidate.dimensions, (3000, 4000));
+    }
+
+    #[test]
+    fn test_reddit_post_bundle_candidate_conversion() {
+        let tags = ParsedTags::parse_title("[40x30] Royal Castle [Gridless]");
+        let post = RedditPost {
+            id: "castle123".into(),
+            name: "t3_castle123".into(),
+            title: "[40x30] Royal Castle [Gridless]".into(),
+            author: "king_mapper".into(),
+            permalink: "https://reddit.com/r/battlemaps/comments/castle123/".into(),
+            url: "https://i.redd.it/castle_0.png".into(),
+            score: 250,
+            created_utc: Utc::now(),
+            media: vec![
+                HarvestedMedia::new("https://i.redd.it/castle_0.png")
+                    .with_dimensions(4000, 3000)
+                    .with_caption("Ground Floor"),
+                HarvestedMedia::new("https://i.redd.it/castle_1.png")
+                    .with_dimensions(4000, 3000)
+                    .with_caption("Second Floor"),
+            ],
+            tags,
+        };
+
+        let candidate = post.to_bundle_candidate();
+        assert_eq!(candidate.id, "castle123");
+        assert_eq!(candidate.source, Source::Reddit);
+        assert_eq!(candidate.filename, "castle123.png");
+        assert_eq!(candidate.dimensions, (4000, 3000));
+        assert_eq!(candidate.title.as_deref(), Some("[40x30] Royal Castle [Gridless]"));
+        assert_eq!(candidate.author.as_deref(), Some("king_mapper"));
+        assert_eq!(candidate.parsed_gridless, Some(true));
+        assert_eq!(candidate.parsed_dimensions, Some((40, 30)));
+        assert_eq!(candidate.layers.len(), 2);
+
+        assert_eq!(candidate.layers[0].index, 0);
+        assert_eq!(candidate.layers[0].filename, "0.png");
+        assert_eq!(candidate.layers[0].role, LayerRole::Ground);
+        assert_eq!(candidate.layers[0].elevation, Some(0));
+        assert_eq!(candidate.layers[0].caption.as_deref(), Some("Ground Floor"));
+        assert!(candidate.layers[0].source_url.as_deref().unwrap().contains("castle_0.png"));
+
+        assert_eq!(candidate.layers[1].index, 1);
+        assert_eq!(candidate.layers[1].filename, "1.png");
+        assert_eq!(candidate.layers[1].role, LayerRole::UpperFloor);
+        assert_eq!(candidate.layers[1].elevation, Some(1));
+        assert_eq!(candidate.layers[1].caption.as_deref(), Some("Second Floor"));
+        assert!(candidate.layers[1].source_url.as_deref().unwrap().contains("castle_1.png"));
     }
 
     #[test]

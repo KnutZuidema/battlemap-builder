@@ -1,14 +1,18 @@
+use std::time::Duration;
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
-use crate::adapters::reddit::{unescape_xml_entities, DEFAULT_USER_AGENT};
+pub use crate::adapters::reddit::BackoffConfig;
+use crate::adapters::reddit::{
+    parse_rate_limit_delay, unescape_xml_entities, DEFAULT_USER_AGENT,
+};
 use crate::domain::{
     format_source_url, RedditHarvestQuery, RedditPost, RedditSidecarMetadata, Source,
 };
 use crate::ports::harvester::{HarvesterError, RedditHarvester};
 use crate::ports::storage::{StorageError, StorageRepository};
-
 /// Summary of an ingestion execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct IngestionSummary {
@@ -49,6 +53,7 @@ pub enum SkipReason {
     NoMedia,
     InvalidMediaIndex,
     NotGridless,
+    DownloadFailed,
 }
 
 /// Progress event emitted during Reddit harvesting pipeline execution.
@@ -62,6 +67,12 @@ pub struct IngestionProgress {
     pub total: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
 }
 
 impl IngestionProgress {
@@ -81,11 +92,21 @@ impl IngestionProgress {
             skipped,
             total,
             candidate_id: None,
+            wait_seconds: None,
+            attempt: None,
+            max_retries: None,
         }
     }
 
     pub fn with_candidate_id(mut self, candidate_id: impl Into<String>) -> Self {
         self.candidate_id = Some(candidate_id.into());
+        self
+    }
+
+    pub fn with_rate_limit(mut self, wait_seconds: u64, attempt: u32, max_retries: u32) -> Self {
+        self.wait_seconds = Some(wait_seconds);
+        self.attempt = Some(attempt);
+        self.max_retries = Some(max_retries);
         self
     }
 }
@@ -127,6 +148,7 @@ pub struct RedditIngestionService<H, S> {
     harvester: H,
     storage: S,
     http_client: reqwest::Client,
+    backoff: BackoffConfig,
 }
 
 impl<H, S> RedditIngestionService<H, S> {
@@ -139,15 +161,43 @@ impl<H, S> RedditIngestionService<H, S> {
             harvester,
             storage,
             http_client,
+            backoff: Self::backoff_from_env(),
         }
     }
 
-    pub fn with_http_client(harvester: H, storage: S, http_client: reqwest::Client) -> Self {
-        Self {
-            harvester,
-            storage,
-            http_client,
+    fn backoff_from_env() -> BackoffConfig {
+        let mut backoff = BackoffConfig::default();
+
+        if let Ok(initial_secs_str) = std::env::var("REDDIT_BACKOFF_INITIAL_SECS") {
+            if let Ok(secs) = initial_secs_str.trim().parse::<u64>() {
+                backoff.initial_delay = Duration::from_secs(secs);
+            }
         }
+
+        if let Ok(max_retries_str) = std::env::var("REDDIT_BACKOFF_MAX_RETRIES") {
+            if let Ok(retries) = max_retries_str.trim().parse::<u32>() {
+                backoff.max_retries = retries;
+            }
+        }
+
+        if let Ok(factor_str) = std::env::var("REDDIT_BACKOFF_FACTOR") {
+            if let Ok(factor) = factor_str.trim().parse::<f64>() {
+                backoff.backoff_factor = factor;
+            }
+        }
+
+        backoff
+    }
+
+    pub fn with_http_client(harvester: H, storage: S, http_client: reqwest::Client) -> Self {
+        let mut service = Self::new(harvester, storage);
+        service.http_client = http_client;
+        service
+    }
+
+    pub fn with_backoff(mut self, backoff: BackoffConfig) -> Self {
+        self.backoff = backoff;
+        self
     }
 
     pub fn harvester(&self) -> &H {
@@ -161,7 +211,12 @@ impl<H, S> RedditIngestionService<H, S> {
     pub fn http_client(&self) -> &reqwest::Client {
         &self.http_client
     }
+
+    pub fn backoff(&self) -> &BackoffConfig {
+        &self.backoff
+    }
 }
+
 
 impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
     /// Ingest battlemaps matching a Reddit query.
@@ -291,7 +346,56 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
             }
 
             for idx in 0..post.media.len() {
-                match self.ingest_media_filtered(post, idx, gridless_only).await? {
+                let mut rate_limit_hook =
+                    |cid: &str, wait_time: Duration, attempt: u32, max_retries: u32| {
+                        let wait_secs =
+                            if wait_time.as_secs() == 0 && wait_time.subsec_millis() == 0 {
+                                0
+                            } else {
+                                wait_time.as_secs().max(1)
+                            };
+                        on_progress(
+                            IngestionProgress::new(
+                                "rate_limited",
+                                format!(
+                                    "Rate limited downloading candidate {cid}; waiting {wait_secs}s (attempt {attempt}/{max_retries})..."
+                                ),
+                                summary.processed,
+                                summary.downloaded,
+                                summary.skipped,
+                                total_items,
+                            )
+                            .with_candidate_id(cid)
+                            .with_rate_limit(wait_secs, attempt, max_retries),
+                        );
+                    };
+
+                let outcome = match self
+                    .ingest_media_filtered_inner(
+                        post,
+                        idx,
+                        gridless_only,
+                        Some(&mut rate_limit_hook),
+                    )
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(e) => {
+                        warn!(
+                            post_id = %post.id,
+                            media_index = idx,
+                            error = %e,
+                            "Image ingestion failed, skipping candidate"
+                        );
+                        let cid = candidate_id_for_post(&post.id, idx, post.media.len());
+                        IngestionOutcome::Skipped {
+                            id: cid,
+                            reason: SkipReason::DownloadFailed,
+                        }
+                    }
+                };
+
+                match outcome {
                     IngestionOutcome::Downloaded(cid) => {
                         summary.record_downloaded();
                         on_progress(
@@ -399,9 +503,18 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
         }
 
         for idx in 0..post.media.len() {
-            match self.ingest_media_filtered(post, idx, gridless_only).await? {
-                IngestionOutcome::Downloaded(_) => summary.record_downloaded(),
-                IngestionOutcome::Skipped { .. } => summary.record_skipped(),
+            match self.ingest_media_filtered(post, idx, gridless_only).await {
+                Ok(IngestionOutcome::Downloaded(_)) => summary.record_downloaded(),
+                Ok(IngestionOutcome::Skipped { .. }) => summary.record_skipped(),
+                Err(e) => {
+                    warn!(
+                        post_id = %post.id,
+                        media_index = idx,
+                        error = %e,
+                        "Image ingestion failed, skipping candidate"
+                    );
+                    summary.record_skipped();
+                }
             }
         }
 
@@ -424,6 +537,25 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
         media_index: usize,
         gridless_only: bool,
     ) -> Result<IngestionOutcome, IngestionError> {
+        self.ingest_media_filtered_inner(
+            post,
+            media_index,
+            gridless_only,
+            None::<fn(&str, Duration, u32, u32)>,
+        )
+        .await
+    }
+
+    async fn ingest_media_filtered_inner<Hook>(
+        &self,
+        post: &RedditPost,
+        media_index: usize,
+        gridless_only: bool,
+        mut on_rate_limit: Option<Hook>,
+    ) -> Result<IngestionOutcome, IngestionError>
+    where
+        Hook: FnMut(&str, Duration, u32, u32) + Send,
+    {
         let media = match post.media.get(media_index) {
             Some(m) => m,
             None => {
@@ -492,16 +624,99 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
             });
         }
 
-        // 4. Download image bytes
+        // 4. Download image bytes with exponential backoff on HTTP 429
         let download_url = unescape_xml_entities(&media.url);
-        let response = self.http_client.get(&download_url).send().await?;
-        if !response.status().is_success() {
-            return Err(IngestionError::Http(
-                response.error_for_status().unwrap_err(),
-            ));
-        }
+        let mut attempts: u32 = 0;
+        let mut delay = self.backoff.initial_delay;
 
-        let image_bytes = response.bytes().await?;
+        let image_bytes = loop {
+            let response = match self.http_client.get(&download_url).send().await {
+                Ok(res) => res,
+                Err(err) => {
+                    warn!(
+                        post_id = %post.id,
+                        candidate_id = %candidate_id,
+                        error = %err,
+                        "Failed to request image download"
+                    );
+                    return Ok(IngestionOutcome::Skipped {
+                        id: candidate_id,
+                        reason: SkipReason::DownloadFailed,
+                    });
+                }
+            };
+
+            let status = response.status();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                if attempts >= self.backoff.max_retries {
+                    warn!(
+                        post_id = %post.id,
+                        candidate_id = %candidate_id,
+                        retries = attempts,
+                        "Exceeded max retries downloading image after HTTP 429 rate limit"
+                    );
+                    return Ok(IngestionOutcome::Skipped {
+                        id: candidate_id,
+                        reason: SkipReason::DownloadFailed,
+                    });
+                }
+
+                let wait_time = parse_rate_limit_delay(response.headers(), delay);
+                let attempt_num = attempts + 1;
+                let wait_secs = if wait_time.as_secs() == 0 && wait_time.subsec_millis() == 0 {
+                    0
+                } else {
+                    wait_time.as_secs().max(1)
+                };
+
+                warn!(
+                    post_id = %post.id,
+                    candidate_id = %candidate_id,
+                    attempt = attempt_num,
+                    max_retries = self.backoff.max_retries,
+                    wait_secs = wait_secs,
+                    "Received HTTP 429 Too Many Requests while downloading media; backing off"
+                );
+
+                if let Some(hook) = &mut on_rate_limit {
+                    hook(&candidate_id, wait_time, attempt_num, self.backoff.max_retries);
+                }
+
+                tokio::time::sleep(wait_time).await;
+                delay = delay.mul_f64(self.backoff.backoff_factor);
+                attempts += 1;
+                continue;
+            }
+
+            if !status.is_success() {
+                warn!(
+                    post_id = %post.id,
+                    candidate_id = %candidate_id,
+                    status = %status,
+                    "Non-success HTTP status encountered while downloading image"
+                );
+                return Ok(IngestionOutcome::Skipped {
+                    id: candidate_id,
+                    reason: SkipReason::DownloadFailed,
+                });
+            }
+
+            match response.bytes().await {
+                Ok(bytes) => break bytes,
+                Err(err) => {
+                    warn!(
+                        post_id = %post.id,
+                        candidate_id = %candidate_id,
+                        error = %err,
+                        "Failed to read image response bytes"
+                    );
+                    return Ok(IngestionOutcome::Skipped {
+                        id: candidate_id,
+                        reason: SkipReason::DownloadFailed,
+                    });
+                }
+            }
+        };
 
         // 5. Build sidecar metadata according to Issue #25 schema
         let source_url = format_source_url(&post.permalink, &media.url);

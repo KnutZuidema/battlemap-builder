@@ -1,13 +1,15 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 use tokio::net::TcpListener;
-
 use async_trait::async_trait;
 use axum::routing::get;
 use axum::Router;
 use chrono::Utc;
 
 use curator::adapters::filesystem_storage::FilesystemStorage;
+use curator::adapters::reddit::BackoffConfig;
 use curator::domain::{
     CuratedMap, HarvestedMedia, ParsedTags, RedditHarvestQuery, RedditPost, RejectionReason,
     Source, Theme,
@@ -509,4 +511,284 @@ async fn test_ingest_query_progress_events() {
     assert!(!events.is_empty());
     assert_eq!(events[0].phase, "fetching");
     assert_eq!(events.last().unwrap().phase, "complete");
+}
+
+#[tokio::test]
+async fn test_media_download_429_backoff_and_recovery() {
+    let png_bytes = create_test_png();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+
+    let app = Router::new().route(
+        "/recoverable.png",
+        get(move || {
+            let data = png_bytes.clone();
+            let c = counter_clone.clone();
+            async move {
+                let count = c.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", "0"), ("content-type", "text/plain")],
+                        vec![],
+                    )
+                } else if count == 1 {
+                    (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        [("x-ratelimit-reset", "0"), ("content-type", "text/plain")],
+                        vec![],
+                    )
+                } else {
+                    (
+                        axum::http::StatusCode::OK,
+                        [("retry-after", "0"), ("content-type", "image/png")],
+                        data,
+                    )
+                }
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let image_url = format!("http://{addr}/recoverable.png");
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+
+    let post = RedditPost {
+        id: "recover_post".into(),
+        name: "t3_recover_post".into(),
+        title: "[20x20] Ambush Pass [Gridless]".into(),
+        author: "ranger".into(),
+        permalink: "/r/battlemaps/comments/recover_post/".into(),
+        url: image_url.clone(),
+        score: 120,
+        created_utc: Utc::now(),
+        media: vec![HarvestedMedia::new(image_url.clone())],
+        tags: ParsedTags::parse_title("[20x20] Ambush Pass [Gridless]"),
+    };
+
+    let harvester = MockHarvester::new(vec![post.clone()]);
+    let backoff = BackoffConfig::new(Duration::from_millis(5), 3, 1.5);
+    let service = RedditIngestionService::new(harvester, storage.clone()).with_backoff(backoff);
+
+    assert_eq!(service.backoff().max_retries, 3);
+
+    let summary = service.ingest_post(&post).await.unwrap();
+    assert_eq!(summary.processed, 1);
+    assert_eq!(summary.downloaded, 1);
+    assert_eq!(summary.skipped, 0);
+
+    // Verify file exists on disk
+    let staged_file = storage.staging_dir().join("reddit").join("recover_post.png");
+    assert!(staged_file.is_file());
+    assert_eq!(counter.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn test_media_download_429_exhausted_retries_continues_batch() {
+    let png_bytes = create_test_png();
+    let png_clone = png_bytes.clone();
+    let fail_counter = Arc::new(AtomicUsize::new(0));
+    let fail_counter_clone = fail_counter.clone();
+
+    let app = Router::new()
+        .route(
+            "/always_429.png",
+            get(move || {
+                let c = fail_counter_clone.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", "0"), ("content-type", "text/plain")],
+                        vec![],
+                    )
+                }
+            }),
+        )
+        .route(
+            "/ok.png",
+            get(move || {
+                let data = png_clone.clone();
+                async move {
+                    (
+                        axum::http::StatusCode::OK,
+                        [("content-type", "image/png")],
+                        data,
+                    )
+                }
+            }),
+        );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let fail_url = format!("http://{addr}/always_429.png");
+    let ok_url = format!("http://{addr}/ok.png");
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+
+    let post1_fail = RedditPost {
+        id: "post_1_fail".into(),
+        name: "t3_post_1_fail".into(),
+        title: "[25x25] Dragon Lair [Gridless]".into(),
+        author: "dragon_master".into(),
+        permalink: "/r/battlemaps/comments/post_1_fail/".into(),
+        url: fail_url.clone(),
+        score: 300,
+        created_utc: Utc::now(),
+        media: vec![HarvestedMedia::new(fail_url.clone())],
+        tags: ParsedTags::parse_title("[25x25] Dragon Lair [Gridless]"),
+    };
+
+    let post2_ok = RedditPost {
+        id: "post_2_ok".into(),
+        name: "t3_post_2_ok".into(),
+        title: "[30x30] Goblin Camp [Gridless]".into(),
+        author: "goblin_king".into(),
+        permalink: "/r/battlemaps/comments/post_2_ok/".into(),
+        url: ok_url.clone(),
+        score: 200,
+        created_utc: Utc::now(),
+        media: vec![HarvestedMedia::new(ok_url.clone())],
+        tags: ParsedTags::parse_title("[30x30] Goblin Camp [Gridless]"),
+    };
+
+    let harvester = MockHarvester::new(vec![post1_fail.clone(), post2_ok.clone()]);
+    let backoff = BackoffConfig::new(Duration::from_millis(5), 2, 1.5);
+    let service = RedditIngestionService::new(harvester, storage.clone()).with_backoff(backoff);
+
+    // First verify ingest_media for post1_fail directly returns SkipReason::DownloadFailed
+    let outcome = service.ingest_media(&post1_fail, 0).await.unwrap();
+    assert_eq!(
+        outcome,
+        IngestionOutcome::Skipped {
+            id: "post_1_fail".into(),
+            reason: SkipReason::DownloadFailed,
+        }
+    );
+
+    // Now verify batch execution of both posts continues
+    let summary = service
+        .ingest_posts(&[post1_fail.clone(), post2_ok.clone()])
+        .await
+        .unwrap();
+
+    assert_eq!(summary.processed, 2);
+    assert_eq!(summary.downloaded, 1);
+    assert_eq!(summary.skipped, 1);
+
+    // Staging must NOT have post_1_fail, but MUST have post_2_ok
+    let reddit_staging = storage.staging_dir().join("reddit");
+    assert!(!reddit_staging.join("post_1_fail.png").exists());
+    assert!(!reddit_staging.join("post_1_fail.json").exists());
+    assert!(reddit_staging.join("post_2_ok.png").is_file());
+    assert!(reddit_staging.join("post_2_ok.json").is_file());
+}
+
+#[tokio::test]
+async fn test_rate_limit_progress_events_emitted_during_backoff() {
+    let png_bytes = create_test_png();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_clone = counter.clone();
+
+    let app = Router::new().route(
+        "/rate_limit_progress.png",
+        get(move || {
+            let data = png_bytes.clone();
+            let c = counter_clone.clone();
+            async move {
+                let count = c.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", "1"), ("content-type", "text/plain")],
+                        vec![],
+                    )
+                } else {
+                    (
+                        axum::http::StatusCode::OK,
+                        [("retry-after", "0"), ("content-type", "image/png")],
+                        data,
+                    )
+                }
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let image_url = format!("http://{addr}/rate_limit_progress.png");
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+
+    let post = RedditPost {
+        id: "rl_post".into(),
+        name: "t3_rl_post".into(),
+        title: "[40x40] Sunken Temple [Gridless]".into(),
+        author: "priest".into(),
+        permalink: "/r/battlemaps/comments/rl_post/".into(),
+        url: image_url.clone(),
+        score: 180,
+        created_utc: Utc::now(),
+        media: vec![HarvestedMedia::new(image_url.clone())],
+        tags: ParsedTags::parse_title("[40x40] Sunken Temple [Gridless]"),
+    };
+
+    let harvester = MockHarvester::new(vec![post]);
+    let backoff = BackoffConfig::new(Duration::from_millis(5), 3, 2.0);
+    let service = RedditIngestionService::new(harvester, storage).with_backoff(backoff);
+
+    let query = RedditHarvestQuery::default();
+    let mut events: Vec<IngestionProgress> = Vec::new();
+
+    let summary = service
+        .ingest_query_progress(&query, false, |progress| {
+            events.push(progress);
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(summary.downloaded, 1);
+    assert_eq!(summary.skipped, 0);
+
+    let rl_event = events
+        .iter()
+        .find(|e| e.phase == "rate_limited")
+        .expect("Must have emitted a rate_limited progress event");
+
+    assert_eq!(rl_event.candidate_id.as_deref(), Some("rl_post"));
+    assert_eq!(rl_event.attempt, Some(1));
+    assert_eq!(rl_event.max_retries, Some(3));
+    assert!(rl_event.message.contains("Rate limited"));
+    assert!(rl_event.wait_seconds.is_some());
+    assert_eq!(events.last().unwrap().phase, "complete");
+}
+
+#[test]
+fn test_reddit_ingestion_service_backoff_config() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let harvester = MockHarvester::default();
+    let service = RedditIngestionService::new(harvester, storage.clone());
+
+    assert_eq!(service.backoff().initial_delay, Duration::from_secs(3));
+    assert_eq!(service.backoff().max_retries, 5);
+    assert_eq!(service.backoff().backoff_factor, 2.0);
+
+    let custom = BackoffConfig::new(Duration::from_secs(1), 2, 1.5);
+    let service = service.with_backoff(custom.clone());
+    assert_eq!(service.backoff(), &custom);
 }

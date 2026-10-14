@@ -556,6 +556,7 @@ impl FilesystemStorage {
     /// Idempotent startup migration that converts legacy flat staging/curated files
     /// (including sibling `{post_id}_0`, `{post_id}_1` Reddit items) into uniform `<id>/`
     /// bundle directories containing `manifest.json` and indexed layer images.
+    #[allow(clippy::type_complexity)]
     pub fn migrate_legacy_storage(&self) -> Result<(), StorageError> {
         let staging = self.staging_dir();
         if staging.is_dir() {
@@ -583,6 +584,7 @@ impl FilesystemStorage {
         Ok(())
     }
 
+    #[allow(clippy::type_complexity)]
     fn migrate_staging_directory(&self, dir: &Path) -> Result<(), StorageError> {
         let mut flat_items: Vec<(String, PathBuf, PathBuf, Candidate)> = Vec::new();
 
@@ -698,7 +700,7 @@ impl FilesystemStorage {
 
             let mut layers = Vec::with_capacity(group.len());
             for (new_idx, ((_, _, json_path, img_path, cand), (role, elevation))) in
-                group.iter().zip(inferred_roles.into_iter()).enumerate()
+                group.iter().zip(inferred_roles).enumerate()
             {
                 let ext = img_path
                     .extension()
@@ -1507,13 +1509,12 @@ impl StorageRepository for FilesystemStorage {
             return Ok(true);
         }
         if let Some((base_id, suffix)) = id.rsplit_once('_') {
-            if suffix.chars().all(|c| c.is_ascii_digit()) {
-                if self.is_rejected(base_id)?
+            if suffix.chars().all(|c| c.is_ascii_digit())
+                && (self.is_rejected(base_id)?
                     || self.is_in_staging(base_id)?
-                    || self.is_curated(base_id)?
-                {
-                    return Ok(true);
-                }
+                    || self.is_curated(base_id)?)
+            {
+                return Ok(true);
             }
         }
         Ok(false)
@@ -1919,7 +1920,7 @@ impl StorageRepository for FilesystemStorage {
 
         let mut regrouped_layers = Vec::with_capacity(matching.len());
         for (new_idx, ((_, child_dir, child_cand), (role, elevation))) in
-            matching.iter().zip(inferred_roles.into_iter()).enumerate()
+            matching.iter().zip(inferred_roles).enumerate()
         {
             let child_layers = child_cand.resolved_layers();
             let first_layer = &child_layers[0];

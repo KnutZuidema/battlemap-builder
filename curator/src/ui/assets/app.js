@@ -352,8 +352,7 @@
 
             // Draw active layer battlemap at origin (0, 0)
             ctx.globalAlpha = 1.0;
-
-
+            ctx.drawImage(img, 0, 0, imgW, imgH);
             // Draw crisp 64px VTT grid overlay in image space
             if (state.gridVisible) {
                 drawVttGrid(ctx, imgW, imgH);

@@ -17,9 +17,9 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info, instrument};
 
 use crate::domain::{
-    generate_benchmark_id, BenchmarkArchetype, BenchmarkMetadata, BenchmarkModelSpec,
-    BenchmarkResult, GenerationRequest, GenerationResponse, ModelApiType, MODEL_GEMINI_31_FLASH,
-    MODEL_GEMINI_31_FLASH_LITE, MODEL_MUSE, MODEL_SEEDREAM_50_FLASH,
+    build_battlemap_prompt, generate_benchmark_id, BenchmarkArchetype, BenchmarkMetadata,
+    BenchmarkModelSpec, BenchmarkResult, GenerationRequest, GenerationResponse, ModelApiType,
+    MODEL_GEMINI_31_FLASH, MODEL_GEMINI_31_FLASH_LITE, MODEL_MUSE, MODEL_SEEDREAM_50_FLASH,
 };
 use crate::ports::model_engine::{ModelEngine, ModelEngineError};
 
@@ -128,6 +128,96 @@ impl OpenRouterAdapter {
     pub fn images_endpoint_url(&self) -> String {
         format!("{}/images", self.inner.base_url)
     }
+
+    /// Builds the JSON request payload for the OpenRouter chat completions endpoint.
+    pub fn build_chat_payload(request: &GenerationRequest) -> Value {
+        let user_content = if request.images.is_empty() {
+            json!(request.prompt)
+        } else {
+            let mut parts = vec![json!({
+                "type": "text",
+                "text": request.prompt,
+            })];
+            for img in &request.images {
+                parts.push(json!({
+                    "type": "text",
+                    "text": format!("{}:", img.label),
+                }));
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!(
+                            "data:{};base64,{}",
+                            img.mime_type,
+                            BASE64_STANDARD.encode(&img.data)
+                        ),
+                    },
+                }));
+            }
+            Value::Array(parts)
+        };
+
+        let mut messages = Vec::new();
+        if let Some(sys) = &request.system_instruction {
+            if !sys.trim().is_empty() {
+                messages.push(json!({
+                    "role": "system",
+                    "content": sys,
+                }));
+            }
+        }
+        messages.push(json!({
+            "role": "user",
+            "content": user_content,
+        }));
+
+        json!({
+            "model": request.model,
+            "modalities": ["image", "text"],
+            "messages": messages,
+        })
+    }
+
+    /// Builds the JSON request payload for the OpenRouter images endpoint.
+    pub fn build_images_payload(request: &GenerationRequest) -> Value {
+        let combined_prompt = if let Some(sys) = &request.system_instruction {
+            if !sys.trim().is_empty() {
+                format!("{sys}\n\n[USER REQUEST]\n{}", request.prompt)
+            } else {
+                request.prompt.clone()
+            }
+        } else {
+            request.prompt.clone()
+        };
+
+        let mut body = json!({
+            "model": request.model,
+            "prompt": combined_prompt,
+            "aspect_ratio": request.aspect_ratio,
+        });
+
+        if !request.images.is_empty() {
+            let input_references: Vec<Value> = request
+                .images
+                .iter()
+                .map(|img| {
+                    json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!(
+                                "data:{};base64,{}",
+                                img.mime_type,
+                                BASE64_STANDARD.encode(&img.data)
+                            )
+                        }
+                    })
+                })
+                .collect();
+            body["input_references"] = json!(input_references);
+        }
+
+        body
+    }
 }
 
 /// Resolves `OPENROUTER_API_KEY` by checking `server/.env`, `.env`, and environment variables.
@@ -200,31 +290,7 @@ impl ModelEngine for OpenRouterAdapter {
         let (payload, latency_ms) = match api_type {
             ModelApiType::Chat => {
                 let endpoint = self.chat_endpoint_url();
-                let mut body = json!({
-                    "model": request.model,
-                    "modalities": ["image", "text"],
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": request.prompt
-                        }
-                    ]
-                });
-
-                if let Some(sys) = &request.system_instruction {
-                    if !sys.trim().is_empty() {
-                        body["messages"] = json!([
-                            {
-                                "role": "system",
-                                "content": sys
-                            },
-                            {
-                                "role": "user",
-                                "content": request.prompt
-                            }
-                        ]);
-                    }
-                }
+                let body = Self::build_chat_payload(request);
 
                 let res = self
                     .inner
@@ -256,21 +322,7 @@ impl ModelEngine for OpenRouterAdapter {
             }
             ModelApiType::Images => {
                 let endpoint = self.images_endpoint_url();
-                let full_prompt = if let Some(sys) = &request.system_instruction {
-                    if !sys.trim().is_empty() {
-                        format!("{sys}\n\n[USER REQUEST]\n{}", request.prompt)
-                    } else {
-                        request.prompt.clone()
-                    }
-                } else {
-                    request.prompt.clone()
-                };
-
-                let body = json!({
-                    "model": request.model,
-                    "prompt": full_prompt,
-                    "aspect_ratio": request.aspect_ratio
-                });
+                let body = Self::build_images_payload(request);
 
                 let res = self
                     .inner
@@ -332,7 +384,8 @@ impl ModelEngine for OpenRouterAdapter {
         model: &str,
         archetype: &BenchmarkArchetype,
     ) -> Result<BenchmarkResult, ModelEngineError> {
-        let request = GenerationRequest::new(model, archetype.prompt());
+        let request = GenerationRequest::new(model, build_battlemap_prompt(archetype.prompt()))
+            .with_battlemap_defaults();
         let response = self.generate_image(&request).await?;
 
         let id = generate_benchmark_id(model, archetype.slug());
@@ -844,5 +897,342 @@ mod tests {
             OpenRouterAdapter::endpoint_type_for_model(MODEL_SEEDREAM_50_FLASH),
             ModelApiType::Images
         );
+    }
+
+    #[test]
+    fn test_build_chat_payload_plain_text() {
+        let req = GenerationRequest::new(MODEL_GEMINI_31_FLASH, "Dungeon floor map");
+        let payload = OpenRouterAdapter::build_chat_payload(&req);
+
+        assert_eq!(payload["model"], MODEL_GEMINI_31_FLASH);
+        assert_eq!(payload["modalities"], json!(["image", "text"]));
+        let messages = payload["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], "Dungeon floor map");
+    }
+
+    #[test]
+    fn test_build_chat_payload_with_system_instruction() {
+        let req = GenerationRequest::new(MODEL_GEMINI_31_FLASH, "Dungeon floor map")
+            .with_system_instruction("Render strictly 2D flat");
+        let payload = OpenRouterAdapter::build_chat_payload(&req);
+
+        let messages = payload["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "Render strictly 2D flat");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "Dungeon floor map");
+    }
+
+    #[test]
+    fn test_build_chat_payload_with_empty_system_instruction() {
+        let req = GenerationRequest::new(MODEL_GEMINI_31_FLASH, "Dungeon floor map")
+            .with_system_instruction("   \n\t  ");
+        let payload = OpenRouterAdapter::build_chat_payload(&req);
+
+        let messages = payload["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+    }
+
+    #[test]
+    fn test_build_chat_payload_with_reference_images() {
+        use crate::domain::ReferenceImage;
+
+        let req = GenerationRequest::new(MODEL_GEMINI_31_FLASH, "Dungeon floor map")
+            .with_system_instruction("Strict 2D")
+            .with_image(ReferenceImage::png("Style Guide", vec![0x89, 0x50, 0x4e, 0x47]))
+            .with_image(ReferenceImage::jpeg("Texture", vec![0xff, 0xd8, 0xff]));
+        let payload = OpenRouterAdapter::build_chat_payload(&req);
+
+        let messages = payload["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "Strict 2D");
+
+        assert_eq!(messages[1]["role"], "user");
+        let parts = messages[1]["content"].as_array().expect("content parts");
+        assert_eq!(parts.len(), 5);
+
+        // Part 0: prompt text
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "Dungeon floor map");
+
+        // Part 1: image 1 label
+        assert_eq!(parts[1]["type"], "text");
+        assert_eq!(parts[1]["text"], "Style Guide:");
+
+        // Part 2: image 1 image_url
+        assert_eq!(parts[2]["type"], "image_url");
+        assert_eq!(
+            parts[2]["image_url"]["url"],
+            format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&[0x89, 0x50, 0x4e, 0x47]))
+        );
+
+        // Part 3: image 2 label
+        assert_eq!(parts[3]["type"], "text");
+        assert_eq!(parts[3]["text"], "Texture:");
+
+        // Part 4: image 2 image_url
+        assert_eq!(parts[4]["type"], "image_url");
+        assert_eq!(
+            parts[4]["image_url"]["url"],
+            format!("data:image/jpeg;base64,{}", BASE64_STANDARD.encode(&[0xff, 0xd8, 0xff]))
+        );
+    }
+
+    #[test]
+    fn test_build_images_payload_plain_text() {
+        let req = GenerationRequest::new(MODEL_MUSE, "Forest glade map");
+        let payload = OpenRouterAdapter::build_images_payload(&req);
+
+        assert_eq!(payload["model"], MODEL_MUSE);
+        assert_eq!(payload["prompt"], "Forest glade map");
+        assert_eq!(payload["aspect_ratio"], "1:1");
+        assert!(payload.get("input_references").is_none());
+    }
+
+    #[test]
+    fn test_build_images_payload_with_system_instruction() {
+        let req = GenerationRequest::new(MODEL_SEEDREAM_50_FLASH, "Castle ruins")
+            .with_system_instruction("You are a mapmaker")
+            .with_aspect_ratio("16:9");
+        let payload = OpenRouterAdapter::build_images_payload(&req);
+
+        assert_eq!(payload["model"], MODEL_SEEDREAM_50_FLASH);
+        assert_eq!(
+            payload["prompt"],
+            "You are a mapmaker\n\n[USER REQUEST]\nCastle ruins"
+        );
+        assert_eq!(payload["aspect_ratio"], "16:9");
+        assert!(payload.get("input_references").is_none());
+    }
+
+    #[test]
+    fn test_build_images_payload_with_reference_images() {
+        use crate::domain::ReferenceImage;
+
+        let req = GenerationRequest::new(MODEL_MUSE, "Swamp bridge")
+            .with_system_instruction("System prompt")
+            .with_image(ReferenceImage::png("Color Ref", vec![1, 2, 3]))
+            .with_image(ReferenceImage::webp("Layout Ref", vec![4, 5, 6]));
+        let payload = OpenRouterAdapter::build_images_payload(&req);
+
+        assert_eq!(
+            payload["prompt"],
+            "System prompt\n\n[USER REQUEST]\nSwamp bridge"
+        );
+        let refs = payload["input_references"].as_array().expect("input_references");
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0]["type"], "image_url");
+        assert_eq!(
+            refs[0]["image_url"]["url"],
+            format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&[1, 2, 3]))
+        );
+        assert_eq!(refs[1]["type"], "image_url");
+        assert_eq!(
+            refs[1]["image_url"]["url"],
+            format!("data:image/webp;base64,{}", BASE64_STANDARD.encode(&[4, 5, 6]))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_image_chat_mock_roundtrip() {
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tokio::net::TcpListener;
+        use crate::domain::ReferenceImage;
+
+        let last_payload = Arc::new(tokio::sync::Mutex::new(Value::Null));
+        let lp = last_payload.clone();
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let lp = lp.clone();
+                async move {
+                    *lp.lock().await = body;
+                    Json(json!({
+                        "id": "gen-chat-mock",
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": format!("Here is the map:\n![Map](data:image/png;base64,{DUMMY_PNG_B64})")
+                                }
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 80,
+                            "completion_tokens": 200,
+                            "cost": 0.025
+                        }
+                    }))
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let adapter = OpenRouterAdapter::with_config(
+            "test_api_key",
+            format!("http://127.0.0.1:{}", addr.port()),
+            2,
+        );
+
+        let req = GenerationRequest::new(MODEL_GEMINI_31_FLASH, "Catacombs map")
+            .with_system_instruction("Architectural 2D plan")
+            .with_image(ReferenceImage::png("Poché Wall Ref", vec![10, 20]));
+
+        let resp = adapter.generate_image(&req).await.expect("generation succeeded");
+        assert!(looks_like_image(&resp.image_bytes));
+        assert_eq!(resp.model, MODEL_GEMINI_31_FLASH);
+        assert_eq!(resp.prompt_tokens, Some(80));
+        assert_eq!(resp.completion_tokens, Some(200));
+        assert_eq!(resp.cost_usd, 0.025);
+
+        let received = last_payload.lock().await.clone();
+        assert_eq!(received["model"], MODEL_GEMINI_31_FLASH);
+        let msgs = received["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "Architectural 2D plan");
+        assert_eq!(msgs[1]["role"], "user");
+        let parts = msgs[1]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0]["text"], "Catacombs map");
+        assert_eq!(parts[1]["text"], "Poché Wall Ref:");
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_generate_image_images_api_mock_roundtrip() {
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tokio::net::TcpListener;
+        use crate::domain::ReferenceImage;
+
+        let last_payload = Arc::new(tokio::sync::Mutex::new(Value::Null));
+        let lp = last_payload.clone();
+
+        let app = Router::new().route(
+            "/images",
+            post(move |Json(body): Json<Value>| {
+                let lp = lp.clone();
+                async move {
+                    *lp.lock().await = body;
+                    Json(json!({
+                        "data": [
+                            {
+                                "b64_json": DUMMY_PNG_B64
+                            }
+                        ]
+                    }))
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let adapter = OpenRouterAdapter::with_config(
+            "test_api_key",
+            format!("http://127.0.0.1:{}", addr.port()),
+            2,
+        );
+
+        let req = GenerationRequest::new(MODEL_SEEDREAM_50_FLASH, "Underground lair")
+            .with_system_instruction("Render strictly 2D")
+            .with_aspect_ratio("16:9")
+            .with_image(ReferenceImage::png("Palette", vec![99, 100]));
+
+        let resp = adapter.generate_image(&req).await.expect("generation succeeded");
+        assert!(looks_like_image(&resp.image_bytes));
+        assert_eq!(resp.model, MODEL_SEEDREAM_50_FLASH);
+
+        let received = last_payload.lock().await.clone();
+        assert_eq!(received["model"], MODEL_SEEDREAM_50_FLASH);
+        assert_eq!(received["aspect_ratio"], "16:9");
+        assert_eq!(
+            received["prompt"],
+            "Render strictly 2D\n\n[USER REQUEST]\nUnderground lair"
+        );
+        let refs = received["input_references"].as_array().unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0]["type"], "image_url");
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_run_benchmark_formats_prompt_and_defaults() {
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tokio::net::TcpListener;
+
+        let last_payload = Arc::new(tokio::sync::Mutex::new(Value::Null));
+        let lp = last_payload.clone();
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let lp = lp.clone();
+                async move {
+                    *lp.lock().await = body;
+                    Json(json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": format!("data:image/png;base64,{DUMMY_PNG_B64}")
+                                }
+                            }
+                        ]
+                    }))
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let adapter = OpenRouterAdapter::with_config(
+            "test_api_key",
+            format!("http://127.0.0.1:{}", addr.port()),
+            2,
+        );
+
+        let res = adapter
+            .run_benchmark(MODEL_GEMINI_31_FLASH, &BenchmarkArchetype::StoneCrypt)
+            .await
+            .expect("benchmark run");
+        assert!(looks_like_image(&res.image_bytes));
+        assert_eq!(res.metadata.model, MODEL_GEMINI_31_FLASH);
+        assert_eq!(res.metadata.prompt_name, BenchmarkArchetype::StoneCrypt.name());
+
+        let recorded = last_payload.lock().await.clone();
+        let messages = recorded["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], crate::domain::SYSTEM_INSTRUCTION_GENERATE);
+        assert_eq!(messages[1]["role"], "user");
+        let user_text = messages[1]["content"].as_str().unwrap();
+        assert!(user_text.contains("Perspective: Strict 2D architectural floor plan cut"));
+        assert!(user_text.contains(BenchmarkArchetype::StoneCrypt.prompt()));
+
+        server_task.abort();
     }
 }

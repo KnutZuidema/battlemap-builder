@@ -9,12 +9,14 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, instrument};
 
 use crate::domain::{
-    generate_benchmark_id, BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata,
-    BenchmarkResult, GenerationRequest, ALL_BENCHMARK_MODELS,
+    build_battlemap_prompt, generate_benchmark_id, BatchBenchmarkItem, BenchmarkArchetype,
+    BenchmarkMetadata, BenchmarkResult, GenerationRequest, ALL_BENCHMARK_MODELS,
 };
 use crate::ports::cost_tracker::{CostTracker, CostTrackerError, GenerationCostRecord};
 use crate::ports::model_engine::{ModelEngine, ModelEngineError};
 use crate::ports::storage::{StorageError, StorageRepository};
+use crate::services::reference_provider::{ReferenceProvider, ReferenceProviderError};
+
 /// Errors arising from benchmark service execution.
 #[derive(Debug, Error)]
 pub enum BenchmarkServiceError {
@@ -31,8 +33,10 @@ pub enum BenchmarkServiceError {
 
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
-}
 
+    #[error("Reference provider error: {0}")]
+    ReferenceProvider(#[from] ReferenceProviderError),
+}
 
 /// Real-time progress update event emitted during benchmark batch execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +59,7 @@ pub struct BenchmarkService {
     engine: Arc<dyn ModelEngine + Send + Sync>,
     storage: Arc<dyn StorageRepository + Send + Sync>,
     cost_tracker: Option<Arc<dyn CostTracker + Send + Sync>>,
+    reference_provider: ReferenceProvider,
 }
 
 impl BenchmarkService {
@@ -63,10 +68,12 @@ impl BenchmarkService {
         engine: Arc<dyn ModelEngine + Send + Sync>,
         storage: Arc<dyn StorageRepository + Send + Sync>,
     ) -> Self {
+        let reference_provider = ReferenceProvider::new(storage.clone());
         Self {
             engine,
             storage,
             cost_tracker: None,
+            reference_provider,
         }
     }
 
@@ -76,11 +83,24 @@ impl BenchmarkService {
         storage: Arc<dyn StorageRepository + Send + Sync>,
         cost_tracker: Arc<dyn CostTracker + Send + Sync>,
     ) -> Self {
+        let reference_provider = ReferenceProvider::new(storage.clone());
         Self {
             engine,
             storage,
             cost_tracker: Some(cost_tracker),
+            reference_provider,
         }
+    }
+
+    /// Attaches a custom reference provider.
+    pub fn with_reference_provider(mut self, reference_provider: ReferenceProvider) -> Self {
+        self.reference_provider = reference_provider;
+        self
+    }
+
+    /// Reference to the underlying reference provider.
+    pub fn reference_provider(&self) -> &ReferenceProvider {
+        &self.reference_provider
     }
 
     /// Reference to the underlying model engine.
@@ -92,7 +112,6 @@ impl BenchmarkService {
     pub fn storage(&self) -> &Arc<dyn StorageRepository + Send + Sync> {
         &self.storage
     }
-
 
     /// Reference to the optional cost tracker.
     pub fn cost_tracker(&self) -> Option<&Arc<dyn CostTracker + Send + Sync>> {
@@ -107,13 +126,39 @@ impl BenchmarkService {
         }
         Ok(())
     }
+
     /// Run a benchmark for a single archetype on a specific model without persisting.
     pub async fn run_archetype(
         &self,
         model: &str,
         archetype: &BenchmarkArchetype,
     ) -> Result<BenchmarkResult, BenchmarkServiceError> {
-        let result = self.engine.run_benchmark(model, archetype).await?;
+        let prompt = build_battlemap_prompt(archetype.prompt());
+        let mut request = GenerationRequest::new(model, prompt).with_battlemap_defaults();
+
+        let theme = archetype.default_theme();
+        if let Ok(Some(resolution)) = self.reference_provider.resolve_reference_for_theme(&theme) {
+            info!(
+                provenance = ?resolution.provenance,
+                "Applying visual reference conditioning to benchmark request"
+            );
+            request = request.with_image(resolution.image);
+        }
+
+        let response = self.engine.generate_image(&request).await?;
+        let id = generate_benchmark_id(model, archetype.slug());
+        let metadata = BenchmarkMetadata::new(
+            id,
+            model,
+            archetype.name(),
+            archetype.prompt(),
+            response.prompt_tokens,
+            response.completion_tokens,
+            response.latency_ms,
+            response.cost_usd,
+        );
+
+        let result = BenchmarkResult::new(metadata, response.image_bytes);
         self.record_cost(&result.metadata).await?;
         Ok(result)
     }
@@ -126,8 +171,7 @@ impl BenchmarkService {
         model: &str,
         archetype: &BenchmarkArchetype,
     ) -> Result<BenchmarkResult, BenchmarkServiceError> {
-        let result = self.engine.run_benchmark(model, archetype).await?;
-        self.record_cost(&result.metadata).await?;
+        let result = self.run_archetype(model, archetype).await?;
         info!(
             id = %result.metadata.id,
             model = %result.metadata.model,
@@ -142,7 +186,6 @@ impl BenchmarkService {
 
         Ok(result)
     }
-
     /// Run a suite of benchmarks across multiple models and archetypes without persisting.
     pub async fn run_suite(
         &self,
@@ -201,9 +244,22 @@ impl BenchmarkService {
             .parse::<BenchmarkArchetype>()
             .or_else(|_| item.name.parse::<BenchmarkArchetype>())
         {
-            self.engine.run_benchmark(model, &archetype).await?
+            self.run_archetype(model, &archetype).await?
         } else {
-            let request = GenerationRequest::new(model, &item.prompt);
+            let prompt = build_battlemap_prompt(&item.prompt);
+            let mut request = GenerationRequest::new(model, prompt).with_battlemap_defaults();
+
+            if let Ok(Some(resolution)) = self
+                .reference_provider
+                .resolve_reference_for_prompt(&item.prompt)
+            {
+                info!(
+                    provenance = ?resolution.provenance,
+                    "Applying visual reference conditioning to benchmark request"
+                );
+                request = request.with_image(resolution.image);
+            }
+
             let response = self.engine.generate_image(&request).await?;
             let id = generate_benchmark_id(model, &item.slug);
             let metadata = BenchmarkMetadata::new(
@@ -216,10 +272,10 @@ impl BenchmarkService {
                 response.latency_ms,
                 response.cost_usd,
             );
-            BenchmarkResult::new(metadata, response.image_bytes)
+            let bench_result = BenchmarkResult::new(metadata, response.image_bytes);
+            self.record_cost(&bench_result.metadata).await?;
+            bench_result
         };
-
-        self.record_cost(&result.metadata).await?;
         self.storage
             .save_staging_generated(&result.metadata, &result.image_bytes)?;
 
@@ -423,6 +479,74 @@ mod tests {
     use async_trait::async_trait;
     use tempfile::TempDir;
 
+    struct RecordingMockEngine {
+        dummy_png: Vec<u8>,
+        captured_requests: Arc<std::sync::Mutex<Vec<GenerationRequest>>>,
+    }
+
+    impl RecordingMockEngine {
+        fn new() -> (Self, Arc<std::sync::Mutex<Vec<GenerationRequest>>>) {
+            let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let engine = Self {
+                dummy_png: vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+                captured_requests: captured_requests.clone(),
+            };
+            (engine, captured_requests)
+        }
+    }
+
+    #[async_trait]
+    impl ModelEngine for RecordingMockEngine {
+        async fn generate_image(
+            &self,
+            request: &crate::domain::GenerationRequest,
+        ) -> Result<GenerationResponse, ModelEngineError> {
+            self.captured_requests.lock().unwrap().push(request.clone());
+            Ok(GenerationResponse {
+                image_bytes: self.dummy_png.clone(),
+                model: request.model.clone(),
+                prompt: request.prompt.clone(),
+                prompt_tokens: Some(100),
+                completion_tokens: Some(300),
+                latency_ms: 250,
+                cost_usd: 0.015,
+            })
+        }
+
+        async fn run_benchmark(
+            &self,
+            model: &str,
+            archetype: &BenchmarkArchetype,
+        ) -> Result<BenchmarkResult, ModelEngineError> {
+            let id = format!("test_{}_{}", model.replace('/', "_"), archetype.slug());
+            let metadata = BenchmarkMetadata::new(
+                id,
+                model,
+                archetype.name(),
+                archetype.prompt(),
+                Some(100),
+                Some(300),
+                250,
+                0.015,
+            );
+            Ok(BenchmarkResult::new(metadata, self.dummy_png.clone()))
+        }
+
+        async fn run_benchmark_suite(
+            &self,
+            models: &[String],
+            archetypes: &[BenchmarkArchetype],
+        ) -> Result<Vec<BenchmarkResult>, ModelEngineError> {
+            let mut results = Vec::new();
+            for model in models {
+                for archetype in archetypes {
+                    results.push(self.run_benchmark(model, archetype).await?);
+                }
+            }
+            Ok(results)
+        }
+    }
+
     struct MockEngine {
         dummy_png: Vec<u8>,
     }
@@ -434,7 +558,6 @@ mod tests {
             }
         }
     }
-
     #[async_trait]
     impl ModelEngine for MockEngine {
         async fn generate_image(
@@ -614,5 +737,147 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(updates.iter().any(|u| u.phase == "cancelled"));
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_service_visual_reference_static_fallback() {
+        use crate::adapters::FilesystemStorage;
+        use crate::domain::SYSTEM_INSTRUCTION_GENERATE;
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
+        let (engine, captured_requests) = RecordingMockEngine::new();
+        let service = BenchmarkService::new(Arc::new(engine), storage);
+
+        let result = service
+            .run_archetype("meta/muse-image", &BenchmarkArchetype::StoneCrypt)
+            .await
+            .expect("run archetype succeeds");
+
+        assert_eq!(result.metadata.prompt_name, "Stone Crypt");
+
+        let requests = captured_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let req = &requests[0];
+
+        // Verify battlemap defaults and prompt formatting
+        assert_eq!(
+            req.system_instruction.as_deref(),
+            Some(SYSTEM_INSTRUCTION_GENERATE)
+        );
+        assert!(req.prompt.contains("Flat 2D stone dungeon crypt"));
+        assert!(req.prompt.contains("64px = 5ft square"));
+        // Verify attached reference image from static fallback
+        assert_eq!(req.images.len(), 1);
+        let ref_img = &req.images[0];
+        assert_eq!(
+            ref_img.label,
+            "Perspective Reference: 2D Stone Dungeon Plan View"
+        );
+        assert_eq!(ref_img.mime_type, "image/jpeg");
+        assert!(!ref_img.data.is_empty());
+
+        // Verify preprocessed image is 512x512
+        let decoded = image::load_from_memory(&ref_img.data).expect("valid jpeg");
+        assert_eq!(decoded.width(), 512);
+        assert_eq!(decoded.height(), 512);
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_service_visual_reference_curated_prioritization() {
+        use chrono::Utc;
+        use crate::adapters::FilesystemStorage;
+        use crate::domain::{CuratedMap, Theme};
+        use image::{ImageBuffer, Rgb};
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
+
+        // Save a 5-star curated map in the Dungeon theme
+        let map = CuratedMap::new(
+            "curated-crypt-champion",
+            Theme::Dungeon,
+            5,
+            vec!["crypt".to_string(), "dungeon".to_string()],
+            (1024, 1024),
+            Utc::now(),
+        );
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(256, 256, Rgb([50, 100, 150]));
+        let mut png_bytes = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .unwrap();
+        storage.save_curated(&map, &png_bytes).unwrap();
+
+        let (engine, captured_requests) = RecordingMockEngine::new();
+        let service = BenchmarkService::new(Arc::new(engine), storage);
+
+        let result = service
+            .run_archetype("meta/muse-image", &BenchmarkArchetype::StoneCrypt)
+            .await
+            .expect("run archetype succeeds");
+
+        assert_eq!(result.metadata.prompt_name, "Stone Crypt");
+
+        let requests = captured_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let req = &requests[0];
+
+        // Verify curated map reference is attached instead of static fallback
+        assert_eq!(req.images.len(), 1);
+        let ref_img = &req.images[0];
+        assert_eq!(
+            ref_img.label,
+            "Perspective Reference: 2D dungeon Plan View"
+        );
+        assert_eq!(ref_img.mime_type, "image/jpeg");
+
+        // Verify preprocessed image is 512x512
+        let decoded = image::load_from_memory(&ref_img.data).expect("valid jpeg");
+        assert_eq!(decoded.width(), 512);
+        assert_eq!(decoded.height(), 512);
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_service_custom_prompt_keyword_detection() {
+        use crate::adapters::FilesystemStorage;
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
+        let (engine, captured_requests) = RecordingMockEngine::new();
+        let service = BenchmarkService::new(Arc::new(engine), storage);
+
+        // 1. Custom prompt matching Tavern
+        let tavern_item = BatchBenchmarkItem::new(
+            "Cozy Tavern",
+            "Flat 2D fantasy tavern interior with hearth and bar counter",
+        );
+        service
+            .run_item_and_persist("meta/muse-image", &tavern_item)
+            .await
+            .expect("run item succeeds");
+
+        // 2. Custom prompt with no matching theme keywords
+        let generic_item = BatchBenchmarkItem::new(
+            "Abstract Test",
+            "Random non-thematic test 998877",
+        );
+        service
+            .run_item_and_persist("meta/muse-image", &generic_item)
+            .await
+            .expect("run item succeeds");
+
+        let requests = captured_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+
+        // Tavern item should have resolved the tavern static reference
+        assert_eq!(requests[0].images.len(), 1);
+        assert_eq!(
+            requests[0].images[0].label,
+            "Perspective Reference: 2D Tavern & Rooms Plan View"
+        );
+
+        // Generic item without matching keywords should have no reference images attached
+        assert!(requests[1].images.is_empty());
     }
 }

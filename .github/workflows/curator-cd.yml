@@ -54,10 +54,12 @@ jobs:
         uses: azure/setup-kubectl@v4
 
       - name: Deploy to Kubernetes Cluster
-        if: ${{ secrets.KUBECONFIG != '' }}
+        env:
+          KUBECONFIG_DATA: ${{ secrets.KUBECONFIG }}
+        if: env.KUBECONFIG_DATA != ''
         run: |
           mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBECONFIG }}" > $HOME/.kube/config
+          echo "$KUBECONFIG_DATA" > $HOME/.kube/config
           chmod 600 $HOME/.kube/config
 
           # Apply base infrastructure

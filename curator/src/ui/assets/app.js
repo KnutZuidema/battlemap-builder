@@ -100,7 +100,7 @@
     let costMonitorHud, costMonitorText;
     let benchmarkDrawer, btnCloseBenchmarkDrawer, btnCancelBenchmarkDrawer;
     let btnModelsSelectAll, btnModelsSelectNone, btnPromptsSelectAll, btnPromptsSelectNone;
-    let benchmarkEnableCustom, customPromptFields, benchmarkCustomName, benchmarkCustomPrompt;
+    let benchmarkEnableCustom, customPromptFields, benchmarkCustomName, benchmarkCustomPrompt, benchmarkEnableReference;
     let calcBadgeCost, calcFormulaDisplay, calcWarningNote;
     let btnStartBenchmark, btnStartBenchmarkText;
     let benchmarkProgressContainer, benchmarkProgressBar, benchmarkProgressText, btnCancelBenchmarkRun;
@@ -198,6 +198,7 @@
         customPromptFields = document.getElementById("custom-prompt-fields");
         benchmarkCustomName = document.getElementById("benchmark-custom-name");
         benchmarkCustomPrompt = document.getElementById("benchmark-custom-prompt");
+        benchmarkEnableReference = document.getElementById("benchmark-enable-reference");
 
         calcBadgeCost = document.getElementById("calc-badge-cost");
         calcFormulaDisplay = document.getElementById("calc-formula-display");
@@ -1292,6 +1293,7 @@
             models: metrics.models,
             archetypes: metrics.archetypes,
             custom_prompts: customPrompts,
+            use_reference_conditioning: benchmarkEnableReference ? benchmarkEnableReference.checked : true,
         };
 
         try {
@@ -1441,7 +1443,7 @@
                 </div>
             `;
 
-            appendBenchmarkLog("GEN", `Generating ${promptName} with ${modelName}...`);
+            appendBenchmarkLog("GEN", data.message || `Generating ${promptName} with ${modelName}...`);
         } else if (phase === "progress") {
             // Remove active generation card
             document.getElementById("benchmark-active-generation-card")?.remove();

@@ -367,6 +367,12 @@ pub struct BenchmarkRunRequest {
     pub archetypes: Vec<String>,
     #[serde(default)]
     pub custom_prompts: Vec<CustomPrompt>,
+    #[serde(default = "default_true")]
+    pub use_reference_conditioning: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Response payload for completed non-streaming benchmark runs.
@@ -427,7 +433,11 @@ pub async fn post_benchmark_run(
         ));
     }
 
-    let service = state.get_or_create_benchmark_service()?;
+    let service = state
+        .get_or_create_benchmark_service()?
+        .as_ref()
+        .clone()
+        .with_reference_conditioning(payload.use_reference_conditioning);
 
     let is_sse = headers
         .get(header::ACCEPT)

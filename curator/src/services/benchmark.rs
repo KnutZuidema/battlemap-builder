@@ -15,7 +15,9 @@ use crate::domain::{
 use crate::ports::cost_tracker::{CostTracker, CostTrackerError, GenerationCostRecord};
 use crate::ports::model_engine::{ModelEngine, ModelEngineError};
 use crate::ports::storage::{StorageError, StorageRepository};
-use crate::services::reference_provider::{ReferenceProvider, ReferenceProviderError};
+use crate::services::reference_provider::{
+    ReferenceProvenance, ReferenceProvider, ReferenceProviderError, ReferenceResolution,
+};
 
 /// Errors arising from benchmark service execution.
 #[derive(Debug, Error)]
@@ -60,6 +62,7 @@ pub struct BenchmarkService {
     storage: Arc<dyn StorageRepository + Send + Sync>,
     cost_tracker: Option<Arc<dyn CostTracker + Send + Sync>>,
     reference_provider: ReferenceProvider,
+    reference_conditioning_enabled: bool,
 }
 
 impl BenchmarkService {
@@ -74,6 +77,7 @@ impl BenchmarkService {
             storage,
             cost_tracker: None,
             reference_provider,
+            reference_conditioning_enabled: true,
         }
     }
 
@@ -89,6 +93,7 @@ impl BenchmarkService {
             storage,
             cost_tracker: Some(cost_tracker),
             reference_provider,
+            reference_conditioning_enabled: true,
         }
     }
 
@@ -101,6 +106,43 @@ impl BenchmarkService {
     /// Reference to the underlying reference provider.
     pub fn reference_provider(&self) -> &ReferenceProvider {
         &self.reference_provider
+    }
+
+    /// Enables or disables reference image conditioning for generation requests.
+    pub fn with_reference_conditioning(mut self, enabled: bool) -> Self {
+        self.reference_conditioning_enabled = enabled;
+        self
+    }
+
+    /// Whether reference conditioning is currently enabled.
+    pub fn reference_conditioning_enabled(&self) -> bool {
+        self.reference_conditioning_enabled
+    }
+
+    /// Resolve reference image for a given batch item if reference conditioning is enabled.
+    pub fn resolve_reference_for_item(
+        &self,
+        item: &BatchBenchmarkItem,
+    ) -> Option<ReferenceResolution> {
+        if !self.reference_conditioning_enabled {
+            return None;
+        }
+
+        if let Ok(archetype) = item
+            .slug
+            .parse::<BenchmarkArchetype>()
+            .or_else(|_| item.name.parse::<BenchmarkArchetype>())
+        {
+            self.reference_provider
+                .resolve_reference_for_theme(&archetype.default_theme())
+                .ok()
+                .flatten()
+        } else {
+            self.reference_provider
+                .resolve_reference_for_prompt(&item.prompt)
+                .ok()
+                .flatten()
+        }
     }
 
     /// Reference to the underlying model engine.
@@ -136,13 +178,15 @@ impl BenchmarkService {
         let prompt = build_battlemap_prompt(archetype.prompt());
         let mut request = GenerationRequest::new(model, prompt).with_battlemap_defaults();
 
-        let theme = archetype.default_theme();
-        if let Ok(Some(resolution)) = self.reference_provider.resolve_reference_for_theme(&theme) {
-            info!(
-                provenance = ?resolution.provenance,
-                "Applying visual reference conditioning to benchmark request"
-            );
-            request = request.with_image(resolution.image);
+        if self.reference_conditioning_enabled {
+            let theme = archetype.default_theme();
+            if let Ok(Some(resolution)) = self.reference_provider.resolve_reference_for_theme(&theme) {
+                info!(
+                    provenance = ?resolution.provenance,
+                    "Applying visual reference conditioning to benchmark request"
+                );
+                request = request.with_image(resolution.image);
+            }
         }
 
         let response = self.engine.generate_image(&request).await?;
@@ -249,15 +293,17 @@ impl BenchmarkService {
             let prompt = build_battlemap_prompt(&item.prompt);
             let mut request = GenerationRequest::new(model, prompt).with_battlemap_defaults();
 
-            if let Ok(Some(resolution)) = self
-                .reference_provider
-                .resolve_reference_for_prompt(&item.prompt)
-            {
-                info!(
-                    provenance = ?resolution.provenance,
-                    "Applying visual reference conditioning to benchmark request"
-                );
-                request = request.with_image(resolution.image);
+            if self.reference_conditioning_enabled {
+                if let Ok(Some(resolution)) = self
+                    .reference_provider
+                    .resolve_reference_for_prompt(&item.prompt)
+                {
+                    info!(
+                        provenance = ?resolution.provenance,
+                        "Applying visual reference conditioning to benchmark request"
+                    );
+                    request = request.with_image(resolution.image);
+                }
             }
 
             let response = self.engine.generate_image(&request).await?;
@@ -360,7 +406,24 @@ impl BenchmarkService {
                     completed,
                     total,
                     current_spend,
-                    message: format!("Generating {} with {}...", item.name, model),
+                    message: if let Some(ref_res) = self.resolve_reference_for_item(item) {
+                        match ref_res.provenance {
+                            ReferenceProvenance::Curated { id, rating, .. } => {
+                                format!(
+                                    "Generating {} for {} (curated reference: {}★ {})",
+                                    item.name, model, rating, id
+                                )
+                            }
+                            ReferenceProvenance::StaticFallback { name, .. } => {
+                                format!(
+                                    "Generating {} for {} (static reference: {})",
+                                    item.name, model, name
+                                )
+                            }
+                        }
+                    } else {
+                        format!("Generating {} for {}", item.name, model)
+                    },
                     metadata: None,
                 });
 
@@ -879,5 +942,30 @@ mod tests {
 
         // Generic item without matching keywords should have no reference images attached
         assert!(requests[1].images.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_service_reference_conditioning_toggle() {
+        use crate::adapters::FilesystemStorage;
+
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
+        let (engine, captured_requests) = RecordingMockEngine::new();
+        let service = BenchmarkService::new(Arc::new(engine), storage)
+            .with_reference_conditioning(false);
+
+        assert!(!service.reference_conditioning_enabled());
+
+        let result = service
+            .run_archetype("meta/muse-image", &BenchmarkArchetype::StoneCrypt)
+            .await
+            .expect("run archetype succeeds");
+
+        assert_eq!(result.metadata.prompt_name, "Stone Crypt");
+
+        let requests = captured_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        // Images should be empty when reference conditioning is disabled
+        assert!(requests[0].images.is_empty());
     }
 }

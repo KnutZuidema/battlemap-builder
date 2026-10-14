@@ -735,6 +735,20 @@ async fn test_api_cost_stats_and_reset_session() {
 
 struct MockBenchmarkEngine {
     dummy_png: Vec<u8>,
+    captured_requests: Arc<std::sync::Mutex<Vec<curator::domain::GenerationRequest>>>,
+}
+
+impl MockBenchmarkEngine {
+    fn new() -> (Self, Arc<std::sync::Mutex<Vec<curator::domain::GenerationRequest>>>) {
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            Self {
+                dummy_png: vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+                captured_requests: captured.clone(),
+            },
+            captured,
+        )
+    }
 }
 
 #[async_trait]
@@ -743,6 +757,7 @@ impl curator::ports::model_engine::ModelEngine for MockBenchmarkEngine {
         &self,
         request: &curator::domain::GenerationRequest,
     ) -> Result<curator::domain::GenerationResponse, curator::ports::model_engine::ModelEngineError> {
+        self.captured_requests.lock().unwrap().push(request.clone());
         Ok(curator::domain::GenerationResponse {
             image_bytes: self.dummy_png.clone(),
             model: request.model.clone(),
@@ -753,7 +768,6 @@ impl curator::ports::model_engine::ModelEngine for MockBenchmarkEngine {
             cost_usd: 0.02,
         })
     }
-
     async fn run_benchmark(
         &self,
         model: &str,
@@ -788,19 +802,19 @@ impl curator::ports::model_engine::ModelEngine for MockBenchmarkEngine {
     }
 }
 
-fn setup_benchmark_test_app() -> (
+fn setup_benchmark_test_app_with_recorder() -> (
     axum::Router,
     Arc<FilesystemStorage>,
     Arc<FileCostLedger>,
     tempfile::TempDir,
+    Arc<std::sync::Mutex<Vec<curator::domain::GenerationRequest>>>,
 ) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let ledger_path = dir.path().join("telemetry/cost_ledger.json");
     let ledger = Arc::new(FileCostLedger::new(&ledger_path));
-    let engine = Arc::new(MockBenchmarkEngine {
-        dummy_png: vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
-    });
+    let (engine_struct, captured) = MockBenchmarkEngine::new();
+    let engine = Arc::new(engine_struct);
     let benchmark_service = Arc::new(curator::services::BenchmarkService::with_cost_tracker(
         engine,
         storage.clone(),
@@ -808,6 +822,16 @@ fn setup_benchmark_test_app() -> (
     ));
     let state = AppState::with_benchmark_service(storage.clone(), benchmark_service, ledger.clone());
     let router = create_router(state);
+    (router, storage, ledger, dir, captured)
+}
+
+fn setup_benchmark_test_app() -> (
+    axum::Router,
+    Arc<FilesystemStorage>,
+    Arc<FileCostLedger>,
+    tempfile::TempDir,
+) {
+    let (router, storage, ledger, dir, _captured) = setup_benchmark_test_app_with_recorder();
     (router, storage, ledger, dir)
 }
 
@@ -943,4 +967,156 @@ async fn test_api_benchmark_cancel() {
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "ok");
+}
+
+#[tokio::test]
+async fn test_api_benchmark_reference_conditioning_default_true() {
+    let (app, _storage, _ledger, _dir, captured) = setup_benchmark_test_app_with_recorder();
+
+    // Default payload without use_reference_conditioning (defaults to true)
+    let payload = json!({
+        "models": ["meta/muse-image"],
+        "archetypes": ["stone-crypt"]
+    });
+
+    let req = Request::builder()
+        .uri("/api/benchmark/run")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "text/event-stream")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body_str = String::from_utf8_lossy(&body);
+
+    // Verify SSE progress message shows static reference fallback provenance
+    assert!(
+        body_str.contains("Generating Stone Crypt for meta/muse-image (static reference: stone-dungeon)"),
+        "Expected static reference provenance in SSE stream: {}",
+        body_str
+    );
+
+    // Verify captured engine request contains reference image
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].images.len(), 1);
+    assert_eq!(
+        requests[0].images[0].label,
+        "Perspective Reference: 2D Stone Dungeon Plan View"
+    );
+}
+
+#[tokio::test]
+async fn test_api_benchmark_reference_conditioning_disabled() {
+    let (app, _storage, _ledger, _dir, captured) = setup_benchmark_test_app_with_recorder();
+
+    // Explicitly disable reference conditioning
+    let payload = json!({
+        "models": ["meta/muse-image"],
+        "archetypes": ["stone-crypt"],
+        "use_reference_conditioning": false
+    });
+
+    let req = Request::builder()
+        .uri("/api/benchmark/run")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "text/event-stream")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body_str = String::from_utf8_lossy(&body);
+
+    // Verify SSE progress message does NOT mention reference
+    assert!(
+        body_str.contains("Generating Stone Crypt for meta/muse-image"),
+        "Expected generation message in SSE stream: {}",
+        body_str
+    );
+    assert!(
+        !body_str.contains("reference:"),
+        "Expected no reference provenance when disabled: {}",
+        body_str
+    );
+
+    // Verify captured engine request has NO attached reference image
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].images.is_empty());
+}
+
+#[tokio::test]
+async fn test_api_benchmark_reference_conditioning_curated_prioritization_and_persistence() {
+    use chrono::Utc;
+    use curator::domain::CuratedMap;
+    use image::{ImageBuffer, Rgb};
+
+    let (app, storage, _ledger, _dir, captured) = setup_benchmark_test_app_with_recorder();
+
+    // Save a 5-star curated map in the Dungeon theme
+    let map = CuratedMap::new(
+        "curated-dungeon-5star",
+        Theme::Dungeon,
+        5,
+        vec!["dungeon".to_string(), "crypt".to_string()],
+        (1024, 1024),
+        Utc::now(),
+    );
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_pixel(256, 256, Rgb([80, 120, 160]));
+    let mut png_bytes = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+        .unwrap();
+    storage.save_curated(&map, &png_bytes).unwrap();
+
+    // Request benchmark run with reference conditioning enabled
+    let payload = json!({
+        "models": ["meta/muse-image"],
+        "archetypes": ["stone-crypt"],
+        "use_reference_conditioning": true
+    });
+
+    let req = Request::builder()
+        .uri("/api/benchmark/run")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "text/event-stream")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body_str = String::from_utf8_lossy(&body);
+
+    // Verify SSE progress message shows curated reference provenance
+    assert!(
+        body_str.contains("Generating Stone Crypt for meta/muse-image (curated reference: 5★ curated-dungeon-5star)"),
+        "Expected curated reference provenance in SSE stream: {}",
+        body_str
+    );
+
+    // Verify captured engine request has the curated reference image attached
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].images.len(), 1);
+    assert_eq!(
+        requests[0].images[0].label,
+        "Perspective Reference: 2D dungeon Plan View"
+    );
+
+    // Verify staging persistence: generated raster output and JSON sidecar
+    let staging = storage.list_staging().expect("list staging succeeds");
+    assert_eq!(staging.len(), 1);
+    assert!(staging[0].id.starts_with("bench_meta_muse_image_stone_crypt_"));
+    assert_eq!(staging[0].source, curator::domain::Source::Generated);
 }

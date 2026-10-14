@@ -119,6 +119,10 @@
                         <button type="button" id="btn-zoom-in" class="btn btn-icon" title="Zoom In (Hotkey: ] or +)">+</button>
                     </div>
                 </div>
+                    <button type="button" id="btn-split-bundle-hud" class="btn btn-tool btn-split-bundle hidden" title="Split multi-layer bundle into standalone maps (Hotkey: U)">
+                        <kbd>U</kbd>
+                        <span class="btn-label" id="btn-split-hud-text">Split</span>
+                    </button>
 
                 <div class="action-divider"></div>
 
@@ -158,6 +162,67 @@
                 <canvas id="triage-canvas"></canvas>
             </div>
 
+            <!-- Floating Onion-Skin Alignment Badge -->
+            <div id="onion-skin-badge" class="onion-skin-badge hidden" title="Base Ground Layer Alignment Overlay Active (Hotkey: O)">
+                <span class="onion-dot"></span>
+                <span class="onion-text">Onion Skin Active (50% Ground)</span>
+            </div>
+
+            <!-- Synced Layer Filmstrip Deck (Canvas 2D Triage) -->
+            <div id="layer-deck" class="layer-deck hidden" aria-label="Layer Filmstrip Deck">
+                <div class="layer-deck-header">
+                    <div class="layer-deck-title-group">
+                        <svg class="layer-deck-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+                            <polyline points="2 17 12 22 22 17"/>
+                            <polyline points="2 12 12 17 22 12"/>
+                        </svg>
+                        <span class="layer-deck-title">Layers</span>
+                        <span id="layer-deck-count" class="layer-deck-count mono">1 / 1</span>
+                        <span id="layer-deck-bundle-tag" class="badge badge-bundle">Multi-Layer Bundle</span>
+                    </div>
+
+                    <div class="layer-deck-center">
+                        <!-- Layer Role Selector HUD (Hotkey: 3, then 1-6) -->
+                        <div id="role-selector" class="role-selector" role="radiogroup" aria-label="Layer Role Selection" title="Layer Role (Press 3, then 1-6)">
+                            <button type="button" class="role-badge" data-role="ground" data-key="1" title="Ground (Elevation 0) [Hotkey: 3, then 1]">
+                                <kbd>1</kbd><span>Ground (0)</span>
+                            </button>
+                            <button type="button" class="role-badge" data-role="upper_floor" data-key="2" title="Upper Floor (+1, +2...) [Hotkey: 3, then 2]">
+                                <kbd>2</kbd><span>Upper Floor</span>
+                            </button>
+                            <button type="button" class="role-badge" data-role="basement" data-key="3" title="Basement (-1, -2...) [Hotkey: 3, then 3]">
+                                <kbd>3</kbd><span>Basement</span>
+                            </button>
+                            <button type="button" class="role-badge" data-role="roof" data-key="4" title="Roof [Hotkey: 3, then 4]">
+                                <kbd>4</kbd><span>Roof</span>
+                            </button>
+                            <button type="button" class="role-badge" data-role="variant" data-key="5" title="Variant [Hotkey: 3, then 5]">
+                                <kbd>5</kbd><span>Variant</span>
+                            </button>
+                            <button type="button" class="role-badge" data-role="exclude" data-key="6" title="Exclude [Hotkey: 3, then 6]">
+                                <kbd>6</kbd><span>Exclude</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="layer-deck-tools">
+                        <button type="button" id="btn-onion-skin" class="btn btn-tool btn-onion-skin" title="Toggle Onion-Skin base layer alignment overlay (Hotkey: O)">
+                            <kbd>O</kbd>
+                            <span>Onion Skin</span>
+                        </button>
+                        <button type="button" id="btn-split-bundle" class="btn btn-tool btn-split-bundle" title="Split multi-layer bundle into standalone maps (Hotkey: U)">
+                            <kbd>U</kbd>
+                            <span id="btn-split-label">Split Bundle</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Filmstrip Cards Container -->
+                <div id="layer-filmstrip" class="layer-filmstrip" role="tablist" aria-label="Map Layers Filmstrip">
+                    <!-- Populated dynamically by app.js -->
+                </div>
+            </div>
             <!-- Floating Viewport Status HUD -->
             <div id="viewport-hud" class="viewport-hud">
                 <span id="hud-pan-zoom" class="hud-item mono">Zoom: 100%</span>
@@ -308,6 +373,18 @@
                             <div class="help-row"><kbd>2</kbd><span>Trigger Quality rating mode</span></div>
                             <div class="help-row"><kbd>1-5</kbd><span>Set quality star rating (1 to 5 stars)</span></div>
                             <div class="help-row"><kbd>Esc</kbd><span>Cancel active rating labeling mode</span></div>
+                        </div>
+                    </div>
+                    <div class="help-section">
+                        <h4>Multi-Layer Canvas Deck Controls</h4>
+                        <div class="help-grid">
+                            <div class="help-row"><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd><span>Flip to next / previous layer (preserves exact canvas pan & zoom)</span></div>
+                            <div class="help-row"><kbd>↑</kbd> / <kbd>↓</kbd><span>Cycle previous / next layer within active candidate</span></div>
+                            <div class="help-row"><kbd>3</kbd><span>Trigger Layer Role mode (then <kbd>1-6</kbd> for Ground, Upper, Basement, Roof, Variant, Exclude)</span></div>
+                            <div class="help-row"><kbd>Alt+↑</kbd> / <kbd>Alt+↓</kbd><span>Increment / decrement floor elevation for active layer</span></div>
+                            <div class="help-row"><kbd>Space</kbd><span>Quick-toggle active layer between Exclude and assigned role</span></div>
+                            <div class="help-row"><kbd>O</kbd><span>Toggle 50% opacity Onion-Skin overlay of base Ground layer</span></div>
+                            <div class="help-row"><kbd>U</kbd><span>Split multi-layer bundle into standalone maps (or Undo / Regroup)</span></div>
                         </div>
                     </div>
 

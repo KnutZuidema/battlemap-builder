@@ -89,6 +89,8 @@ pub struct BenchmarkModelSpec {
     pub label: String,
     pub api_type: ModelApiType,
     pub pricing: ModelPricing,
+    #[serde(default)]
+    pub has_vision: bool,
 }
 
 impl BenchmarkModelSpec {
@@ -99,27 +101,36 @@ impl BenchmarkModelSpec {
                 label: "Google Gemini 3.1 Flash Image".to_string(),
                 api_type: ModelApiType::Chat,
                 pricing: ModelPricing::new(0.50, 3.00, 0.00006),
+                has_vision: true,
             }),
             MODEL_GEMINI_31_FLASH_LITE => Some(Self {
                 id: MODEL_GEMINI_31_FLASH_LITE.to_string(),
                 label: "Google Gemini 3.1 Flash Lite Image".to_string(),
                 api_type: ModelApiType::Chat,
                 pricing: ModelPricing::new(0.25, 1.50, 0.00003),
+                has_vision: true,
             }),
             MODEL_MUSE => Some(Self {
                 id: MODEL_MUSE.to_string(),
                 label: "Meta Muse Image".to_string(),
                 api_type: ModelApiType::Images,
                 pricing: ModelPricing::new(0.0, 0.0, 0.01),
+                has_vision: true,
             }),
             MODEL_SEEDREAM_50_FLASH => Some(Self {
                 id: MODEL_SEEDREAM_50_FLASH.to_string(),
                 label: "ByteDance Seedream 5.0 Flash".to_string(),
                 api_type: ModelApiType::Images,
                 pricing: ModelPricing::new(0.0, 0.0, 0.018),
+                has_vision: true,
             }),
             _ => None,
         }
+    }
+
+    /// Whether this model supports multi-modal visual reference conditioning.
+    pub fn has_vision(&self) -> bool {
+        self.has_vision
     }
 
     /// Estimated cost per map in USD for UI pre-flight cost projections.
@@ -533,6 +544,8 @@ mod tests {
             let spec = BenchmarkModelSpec::find(model_id).expect("model spec found");
             assert_eq!(&spec.id, model_id);
             assert!(!spec.label.is_empty());
+            assert!(spec.has_vision());
+            assert!(spec.has_vision);
         }
 
         let flash = BenchmarkModelSpec::find(MODEL_GEMINI_31_FLASH).unwrap();

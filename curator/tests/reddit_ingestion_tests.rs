@@ -218,12 +218,20 @@ async fn test_end_to_end_ingestion_download_and_staging_persistence() {
 
     // 4. Verify files on disk in staging/reddit/
     let reddit_staging = storage.staging_dir().join("reddit");
-    let image_file = reddit_staging.join("harvest_1.png");
-    let sidecar_file = reddit_staging.join("harvest_1.json");
+    let bundle_dir = reddit_staging.join("harvest_1");
+    let image_file = if bundle_dir.join("0.png").is_file() {
+        bundle_dir.join("0.png")
+    } else {
+        reddit_staging.join("harvest_1.png")
+    };
+    let sidecar_file = if bundle_dir.join("manifest.json").is_file() {
+        bundle_dir.join("manifest.json")
+    } else {
+        reddit_staging.join("harvest_1.json")
+    };
 
     assert!(image_file.is_file(), "image file must exist");
     assert!(sidecar_file.is_file(), "sidecar json must exist");
-
     let saved_bytes = std::fs::read(&image_file).unwrap();
     assert_eq!(saved_bytes, png_bytes);
 
@@ -336,16 +344,18 @@ async fn test_multi_image_gallery_ingestion() {
     assert_eq!(summary.skipped, 0);
 
     let reddit_staging = storage.staging_dir().join("reddit");
-    assert!(reddit_staging.join("gallery_post_0.png").is_file());
-    assert!(reddit_staging.join("gallery_post_0.json").is_file());
-    assert!(reddit_staging.join("gallery_post_1.png").is_file());
-    assert!(reddit_staging.join("gallery_post_1.json").is_file());
-
+    let b0 = reddit_staging.join("gallery_post_0");
+    let b1 = reddit_staging.join("gallery_post_1");
+    assert!(b0.join("0.png").is_file() || reddit_staging.join("gallery_post_0.png").is_file());
+    assert!(b0.join("manifest.json").is_file() || reddit_staging.join("gallery_post_0.json").is_file());
+    assert!(b1.join("0.png").is_file() || reddit_staging.join("gallery_post_1.png").is_file());
+    assert!(b1.join("manifest.json").is_file() || reddit_staging.join("gallery_post_1.json").is_file());
     // Reject gallery_post_1
     storage
         .reject_staging("gallery_post_1", RejectionReason::BlurryLowRes, Some("Blurry variant"))
         .unwrap();
 
+    assert!(!b1.exists());
     assert!(!reddit_staging.join("gallery_post_1.png").exists());
     assert!(!reddit_staging.join("gallery_post_1.json").exists());
     assert!(storage.is_rejected("gallery_post_1").unwrap());
@@ -584,8 +594,9 @@ async fn test_media_download_429_backoff_and_recovery() {
     assert_eq!(summary.skipped, 0);
 
     // Verify file exists on disk
+    let staged_bundle = storage.staging_dir().join("reddit").join("recover_post");
     let staged_file = storage.staging_dir().join("reddit").join("recover_post.png");
-    assert!(staged_file.is_file());
+    assert!(staged_bundle.join("0.png").is_file() || staged_file.is_file());
     assert_eq!(counter.load(Ordering::SeqCst), 3);
 }
 
@@ -688,10 +699,11 @@ async fn test_media_download_429_exhausted_retries_continues_batch() {
 
     // Staging must NOT have post_1_fail, but MUST have post_2_ok
     let reddit_staging = storage.staging_dir().join("reddit");
+    assert!(!reddit_staging.join("post_1_fail").exists());
     assert!(!reddit_staging.join("post_1_fail.png").exists());
     assert!(!reddit_staging.join("post_1_fail.json").exists());
-    assert!(reddit_staging.join("post_2_ok.png").is_file());
-    assert!(reddit_staging.join("post_2_ok.json").is_file());
+    assert!(reddit_staging.join("post_2_ok").join("0.png").is_file() || reddit_staging.join("post_2_ok.png").is_file());
+    assert!(reddit_staging.join("post_2_ok").join("manifest.json").is_file() || reddit_staging.join("post_2_ok.json").is_file());
 }
 
 #[tokio::test]

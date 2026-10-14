@@ -182,6 +182,231 @@ impl std::str::FromStr for RejectionReason {
     }
 }
 
+
+/// Role of an individual image layer within a battlemap bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LayerRole {
+    #[default]
+    #[serde(alias = "Ground", alias = "GROUND")]
+    Ground,
+    #[serde(
+        alias = "UpperFloor",
+        alias = "UPPER_FLOOR",
+        alias = "upper",
+        alias = "Upper",
+        alias = "upperfloor",
+        alias = "upper-floor"
+    )]
+    UpperFloor,
+    #[serde(
+        alias = "Basement",
+        alias = "BASEMENT",
+        alias = "lower",
+        alias = "Lower",
+        alias = "lower_floor",
+        alias = "lower-floor",
+        alias = "lowerfloor",
+        alias = "cellar",
+        alias = "Cellar"
+    )]
+    Basement,
+    #[serde(alias = "Roof", alias = "ROOF")]
+    Roof,
+    #[serde(alias = "Variant", alias = "VARIANT")]
+    Variant,
+    #[serde(
+        alias = "Exclude",
+        alias = "EXCLUDE",
+        alias = "excluded",
+        alias = "Excluded"
+    )]
+    Exclude,
+    #[serde(alias = "Unassigned", alias = "UNASSIGNED")]
+    Unassigned,
+}
+
+impl LayerRole {
+    /// Canonical lowercase snake_case string representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ground => "ground",
+            Self::UpperFloor => "upper_floor",
+            Self::Basement => "basement",
+            Self::Roof => "roof",
+            Self::Variant => "variant",
+            Self::Exclude => "exclude",
+            Self::Unassigned => "unassigned",
+        }
+    }
+
+    /// True if this layer is excluded from curation.
+    pub fn is_excluded(&self) -> bool {
+        matches!(self, Self::Exclude)
+    }
+
+    /// True if this layer is still unassigned and requires manual resolution.
+    pub fn is_unassigned(&self) -> bool {
+        matches!(self, Self::Unassigned)
+    }
+
+    /// True if this layer will be included in the curated bundle (`role != Exclude`).
+    pub fn is_included(&self) -> bool {
+        !self.is_excluded()
+    }
+}
+
+impl std::fmt::Display for LayerRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for LayerRole {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().replace(['-', '_'], "").as_str() {
+            "ground" => Ok(Self::Ground),
+            "upperfloor" | "upper" => Ok(Self::UpperFloor),
+            "basement" | "lower" | "lowerfloor" | "cellar" => Ok(Self::Basement),
+            "roof" => Ok(Self::Roof),
+            "variant" => Ok(Self::Variant),
+            "exclude" | "excluded" => Ok(Self::Exclude),
+            "unassigned" => Ok(Self::Unassigned),
+            _ => Err(format!("Unknown layer role: {s}")),
+        }
+    }
+}
+
+/// Metadata for a single candidate layer in a staged map bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateLayer {
+    pub index: usize,
+    pub filename: String,
+    pub role: LayerRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevation: Option<i8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(default)]
+    pub dimensions: (u32, u32),
+}
+
+impl CandidateLayer {
+    pub fn new(
+        index: usize,
+        filename: impl Into<String>,
+        role: LayerRole,
+        elevation: Option<i8>,
+        dimensions: (u32, u32),
+    ) -> Self {
+        Self {
+            index,
+            filename: filename.into(),
+            role,
+            elevation,
+            caption: None,
+            source_url: None,
+            dimensions,
+        }
+    }
+
+    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
+        self.caption = Some(caption.into());
+        self
+    }
+
+    pub fn with_source_url(mut self, source_url: impl Into<String>) -> Self {
+        self.source_url = Some(source_url.into());
+        self
+    }
+}
+
+/// Persisted metadata per approved layer in a curated map bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CuratedLayer {
+    pub index: usize,
+    pub filename: String,
+    pub role: LayerRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevation: Option<i8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+    #[serde(default)]
+    pub dimensions: (u32, u32),
+}
+
+impl CuratedLayer {
+    pub fn new(
+        index: usize,
+        filename: impl Into<String>,
+        role: LayerRole,
+        elevation: Option<i8>,
+        dimensions: (u32, u32),
+    ) -> Self {
+        Self {
+            index,
+            filename: filename.into(),
+            role,
+            elevation,
+            caption: None,
+            dimensions,
+        }
+    }
+
+    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
+        self.caption = Some(caption.into());
+        self
+    }
+
+    /// Deterministically formats the curated layer filename for a given curated index, role, elevation, and extension.
+    /// E.g. `0_ground.png`, `1_upper_1.png`, `2_basement_1.png`, `3_roof.png`, `4_variant.png`.
+    pub fn format_filename(
+        curated_index: usize,
+        role: LayerRole,
+        elevation: Option<i8>,
+        ext: &str,
+    ) -> String {
+        let clean_ext = ext.trim_start_matches('.');
+        let ext_part = if clean_ext.is_empty() { "png" } else { clean_ext };
+        let slug = match role {
+            LayerRole::Ground => "ground".to_string(),
+            LayerRole::UpperFloor => {
+                let lvl = elevation.unwrap_or(1).unsigned_abs().max(1);
+                format!("upper_{lvl}")
+            }
+            LayerRole::Basement => {
+                let lvl = elevation.unwrap_or(-1).unsigned_abs().max(1);
+                format!("basement_{lvl}")
+            }
+            LayerRole::Roof => "roof".to_string(),
+            LayerRole::Variant => "variant".to_string(),
+            LayerRole::Exclude => "exclude".to_string(),
+            LayerRole::Unassigned => "unassigned".to_string(),
+        };
+        format!("{curated_index}_{slug}.{ext_part}")
+    }
+}
+
+/// Validates that a slice of `(LayerRole, Option<i8>)` layer assignments is ready for curation:
+/// - At least 1 layer must be included (`role != LayerRole::Exclude`).
+/// - Zero included layers may have `role == LayerRole::Unassigned`.
+pub fn validate_layers_for_curation(layers: &[(LayerRole, Option<i8>)]) -> Result<(), String> {
+    let included: Vec<&(LayerRole, Option<i8>)> =
+        layers.iter().filter(|(r, _)| r.is_included()).collect();
+    if included.is_empty() {
+        return Err("At least one layer must be included (not excluded) to curate a bundle".into());
+    }
+    if included.iter().any(|(r, _)| r.is_unassigned()) {
+        return Err(
+            "All included layers must have an assigned role before curation (none may remain unassigned)".into(),
+        );
+    }
+    Ok(())
+}
 /// Persistent record of a rejected candidate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RejectionRecord {
@@ -236,6 +461,10 @@ pub struct Candidate {
     pub parsed_gridless: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parsed_dimensions: Option<(u32, u32)>,
+    #[serde(default)]
+    pub layers: Vec<CandidateLayer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_group_id: Option<String>,
 }
 
 impl Candidate {
@@ -257,6 +486,8 @@ impl Candidate {
             author: None,
             parsed_gridless: None,
             parsed_dimensions: None,
+            layers: Vec::new(),
+            parent_group_id: None,
         }
     }
 
@@ -294,6 +525,16 @@ impl Candidate {
         self
     }
 
+    pub fn with_layers(mut self, layers: Vec<CandidateLayer>) -> Self {
+        self.layers = layers;
+        self
+    }
+
+    pub fn with_parent_group_id(mut self, parent_group_id: impl Into<String>) -> Self {
+        self.parent_group_id = Some(parent_group_id.into());
+        self
+    }
+
     /// Returns the assigned filename or fallback to `{id}.png`.
     pub fn resolved_filename(&self) -> String {
         if self.filename.is_empty() {
@@ -301,6 +542,36 @@ impl Candidate {
         } else {
             self.filename.clone()
         }
+    }
+
+    /// Returns the explicit `layers` if non-empty, or synthesizes a single `Ground` layer
+    /// for legacy single-image candidates.
+    pub fn resolved_layers(&self) -> Vec<CandidateLayer> {
+        if !self.layers.is_empty() {
+            return self.layers.clone();
+        }
+        let ext = std::path::Path::new(&self.filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .filter(|e| !e.is_empty())
+            .unwrap_or("png");
+        vec![CandidateLayer {
+            index: 0,
+            filename: format!("0.{ext}"),
+            role: LayerRole::Ground,
+            elevation: Some(0),
+            caption: None,
+            source_url: self.source_url.clone(),
+            dimensions: self.dimensions,
+        }]
+    }
+
+    /// Validates that this candidate's layers are ready for curation.
+    pub fn validate_for_curation(&self) -> Result<(), String> {
+        let resolved = self.resolved_layers();
+        let pairs: Vec<(LayerRole, Option<i8>)> =
+            resolved.iter().map(|l| (l.role, l.elevation)).collect();
+        validate_layers_for_curation(&pairs)
     }
 }
 
@@ -349,6 +620,8 @@ impl From<RedditSidecarMetadata> for Candidate {
             author: Some(meta.author),
             parsed_gridless: Some(meta.parsed_gridless),
             parsed_dimensions: meta.parsed_dimensions,
+            layers: Vec::new(),
+            parent_group_id: None,
         }
     }
 }
@@ -386,6 +659,8 @@ pub struct CuratedMap {
     pub tags: Vec<String>,
     pub dimensions: (u32, u32),
     pub curated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub layers: Vec<CuratedLayer>,
 }
 
 impl CuratedMap {
@@ -404,6 +679,7 @@ impl CuratedMap {
             tags,
             dimensions,
             curated_at,
+            layers: Vec::new(),
         }
     }
 
@@ -417,10 +693,233 @@ impl CuratedMap {
         Self::new(id, theme, rating, tags, dimensions, Utc::now())
     }
 
+    pub fn with_layers(mut self, layers: Vec<CuratedLayer>) -> Self {
+        self.layers = layers;
+        self
+    }
+
     /// Validates that the quality rating falls within the required 1-5 range.
     pub fn is_valid_rating(rating: u8) -> bool {
         (1..=5).contains(&rating)
     }
+
+    /// Validates that `layers` (when populated) contains at least one included layer and no
+    /// `Exclude` or `Unassigned` layers.
+    pub fn validate_layers(&self) -> Result<(), String> {
+        if self.layers.is_empty() {
+            return Ok(());
+        }
+        if self.layers.iter().any(|l| l.role.is_excluded()) {
+            return Err("CuratedMap layers must not include excluded layers".into());
+        }
+        if self.layers.iter().any(|l| l.role.is_unassigned()) {
+            return Err("CuratedMap layers must not include unassigned layers".into());
+        }
+        Ok(())
+    }
+}
+
+static LAYER_EXCLUDE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(gridded|with\s+grid|hex(?:\s+grid)?|grid\s+version|grid)\b")
+        .expect("valid layer exclude regex")
+});
+
+static LAYER_ROOF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(roof|rooftop|roofs|canopy|treetop|treetops|exterior(?:\s+roof)?)\b")
+        .expect("valid layer roof regex")
+});
+
+static LAYER_BASEMENT_EXPLICIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(?:b(\d+)|(?:basement|cellar|crypt|sub-?level|lower\s+level|lower\s+floor|dungeon\s+level)\s*#?\s*(\d+))\b",
+    )
+    .expect("valid layer basement explicit regex")
+});
+
+static LAYER_BASEMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(basement|cellar|crypt|underdark|sewer|sewers|dungeon\s+level|lower\s+level|lower\s+floor|lower|sub-?level|underground|b\d+)\b",
+    )
+    .expect("valid layer basement regex")
+});
+
+static LAYER_UPPER_EXPLICIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(?:(2nd|second)\s+(?:floor|level|story|storey)|(3rd|third)\s+(?:floor|level|story|storey)|(4th|fourth)\s+(?:floor|level|story|storey)|(5th|fifth)\s+(?:floor|level|story|storey)|(?:floor|level|f)\s*([2-9])|1st\s+upper(?:\s+floor)?|(2nd|second)\s+upper(?:\s+floor)?)\b",
+    )
+    .expect("valid layer upper explicit regex")
+});
+
+static LAYER_UPPER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(2nd\s+floor|3rd\s+floor|4th\s+floor|5th\s+floor|second\s+floor|third\s+floor|fourth\s+floor|fifth\s+floor|upper\s+floor|upper\s+level|upper|attic|mezzanine|balcony|tower\s+level|floor\s+[2-9]|level\s+[2-9]|f[2-9]|1st\s+upper|2nd\s+upper)\b",
+    )
+    .expect("valid layer upper regex")
+});
+
+static LAYER_GROUND_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(ground|ground\s+floor|ground\s+level|1st\s+floor|first\s+floor|1st\s+level|first\s+level|main\s+floor|main\s+level|base|base\s+map|interior|inside|street\s+level|floor\s+1|level\s+1|f1|courtyard)\b",
+    )
+    .expect("valid layer ground regex")
+});
+
+static LAYER_VARIANT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(night|midnight|evening|dusk|dawn|sunset|day|daylight|daytime|rain|rainy|storm|stormy|snow|snowy|winter|autumn|fall|spring|summer|blood|bloody|ruined|destroyed|burning|fire|flooded|empty|unfurnished|prop-?free|no[- ]?props|clean|blank|fog|foggy|mist|misty|astral|fey|feywild|shadow|shadowfell|variant|alt|alternate|patron|seasonal|haunted|massacre|abandoned|lit|unlit)\b",
+    )
+    .expect("valid layer variant regex")
+});
+
+/// Infers a `(LayerRole, Option<i8>)` from a single caption or label string.
+/// Returns `None` if no unambiguous role keyword is matched.
+/// Note: when `Some((LayerRole::UpperFloor, None))` or `Some((LayerRole::Basement, None))` is returned,
+/// the caller (such as `infer_bundle_layer_roles`) can assign sequential floor offsets (`+1, +2...` or `-1, -2...`).
+pub fn infer_layer_role_from_text(text: &str) -> Option<(LayerRole, Option<i8>)> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // 1. Check for gridded exclusion first (ignoring gridless / no-grid / ungridded)
+    let without_gridless = GRIDLESS_RE.replace_all(trimmed, " ");
+    if LAYER_EXCLUDE_RE.is_match(&without_gridless) {
+        return Some((LayerRole::Exclude, None));
+    }
+
+    // 2. Check for Roof (before UpperFloor/Ground so "exterior roof" or "upper roof" matches Roof)
+    if LAYER_ROOF_RE.is_match(trimmed) {
+        return Some((LayerRole::Roof, None));
+    }
+
+    // 3. Check for Basement / Lower levels
+    if let Some(caps) = LAYER_BASEMENT_EXPLICIT_RE.captures(trimmed) {
+        let num_str = caps.get(1).or_else(|| caps.get(2)).map(|m| m.as_str());
+        if let Some(n) = num_str.and_then(|s| s.parse::<i8>().ok()) {
+            let elev = -(n.abs().max(1));
+            return Some((LayerRole::Basement, Some(elev)));
+        }
+    }
+    if LAYER_BASEMENT_RE.is_match(trimmed) {
+        return Some((LayerRole::Basement, None));
+    }
+
+    // 4. Check for Upper Floor levels
+    if let Some(caps) = LAYER_UPPER_EXPLICIT_RE.captures(trimmed) {
+        if caps.get(1).is_some() {
+            // 2nd floor / second floor -> +1
+            return Some((LayerRole::UpperFloor, Some(1)));
+        }
+        if caps.get(2).is_some() || caps.get(6).is_some() {
+            // 3rd floor / third floor / 2nd upper -> +2
+            return Some((LayerRole::UpperFloor, Some(2)));
+        }
+        if caps.get(3).is_some() {
+            // 4th floor / fourth floor -> +3
+            return Some((LayerRole::UpperFloor, Some(3)));
+        }
+        if caps.get(4).is_some() {
+            // 5th floor / fifth floor -> +4
+            return Some((LayerRole::UpperFloor, Some(4)));
+        }
+        if let Some(m) = caps.get(5) {
+            if let Ok(floor_num) = m.as_str().parse::<i8>() {
+                let offset = (floor_num - 1).max(1);
+                return Some((LayerRole::UpperFloor, Some(offset)));
+            }
+        }
+        // "1st upper"
+        return Some((LayerRole::UpperFloor, Some(1)));
+    }
+    if LAYER_UPPER_RE.is_match(trimmed) {
+        return Some((LayerRole::UpperFloor, None));
+    }
+
+    // 5. Check for Ground floor / Base / Interior
+    if LAYER_GROUND_RE.is_match(trimmed) {
+        return Some((LayerRole::Ground, Some(0)));
+    }
+
+    // 6. Check for Variant (Night, Rain, Unfurnished, etc.)
+    if LAYER_VARIANT_RE.is_match(trimmed) {
+        return Some((LayerRole::Variant, None));
+    }
+
+    None
+}
+
+/// Infers `(LayerRole, Option<i8>)` for all layers in a bundle given their captions and optional post title.
+/// - Single-image bundles (`captions.len() == 1`) always default `layers[0]` to `(LayerRole::Ground, Some(0))`.
+/// - Multi-image bundles (`captions.len() > 1`) parse each layer's caption using regex heuristics,
+///   auto-incrementing `UpperFloor` (`+1, +2, ...`) and `Basement` (`-1, -2, ...`) elevations in sequence,
+///   and strictly falling back to `(LayerRole::Unassigned, None)` when a caption is missing or ambiguous.
+pub fn infer_bundle_layer_roles(
+    captions: &[Option<String>],
+    _post_title: Option<&str>,
+) -> Vec<(LayerRole, Option<i8>)> {
+    if captions.is_empty() {
+        return Vec::new();
+    }
+    if captions.len() == 1 {
+        return vec![(LayerRole::Ground, Some(0))];
+    }
+
+    let mut results = Vec::with_capacity(captions.len());
+    let mut next_upper: i8 = 1;
+    let mut next_basement: i8 = -1;
+
+    for cap_opt in captions {
+        let inferred = cap_opt
+            .as_deref()
+            .and_then(infer_layer_role_from_text);
+        match inferred {
+            Some((LayerRole::Ground, _)) => {
+                results.push((LayerRole::Ground, Some(0)));
+            }
+            Some((LayerRole::UpperFloor, Some(explicit_elev))) => {
+                let elev = explicit_elev.max(1);
+                if elev >= next_upper {
+                    next_upper = elev.saturating_add(1);
+                }
+                results.push((LayerRole::UpperFloor, Some(elev)));
+            }
+            Some((LayerRole::UpperFloor, None)) => {
+                let elev = next_upper;
+                next_upper = next_upper.saturating_add(1);
+                results.push((LayerRole::UpperFloor, Some(elev)));
+            }
+            Some((LayerRole::Basement, Some(explicit_elev))) => {
+                let elev = if explicit_elev < 0 {
+                    explicit_elev
+                } else {
+                    -(explicit_elev.max(1))
+                };
+                if elev <= next_basement {
+                    next_basement = elev.saturating_sub(1);
+                }
+                results.push((LayerRole::Basement, Some(elev)));
+            }
+            Some((LayerRole::Basement, None)) => {
+                let elev = next_basement;
+                next_basement = next_basement.saturating_sub(1);
+                results.push((LayerRole::Basement, Some(elev)));
+            }
+            Some((LayerRole::Roof, _)) => {
+                results.push((LayerRole::Roof, None));
+            }
+            Some((LayerRole::Variant, _)) => {
+                results.push((LayerRole::Variant, None));
+            }
+            Some((LayerRole::Exclude, _)) => {
+                results.push((LayerRole::Exclude, None));
+            }
+            Some((LayerRole::Unassigned, _)) | None => {
+                results.push((LayerRole::Unassigned, None));
+            }
+        }
+    }
+
+    results
 }
 
 static GRIDLESS_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -1207,5 +1706,275 @@ mod tests {
         assert_eq!(query.sort, RedditSort::Top);
         assert_eq!(query.time, Some(RedditTimeRange::Year));
         assert_eq!(query.limit, 30);
+    }
+
+    #[test]
+    fn test_layer_role_regex_inference_from_text() {
+        // Ground / Base / 1st Floor / Interior -> Ground (0)
+        assert_eq!(
+            infer_layer_role_from_text("Ground floor"),
+            Some((LayerRole::Ground, Some(0)))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Base map"),
+            Some((LayerRole::Ground, Some(0)))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("1st Floor"),
+            Some((LayerRole::Ground, Some(0)))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Interior"),
+            Some((LayerRole::Ground, Some(0)))
+        );
+
+        // 2nd Floor / 3rd Floor / Upper / Attic -> UpperFloor
+        assert_eq!(
+            infer_layer_role_from_text("2nd Floor"),
+            Some((LayerRole::UpperFloor, Some(1)))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("3rd Floor"),
+            Some((LayerRole::UpperFloor, Some(2)))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Upper level"),
+            Some((LayerRole::UpperFloor, None))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Attic"),
+            Some((LayerRole::UpperFloor, None))
+        );
+
+        // Basement / Cellar / Crypt / Lower -> Basement
+        assert_eq!(
+            infer_layer_role_from_text("Basement"),
+            Some((LayerRole::Basement, None))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Cellar"),
+            Some((LayerRole::Basement, None))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Crypt"),
+            Some((LayerRole::Basement, None))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Lower"),
+            Some((LayerRole::Basement, None))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Basement 2"),
+            Some((LayerRole::Basement, Some(-2)))
+        );
+
+        // Roof / Canopy / Exterior -> Roof (None)
+        assert_eq!(
+            infer_layer_role_from_text("Roof"),
+            Some((LayerRole::Roof, None))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Canopy"),
+            Some((LayerRole::Roof, None))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Exterior"),
+            Some((LayerRole::Roof, None))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Exterior roof"),
+            Some((LayerRole::Roof, None))
+        );
+
+        // Night / Storm / Massacre / Ruined / Variant -> Variant (None)
+        assert_eq!(
+            infer_layer_role_from_text("Night"),
+            Some((LayerRole::Variant, None))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Storm"),
+            Some((LayerRole::Variant, None))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Massacre"),
+            Some((LayerRole::Variant, None))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Ruined"),
+            Some((LayerRole::Variant, None))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Variant"),
+            Some((LayerRole::Variant, None))
+        );
+
+        // Gridded / Hex -> Exclude (None)
+        assert_eq!(
+            infer_layer_role_from_text("Gridded"),
+            Some((LayerRole::Exclude, None))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Hex"),
+            Some((LayerRole::Exclude, None))
+        );
+        assert_eq!(
+            infer_layer_role_from_text("Hex grid"),
+            Some((LayerRole::Exclude, None))
+        );
+
+        // Unrecognized / empty -> None
+        assert_eq!(infer_layer_role_from_text(""), None);
+        assert_eq!(infer_layer_role_from_text("Mysterious dragon cave"), None);
+    }
+
+    #[test]
+    fn test_infer_bundle_layer_roles_single_and_multi_item() {
+        // Single-item post -> defaults to Ground (0) regardless of text
+        let single_none = infer_bundle_layer_roles(&[None], None);
+        assert_eq!(single_none, vec![(LayerRole::Ground, Some(0))]);
+
+        let single_random = infer_bundle_layer_roles(&[Some("Dragon Cave".into())], None);
+        assert_eq!(single_random, vec![(LayerRole::Ground, Some(0))]);
+
+        let single_variant = infer_bundle_layer_roles(&[Some("Night storm".into())], None);
+        assert_eq!(single_variant, vec![(LayerRole::Ground, Some(0))]);
+
+        // Multi-item post captions with full spectrum of roles and auto-increment
+        let captions = vec![
+            Some("Ground floor".to_string()),
+            Some("2nd Floor".to_string()),
+            Some("3rd Floor".to_string()),
+            Some("Upper".to_string()),
+            Some("Attic".to_string()),
+            Some("Basement".to_string()),
+            Some("Cellar".to_string()),
+            Some("Crypt".to_string()),
+            Some("Lower".to_string()),
+            Some("Roof".to_string()),
+            Some("Canopy".to_string()),
+            Some("Exterior".to_string()),
+            Some("Night".to_string()),
+            Some("Storm".to_string()),
+            Some("Massacre".to_string()),
+            Some("Ruined".to_string()),
+            Some("Variant".to_string()),
+            Some("Gridded".to_string()),
+            Some("Hex".to_string()),
+            None,
+            Some("Unknown chamber".to_string()),
+        ];
+
+        let inferred = infer_bundle_layer_roles(&captions, None);
+        assert_eq!(inferred.len(), 21);
+
+        // Ground (0)
+        assert_eq!(inferred[0], (LayerRole::Ground, Some(0)));
+
+        // UpperFloors (+1, +2, +3, +4)
+        assert_eq!(inferred[1], (LayerRole::UpperFloor, Some(1)));
+        assert_eq!(inferred[2], (LayerRole::UpperFloor, Some(2)));
+        assert_eq!(inferred[3], (LayerRole::UpperFloor, Some(3)));
+        assert_eq!(inferred[4], (LayerRole::UpperFloor, Some(4)));
+
+        // Basements (-1, -2, -3, -4)
+        assert_eq!(inferred[5], (LayerRole::Basement, Some(-1)));
+        assert_eq!(inferred[6], (LayerRole::Basement, Some(-2)));
+        assert_eq!(inferred[7], (LayerRole::Basement, Some(-3)));
+        assert_eq!(inferred[8], (LayerRole::Basement, Some(-4)));
+
+        // Roofs (None)
+        assert_eq!(inferred[9], (LayerRole::Roof, None));
+        assert_eq!(inferred[10], (LayerRole::Roof, None));
+        assert_eq!(inferred[11], (LayerRole::Roof, None));
+
+        // Variants (None)
+        assert_eq!(inferred[12], (LayerRole::Variant, None));
+        assert_eq!(inferred[13], (LayerRole::Variant, None));
+        assert_eq!(inferred[14], (LayerRole::Variant, None));
+        assert_eq!(inferred[15], (LayerRole::Variant, None));
+        assert_eq!(inferred[16], (LayerRole::Variant, None));
+
+        // Exclude (None)
+        assert_eq!(inferred[17], (LayerRole::Exclude, None));
+        assert_eq!(inferred[18], (LayerRole::Exclude, None));
+
+        // Unrecognized / missing caption -> Unassigned (None)
+        assert_eq!(inferred[19], (LayerRole::Unassigned, None));
+        assert_eq!(inferred[20], (LayerRole::Unassigned, None));
+    }
+
+    #[test]
+    fn test_bundle_curation_validation() {
+        // Fails when all layers are Excluded
+        let all_excluded = vec![
+            (LayerRole::Exclude, None),
+            (LayerRole::Exclude, None),
+        ];
+        assert!(validate_layers_for_curation(&all_excluded).is_err());
+
+        // Fails when any included layer is Unassigned
+        let with_unassigned = vec![
+            (LayerRole::Ground, Some(0)),
+            (LayerRole::Unassigned, None),
+            (LayerRole::Exclude, None),
+        ];
+        assert!(validate_layers_for_curation(&with_unassigned).is_err());
+
+        // Passes with valid mix of Ground, UpperFloor, Roof, Exclude
+        let valid_mix = vec![
+            (LayerRole::Ground, Some(0)),
+            (LayerRole::UpperFloor, Some(1)),
+            (LayerRole::Roof, None),
+            (LayerRole::Exclude, None),
+        ];
+        assert!(validate_layers_for_curation(&valid_mix).is_ok());
+
+        // Candidate validation method checks
+        let mut cand_all_excluded = Candidate::with_now(
+            "cand_excl",
+            Source::Reddit,
+            "cand_excl/0.png",
+            (1000, 1000),
+        );
+        cand_all_excluded.layers = vec![
+            CandidateLayer::new(0, "0.png", LayerRole::Exclude, None, (1000, 1000)),
+            CandidateLayer::new(1, "1.png", LayerRole::Exclude, None, (1000, 1000)),
+        ];
+        assert!(cand_all_excluded.validate_for_curation().is_err());
+
+        let mut cand_unassigned = Candidate::with_now(
+            "cand_unass",
+            Source::Reddit,
+            "cand_unass/0.png",
+            (1000, 1000),
+        );
+        cand_unassigned.layers = vec![
+            CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1000, 1000)),
+            CandidateLayer::new(1, "1.png", LayerRole::Unassigned, None, (1000, 1000)),
+        ];
+        assert!(cand_unassigned.validate_for_curation().is_err());
+
+        let mut cand_valid = Candidate::with_now(
+            "cand_ok",
+            Source::Reddit,
+            "cand_ok/0.png",
+            (1000, 1000),
+        );
+        cand_valid.layers = vec![
+            CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1000, 1000)),
+            CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1000, 1000)),
+            CandidateLayer::new(2, "2.png", LayerRole::Roof, None, (1000, 1000)),
+            CandidateLayer::new(3, "3.png", LayerRole::Exclude, None, (1000, 1000)),
+        ];
+        assert!(cand_valid.validate_for_curation().is_ok());
+
+        // Default single-image candidate defaults to Ground(0) and passes
+        let cand_single = Candidate::with_now(
+            "cand_single",
+            Source::Reddit,
+            "cand_single.png",
+            (1000, 1000),
+        );
+        assert!(cand_single.validate_for_curation().is_ok());
     }
 }

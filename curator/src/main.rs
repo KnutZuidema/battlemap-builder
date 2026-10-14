@@ -94,8 +94,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data_dir = %data_dir.display(),
         "Initializing filesystem storage repository..."
     );
-    let storage: Arc<dyn StorageRepository + Send + Sync> =
-        Arc::new(FilesystemStorage::new(&data_dir));
+    let fs_storage = FilesystemStorage::new(&data_dir);
+    if let Err(err) = fs_storage.migrate_legacy_storage() {
+        tracing::warn!(error = %err, "Failed to migrate legacy storage on startup");
+    }
+    let storage: Arc<dyn StorageRepository + Send + Sync> = Arc::new(fs_storage);
 
     let cost_ledger_path = data_dir.join("telemetry/cost_ledger.json");
     tracing::info!(

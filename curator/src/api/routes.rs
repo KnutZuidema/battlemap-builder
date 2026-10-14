@@ -15,8 +15,8 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{
-    BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CuratedMap,
-    CustomPrompt, RedditHarvestRequest, RejectionReason, Theme,
+    BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
+    CuratedMap, CustomPrompt, RedditHarvestRequest, RejectionReason, Theme,
 };
 use crate::ports::cost_tracker::CostStats;
 use crate::services::{IngestionSummary, RedditIngestionService};
@@ -113,6 +113,54 @@ pub async fn get_staging_image(
 
     Ok(response)
 }
+/// GET /api/image/staging/{id}/{layer_index} - Stream binary image bytes for a specific layer of a staged candidate.
+pub async fn get_staging_layer_image(
+    State(state): State<AppState>,
+    Path((id, layer_index)): Path<(String, usize)>,
+) -> Result<Response, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Candidate ID cannot be empty"));
+    }
+
+    let bytes = state.storage.get_staging_layer_image(&id, layer_index)?;
+
+    // Inspect candidate layers to detect MIME type from layer filename
+    let filename = state
+        .storage
+        .list_staging()
+        .ok()
+        .and_then(|list| {
+            list.into_iter().find(|c| c.id == id).and_then(|c| {
+                let layers = c.resolved_layers();
+                layers
+                    .into_iter()
+                    .find(|l| l.index == layer_index)
+                    .map(|l| l.filename)
+                    .or_else(|| {
+                        if layer_index == 0 {
+                            Some(c.filename)
+                        } else {
+                            None
+                        }
+                    })
+            })
+        });
+
+    let mime = detect_image_mime(&bytes, filename.as_deref());
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, HeaderValue::from_static(mime))
+        .header(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=3600"),
+        )
+        .body(Body::from(bytes))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(response)
+}
+
 
 /// GET /api/image/curated/{theme}/{id} - Stream binary image for a curated map.
 pub async fn get_curated_image(
@@ -142,15 +190,66 @@ pub async fn get_curated_image(
 
     Ok(response)
 }
+/// GET /api/image/curated/{theme}/{id}/{layer_index} - Stream binary image bytes for a specific layer of a curated map.
+pub async fn get_curated_layer_image(
+    State(state): State<AppState>,
+    Path((theme_str, id, layer_index)): Path<(String, String, usize)>,
+) -> Result<Response, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Map ID cannot be empty"));
+    }
+
+    let theme: Theme = theme_str
+        .parse()
+        .map_err(|e| ApiError::bad_request(format!("{e}")))?;
+
+    let bytes = state.storage.get_curated_layer_image(&theme, &id, layer_index)?;
+
+    let filename = state
+        .storage
+        .list_curated(Some(&theme))
+        .ok()
+        .and_then(|list| {
+            list.into_iter().find(|m| m.id == id).and_then(|m| {
+                m.layers
+                    .into_iter()
+                    .find(|l| l.index == layer_index)
+                    .map(|l| l.filename)
+            })
+        });
+
+    let mime = detect_image_mime(&bytes, filename.as_deref());
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, HeaderValue::from_static(mime))
+        .header(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=3600"),
+        )
+        .body(Body::from(bytes))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(response)
+}
+
 
 /// Request payload for curating a candidate.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurateRequest {
     pub id: String,
     pub theme: Theme,
     pub rating: u8,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub layers: Option<Vec<CandidateLayer>>,
+}
+
+/// Request payload for updating candidate layers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateLayersRequest {
+    pub layers: Vec<CandidateLayer>,
 }
 
 /// Response payload for curate endpoint.
@@ -176,10 +275,42 @@ pub async fn post_curate(
         )));
     }
 
-    // Inspect candidate in staging to preserve dimensions
+    // Inspect candidate in staging to preserve dimensions and validate layers
     let candidates = state.storage.list_staging()?;
-    let candidate = candidates.iter().find(|c| c.id == payload.id);
-    let dimensions = candidate.map(|c| c.dimensions).unwrap_or((0, 0));
+    let candidate = candidates
+        .iter()
+        .find(|c| c.id == payload.id)
+        .ok_or_else(|| ApiError::not_found(format!("Candidate '{}' not found in staging", payload.id)))?;
+
+    let dimensions = candidate.dimensions;
+
+    // Validate layers
+    let layers_to_check: Vec<CandidateLayer> = if let Some(req_layers) = &payload.layers {
+        req_layers.clone()
+    } else {
+        candidate.resolved_layers()
+    };
+
+    if let Some(unassigned_layer) = layers_to_check.iter().find(|l| l.role.is_unassigned()) {
+        return Err(ApiError::bad_request(format!(
+            "Cannot curate bundle: layer {} is Unassigned",
+            unassigned_layer.index
+        )));
+    }
+
+    let included_layers: Vec<&CandidateLayer> = layers_to_check
+        .iter()
+        .filter(|l| l.role.is_included())
+        .collect();
+
+    if included_layers.is_empty() {
+        return Err(ApiError::bad_request("At least 1 layer must be included"));
+    }
+
+    // If request provided layers, update them in staging before curation
+    if let Some(layers) = payload.layers {
+        state.storage.update_staging_layers(&payload.id, layers)?;
+    }
 
     let curated = CuratedMap::with_now(
         &payload.id,
@@ -191,6 +322,14 @@ pub async fn post_curate(
 
     state.storage.curate_staging(&curated)?;
 
+    // Read back curated map with populated layers if available
+    let curated_result = state
+        .storage
+        .list_curated(Some(&payload.theme))
+        .ok()
+        .and_then(|list| list.into_iter().find(|m| m.id == payload.id))
+        .unwrap_or(curated);
+
     tracing::info!(
         id = %payload.id,
         theme = %payload.theme,
@@ -199,8 +338,51 @@ pub async fn post_curate(
 
     Ok(Json(CurateResponse {
         status: "ok",
-        curated,
+        curated: curated_result,
     }))
+}
+
+/// PATCH /api/staging/{id}/layers - Update candidate layer metadata in staging manifest.
+pub async fn patch_staging_layers(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<UpdateLayersRequest>,
+) -> Result<Json<Candidate>, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Candidate ID cannot be empty"));
+    }
+
+    let updated_candidate = state.storage.update_staging_layers(&id, payload.layers)?;
+
+    Ok(Json(updated_candidate))
+}
+
+/// POST /api/staging/{id}/split - Decompose a multi-layer bundle into standalone candidates.
+pub async fn post_split_staging(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<Candidate>>, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Candidate ID cannot be empty"));
+    }
+
+    let split_candidates = state.storage.split_staging_bundle(&id)?;
+
+    Ok(Json(split_candidates))
+}
+
+/// POST /api/staging/{parent_id}/regroup - Recombine split candidates back into a single bundle.
+pub async fn post_regroup_staging(
+    State(state): State<AppState>,
+    Path(parent_id): Path<String>,
+) -> Result<Json<Candidate>, ApiError> {
+    if parent_id.trim().is_empty() {
+        return Err(ApiError::bad_request("Parent ID cannot be empty"));
+    }
+
+    let regrouped_candidate = state.storage.regroup_staging_bundle(&parent_id)?;
+
+    Ok(Json(regrouped_candidate))
 }
 
 /// Request payload for rejecting a candidate.

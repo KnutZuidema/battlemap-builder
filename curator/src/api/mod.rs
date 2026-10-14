@@ -9,7 +9,7 @@ pub use routes::*;
 pub use state::AppState;
 
 use axum::{
-    routing::{get, post},
+    routing::{get, patch, post},
     Router,
 };
 use tower_http::cors::CorsLayer;
@@ -22,7 +22,15 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/status", get(get_status))
         .route("/api/staging", get(get_staging))
         .route("/api/image/staging/{id}", get(get_staging_image))
+        .route("/api/image/staging/{id}/{layer_index}", get(get_staging_layer_image))
         .route("/api/image/curated/{theme}/{id}", get(get_curated_image))
+        .route("/api/image/curated/{theme}/{id}/{layer_index}", get(get_curated_layer_image))
+        .route(
+            "/api/staging/{id}/layers",
+            patch(patch_staging_layers).post(patch_staging_layers),
+        )
+        .route("/api/staging/{id}/split", post(post_split_staging))
+        .route("/api/staging/{parent_id}/regroup", post(post_regroup_staging))
         .route("/api/curate", post(post_curate))
         .route("/api/reject", post(post_reject))
         .route("/api/harvest/reddit", post(post_harvest_reddit))

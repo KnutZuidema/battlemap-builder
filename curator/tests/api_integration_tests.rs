@@ -12,7 +12,8 @@ use curator::adapters::{FileCostLedger, FilesystemStorage};
 use curator::api::{create_router, AppState};
 use curator::ports::cost_tracker::{CostTracker, GenerationCostRecord};
 use curator::domain::{
-    Candidate, HarvestedMedia, ParsedTags, RedditHarvestQuery, RedditPost, Source, Theme,
+    Candidate, CandidateLayer, HarvestedMedia, LayerRole, ParsedTags, RedditHarvestQuery,
+    RedditPost, Source, Theme,
 };
 use curator::ports::harvester::{HarvesterError, RedditHarvester};
 use curator::ports::storage::StorageRepository;
@@ -1119,4 +1120,377 @@ async fn test_api_benchmark_reference_conditioning_curated_prioritization_and_pe
     assert_eq!(staging.len(), 1);
     assert!(staging[0].id.starts_with("bench_meta_muse_image_stone_crypt_"));
     assert_eq!(staging[0].source, curator::domain::Source::Generated);
+}
+
+#[tokio::test]
+async fn test_api_layer_image_retrieval() {
+    let (app, storage, _dir) = setup_test_app();
+
+    let img0 = b"\x89PNG\r\n\x1a\nlayer0_bytes_staging";
+    let img1 = b"\x89PNG\r\n\x1a\nlayer1_bytes_staging";
+
+    let mut cand = Candidate::with_now("bundle_img_test", Source::Reddit, "0.png", (1000, 1000));
+    cand.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1000, 1000)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1000, 1000)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand, &[img0.to_vec(), img1.to_vec()])
+        .unwrap();
+
+    // 1. Staging layer 0 retrieval
+    let req0 = Request::builder()
+        .uri("/api/image/staging/bundle_img_test/0")
+        .body(Body::empty())
+        .unwrap();
+    let resp0 = app.clone().oneshot(req0).await.unwrap();
+    assert_eq!(resp0.status(), StatusCode::OK);
+    assert_eq!(
+        resp0.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/png"
+    );
+    assert_eq!(
+        resp0.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=3600"
+    );
+    let body0 = to_bytes(resp0.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body0.as_ref(), img0);
+
+    // 2. Staging layer 1 retrieval
+    let req1 = Request::builder()
+        .uri("/api/image/staging/bundle_img_test/1")
+        .body(Body::empty())
+        .unwrap();
+    let resp1 = app.clone().oneshot(req1).await.unwrap();
+    assert_eq!(resp1.status(), StatusCode::OK);
+    assert_eq!(
+        resp1.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/png"
+    );
+    let body1 = to_bytes(resp1.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body1.as_ref(), img1);
+
+    // 3. Out-of-bounds layer 99 retrieval returns 404
+    let req99 = Request::builder()
+        .uri("/api/image/staging/bundle_img_test/99")
+        .body(Body::empty())
+        .unwrap();
+    let resp99 = app.clone().oneshot(req99).await.unwrap();
+    assert_eq!(resp99.status(), StatusCode::NOT_FOUND);
+
+    // 4. Base staging image endpoint serves layer 0
+    let req_base = Request::builder()
+        .uri("/api/image/staging/bundle_img_test")
+        .body(Body::empty())
+        .unwrap();
+    let resp_base = app.clone().oneshot(req_base).await.unwrap();
+    assert_eq!(resp_base.status(), StatusCode::OK);
+    let body_base = to_bytes(resp_base.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body_base.as_ref(), img0);
+
+    // 5. Curate the bundle to theme "dungeon"
+    let curate_req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "bundle_img_test",
+                "theme": "dungeon",
+                "rating": 5,
+                "tags": ["fortress"]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let curate_resp = app.clone().oneshot(curate_req).await.unwrap();
+    assert_eq!(curate_resp.status(), StatusCode::OK);
+
+    // 6. Curated layer 0 retrieval
+    let req_curated0 = Request::builder()
+        .uri("/api/image/curated/dungeon/bundle_img_test/0")
+        .body(Body::empty())
+        .unwrap();
+    let resp_curated0 = app.clone().oneshot(req_curated0).await.unwrap();
+    assert_eq!(resp_curated0.status(), StatusCode::OK);
+    assert_eq!(
+        resp_curated0.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/png"
+    );
+    let body_curated0 = to_bytes(resp_curated0.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body_curated0.as_ref(), img0);
+
+    // 7. Curated layer 1 retrieval
+    let req_curated1 = Request::builder()
+        .uri("/api/image/curated/dungeon/bundle_img_test/1")
+        .body(Body::empty())
+        .unwrap();
+    let resp_curated1 = app.clone().oneshot(req_curated1).await.unwrap();
+    assert_eq!(resp_curated1.status(), StatusCode::OK);
+    let body_curated1 = to_bytes(resp_curated1.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body_curated1.as_ref(), img1);
+
+    // 8. Curated out-of-bounds layer 99 returns 404
+    let req_curated99 = Request::builder()
+        .uri("/api/image/curated/dungeon/bundle_img_test/99")
+        .body(Body::empty())
+        .unwrap();
+    let resp_curated99 = app.oneshot(req_curated99).await.unwrap();
+    assert_eq!(resp_curated99.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_api_curate_bundle_validation_and_success() {
+    let (app, storage, _dir) = setup_test_app();
+
+    let img0 = b"\x89PNG\r\n\x1a\nlayer0_bytes";
+    let img1 = b"\x89PNG\r\n\x1a\nlayer1_bytes";
+
+    // Case A: Bundle in staging with Unassigned layer is rejected with 400
+    let mut cand_unassigned =
+        Candidate::with_now("cand_unassigned", Source::Reddit, "0.png", (800, 600));
+    cand_unassigned.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (800, 600)),
+        CandidateLayer::new(1, "1.png", LayerRole::Unassigned, None, (800, 600)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand_unassigned, &[img0.to_vec(), img1.to_vec()])
+        .unwrap();
+
+    let req_unassigned = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "cand_unassigned",
+                "theme": "dungeon",
+                "rating": 4
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp_unassigned = app.clone().oneshot(req_unassigned).await.unwrap();
+    assert_eq!(resp_unassigned.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp_unassigned.into_body(), usize::MAX).await.unwrap();
+    let json_err: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json_err["error"].as_str().unwrap().contains("Unassigned"),
+        "Expected error message mentioning Unassigned: {:?}",
+        json_err
+    );
+
+    // Case B: Bundle in staging with all Exclude layers is rejected with 400
+    let mut cand_excluded =
+        Candidate::with_now("cand_excluded", Source::Reddit, "0.png", (800, 600));
+    cand_excluded.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Exclude, None, (800, 600)),
+        CandidateLayer::new(1, "1.png", LayerRole::Exclude, None, (800, 600)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand_excluded, &[img0.to_vec(), img1.to_vec()])
+        .unwrap();
+
+    let req_excluded = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "cand_excluded",
+                "theme": "dungeon",
+                "rating": 4
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp_excluded = app.clone().oneshot(req_excluded).await.unwrap();
+    assert_eq!(resp_excluded.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp_excluded.into_body(), usize::MAX).await.unwrap();
+    let json_err: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json_err["error"].as_str().unwrap().contains("At least 1 layer must be included"),
+        "Expected error message mentioning at least 1 layer included: {:?}",
+        json_err
+    );
+
+    // Case C: Successfully curate cand_unassigned by supplying valid layer assignments in CurateRequest
+    let req_curate_with_layers = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "cand_unassigned",
+                "theme": "dungeon",
+                "rating": 5,
+                "tags": ["crypt"],
+                "layers": [
+                    {
+                        "index": 0,
+                        "filename": "0.png",
+                        "role": "ground",
+                        "elevation": 0,
+                        "dimensions": [800, 600]
+                    },
+                    {
+                        "index": 1,
+                        "filename": "1.png",
+                        "role": "upper_floor",
+                        "elevation": 1,
+                        "dimensions": [800, 600]
+                    }
+                ]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp_curate = app.clone().oneshot(req_curate_with_layers).await.unwrap();
+    assert_eq!(resp_curate.status(), StatusCode::OK);
+    let body = to_bytes(resp_curate.into_body(), usize::MAX).await.unwrap();
+    let curate_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(curate_json["status"], "ok");
+    assert_eq!(curate_json["curated"]["id"], "cand_unassigned");
+    assert_eq!(curate_json["curated"]["theme"], "dungeon");
+
+    // Staging should no longer contain cand_unassigned
+    let remaining_staging = storage.list_staging().unwrap();
+    assert!(remaining_staging.iter().all(|c| c.id != "cand_unassigned"));
+
+    // Curated theme should have cand_unassigned with multiple layers
+    let curated_list = storage.list_curated(Some(&Theme::Dungeon)).unwrap();
+    let curated_item = curated_list
+        .iter()
+        .find(|m| m.id == "cand_unassigned")
+        .expect("curated cand_unassigned exists");
+    assert_eq!(curated_item.layers.len(), 2);
+    assert_eq!(curated_item.layers[0].role, LayerRole::Ground);
+    assert_eq!(curated_item.layers[1].role, LayerRole::UpperFloor);
+}
+
+#[tokio::test]
+async fn test_api_patch_staging_layers() {
+    let (app, storage, _dir) = setup_test_app();
+
+    let img0 = b"\x89PNG\r\n\x1a\nlayer0_bytes";
+    let img1 = b"\x89PNG\r\n\x1a\nlayer1_bytes";
+
+    let mut cand = Candidate::with_now("patch_layers_cand", Source::Reddit, "0.png", (1200, 800));
+    cand.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Unassigned, None, (1200, 800)),
+        CandidateLayer::new(1, "1.png", LayerRole::Unassigned, None, (1200, 800)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand, &[img0.to_vec(), img1.to_vec()])
+        .unwrap();
+
+    let patch_payload = json!({
+        "layers": [
+            {
+                "index": 0,
+                "filename": "0.png",
+                "role": "ground",
+                "elevation": 0,
+                "dimensions": [1200, 800]
+            },
+            {
+                "index": 1,
+                "filename": "1.png",
+                "role": "roof",
+                "elevation": null,
+                "dimensions": [1200, 800]
+            }
+        ]
+    });
+
+    let req = Request::builder()
+        .uri("/api/staging/patch_layers_cand/layers")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(patch_payload.to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let updated: Candidate = serde_json::from_slice(&body).unwrap();
+    assert_eq!(updated.layers.len(), 2);
+    assert_eq!(updated.layers[0].role, LayerRole::Ground);
+    assert_eq!(updated.layers[1].role, LayerRole::Roof);
+
+    // Verify in staging storage
+    let staged_list = storage.list_staging().unwrap();
+    let staged_item = staged_list
+        .iter()
+        .find(|c| c.id == "patch_layers_cand")
+        .unwrap();
+    assert_eq!(staged_item.layers[0].role, LayerRole::Ground);
+    assert_eq!(staged_item.layers[1].role, LayerRole::Roof);
+}
+
+#[tokio::test]
+async fn test_api_staging_split_and_regroup() {
+    let (app, storage, _dir) = setup_test_app();
+
+    let img0 = b"\x89PNG\r\n\x1a\nsplit_ground_bytes";
+    let img1 = b"\x89PNG\r\n\x1a\nsplit_upper_bytes";
+
+    let mut cand = Candidate::with_now("split_regroup_cand", Source::Reddit, "0.png", (1000, 1000));
+    cand.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1000, 1000)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1000, 1000)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand, &[img0.to_vec(), img1.to_vec()])
+        .unwrap();
+
+    // 1. POST /api/staging/{id}/split decomposes bundle into standalone candidates with parent_group_id
+    let req_split = Request::builder()
+        .uri("/api/staging/split_regroup_cand/split")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp_split = app.clone().oneshot(req_split).await.unwrap();
+    assert_eq!(resp_split.status(), StatusCode::OK);
+    let body_split = to_bytes(resp_split.into_body(), usize::MAX).await.unwrap();
+    let split_candidates: Vec<Candidate> = serde_json::from_slice(&body_split).unwrap();
+    assert_eq!(split_candidates.len(), 2);
+    assert_eq!(split_candidates[0].id, "split_regroup_cand_0");
+    assert_eq!(split_candidates[1].id, "split_regroup_cand_1");
+    assert_eq!(
+        split_candidates[0].parent_group_id.as_deref(),
+        Some("split_regroup_cand")
+    );
+    assert_eq!(
+        split_candidates[1].parent_group_id.as_deref(),
+        Some("split_regroup_cand")
+    );
+
+    // Original bundle should no longer exist in staging
+    let staging = storage.list_staging().unwrap();
+    assert!(staging.iter().all(|c| c.id != "split_regroup_cand"));
+    assert!(staging.iter().any(|c| c.id == "split_regroup_cand_0"));
+    assert!(staging.iter().any(|c| c.id == "split_regroup_cand_1"));
+
+    // 2. POST /api/staging/{parent_id}/regroup combines split candidates back into single bundle
+    let req_regroup = Request::builder()
+        .uri("/api/staging/split_regroup_cand/regroup")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp_regroup = app.oneshot(req_regroup).await.unwrap();
+    assert_eq!(resp_regroup.status(), StatusCode::OK);
+    let body_regroup = to_bytes(resp_regroup.into_body(), usize::MAX).await.unwrap();
+    let regrouped: Candidate = serde_json::from_slice(&body_regroup).unwrap();
+    assert_eq!(regrouped.id, "split_regroup_cand");
+    assert_eq!(regrouped.layers.len(), 2);
+    assert_eq!(regrouped.parent_group_id, None);
+
+    // Split children should be cleaned up, and regrouped candidate is in staging
+    let final_staging = storage.list_staging().unwrap();
+    assert!(final_staging.iter().all(|c| c.id != "split_regroup_cand_0"));
+    assert!(final_staging.iter().all(|c| c.id != "split_regroup_cand_1"));
+    assert!(final_staging.iter().any(|c| c.id == "split_regroup_cand"));
 }

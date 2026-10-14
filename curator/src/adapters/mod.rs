@@ -4,6 +4,7 @@ pub mod cost_ledger;
 pub mod filesystem_storage;
 pub mod openrouter;
 pub mod reddit;
+pub mod simd_image;
 #[allow(unused_imports)]
 pub use filesystem_storage::*;
 #[allow(unused_imports)]
@@ -12,3 +13,5 @@ pub use openrouter::*;
 pub use reddit::*;
 #[allow(unused_imports)]
 pub use cost_ledger::*;
+#[allow(unused_imports)]
+pub use simd_image::*;

@@ -136,6 +136,14 @@ pub trait StorageRepository: Send + Sync {
             )))
         }
     }
+    /// Retrieve the raw 1024x1024 LoRA-normalized PNG image bytes for a curated map by theme and ID.
+    fn get_curated_lora_image(&self, theme: &Theme, id: &str) -> Result<Vec<u8>, StorageError>;
+
+    /// Retrieve the LoRA companion caption text (.txt) for a curated map by theme and ID.
+    fn get_curated_lora_caption(&self, theme: &Theme, id: &str) -> Result<String, StorageError>;
+
+    /// Check if a curated map has been LoRA normalized to 1024x1024.
+    fn is_lora_normalized(&self, theme: &Theme, id: &str) -> Result<bool, StorageError>;
 
     /// List curated maps, optionally filtered by theme (or all if None).
     fn list_curated(&self, theme: Option<&Theme>) -> Result<Vec<CuratedMap>, StorageError>;
@@ -277,6 +285,17 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
         layer_index: usize,
     ) -> Result<Vec<u8>, StorageError> {
         (**self).get_curated_layer_image(theme, id, layer_index)
+    }
+    fn get_curated_lora_image(&self, theme: &Theme, id: &str) -> Result<Vec<u8>, StorageError> {
+        (**self).get_curated_lora_image(theme, id)
+    }
+
+    fn get_curated_lora_caption(&self, theme: &Theme, id: &str) -> Result<String, StorageError> {
+        (**self).get_curated_lora_caption(theme, id)
+    }
+
+    fn is_lora_normalized(&self, theme: &Theme, id: &str) -> Result<bool, StorageError> {
+        (**self).is_lora_normalized(theme, id)
     }
     fn list_curated(&self, theme: Option<&Theme>) -> Result<Vec<CuratedMap>, StorageError> {
         (**self).list_curated(theme)

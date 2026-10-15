@@ -133,6 +133,10 @@
                         <kbd>G</kbd>
                         <span class="btn-label">Grid</span>
                     </button>
+                    <button type="button" id="btn-grid-adjust" class="btn btn-tool" title="Adjust Grid Scale & Alignment (Hotkey: Shift+G)">
+                        <kbd>⇧G</kbd>
+                        <span class="btn-label">Adjust</span>
+                    </button>
                     <button type="button" id="btn-fit-screen" class="btn btn-tool" title="Fit to Screen (Hotkey: F)">
                         <kbd>F</kbd>
                         <span class="btn-label">Fit</span>
@@ -184,6 +188,94 @@
         <main id="triage-viewport" class="triage-viewport">
             <div class="canvas-container" id="canvas-container">
                 <canvas id="triage-canvas"></canvas>
+            </div>
+
+            <!-- Floating Glassmorphic Grid Calibration Panel -->
+            <div id="grid-adjust-panel" class="grid-adjust-panel hidden" role="dialog" aria-label="Grid Calibration Panel">
+                <div class="grid-panel-header">
+                    <div class="grid-panel-title">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <line x1="3" y1="9" x2="21" y2="9"/>
+                            <line x1="3" y1="15" x2="21" y2="15"/>
+                            <line x1="9" y1="3" x2="9" y2="21"/>
+                            <line x1="15" y1="3" x2="15" y2="21"/>
+                        </svg>
+                        <span>Grid Calibration</span>
+                    </div>
+                    <button type="button" id="btn-close-grid-panel" class="btn-panel-close" title="Close Panel (Esc)" aria-label="Close">✕</button>
+                </div>
+
+                <!-- Size Section -->
+                <div class="grid-panel-section">
+                    <div class="grid-panel-row">
+                        <label for="grid-size-input" class="grid-panel-label">Square Size</label>
+                        <div class="grid-size-controls">
+                            <button type="button" id="btn-grid-size-dec" class="btn btn-icon btn-sm" title="Decrease Size (−1px)">−</button>
+                            <input type="number" id="grid-size-input" class="grid-size-input mono" min="16" max="300" step="1" value="64">
+                            <span class="grid-unit mono">px</span>
+                            <button type="button" id="btn-grid-size-inc" class="btn btn-icon btn-sm" title="Increase Size (+1px)">+</button>
+                        </div>
+                    </div>
+                    <input type="range" id="grid-size-slider" class="grid-slider" min="16" max="256" step="1" value="64">
+
+                    <!-- Presets -->
+                    <div class="grid-presets">
+                        <span class="presets-label">Presets:</span>
+                        <div class="preset-chips">
+                            <button type="button" class="preset-chip" data-size="32">32px</button>
+                            <button type="button" class="preset-chip" data-size="50">50px</button>
+                            <button type="button" class="preset-chip active" data-size="64">64px</button>
+                            <button type="button" class="preset-chip" data-size="70">70px</button>
+                            <button type="button" class="preset-chip" data-size="100">100px</button>
+                            <button type="button" class="preset-chip" data-size="128">128px</button>
+                            <button type="button" class="preset-chip" data-size="140">140px</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Position Offset Section -->
+                <div class="grid-panel-section">
+                    <div class="grid-panel-row">
+                        <span class="grid-panel-label">Grid Offset</span>
+                        <div class="grid-offset-readout mono">
+                            <span>X: <span id="grid-offset-x-val">0</span>px</span>
+                            <span>Y: <span id="grid-offset-y-val">0</span>px</span>
+                        </div>
+                    </div>
+
+                    <div class="grid-alignment-controls">
+                        <div class="grid-nudge-pad">
+                            <button type="button" id="btn-grid-nudge-up" class="btn btn-icon btn-sm nudge-btn" title="Nudge Up (Shift+↑)">▲</button>
+                            <div class="nudge-mid-row">
+                                <button type="button" id="btn-grid-nudge-left" class="btn btn-icon btn-sm nudge-btn" title="Nudge Left (Shift+←)">◀</button>
+                                <button type="button" id="btn-grid-align-drag" class="btn btn-tool btn-sm btn-align-mode" title="Toggle Drag-to-Align mode on canvas">
+                                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="5 9 2 12 5 15"/>
+                                        <polyline points="9 5 12 2 15 5"/>
+                                        <polyline points="15 19 12 22 9 19"/>
+                                        <polyline points="19 9 22 12 19 15"/>
+                                        <line x1="2" y1="12" x2="22" y2="12"/>
+                                        <line x1="12" y1="2" x2="12" y2="22"/>
+                                    </svg>
+                                    <span>Align</span>
+                                </button>
+                                <button type="button" id="btn-grid-nudge-right" class="btn btn-icon btn-sm nudge-btn" title="Nudge Right (Shift+→)">▶</button>
+                            </div>
+                            <button type="button" id="btn-grid-nudge-down" class="btn btn-icon btn-sm nudge-btn" title="Nudge Down (Shift+↓)">▼</button>
+                        </div>
+
+                        <div class="grid-drag-hint">
+                            <span>Tip: Hold <kbd>Shift</kbd> + drag on map to align grid</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Actions Footer -->
+                <div class="grid-panel-footer">
+                    <button type="button" id="btn-grid-reset" class="btn btn-secondary btn-sm" title="Reset to 64px, (0, 0)">Reset</button>
+                    <button type="button" id="btn-grid-done" class="btn btn-primary btn-sm">Done</button>
+                </div>
             </div>
 
             <!-- Floating Onion-Skin Alignment Badge -->
@@ -488,6 +580,10 @@
                         <h4>Canvas 2D Viewport Controls</h4>
                         <div class="help-grid">
                             <div class="help-row"><kbd>G</kbd><span>Toggle crisp 64px (5ft VTT scale) grid overlay</span></div>
+                            <div class="help-row"><kbd>Shift+G</kbd><span>Open Grid Calibration panel</span></div>
+                            <div class="help-row"><kbd>Shift+Drag</kbd><span>Drag to align grid overlay to map features</span></div>
+                            <div class="help-row"><kbd>Shift+Arrow Keys</kbd><span>Nudge grid offset (1px; Alt for 5px)</span></div>
+                            <div class="help-row"><kbd>Shift+[ / ]</kbd><span>Increase / decrease grid square size</span></div>
                             <div class="help-row"><kbd>F</kbd><span>Fit map to screen / center viewport</span></div>
                             <div class="help-row"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>Pan map viewport (Up, Left, Down, Right)</span></div>
                             <div class="help-row"><kbd>]</kbd> / <kbd>[</kbd><span>Zoom in / zoom out</span></div>

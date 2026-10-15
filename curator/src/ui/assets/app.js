@@ -34,7 +34,13 @@
 
         // Visual overlays
         gridVisible: true,
-
+        gridSize: 64,
+        gridOffset: { x: 0, y: 0 },
+        gridAlignMode: false,
+        gridPanelOpen: false,
+        isDraggingGrid: false,
+        gridDragStart: { x: 0, y: 0 },
+        gridOffsetStart: { x: 0, y: 0 },
         // Modal and UI dialog state
         rejectionModalOpen: false,
         helpModalOpen: false,
@@ -65,10 +71,14 @@
 
     // Constants
     const VTT_GRID_SIZE = 64; // 64px represents standard 5ft D&D VTT square
+    const MIN_GRID_SIZE = 16;
+    const MAX_GRID_SIZE = 300;
     const MIN_ZOOM = 0.1;
     const MAX_ZOOM = 5.0;
     const PREFETCH_AHEAD = 3;
 
+    // Per-candidate grid settings cache (candidateId -> { size, offset: { x, y } })
+    const candidateGridSettings = new Map();
 
     const MODEL_PRICES = {
         "google/gemini-3.1-flash-image": 0.07,
@@ -102,6 +112,12 @@
     let candidateMetaBox, queueCounter, candidateId, candidateDimensions, candidateSource;
     let zoomLevelDisplay, hudPanZoom, hudGridStatus, hudResolution, hudPrefetchStatus;
     let btnGridToggle, btnFitScreen, btnPrev, btnNext, btnReject, btnCurate;
+    // Grid Adjustment DOM Elements
+    let btnGridAdjust, gridAdjustPanel, btnCloseGridPanel;
+    let btnGridSizeDec, btnGridSizeInc, gridSizeInput, gridSizeSlider;
+    let gridOffsetXVal, gridOffsetYVal;
+    let btnGridNudgeUp, btnGridNudgeDown, btnGridNudgeLeft, btnGridNudgeRight;
+    let btnGridAlignDrag, btnGridReset, btnGridDone;
     let emptyState, loadingOverlay, loadingText;
     let rejectionModal, rejectionNotesInput, helpModal;
     let ingestionDrawer, drawerPanel, btnOpenDrawer, btnEmptyHarvest, btnCloseDrawer, btnCancelDrawer;
@@ -148,6 +164,7 @@
         cacheDOMElements();
         setupCanvas();
         setupEventListeners();
+        updateGridPanel();
         fetchStatus();
         fetchCostStats();
         fetchStagingQueue();
@@ -173,6 +190,22 @@
         hudPrefetchStatus = document.getElementById("hud-prefetch-status");
 
         btnGridToggle = document.getElementById("btn-grid-toggle");
+        btnGridAdjust = document.getElementById("btn-grid-adjust");
+        gridAdjustPanel = document.getElementById("grid-adjust-panel");
+        btnCloseGridPanel = document.getElementById("btn-close-grid-panel");
+        btnGridSizeDec = document.getElementById("btn-grid-size-dec");
+        btnGridSizeInc = document.getElementById("btn-grid-size-inc");
+        gridSizeInput = document.getElementById("grid-size-input");
+        gridSizeSlider = document.getElementById("grid-size-slider");
+        gridOffsetXVal = document.getElementById("grid-offset-x-val");
+        gridOffsetYVal = document.getElementById("grid-offset-y-val");
+        btnGridNudgeUp = document.getElementById("btn-grid-nudge-up");
+        btnGridNudgeDown = document.getElementById("btn-grid-nudge-down");
+        btnGridNudgeLeft = document.getElementById("btn-grid-nudge-left");
+        btnGridNudgeRight = document.getElementById("btn-grid-nudge-right");
+        btnGridAlignDrag = document.getElementById("btn-grid-align-drag");
+        btnGridReset = document.getElementById("btn-grid-reset");
+        btnGridDone = document.getElementById("btn-grid-done");
         btnFitScreen = document.getElementById("btn-fit-screen");
         btnPrev = document.getElementById("btn-prev");
         btnNext = document.getElementById("btn-next");
@@ -407,16 +440,25 @@
      * Evaluates 5ft D&D tactical scale, door alignment, and poché wall consistency.
      */
     function drawVttGrid(c, width, height) {
+        c.save();
+        c.beginPath();
+        c.rect(0, 0, width, height);
+        c.clip();
+
+        const size = state.gridSize || VTT_GRID_SIZE;
+        const startX = ((Math.round(state.gridOffset.x) % size) + size) % size;
+        const startY = ((Math.round(state.gridOffset.y) % size) + size) % size;
+
         c.beginPath();
 
-        // Vertical 64px grid lines
-        for (let x = 0; x <= width; x += VTT_GRID_SIZE) {
+        // Vertical grid lines
+        for (let x = startX; x <= width; x += size) {
             c.moveTo(x, 0);
             c.lineTo(x, height);
         }
 
-        // Horizontal 64px grid lines
-        for (let y = 0; y <= height; y += VTT_GRID_SIZE) {
+        // Horizontal grid lines
+        for (let y = startY; y <= height; y += size) {
             c.moveTo(0, y);
             c.lineTo(width, y);
         }
@@ -425,6 +467,7 @@
         c.lineWidth = Math.max(0.5, 1.0 / state.zoom);
         c.strokeStyle = "rgba(56, 189, 248, 0.4)";
         c.stroke();
+        c.restore();
     }
 
     /**
@@ -595,6 +638,15 @@
         state.currentIndex = index;
         state.currentLayerIndex = 0;
         const candidate = state.candidates[index];
+        if (candidateGridSettings.has(candidate.id)) {
+            const saved = candidateGridSettings.get(candidate.id);
+            state.gridSize = saved.size;
+            state.gridOffset = { ...saved.offset };
+        } else {
+            state.gridSize = 64;
+            state.gridOffset = { x: 0, y: 0 };
+        }
+        updateGridPanel();
         const cacheKey = `${candidate.id}_layer_0`;
 
         // Check if layer 0 (or candidate) is already cached in memory
@@ -1335,6 +1387,7 @@
 
             // Remove curated item from local queue and memory cache
             state.imageCache.delete(candidate.id);
+            candidateGridSettings.delete(candidate.id);
             if (candidate.layers) {
                 candidate.layers.forEach((_, idx) => {
                     state.imageCache.delete(`${candidate.id}_layer_${idx}`);
@@ -1389,6 +1442,7 @@
 
             // Remove rejected item from local queue and cache
             state.imageCache.delete(candidate.id);
+            candidateGridSettings.delete(candidate.id);
             if (candidate.layers) {
                 candidate.layers.forEach((_, idx) => {
                     state.imageCache.delete(`${candidate.id}_layer_${idx}`);
@@ -2726,8 +2780,17 @@
     // ==========================================================================
 
     function setupEventListeners() {
-        // --- Canvas Mouse Pan Dragging ---
+        // --- Canvas Mouse Pan Dragging & Dynamic Grid Align Drag ---
         canvas.addEventListener("mousedown", (e) => {
+            if ((e.button === 0) && (e.shiftKey || state.gridAlignMode)) {
+                state.isDraggingGrid = true;
+                state.gridDragStart = { x: e.clientX, y: e.clientY };
+                state.gridOffsetStart = { x: state.gridOffset.x, y: state.gridOffset.y };
+                canvas.classList.add("grid-dragging");
+                e.preventDefault();
+                return;
+            }
+
             // Left click (0) or Middle click (1)
             if (e.button === 0 || e.button === 1) {
                 state.isPanning = true;
@@ -2739,6 +2802,22 @@
         });
 
         window.addEventListener("mousemove", (e) => {
+            if (canvas && !state.isDraggingGrid) {
+                canvas.classList.toggle("grid-aligning", e.shiftKey || state.gridAlignMode);
+            }
+
+            if (state.isDraggingGrid) {
+                const imgDx = (e.clientX - state.gridDragStart.x) / state.zoom;
+                const imgDy = (e.clientY - state.gridDragStart.y) / state.zoom;
+                state.gridOffset.x = Math.round(state.gridOffsetStart.x + imgDx);
+                state.gridOffset.y = Math.round(state.gridOffsetStart.y + imgDy);
+                saveCurrentCandidateGrid();
+                requestRender();
+                updateHud();
+                updateGridPanel();
+                return;
+            }
+
             if (!state.isPanning) return;
             const dx = e.clientX - state.dragStart.x;
             const dy = e.clientY - state.dragStart.y;
@@ -2749,6 +2828,10 @@
         });
 
         window.addEventListener("mouseup", (e) => {
+            if (state.isDraggingGrid) {
+                state.isDraggingGrid = false;
+                canvas.classList.remove("grid-dragging");
+            }
             if (state.isPanning) {
                 state.isPanning = false;
                 canvas.classList.remove("panning");
@@ -2772,6 +2855,65 @@
 
         // --- Toolbar Button Actions ---
         btnGridToggle.addEventListener("click", () => toggleGrid());
+        // --- Grid Calibration Panel Event Listeners ---
+        if (btnGridAdjust) {
+            btnGridAdjust.addEventListener("click", () => toggleGridPanel());
+        }
+        if (btnCloseGridPanel) {
+            btnCloseGridPanel.addEventListener("click", () => toggleGridPanel(false));
+        }
+        if (btnGridDone) {
+            btnGridDone.addEventListener("click", () => toggleGridPanel(false));
+        }
+        if (btnGridReset) {
+            btnGridReset.addEventListener("click", () => resetGrid());
+        }
+        if (btnGridSizeDec) {
+            btnGridSizeDec.addEventListener("click", () => setGridSize(state.gridSize - 1));
+        }
+        if (btnGridSizeInc) {
+            btnGridSizeInc.addEventListener("click", () => setGridSize(state.gridSize + 1));
+        }
+        if (gridSizeInput) {
+            gridSizeInput.addEventListener("input", (e) => {
+                const val = parseInt(e.target.value, 10);
+                if (!isNaN(val)) setGridSize(val);
+            });
+            gridSizeInput.addEventListener("change", (e) => {
+                const val = parseInt(e.target.value, 10);
+                if (!isNaN(val)) setGridSize(val);
+            });
+        }
+        if (gridSizeSlider) {
+            gridSizeSlider.addEventListener("input", (e) => {
+                const val = parseInt(e.target.value, 10);
+                if (!isNaN(val)) setGridSize(val);
+            });
+        }
+        if (btnGridNudgeUp) {
+            btnGridNudgeUp.addEventListener("click", () => nudgeGridOffset(0, -1));
+        }
+        if (btnGridNudgeDown) {
+            btnGridNudgeDown.addEventListener("click", () => nudgeGridOffset(0, 1));
+        }
+        if (btnGridNudgeLeft) {
+            btnGridNudgeLeft.addEventListener("click", () => nudgeGridOffset(-1, 0));
+        }
+        if (btnGridNudgeRight) {
+            btnGridNudgeRight.addEventListener("click", () => nudgeGridOffset(1, 0));
+        }
+        if (btnGridAlignDrag) {
+            btnGridAlignDrag.addEventListener("click", () => toggleGridAlignMode());
+        }
+
+        const presetChips = document.querySelectorAll(".preset-chip");
+        presetChips.forEach((chip) => {
+            chip.addEventListener("click", () => {
+                const sz = parseInt(chip.getAttribute("data-size"), 10);
+                if (!isNaN(sz)) setGridSize(sz);
+            });
+        });
+
         btnFitScreen.addEventListener("click", () => fitToScreen());
         document.getElementById("btn-zoom-in").addEventListener("click", () => zoomStep(1.25));
         document.getElementById("btn-zoom-out").addEventListener("click", () => zoomStep(1 / 1.25));
@@ -2855,7 +2997,16 @@
         // --- Keyboard Hotkey Dispatcher ---
         window.addEventListener("keydown", handleKeydown);
         window.addEventListener("keyup", handleKeyup);
-        window.addEventListener("blur", stopPanLoop);
+        window.addEventListener("blur", () => {
+            stopPanLoop();
+            if (state.isDraggingGrid) {
+                state.isDraggingGrid = false;
+                canvas.classList.remove("grid-dragging");
+            }
+            if (canvas) {
+                canvas.classList.toggle("grid-aligning", state.gridAlignMode);
+            }
+        });
         window.addEventListener("focusin", (e) => {
             const tag = e.target?.tagName?.toLowerCase();
             if (tag === "input" || tag === "textarea" || tag === "select") {
@@ -2863,14 +3014,21 @@
             }
         });
     }
-
     function handleKeydown(e) {
+        if (canvas) {
+            canvas.classList.toggle("grid-aligning", e.shiftKey || state.gridAlignMode);
+        }
         const tag = document.activeElement ? document.activeElement.tagName.toLowerCase() : "";
         const isInputFocused = tag === "input" || tag === "textarea" || tag === "select";
 
         // Global Modal Dismiss: Escape
         if (e.key === "Escape") {
             stopPanLoop();
+            if (state.gridPanelOpen) {
+                toggleGridPanel(false);
+                e.preventDefault();
+                return;
+            }
             if (state.labelingMode) {
                 exitLabelingMode();
                 e.preventDefault();
@@ -3041,9 +3199,55 @@
             e.preventDefault();
             return;
         }
-        // 64px VTT Grid toggle: G
-        if (e.key === "g" || e.key === "G") {
+        // Dynamic Grid Calibration Panel: Shift + G
+        if (e.shiftKey && (e.key === "g" || e.key === "G")) {
+            toggleGridPanel();
+            e.preventDefault();
+            return;
+        }
+
+        // 64px VTT Grid toggle: G (unmodified)
+        if ((e.key === "g" || e.key === "G") && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
             toggleGrid();
+            e.preventDefault();
+            return;
+        }
+
+        // Shift + Arrow keys: Nudge Grid Offset
+        if (e.shiftKey && !e.ctrlKey && !e.metaKey) {
+            const step = e.altKey ? 5 : 1;
+            if (e.key === "ArrowUp" || e.key === "Up") {
+                nudgeGridOffset(0, -step);
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "ArrowDown" || e.key === "Down") {
+                nudgeGridOffset(0, step);
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "ArrowLeft" || e.key === "Left") {
+                nudgeGridOffset(-step, 0);
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "ArrowRight" || e.key === "Right") {
+                nudgeGridOffset(step, 0);
+                e.preventDefault();
+                return;
+            }
+        }
+
+        // Shift + [ / ]: Adjust Grid Size
+        if (e.shiftKey && (e.key === "[" || e.key === "{" || e.code === "BracketLeft")) {
+            const sizeStep = e.altKey ? 5 : 1;
+            setGridSize(state.gridSize - sizeStep);
+            e.preventDefault();
+            return;
+        }
+        if (e.shiftKey && (e.key === "]" || e.key === "}" || e.code === "BracketRight")) {
+            const sizeStep = e.altKey ? 5 : 1;
+            setGridSize(state.gridSize + sizeStep);
             e.preventDefault();
             return;
         }
@@ -3166,6 +3370,9 @@
     }
 
     function handleKeyup(e) {
+        if (canvas) {
+            canvas.classList.toggle("grid-aligning", e.shiftKey || state.gridAlignMode);
+        }
         const key = e.key.toLowerCase();
         if (key === "w" || key === "a" || key === "s" || key === "d") {
             activePanKeys[key] = false;
@@ -3173,6 +3380,102 @@
                 stopPanLoop();
             }
         }
+    }
+
+    function saveCurrentCandidateGrid() {
+        if (state.currentIndex >= 0 && state.currentIndex < state.candidates.length) {
+            const cand = state.candidates[state.currentIndex];
+            if (cand && cand.id) {
+                candidateGridSettings.set(cand.id, {
+                    size: state.gridSize,
+                    offset: { ...state.gridOffset },
+                });
+            }
+        }
+    }
+
+    function setGridSize(size) {
+        const num = Number.isFinite(size) ? size : parseInt(size, 10);
+        if (isNaN(num)) return;
+        const clamped = Math.max(MIN_GRID_SIZE, Math.min(MAX_GRID_SIZE, Math.round(num)));
+        state.gridSize = clamped;
+        saveCurrentCandidateGrid();
+        updateHud();
+        updateGridPanel();
+        requestRender();
+    }
+
+    function nudgeGridOffset(dx, dy) {
+        state.gridOffset.x = Math.round(state.gridOffset.x + dx);
+        state.gridOffset.y = Math.round(state.gridOffset.y + dy);
+        saveCurrentCandidateGrid();
+        updateHud();
+        updateGridPanel();
+        requestRender();
+    }
+
+    function setGridOffset(x, y) {
+        state.gridOffset.x = Math.round(x);
+        state.gridOffset.y = Math.round(y);
+        saveCurrentCandidateGrid();
+        updateHud();
+        updateGridPanel();
+        requestRender();
+    }
+
+    function resetGrid() {
+        state.gridSize = 64;
+        state.gridOffset = { x: 0, y: 0 };
+        saveCurrentCandidateGrid();
+        updateHud();
+        updateGridPanel();
+        requestRender();
+        showToast("Grid reset to default 64px (0,0)", "info");
+    }
+
+    function toggleGridPanel(force) {
+        state.gridPanelOpen = typeof force === "boolean" ? force : !state.gridPanelOpen;
+        if (gridAdjustPanel) {
+            gridAdjustPanel.classList.toggle("hidden", !state.gridPanelOpen);
+        }
+        if (btnGridAdjust) {
+            btnGridAdjust.classList.toggle("active", state.gridPanelOpen);
+        }
+        if (state.gridPanelOpen) {
+            updateGridPanel();
+        }
+    }
+
+    function toggleGridAlignMode(force) {
+        state.gridAlignMode = typeof force === "boolean" ? force : !state.gridAlignMode;
+        if (btnGridAlignDrag) {
+            btnGridAlignDrag.classList.toggle("active", state.gridAlignMode);
+        }
+        if (canvas) {
+            canvas.classList.toggle("grid-aligning", state.gridAlignMode);
+        }
+    }
+
+    function updateGridPanel() {
+        if (gridSizeInput) {
+            gridSizeInput.value = state.gridSize;
+        }
+        if (gridSizeSlider) {
+            gridSizeSlider.value = Math.min(256, Math.max(16, state.gridSize));
+        }
+        const ox = state.gridOffset ? Math.round(state.gridOffset.x) : 0;
+        const oy = state.gridOffset ? Math.round(state.gridOffset.y) : 0;
+        if (gridOffsetXVal) {
+            gridOffsetXVal.textContent = ox > 0 ? `+${ox}px` : `${ox}px`;
+        }
+        if (gridOffsetYVal) {
+            gridOffsetYVal.textContent = oy > 0 ? `+${oy}px` : `${oy}px`;
+        }
+        const chips = document.querySelectorAll(".preset-chip");
+        chips.forEach((chip) => {
+            const sz = parseInt(chip.getAttribute("data-size"), 10);
+            chip.classList.toggle("active", sz === state.gridSize);
+        });
     }
 
     function toggleGrid() {
@@ -3184,7 +3487,8 @@
         }
         requestRender();
         updateHud();
-        showToast(`64px VTT Grid: ${state.gridVisible ? "Enabled" : "Disabled"}`, "info");
+        const size = state.gridSize || VTT_GRID_SIZE;
+        showToast(`${size}px VTT Grid: ${state.gridVisible ? "Enabled" : "Disabled"}`, "info");
     }
 
     function enterLabelingMode(mode) {
@@ -3274,7 +3578,16 @@
         zoomLevelDisplay.textContent = `${zoomPercent}%`;
         hudPanZoom.textContent = `Zoom: ${zoomPercent}% (${Math.round(state.pan.x)}, ${Math.round(state.pan.y)})`;
 
-        hudGridStatus.textContent = `Grid: 64px [${state.gridVisible ? "ON" : "OFF"}]`;
+        const size = state.gridSize || VTT_GRID_SIZE;
+        const ox = state.gridOffset ? Math.round(state.gridOffset.x) : 0;
+        const oy = state.gridOffset ? Math.round(state.gridOffset.y) : 0;
+        if (ox !== 0 || oy !== 0) {
+            const signX = ox > 0 ? `+${ox}` : `${ox}`;
+            const signY = oy > 0 ? `+${oy}` : `${oy}`;
+            hudGridStatus.textContent = `Grid: ${size}px (${signX}, ${signY}) [${state.gridVisible ? "ON" : "OFF"}]`;
+        } else {
+            hudGridStatus.textContent = `Grid: ${size}px [${state.gridVisible ? "ON" : "OFF"}]`;
+        }
 
         if (state.currentImage && state.currentImage.complete) {
             const imgW = state.currentImage.naturalWidth || state.currentImage.width;

@@ -223,6 +223,87 @@ mod tests {
         assert!(css.contains("selecting-mode-pulse-amber"));
     }
 
+    #[test]
+    fn test_embedded_assets_contain_dynamic_grid_overlay() {
+        let app_js = Assets::get("app.js").expect("app.js must be embedded");
+        let js = std::str::from_utf8(app_js.data.as_ref()).expect("app.js must be valid utf8");
+
+        // Verify dynamic grid state initialization
+        assert!(js.contains("gridSize: 64"));
+        assert!(js.contains("gridOffset: { x: 0, y: 0 }"));
+        assert!(js.contains("gridAlignMode: false"));
+        assert!(js.contains("gridPanelOpen: false"));
+        assert!(js.contains("isDraggingGrid: false"));
+        assert!(js.contains("candidateGridSettings = new Map()"));
+
+        // Verify grid helper functions
+        assert!(js.contains("function setGridSize("));
+        assert!(js.contains("function nudgeGridOffset("));
+        assert!(js.contains("function setGridOffset("));
+        assert!(js.contains("function resetGrid("));
+        assert!(js.contains("function toggleGridPanel("));
+        assert!(js.contains("function toggleGridAlignMode("));
+        assert!(js.contains("function updateGridPanel()"));
+
+        // Verify drawVttGrid clipping and modulo offset
+        assert!(js.contains("c.clip()"));
+        assert!(js.contains("state.gridOffset.x"));
+        assert!(js.contains("state.gridOffset.y"));
+
+        // Verify canvas drag alignment & class toggling
+        assert!(js.contains("grid-dragging"));
+        assert!(js.contains("grid-aligning"));
+
+        // Verify hotkeys: Shift + G, Shift + Arrows, Shift + [ / ]
+        assert!(js.contains("e.shiftKey && (e.key === \"g\" || e.key === \"G\")"));
+        assert!(js.contains("toggleGridPanel()"));
+        assert!(js.contains("nudgeGridOffset(0, -step)"));
+        assert!(js.contains("nudgeGridOffset(0, step)"));
+        assert!(js.contains("nudgeGridOffset(-step, 0)"));
+        assert!(js.contains("nudgeGridOffset(step, 0)"));
+
+        // Verify index.html contains grid calibration elements
+        let index_html = Assets::get("index.html").expect("index.html must be embedded");
+        let html = std::str::from_utf8(index_html.data.as_ref()).expect("index.html must be valid utf8");
+        assert!(html.contains("btn-grid-adjust"));
+        assert!(html.contains("grid-adjust-panel"));
+        assert!(html.contains("btn-close-grid-panel"));
+        assert!(html.contains("grid-size-input"));
+        assert!(html.contains("grid-size-slider"));
+        assert!(html.contains("preset-chip"));
+        assert!(html.contains("data-size=\"32\""));
+        assert!(html.contains("data-size=\"50\""));
+        assert!(html.contains("data-size=\"64\""));
+        assert!(html.contains("data-size=\"70\""));
+        assert!(html.contains("data-size=\"100\""));
+        assert!(html.contains("data-size=\"128\""));
+        assert!(html.contains("data-size=\"140\""));
+        assert!(html.contains("grid-offset-x-val"));
+        assert!(html.contains("grid-offset-y-val"));
+        assert!(html.contains("btn-grid-nudge-up"));
+        assert!(html.contains("btn-grid-nudge-down"));
+        assert!(html.contains("btn-grid-nudge-left"));
+        assert!(html.contains("btn-grid-nudge-right"));
+        assert!(html.contains("btn-grid-align-drag"));
+        assert!(html.contains("btn-grid-reset"));
+        assert!(html.contains("btn-grid-done"));
+        assert!(html.contains("Shift+G"));
+        assert!(html.contains("Shift+Drag"));
+        assert!(html.contains("Shift+Arrow Keys"));
+
+        // Verify style.css contains styling rules
+        let style_css = Assets::get("style.css").expect("style.css must be embedded");
+        let css = std::str::from_utf8(style_css.data.as_ref()).expect("style.css must be valid utf8");
+        assert!(css.contains(".grid-adjust-panel"));
+        assert!(css.contains(".grid-size-controls"));
+        assert!(css.contains(".grid-slider"));
+        assert!(css.contains(".preset-chip"));
+        assert!(css.contains(".grid-nudge-pad"));
+        assert!(css.contains(".btn-align-mode"));
+        assert!(css.contains(".grid-aligning"));
+        assert!(css.contains(".grid-dragging"));
+    }
+
 
     #[tokio::test]
     async fn test_static_handler_index() {

@@ -21,6 +21,8 @@ pub enum StorageError {
 
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("ZIP archive error: {0}")]
+    Zip(#[from] zip::result::ZipError),
 }
 
 /// Port defining storage operations for staging, curated themes, and rejection records.
@@ -147,6 +149,9 @@ pub trait StorageRepository: Send + Sync {
 
     /// List curated maps, optionally filtered by theme (or all if None).
     fn list_curated(&self, theme: Option<&Theme>) -> Result<Vec<CuratedMap>, StorageError>;
+    /// Package all curated maps' 1024x1024 PNG and companion .txt captions into a valid .zip archive.
+    fn export_lora_dataset(&self, theme: Option<&Theme>) -> Result<Vec<u8>, StorageError>;
+
 
     /// Log a rejection for a candidate ID to the rejection record file.
     fn log_rejection(
@@ -308,6 +313,10 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
     fn list_curated(&self, theme: Option<&Theme>) -> Result<Vec<CuratedMap>, StorageError> {
         (**self).list_curated(theme)
     }
+    fn export_lora_dataset(&self, theme: Option<&Theme>) -> Result<Vec<u8>, StorageError> {
+        (**self).export_lora_dataset(theme)
+    }
+
 
     fn log_rejection(
         &self,

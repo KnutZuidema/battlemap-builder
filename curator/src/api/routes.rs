@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event, Sse},
@@ -80,6 +80,53 @@ pub async fn get_staging(
 ) -> Result<Json<Vec<Candidate>>, ApiError> {
     let candidates = state.storage.list_staging()?;
     Ok(Json(candidates))
+}
+
+/// Query parameters for theme-filtered endpoints.
+#[derive(Debug, Default, Deserialize)]
+pub struct ThemeQuery {
+    pub theme: Option<String>,
+}
+
+fn parse_optional_theme(theme_str: Option<&str>) -> Result<Option<Theme>, ApiError> {
+    match theme_str {
+        Some(t) if !t.trim().is_empty() && !t.trim().eq_ignore_ascii_case("all") => {
+            let theme = t.trim().parse::<Theme>().map_err(ApiError::bad_request)?;
+            Ok(Some(theme))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// GET /api/curated - List curated maps, optionally filtered by theme.
+pub async fn get_curated(
+    State(state): State<AppState>,
+    Query(query): Query<ThemeQuery>,
+) -> Result<Json<Vec<CuratedMap>>, ApiError> {
+    let theme = parse_optional_theme(query.theme.as_deref())?;
+    let maps = state.storage.list_curated(theme.as_ref())?;
+    Ok(Json(maps))
+}
+
+/// GET /api/dataset/export - Export LoRA dataset packaged as a ZIP archive.
+pub async fn get_dataset_export(
+    State(state): State<AppState>,
+    Query(query): Query<ThemeQuery>,
+) -> Result<Response, ApiError> {
+    let theme = parse_optional_theme(query.theme.as_deref())?;
+    let zip_bytes = state.storage.export_lora_dataset(theme.as_ref())?;
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"))
+        .header(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment; filename=\"lora-dataset.zip\""),
+        )
+        .body(Body::from(zip_bytes))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(response)
 }
 
 /// GET /api/image/staging/{id} - Stream binary image bytes with MIME type and Cache-Control.

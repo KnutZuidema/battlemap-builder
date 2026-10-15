@@ -21,6 +21,8 @@ pub fn create_router(state: AppState) -> Router {
     let api_routes = Router::new()
         .route("/api/status", get(get_status))
         .route("/api/staging", get(get_staging))
+        .route("/api/curated", get(get_curated))
+        .route("/api/dataset/export", get(get_dataset_export))
         .route("/api/image/staging/{id}", get(get_staging_image))
         .route("/api/image/staging/{id}/{layer_index}", get(get_staging_layer_image))
         .route("/api/image/curated/{theme}/{id}", get(get_curated_image))

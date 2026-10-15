@@ -56,6 +56,11 @@
         // Harvesting parameters
         harvestSort: "hot",
         harvestTime: "all",
+        // Dataset Library View state (Issue #31)
+        currentView: "triage",
+        libraryTheme: "all",
+        curatedMaps: [],
+        isExporting: false,
     };
 
     // Constants
@@ -128,6 +133,12 @@
     let btnBenchmarkClearLogs, benchmarkWindowCost, btnBenchmarkWindowCancel;
     let benchmarkWindowPill, benchmarkPillCount, benchmarkPillCost;
     let activeGenerationIndicatorCard;
+
+    // Dataset Library View DOM Elements (Issue #31)
+    let tabNavTriage, tabNavLibrary;
+    let triageViewport, libraryViewport;
+    let libraryThemeTabs, libraryGrid, libraryEmpty, libraryCountBadge;
+    let btnExportLora, btnExportLabel, btnRefreshLibrary, btnSwitchToTriage;
 
     // ==========================================================================
     // Initialization & Bootstrap
@@ -265,6 +276,20 @@
         benchmarkWindowPill = document.getElementById("benchmark-window-pill");
         benchmarkPillCount = document.getElementById("benchmark-pill-count");
         benchmarkPillCost = document.getElementById("benchmark-pill-cost");
+
+        // Dataset Library View Elements
+        tabNavTriage = document.getElementById("tab-nav-triage");
+        tabNavLibrary = document.getElementById("tab-nav-library");
+        triageViewport = document.getElementById("triage-viewport");
+        libraryViewport = document.getElementById("library-viewport");
+        libraryThemeTabs = document.getElementById("library-theme-tabs");
+        libraryGrid = document.getElementById("library-grid");
+        libraryEmpty = document.getElementById("library-empty");
+        libraryCountBadge = document.getElementById("library-count-badge");
+        btnExportLora = document.getElementById("btn-export-lora");
+        btnExportLabel = document.getElementById("btn-export-label");
+        btnRefreshLibrary = document.getElementById("btn-refresh-library");
+        btnSwitchToTriage = document.getElementById("btn-switch-to-triage");
     }
 
     // ==========================================================================
@@ -2515,6 +2540,188 @@
     }
 
     // ==========================================================================
+    // Dataset Library View & LoRA Export (Issue #31)
+    // ==========================================================================
+
+    function escapeHtml(str) {
+        if (!str) return "";
+        return String(str)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+    }
+
+    function switchView(view) {
+        state.currentView = view;
+        if (view === "triage") {
+            tabNavTriage?.classList.add("active");
+            tabNavLibrary?.classList.remove("active");
+            triageViewport?.classList.remove("hidden");
+            libraryViewport?.classList.add("hidden");
+            resizeCanvas();
+            requestRender();
+        } else if (view === "library") {
+            tabNavLibrary?.classList.add("active");
+            tabNavTriage?.classList.remove("active");
+            libraryViewport?.classList.remove("hidden");
+            triageViewport?.classList.add("hidden");
+            fetchLibraryMaps(state.libraryTheme);
+        }
+    }
+
+    async function fetchLibraryMaps(theme = "all") {
+        if (!libraryGrid) return;
+        libraryGrid.setAttribute("aria-busy", "true");
+
+        try {
+            const url = (!theme || theme === "all") ? "/api/curated" : `/api/curated?theme=${encodeURIComponent(theme)}`;
+            const res = await fetch(url);
+            if (!res.ok) {
+                throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+            }
+            const maps = await res.json();
+            state.curatedMaps = maps;
+
+            if (libraryCountBadge) {
+                libraryCountBadge.textContent = `${maps.length} Map${maps.length === 1 ? "" : "s"}`;
+            }
+
+            renderLibraryGrid(maps);
+        } catch (err) {
+            showToast(`Failed to load dataset library: ${err.message}`, "danger");
+        } finally {
+            if (libraryGrid) libraryGrid.setAttribute("aria-busy", "false");
+        }
+    }
+
+    function renderLibraryGrid(maps) {
+        if (!libraryGrid || !libraryEmpty) return;
+        libraryGrid.innerHTML = "";
+
+        if (!maps || maps.length === 0) {
+            libraryEmpty.classList.remove("hidden");
+            libraryGrid.classList.add("hidden");
+            return;
+        }
+
+        libraryEmpty.classList.add("hidden");
+        libraryGrid.classList.remove("hidden");
+
+        const fragment = document.createDocumentFragment();
+        for (const map of maps) {
+            const card = document.createElement("div");
+            card.className = "curated-card";
+            card.dataset.id = map.id;
+            card.dataset.theme = map.theme;
+
+            const thumbUrl = `/api/image/curated/${encodeURIComponent(map.theme)}/${encodeURIComponent(map.id)}`;
+            const ratingVal = Math.max(1, Math.min(5, map.rating || 1));
+            const stars = "★".repeat(ratingVal) + "☆".repeat(5 - ratingVal);
+
+            const layerCount = (map.layers && map.layers.length > 0) ? map.layers.length : 1;
+            const layerLabel = `${layerCount} Layer${layerCount === 1 ? "" : "s"}`;
+
+            const tagsHtml = (map.tags && map.tags.length > 0)
+                ? map.tags.map(t => `<span class="curated-tag-pill">${escapeHtml(t)}</span>`).join("")
+                : `<span class="curated-tag-pill text-muted">no tags</span>`;
+
+            const captionText = (map.layers && map.layers[0] && map.layers[0].caption)
+                ? map.layers[0].caption
+                : `ttrpg battlemap, flat 2D plan view, perpendicular orthographic camera, poché cut walls, strictly gridless, ${map.theme}`;
+
+            card.innerHTML = `
+                <div class="curated-thumb-box">
+                    <img class="curated-thumb-img" src="${thumbUrl}" alt="Map ${escapeHtml(map.id)}" loading="lazy">
+                    <div class="curated-thumb-overlay">
+                        <span class="curated-theme-badge">${escapeHtml(map.theme)}</span>
+                        <span class="curated-layers-badge">${layerLabel}</span>
+                    </div>
+                </div>
+                <div class="curated-card-body">
+                    <div class="curated-header-row">
+                        <span class="curated-card-id mono" title="${escapeHtml(map.id)}">${escapeHtml(map.id)}</span>
+                        <span class="curated-card-stars" title="${map.rating} Stars">${stars}</span>
+                    </div>
+                    <div class="curated-tags-row">
+                        ${tagsHtml}
+                    </div>
+                    <div class="curated-caption-box">
+                        <span class="curated-caption-label">Companion Caption</span>
+                        <div class="mono">${escapeHtml(captionText)}</div>
+                    </div>
+                </div>
+            `;
+
+            fragment.appendChild(card);
+        }
+
+        libraryGrid.appendChild(fragment);
+    }
+
+    async function exportLoraDataset() {
+        if (state.isExporting) return;
+        state.isExporting = true;
+        if (btnExportLora) btnExportLora.disabled = true;
+        if (btnExportLabel) btnExportLabel.textContent = "Packaging ZIP...";
+
+        const theme = state.libraryTheme || "all";
+        const themeLabel = theme === "all" ? "all themes" : theme;
+        showToast(`Packaging LoRA dataset ZIP archive (${themeLabel})...`, "info");
+
+        try {
+            const url = (theme === "all") ? "/api/dataset/export" : `/api/dataset/export?theme=${encodeURIComponent(theme)}`;
+            const res = await fetch(url);
+            if (!res.ok) {
+                throw new Error(`Export failed (HTTP ${res.status}: ${res.statusText})`);
+            }
+
+            const blob = await res.blob();
+            const filename = "lora-dataset.zip";
+
+            const downloadUrl = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = downloadUrl;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(downloadUrl);
+
+            showToast(`LoRA dataset downloaded (${formatBytes(blob.size)})!`, "success");
+        } catch (err) {
+            showToast(`Export error: ${err.message}`, "danger");
+        } finally {
+            state.isExporting = false;
+            if (btnExportLora) btnExportLora.disabled = false;
+            if (btnExportLabel) btnExportLabel.textContent = "Export LoRA Dataset";
+        }
+    }
+
+    function setupLibraryControls() {
+        tabNavTriage?.addEventListener("click", () => switchView("triage"));
+        tabNavLibrary?.addEventListener("click", () => switchView("library"));
+        btnSwitchToTriage?.addEventListener("click", () => switchView("triage"));
+        btnRefreshLibrary?.addEventListener("click", () => fetchLibraryMaps(state.libraryTheme));
+        btnExportLora?.addEventListener("click", () => exportLoraDataset());
+
+        if (libraryThemeTabs) {
+            libraryThemeTabs.addEventListener("click", (e) => {
+                const tab = e.target.closest(".lib-tab");
+                if (!tab) return;
+                const theme = tab.dataset.theme;
+                if (!theme) return;
+
+                libraryThemeTabs.querySelectorAll(".lib-tab").forEach(t => t.classList.remove("active"));
+                tab.classList.add("active");
+                state.libraryTheme = theme;
+                fetchLibraryMaps(theme);
+            });
+        }
+    }
+
+    // ==========================================================================
     // UI Event Listeners & Hotkeys
     // ==========================================================================
 
@@ -2642,6 +2849,7 @@
         });
         setupDrawerControls();
         setupStorageControls();
+        setupLibraryControls();
 
 
         // --- Keyboard Hotkey Dispatcher ---
@@ -2728,6 +2936,26 @@
 
         // Ignore triage hotkeys if typing in an input
         if (isInputFocused) return;
+
+        // View switching hotkeys: L for library, T for triage
+        if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+            if (e.key === "l" || e.key === "L") {
+                switchView("library");
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "t" || e.key === "T") {
+                switchView("triage");
+                e.preventDefault();
+                return;
+            }
+        }
+
+        // Suppress triage controls when in Library view
+        if (state.currentView === "library") {
+            return;
+        }
+
 
         // Secondary selection handling for active labeling mode
         if (state.labelingMode === "theme") {

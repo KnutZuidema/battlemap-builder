@@ -21,6 +21,22 @@
                     <span class="brand-title">DUNGEON FORGE</span>
                     <span class="badge badge-curator">Curator</span>
                 </div>
+                <nav class="nav-switcher" aria-label="Main Navigation View">
+                    <button type="button" id="tab-nav-triage" class="nav-switcher-btn active" title="Staging Triage (Hotkey: T)">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <polyline points="9 11 12 14 22 4"/>
+                        </svg>
+                        <span>Staging Triage</span>
+                    </button>
+                    <button type="button" id="tab-nav-library" class="nav-switcher-btn" title="Dataset Library (Hotkey: L)">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                        </svg>
+                        <span>Dataset Library</span>
+                    </button>
+                </nav>
                 <div id="status-indicator" class="status-pill status-connecting" title="Curator API Status">
                     <span class="status-dot"></span>
                     <span id="status-text" class="status-text">Connecting...</span>
@@ -281,6 +297,78 @@
                 <span id="loading-text" class="loading-text">Loading battlemap candidate...</span>
             </div>
         </main>
+
+        <!-- Curated Dataset Library View -->
+        <section id="library-viewport" class="library-viewport hidden" aria-label="Dataset Library View">
+            <!-- Library Top Toolbar -->
+            <div class="library-toolbar">
+                <div class="library-toolbar-left">
+                    <div class="library-title-group">
+                        <svg class="library-title-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                        </svg>
+                        <h2 class="library-title">Dataset Library</h2>
+                        <span id="library-count-badge" class="library-count-badge mono">0 Maps</span>
+                    </div>
+
+                    <!-- Theme Filter Tabs -->
+                    <div id="library-theme-tabs" class="library-theme-tabs" role="tablist" aria-label="Theme Filter">
+                        <button type="button" class="lib-tab active" data-theme="all">All</button>
+                        <button type="button" class="lib-tab" data-theme="dungeon">Dungeon</button>
+                        <button type="button" class="lib-tab" data-theme="cave">Cave</button>
+                        <button type="button" class="lib-tab" data-theme="tavern">Tavern</button>
+                        <button type="button" class="lib-tab" data-theme="wilderness">Wilderness</button>
+                        <button type="button" class="lib-tab" data-theme="ruins">Ruins</button>
+                        <button type="button" class="lib-tab" data-theme="urban">Urban</button>
+                        <button type="button" class="lib-tab" data-theme="scifi">SciFi</button>
+                        <button type="button" class="lib-tab" data-theme="building">Building</button>
+                    </div>
+                </div>
+
+                <div class="library-toolbar-right">
+                    <button type="button" id="btn-export-lora" class="btn btn-primary btn-export" title="Export 1024x1024 LoRA dataset (.zip) for training">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        <span id="btn-export-label">Export LoRA Dataset</span>
+                    </button>
+                    <button type="button" id="btn-refresh-library" class="btn btn-secondary btn-icon-only" title="Refresh Library">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="23 4 23 10 17 10"/>
+                            <polyline points="1 20 1 14 7 14"/>
+                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Library Cards Scroll Container -->
+            <div class="library-scroll-container">
+                <div id="library-grid" class="curated-grid" role="feed" aria-busy="false">
+                    <!-- Populated dynamically by app.js -->
+                </div>
+
+                <!-- Empty Library State -->
+                <div id="library-empty" class="empty-state hidden">
+                    <div class="empty-card">
+                        <div class="empty-icon">
+                            <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                            </svg>
+                        </div>
+                        <h3>No Curated Maps Found</h3>
+                        <p id="library-empty-desc">No battlemaps matching the selected theme filter have been approved yet.</p>
+                        <button type="button" id="btn-switch-to-triage" class="btn btn-primary">
+                            <span>Go to Staging Triage</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
 
         <!-- Rejection Reason Modal -->
         <div id="rejection-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="rejection-modal-title">

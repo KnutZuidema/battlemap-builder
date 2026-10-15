@@ -42,6 +42,7 @@ impl From<StorageError> for ApiError {
             StorageError::InvalidData(msg) => ApiError::BadRequest(msg),
             StorageError::Io(err) => ApiError::Internal(err.to_string()),
             StorageError::Serialization(err) => ApiError::Internal(err.to_string()),
+            StorageError::Zip(err) => ApiError::Internal(err.to_string()),
         }
     }
 }

@@ -1,0 +1,293 @@
+use std::io::Cursor;
+use std::sync::Arc;
+
+use axum::{
+    body::{to_bytes, Body},
+    http::{header, Request, StatusCode},
+};
+use tempfile::tempdir;
+use tower::ServiceExt;
+use zip::ZipArchive;
+
+use curator::adapters::FilesystemStorage;
+use curator::api::{create_router, AppState};
+use curator::domain::{CuratedMap, Theme};
+use curator::ports::storage::StorageRepository;
+
+fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
+    let dir = tempdir().expect("Failed to create tempdir");
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let state = AppState::new(storage.clone());
+    let router = create_router(state);
+    (router, storage, dir)
+}
+
+fn create_test_png(width: u32, height: u32) -> Vec<u8> {
+    let img = image::RgbaImage::new(width, height);
+    let mut bytes = Vec::new();
+    let mut cursor = Cursor::new(&mut bytes);
+    img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+    bytes
+}
+
+#[tokio::test]
+async fn test_api_curated_listing_with_and_without_theme_filtering() {
+    let (app, storage, _dir) = setup_test_app();
+    let png_bytes = create_test_png(64, 64);
+
+    // Save curated maps in different themes
+    let map_dungeon1 = CuratedMap::with_now(
+        "dungeon_crypt",
+        Theme::Dungeon,
+        5,
+        vec!["crypt".into(), "stone-walls".into()],
+        (1024, 1024),
+    );
+    let map_dungeon2 = CuratedMap::with_now(
+        "dungeon_prison",
+        Theme::Dungeon,
+        4,
+        vec!["cells".into(), "iron-bars".into()],
+        (1024, 1024),
+    );
+    let map_cave = CuratedMap::with_now(
+        "cave_chasm",
+        Theme::Cave,
+        3,
+        vec!["stalagmites".into(), "chasm".into()],
+        (1024, 1024),
+    );
+    let map_wilderness = CuratedMap::with_now(
+        "forest_clearing",
+        Theme::Wilderness,
+        4,
+        vec!["trees".into(), "river".into()],
+        (1024, 1024),
+    );
+
+    storage.save_curated(&map_dungeon1, &png_bytes).unwrap();
+    storage.save_curated(&map_dungeon2, &png_bytes).unwrap();
+    storage.save_curated(&map_cave, &png_bytes).unwrap();
+    storage.save_curated(&map_wilderness, &png_bytes).unwrap();
+
+    // 1. GET /api/curated without theme query returns all 4 maps
+    let req_all = Request::builder()
+        .uri("/api/curated")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp_all = app.clone().oneshot(req_all).await.unwrap();
+    assert_eq!(resp_all.status(), StatusCode::OK);
+
+    let body_all = to_bytes(resp_all.into_body(), usize::MAX).await.unwrap();
+    let list_all: Vec<CuratedMap> = serde_json::from_slice(&body_all).unwrap();
+    assert_eq!(list_all.len(), 4);
+
+    // Verify fields and companion caption populated on first layer
+    for map in &list_all {
+        assert!(!map.id.is_empty());
+        assert!(map.rating >= 1 && map.rating <= 5);
+        assert!(!map.layers.is_empty());
+        assert!(
+            map.layers[0].caption.is_some(),
+            "Expected companion caption populated on layer 0 for map '{}'",
+            map.id
+        );
+        let caption = map.layers[0].caption.as_ref().unwrap();
+        assert!(caption.contains("ttrpg battlemap"));
+    }
+
+    // 2. GET /api/curated?theme=dungeon returns only the 2 dungeon maps
+    let req_dungeon = Request::builder()
+        .uri("/api/curated?theme=dungeon")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp_dungeon = app.clone().oneshot(req_dungeon).await.unwrap();
+    assert_eq!(resp_dungeon.status(), StatusCode::OK);
+
+    let body_dungeon = to_bytes(resp_dungeon.into_body(), usize::MAX).await.unwrap();
+    let list_dungeon: Vec<CuratedMap> = serde_json::from_slice(&body_dungeon).unwrap();
+    assert_eq!(list_dungeon.len(), 2);
+    assert!(list_dungeon.iter().all(|m| m.theme == Theme::Dungeon));
+
+    // 3. GET /api/curated?theme=cave returns 1 map
+    let req_cave = Request::builder()
+        .uri("/api/curated?theme=cave")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp_cave = app.clone().oneshot(req_cave).await.unwrap();
+    assert_eq!(resp_cave.status(), StatusCode::OK);
+
+    let body_cave = to_bytes(resp_cave.into_body(), usize::MAX).await.unwrap();
+    let list_cave: Vec<CuratedMap> = serde_json::from_slice(&body_cave).unwrap();
+    assert_eq!(list_cave.len(), 1);
+    assert_eq!(list_cave[0].id, "cave_chasm");
+
+    // 4. GET /api/curated?theme=all returns all 4 maps
+    let req_theme_all = Request::builder()
+        .uri("/api/curated?theme=all")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp_theme_all = app.clone().oneshot(req_theme_all).await.unwrap();
+    assert_eq!(resp_theme_all.status(), StatusCode::OK);
+    let body_theme_all = to_bytes(resp_theme_all.into_body(), usize::MAX).await.unwrap();
+    let list_theme_all: Vec<CuratedMap> = serde_json::from_slice(&body_theme_all).unwrap();
+    assert_eq!(list_theme_all.len(), 4);
+
+    // 5. GET /api/curated?theme=invalid_theme returns 400 Bad Request
+    let req_invalid = Request::builder()
+        .uri("/api/curated?theme=nonexistent_theme")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp_invalid = app.oneshot(req_invalid).await.unwrap();
+    assert_eq!(resp_invalid.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn test_storage_export_lora_dataset_paired_png_and_txt() {
+    let dir = tempdir().expect("Failed to create tempdir");
+    let storage = FilesystemStorage::new(dir.path());
+    let png_bytes = create_test_png(128, 128);
+
+    let map1 = CuratedMap::with_now(
+        "dungeon_temple",
+        Theme::Dungeon,
+        5,
+        vec!["altar".into(), "pillars".into()],
+        (1024, 1024),
+    );
+    let map2 = CuratedMap::with_now(
+        "cave_grotto",
+        Theme::Cave,
+        4,
+        vec!["water-stream".into()],
+        (1024, 1024),
+    );
+
+    storage.save_curated(&map1, &png_bytes).unwrap();
+    storage.save_curated(&map2, &png_bytes).unwrap();
+
+    // Export all themes
+    let zip_bytes = storage.export_lora_dataset(None).unwrap();
+    assert!(!zip_bytes.is_empty());
+
+    let mut archive = ZipArchive::new(Cursor::new(&zip_bytes)).unwrap();
+    assert_eq!(archive.len(), 4); // 2 pngs + 2 txts
+
+    let mut filenames: Vec<String> = (0..archive.len())
+        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .collect();
+    filenames.sort();
+
+    assert!(filenames.contains(&"dungeon/dungeon_temple_lora1024.png".to_string()));
+    assert!(filenames.contains(&"dungeon/dungeon_temple_lora1024.txt".to_string()));
+    assert!(filenames.contains(&"cave/cave_grotto_lora1024.png".to_string()));
+    assert!(filenames.contains(&"cave/cave_grotto_lora1024.txt".to_string()));
+
+    // Verify caption content inside ZIP
+    let mut txt_file = archive
+        .by_name("dungeon/dungeon_temple_lora1024.txt")
+        .unwrap();
+    let mut caption_content = String::new();
+    std::io::Read::read_to_string(&mut txt_file, &mut caption_content).unwrap();
+    assert!(caption_content.contains("ttrpg battlemap"));
+    assert!(caption_content.contains("dungeon"));
+
+    // Verify filtered export for Theme::Dungeon only
+    let dungeon_zip = storage.export_lora_dataset(Some(&Theme::Dungeon)).unwrap();
+    let mut dungeon_archive = ZipArchive::new(Cursor::new(&dungeon_zip)).unwrap();
+    assert_eq!(dungeon_archive.len(), 2);
+
+    let d_names: Vec<String> = (0..dungeon_archive.len())
+        .map(|i| dungeon_archive.by_index(i).unwrap().name().to_string())
+        .collect();
+    assert!(d_names.contains(&"dungeon/dungeon_temple_lora1024.png".to_string()));
+    assert!(d_names.contains(&"dungeon/dungeon_temple_lora1024.txt".to_string()));
+    assert!(!d_names.iter().any(|n| n.contains("cave")));
+}
+
+#[tokio::test]
+async fn test_api_dataset_export_headers_and_stream() {
+    let (app, storage, _dir) = setup_test_app();
+    let png_bytes = create_test_png(64, 64);
+
+    let map = CuratedMap::with_now(
+        "catacomb_map",
+        Theme::Dungeon,
+        5,
+        vec!["sarcophagus".into()],
+        (1024, 1024),
+    );
+    storage.save_curated(&map, &png_bytes).unwrap();
+
+    let req = Request::builder()
+        .uri("/api/dataset/export")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Verify required HTTP response headers
+    let content_type = resp.headers().get(header::CONTENT_TYPE).unwrap();
+    assert_eq!(content_type, "application/zip");
+
+    let content_disp = resp.headers().get(header::CONTENT_DISPOSITION).unwrap();
+    assert_eq!(
+        content_disp,
+        "attachment; filename=\"lora-dataset.zip\""
+    );
+
+    // Verify body is a valid ZIP stream containing the expected files
+    let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let mut archive = ZipArchive::new(Cursor::new(&body_bytes)).unwrap();
+    assert_eq!(archive.len(), 2);
+
+    let file0 = archive.by_index(0).unwrap();
+    assert!(file0.name().starts_with("dungeon/catacomb_map_lora1024."));
+}
+
+#[tokio::test]
+async fn test_empty_theme_export_handling() {
+    let (app, storage, _dir) = setup_test_app();
+
+    // 1. Direct adapter call on empty storage
+    let empty_zip = storage.export_lora_dataset(Some(&Theme::SciFi)).unwrap();
+    assert!(!empty_zip.is_empty(), "Empty ZIP must contain valid EOCD bytes");
+
+    let archive = ZipArchive::new(Cursor::new(&empty_zip)).unwrap();
+    assert_eq!(archive.len(), 0);
+
+    // 2. HTTP endpoint call for empty theme
+    let req = Request::builder()
+        .uri("/api/dataset/export?theme=scifi")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/zip"
+    );
+    assert_eq!(
+        resp.headers().get(header::CONTENT_DISPOSITION).unwrap(),
+        "attachment; filename=\"lora-dataset.zip\""
+    );
+
+    let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let http_archive = ZipArchive::new(Cursor::new(&body_bytes)).unwrap();
+    assert_eq!(http_archive.len(), 0);
+}

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1048,6 +1049,26 @@ impl FilesystemStorage {
 
         Ok(())
     }
+    fn ensure_curated_caption(&self, map: &mut CuratedMap) {
+        let has_caption = map.layers.first().and_then(|l| l.caption.as_ref()).is_some();
+        if !has_caption {
+            let cap = self
+                .get_curated_lora_caption(&map.theme, &map.id)
+                .unwrap_or_else(|_| CaptionGenerator::generate_for_curated(map, None));
+            if let Some(first) = map.layers.first_mut() {
+                first.caption = Some(cap);
+            } else {
+                map.layers.push(CuratedLayer {
+                    index: 0,
+                    filename: format!("{}.png", map.id),
+                    role: LayerRole::Ground,
+                    elevation: Some(0),
+                    caption: Some(cap),
+                    dimensions: map.dimensions,
+                });
+            }
+        }
+    }
 }
 
 impl StorageRepository for FilesystemStorage {
@@ -1456,7 +1477,8 @@ impl StorageRepository for FilesystemStorage {
                         let manifest_path = path.join("manifest.json");
                         if manifest_path.is_file() {
                             if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-                                if let Ok(map) = serde_json::from_str::<CuratedMap>(&content) {
+                                if let Ok(mut map) = serde_json::from_str::<CuratedMap>(&content) {
+                                    self.ensure_curated_caption(&mut map);
                                     results.push(map);
                                 }
                             }
@@ -1465,7 +1487,8 @@ impl StorageRepository for FilesystemStorage {
                         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                             if ext == "json" {
                                 if let Ok(content) = std::fs::read_to_string(&path) {
-                                    if let Ok(map) = serde_json::from_str::<CuratedMap>(&content) {
+                                    if let Ok(mut map) = serde_json::from_str::<CuratedMap>(&content) {
+                                        self.ensure_curated_caption(&mut map);
                                         results.push(map);
                                     }
                                 }
@@ -1479,6 +1502,52 @@ impl StorageRepository for FilesystemStorage {
         results.sort_by(|a, b| a.curated_at.cmp(&b.curated_at).then_with(|| a.id.cmp(&b.id)));
         Ok(results)
     }
+    fn export_lora_dataset(&self, theme: Option<&Theme>) -> Result<Vec<u8>, StorageError> {
+        let curated_maps = self.list_curated(theme)?;
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buffer);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+
+            for map in &curated_maps {
+                let theme_str = map.theme.as_str();
+
+                let image_bytes = match self.get_curated_lora_image(&map.theme, &map.id) {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        if let Ok(primary) = self.get_curated_image(&map.theme, &map.id) {
+                            let processor = SimdImageProcessor::new();
+                            match processor.normalize_lora(&primary, ResizeStrategy::FitWithPadding) {
+                                Ok(normalized) => normalized,
+                                Err(_) => primary,
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                };
+
+                let caption_text = match self.get_curated_lora_caption(&map.theme, &map.id) {
+                    Ok(c) => c,
+                    Err(_) => CaptionGenerator::generate_for_curated(map, None),
+                };
+
+                let img_filename = format!("{theme_str}/{}_lora1024.png", map.id);
+                zip.start_file(&img_filename, options)?;
+                zip.write_all(&image_bytes)?;
+
+                let txt_filename = format!("{theme_str}/{}_lora1024.txt", map.id);
+                zip.start_file(&txt_filename, options)?;
+                zip.write_all(caption_text.as_bytes())?;
+            }
+
+            zip.finish()?;
+        }
+
+        Ok(buffer.into_inner())
+    }
+
 
     fn log_rejection(
         &self,

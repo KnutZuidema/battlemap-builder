@@ -4,8 +4,9 @@ target/
 dist
 node_modules
 
-# Data directory
-data/
+# Data directory runtime storage (ignore runtime data, keep compile-time references)
+data/*
+!data/battlemap-reference-*
 
 # Environment and secrets
 .env*

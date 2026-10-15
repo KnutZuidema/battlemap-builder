@@ -12,10 +12,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app/curator
+WORKDIR /app
+
+# Copy static reference assets needed at compile time by reference_provider.rs
+COPY data/battlemap-reference-* ./data/
 
 # Copy actual curator source code and embedded UI assets
-COPY curator/ .
+COPY curator/ ./curator/
+
+WORKDIR /app/curator
 
 # Build release binary with embedded assets
 RUN cargo build --release --bin curator

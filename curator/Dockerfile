@@ -12,13 +12,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /app/curator
 
 # Copy actual curator source code and embedded UI assets
-COPY curator/ ./curator/
+COPY curator/ .
 
 # Build release binary with embedded assets
-RUN cargo build --release --manifest-path curator/Cargo.toml --bin curator
+RUN cargo build --release --bin curator
 
 # ==============================================================================
 # Runtime Stage

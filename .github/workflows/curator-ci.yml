@@ -8,6 +8,10 @@ on:
       - '.github/workflows/curator-ci.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   test:
     name: Test & Lint
@@ -53,7 +57,7 @@ jobs:
         with:
           context: .
           file: curator/Dockerfile
-          platforms: linux/arm64,linux/amd64
+          platforms: linux/amd64
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max

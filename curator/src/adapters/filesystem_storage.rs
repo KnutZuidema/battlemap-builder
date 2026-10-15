@@ -4,10 +4,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 
+use crate::adapters::SimdImageProcessor;
 use crate::domain::{
-    infer_bundle_layer_roles, BenchmarkMetadata, Candidate, CandidateLayer, CuratedLayer,
-    CuratedMap, LayerRole, RedditSidecarMetadata, RejectionReason, RejectionRecord, Source, Theme,
+    infer_bundle_layer_roles, BenchmarkMetadata, Candidate, CandidateLayer, CaptionGenerator,
+    CuratedLayer, CuratedMap, LayerRole, RedditSidecarMetadata, RejectionReason, RejectionRecord,
+    Source, Theme,
 };
+use crate::ports::image_processor::{ImageProcessor, ResizeStrategy};
 use crate::ports::storage::{StorageError, StorageRepository};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -125,6 +128,42 @@ impl FilesystemStorage {
                 std::fs::copy(from, to)?;
                 let _ = std::fs::remove_file(from);
                 Ok(())
+            }
+        }
+    }
+    /// Helper to process primary image bytes and write LoRA 1024x1024 PNG and companion .txt caption.
+    fn write_lora_companions(
+        &self,
+        theme: &Theme,
+        id: &str,
+        primary_image_bytes: &[u8],
+        caption_text: &str,
+        bundle_dir: Option<&Path>,
+    ) {
+        let theme_dir = self.curated_theme_dir(theme);
+        let _ = std::fs::create_dir_all(&theme_dir);
+
+        // Always write caption text (.txt)
+        let theme_txt = theme_dir.join(format!("{id}_lora1024.txt"));
+        let _ = Self::atomic_write(&theme_txt, caption_text.as_bytes());
+        if let Some(b_dir) = bundle_dir {
+            let bundle_txt = b_dir.join(format!("{id}_lora1024.txt"));
+            let _ = Self::atomic_write(&bundle_txt, caption_text.as_bytes());
+        }
+
+        // Try normalizing to 1024x1024 PNG using SIMD Lanczos3 resizer
+        let processor = SimdImageProcessor::new();
+        match processor.normalize_lora(primary_image_bytes, ResizeStrategy::FitWithPadding) {
+            Ok(lora_png) => {
+                let theme_png = theme_dir.join(format!("{id}_lora1024.png"));
+                let _ = Self::atomic_write(&theme_png, &lora_png);
+                if let Some(b_dir) = bundle_dir {
+                    let bundle_png = b_dir.join(format!("{id}_lora1024.png"));
+                    let _ = Self::atomic_write(&bundle_png, &lora_png);
+                }
+            }
+            Err(e) => {
+                tracing::debug!("Skipping LoRA 1024x1024 image normalization for '{id}': {e}");
             }
         }
     }
@@ -517,6 +556,7 @@ impl FilesystemStorage {
     /// Idempotent startup migration that converts legacy flat staging/curated files
     /// (including sibling `{post_id}_0`, `{post_id}_1` Reddit items) into uniform `<id>/`
     /// bundle directories containing `manifest.json` and indexed layer images.
+    #[allow(clippy::type_complexity)]
     pub fn migrate_legacy_storage(&self) -> Result<(), StorageError> {
         let staging = self.staging_dir();
         if staging.is_dir() {
@@ -544,6 +584,7 @@ impl FilesystemStorage {
         Ok(())
     }
 
+    #[allow(clippy::type_complexity)]
     fn migrate_staging_directory(&self, dir: &Path) -> Result<(), StorageError> {
         let mut flat_items: Vec<(String, PathBuf, PathBuf, Candidate)> = Vec::new();
 
@@ -659,7 +700,7 @@ impl FilesystemStorage {
 
             let mut layers = Vec::with_capacity(group.len());
             for (new_idx, ((_, _, json_path, img_path, cand), (role, elevation))) in
-                group.iter().zip(inferred_roles.into_iter()).enumerate()
+                group.iter().zip(inferred_roles).enumerate()
             {
                 let ext = img_path
                     .extension()
@@ -1277,6 +1318,8 @@ impl StorageRepository for FilesystemStorage {
         let manifest_json = serde_json::to_string_pretty(&stored_map)?;
         Self::atomic_write(&bundle_dir.join("manifest.json"), manifest_json.as_bytes())?;
 
+        let caption = CaptionGenerator::generate_for_curated(&stored_map, None);
+        self.write_lora_companions(&map.theme, &map.id, data, &caption, Some(&bundle_dir));
         Ok(())
     }
 
@@ -1300,6 +1343,42 @@ impl StorageRepository for FilesystemStorage {
 
         let bytes = std::fs::read(image_path)?;
         Ok(bytes)
+    }
+    fn get_curated_lora_image(&self, theme: &Theme, id: &str) -> Result<Vec<u8>, StorageError> {
+        let theme_dir = self.curated_theme_dir(theme);
+        let bundle_png = theme_dir.join(id).join(format!("{id}_lora1024.png"));
+        if bundle_png.is_file() {
+            return std::fs::read(bundle_png).map_err(StorageError::Io);
+        }
+        let theme_png = theme_dir.join(format!("{id}_lora1024.png"));
+        if theme_png.is_file() {
+            return std::fs::read(theme_png).map_err(StorageError::Io);
+        }
+        Err(StorageError::NotFound(format!(
+            "Curated LoRA image for candidate '{id}' not found in theme '{theme}'"
+        )))
+    }
+
+    fn get_curated_lora_caption(&self, theme: &Theme, id: &str) -> Result<String, StorageError> {
+        let theme_dir = self.curated_theme_dir(theme);
+        let bundle_txt = theme_dir.join(id).join(format!("{id}_lora1024.txt"));
+        if bundle_txt.is_file() {
+            return std::fs::read_to_string(bundle_txt).map_err(StorageError::Io);
+        }
+        let theme_txt = theme_dir.join(format!("{id}_lora1024.txt"));
+        if theme_txt.is_file() {
+            return std::fs::read_to_string(theme_txt).map_err(StorageError::Io);
+        }
+        Err(StorageError::NotFound(format!(
+            "Curated LoRA caption for candidate '{id}' not found in theme '{theme}'"
+        )))
+    }
+
+    fn is_lora_normalized(&self, theme: &Theme, id: &str) -> Result<bool, StorageError> {
+        let theme_dir = self.curated_theme_dir(theme);
+        let bundle_png = theme_dir.join(id).join(format!("{id}_lora1024.png"));
+        let theme_png = theme_dir.join(format!("{id}_lora1024.png"));
+        Ok(bundle_png.is_file() || theme_png.is_file())
     }
 
     fn list_curated(&self, theme: Option<&Theme>) -> Result<Vec<CuratedMap>, StorageError> {
@@ -1430,13 +1509,12 @@ impl StorageRepository for FilesystemStorage {
             return Ok(true);
         }
         if let Some((base_id, suffix)) = id.rsplit_once('_') {
-            if suffix.chars().all(|c| c.is_ascii_digit()) {
-                if self.is_rejected(base_id)?
+            if suffix.chars().all(|c| c.is_ascii_digit())
+                && (self.is_rejected(base_id)?
                     || self.is_in_staging(base_id)?
-                    || self.is_curated(base_id)?
-                {
-                    return Ok(true);
-                }
+                    || self.is_curated(base_id)?)
+            {
+                return Ok(true);
             }
         }
         Ok(false)
@@ -1560,6 +1638,28 @@ impl StorageRepository for FilesystemStorage {
                 &curated_bundle_dir.join("manifest.json"),
                 curated_json.as_bytes(),
             )?;
+            let primary_layer = stored_map
+                .layers
+                .iter()
+                .find(|l| l.role == LayerRole::Ground)
+                .or_else(|| stored_map.layers.first());
+
+            if let Some(layer) = primary_layer {
+                let primary_path = curated_bundle_dir.join(&layer.filename);
+                if let Ok(primary_bytes) = std::fs::read(&primary_path) {
+                    let caption = CaptionGenerator::generate_for_curated(
+                        &stored_map,
+                        Some(&candidate),
+                    );
+                    self.write_lora_companions(
+                        &map.theme,
+                        &map.id,
+                        &primary_bytes,
+                        &caption,
+                        Some(&curated_bundle_dir),
+                    );
+                }
+            }
 
             let _ = std::fs::remove_dir_all(&bundle_dir);
             return Ok(());
@@ -1624,6 +1724,19 @@ impl StorageRepository for FilesystemStorage {
         }
         let curated_json = serde_json::to_string_pretty(&stored_map)?;
         Self::atomic_write(&target_manifest, curated_json.as_bytes())?;
+        if let Ok(primary_bytes) = std::fs::read(&target_image) {
+            let caption = CaptionGenerator::generate_for_curated(
+                &stored_map,
+                candidate.as_ref(),
+            );
+            self.write_lora_companions(
+                &map.theme,
+                &map.id,
+                &primary_bytes,
+                &caption,
+                Some(&curated_bundle_dir),
+            );
+        }
 
         if let Some(sc) = &staging_sidecar {
             if sc.is_file() {
@@ -1807,7 +1920,7 @@ impl StorageRepository for FilesystemStorage {
 
         let mut regrouped_layers = Vec::with_capacity(matching.len());
         for (new_idx, ((_, child_dir, child_cand), (role, elevation))) in
-            matching.iter().zip(inferred_roles.into_iter()).enumerate()
+            matching.iter().zip(inferred_roles).enumerate()
         {
             let child_layers = child_cand.resolved_layers();
             let first_layer = &child_layers[0];

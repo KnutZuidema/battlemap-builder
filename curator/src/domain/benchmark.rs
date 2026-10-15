@@ -239,7 +239,7 @@ impl FromStr for BenchmarkArchetype {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let normalized = s.trim().to_lowercase().replace('_', "-").replace(' ', "-");
+        let normalized = s.trim().to_lowercase().replace(['_', ' '], "-");
         match normalized.as_str() {
             "stone-crypt" | "stone-dungeon-crypt" | "crypt" => Ok(Self::StoneCrypt),
             "riverside-ambush" | "riverside" | "river-crossing" => Ok(Self::RiversideAmbush),
@@ -338,6 +338,7 @@ pub struct BenchmarkMetadata {
 }
 
 impl BenchmarkMetadata {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: impl Into<String>,
         model: impl Into<String>,

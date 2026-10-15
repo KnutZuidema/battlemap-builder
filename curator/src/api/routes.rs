@@ -136,12 +136,10 @@ pub async fn get_staging_layer_image(
                     .into_iter()
                     .find(|l| l.index == layer_index)
                     .map(|l| l.filename)
-                    .or_else(|| {
-                        if layer_index == 0 {
-                            Some(c.filename)
-                        } else {
-                            None
-                        }
+                    .or(if layer_index == 0 {
+                        Some(c.filename)
+                    } else {
+                        None
                     })
             })
         });
@@ -172,8 +170,8 @@ pub async fn get_curated_image(
     }
 
     let theme: Theme = theme_str
-        .parse()
-        .map_err(|e| ApiError::bad_request(format!("{e}")))?;
+        .parse::<Theme>()
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let bytes = state.storage.get_curated_image(&theme, &id)?;
     let mime = detect_image_mime(&bytes, None);
@@ -200,8 +198,8 @@ pub async fn get_curated_layer_image(
     }
 
     let theme: Theme = theme_str
-        .parse()
-        .map_err(|e| ApiError::bad_request(format!("{e}")))?;
+        .parse::<Theme>()
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let bytes = state.storage.get_curated_layer_image(&theme, &id, layer_index)?;
 

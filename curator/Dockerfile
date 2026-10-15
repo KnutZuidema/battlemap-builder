@@ -14,18 +14,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Pre-cache Cargo dependencies with dummy crate files
-COPY curator/Cargo.toml curator/Cargo.lock ./curator/
-RUN mkdir -p curator/src && \
-    echo "pub fn dummy() {}" > curator/src/lib.rs && \
-    echo "fn main() {}" > curator/src/main.rs && \
-    cargo build --release --manifest-path curator/Cargo.toml && \
-    rm -rf curator/src \
-           curator/target/release/curator* \
-           curator/target/release/deps/curator* \
-           curator/target/release/deps/libcurator* \
-           curator/target/release/.fingerprint/curator-*
-
 # Copy actual curator source code and embedded UI assets
 COPY curator/ ./curator/
 

@@ -41,6 +41,14 @@
                     <span>Benchmark</span>
                     <kbd>B</kbd>
                 </button>
+                <button type="button" id="btn-open-storage-modal" class="btn btn-tool btn-storage" title="Storage Footprint & Purge Monitor">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                    </svg>
+                    <span>Storage</span>
+                </button>
             </div>
 
             <!-- Topbar Cost Monitor HUD -->
@@ -712,6 +720,24 @@
                             </button>
                         </div>
                     </div>
+
+                    <!-- Drawer Storage Footprint Widget -->
+                    <div class="drawer-storage-widget" id="drawer-storage-widget">
+                        <div class="drawer-storage-header">
+                            <span class="drawer-storage-title">Disk Storage Footprint</span>
+                            <button type="button" id="btn-drawer-open-storage" class="btn-link" title="Open Storage Footprint & Purge Monitor">Details & Purge →</button>
+                        </div>
+                        <div class="drawer-storage-metric-row">
+                            <div class="drawer-storage-pill">
+                                <span class="pill-label">Staging:</span>
+                                <span id="drawer-storage-staging" class="pill-val mono">0 B (0 files)</span>
+                            </div>
+                            <div class="drawer-storage-pill">
+                                <span class="pill-label">Curated:</span>
+                                <span id="drawer-storage-curated" class="pill-val mono">0 B (0 files)</span>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <div class="drawer-footer">
@@ -842,6 +868,154 @@
             <span class="benchmark-pill-title">Benchmark</span>
             <span id="benchmark-pill-count" class="benchmark-pill-count mono">0/0</span>
             <span id="benchmark-pill-cost" class="benchmark-pill-cost mono">$0.00</span>
+        </div>
+
+        <!-- Storage Quota & Footprint Modal -->
+        <div id="storage-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="storage-modal-title">
+            <div class="modal-card storage-modal-card">
+                <div class="modal-header">
+                    <div class="storage-header-title">
+                        <svg class="storage-modal-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                            <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                        </svg>
+                        <h3 id="storage-modal-title">Storage Footprint & Quota Monitor</h3>
+                    </div>
+                    <button type="button" id="btn-close-storage-modal" class="btn-close" aria-label="Close modal">×</button>
+                </div>
+                <div class="modal-body storage-modal-body">
+                    <p class="modal-description">
+                        Real-time disk storage allocation across staging triage, curated theme collections, rejection catalogs, and inference telemetry.
+                    </p>
+
+                    <!-- Storage Summary Grid -->
+                    <div class="storage-stats-grid">
+                        <!-- Staging Card -->
+                        <div class="storage-card" id="storage-card-staging">
+                            <div class="storage-card-header">
+                                <span class="storage-card-label">Staging Area</span>
+                                <span class="storage-card-tag badge-staging">Pending Triage</span>
+                            </div>
+                            <div class="storage-card-bytes mono" id="storage-staging-bytes">0 B</div>
+                            <div class="storage-card-sub mono" id="storage-staging-files">0 files</div>
+                            <div class="storage-card-breakdown" id="storage-staging-breakdown">
+                                <div class="breakdown-item"><span>Reddit:</span> <span id="storage-breakdown-reddit" class="mono">0 B (0)</span></div>
+                                <div class="breakdown-item"><span>Generated:</span> <span id="storage-breakdown-generated" class="mono">0 B (0)</span></div>
+                                <div class="breakdown-item"><span>Root:</span> <span id="storage-breakdown-root" class="mono">0 B (0)</span></div>
+                            </div>
+                        </div>
+
+                        <!-- Curated Card -->
+                        <div class="storage-card" id="storage-card-curated">
+                            <div class="storage-card-header">
+                                <span class="storage-card-label">Curated Collection</span>
+                                <span class="storage-card-tag badge-curated">Permanent</span>
+                            </div>
+                            <div class="storage-card-bytes mono" id="storage-curated-bytes">0 B</div>
+                            <div class="storage-card-sub mono" id="storage-curated-files">0 files</div>
+                            <div class="storage-card-breakdown theme-breakdown" id="storage-curated-themes">
+                                <div class="breakdown-hint">By Theme:</div>
+                                <div id="storage-themes-list" class="storage-themes-list">
+                                    <!-- Populated dynamically -->
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Rejected Card -->
+                        <div class="storage-card" id="storage-card-rejected">
+                            <div class="storage-card-header">
+                                <span class="storage-card-label">Rejected Catalog</span>
+                                <span class="storage-card-tag badge-rejected">Catalog</span>
+                            </div>
+                            <div class="storage-card-bytes mono" id="storage-rejected-bytes">0 B</div>
+                            <div class="storage-card-sub mono" id="storage-rejected-records">0 records</div>
+                            <div class="storage-card-hint">Catalog logged in <code>rejections.json</code></div>
+                        </div>
+
+                        <!-- Telemetry Card -->
+                        <div class="storage-card" id="storage-card-telemetry">
+                            <div class="storage-card-header">
+                                <span class="storage-card-label">Cost Telemetry</span>
+                                <span class="storage-card-tag badge-telemetry">Ledger</span>
+                            </div>
+                            <div class="storage-card-bytes mono" id="storage-telemetry-bytes">0 B</div>
+                            <div class="storage-card-sub mono" id="storage-telemetry-files">0 files</div>
+                            <div class="storage-card-hint">Ledgers stored in <code>data/telemetry/</code></div>
+                        </div>
+                    </div>
+
+                    <!-- Total Footprint & Purge Action Row -->
+                    <div class="storage-total-banner">
+                        <div class="storage-total-info">
+                            <span class="storage-total-label">Total Managed Footprint:</span>
+                            <span class="storage-total-value mono" id="storage-total-bytes">0 B</span>
+                            <span class="storage-total-count mono" id="storage-total-files">(0 items)</span>
+                        </div>
+                        <button type="button" id="btn-open-purge-confirm" class="btn btn-danger btn-purge-action" title="Purge unreviewed candidates from staging">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"/>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                            </svg>
+                            <span>Purge Staging...</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" id="btn-refresh-storage" class="btn btn-secondary">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="23 4 23 10 17 10"/>
+                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                        </svg>
+                        <span>Refresh</span>
+                    </button>
+                    <button type="button" id="btn-dismiss-storage-modal" class="btn btn-primary">
+                        <span>Close</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Purge Staging Confirmation Modal -->
+        <div id="purge-confirm-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="purge-confirm-title">
+            <div class="modal-card purge-confirm-card">
+                <div class="modal-header">
+                    <div class="guard-header-title">
+                        <span class="guard-warning-icon">⚠️</span>
+                        <h3 id="purge-confirm-title">Purge Staging Queue</h3>
+                    </div>
+                    <button type="button" id="btn-close-purge-modal" class="btn-close" aria-label="Close modal">×</button>
+                </div>
+                <div class="modal-body">
+                    <p class="modal-description">
+                        Are you sure you want to clean up all unreviewed battlemap files in staging?
+                    </p>
+                    <div class="purge-warning-box">
+                        <div class="purge-reclaim-highlight">
+                            <div class="purge-reclaim-label">Space to Reclaim:</div>
+                            <div class="purge-reclaim-amount mono" id="purge-reclaim-bytes">0 B</div>
+                            <div class="purge-reclaim-sub mono" id="purge-reclaim-files">0 candidate files will be permanently deleted</div>
+                        </div>
+                        <ul class="purge-preservation-list">
+                            <li>✅ <strong>Curated maps & LoRA companions</strong> will remain untouched.</li>
+                            <li>✅ <strong>Rejection catalog (`rejections.json`)</strong> will remain untouched.</li>
+                            <li>✅ <strong>Generation cost telemetry & ledger</strong> will remain untouched.</li>
+                        </ul>
+                    </div>
+                    <p class="guard-confirmation-hint">
+                        This operation immediately prunes staging files and resets the triage queue. This action cannot be undone.
+                    </p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" id="btn-cancel-purge" class="btn btn-secondary">
+                        <kbd>Esc</kbd>
+                        <span>Cancel</span>
+                    </button>
+                    <button type="button" id="btn-confirm-purge" class="btn btn-danger btn-affirmative">
+                        <span id="btn-confirm-purge-text">Confirm & Purge Staging</span>
+                    </button>
+                </div>
+            </div>
         </div>
 
         <!-- Toast Notifications Container -->

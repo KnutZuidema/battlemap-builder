@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use crate::adapters::SimdImageProcessor;
 use crate::domain::{
     infer_bundle_layer_roles, BenchmarkMetadata, Candidate, CandidateLayer, CaptionGenerator,
-    CuratedLayer, CuratedMap, LayerRole, RedditSidecarMetadata, RejectionReason, RejectionRecord,
-    Source, Theme,
+    CuratedLayer, CuratedMap, DirectoryStats, LayerRole, PurgeStagingResult, RedditSidecarMetadata,
+    RejectionReason, RejectionRecord, Source, StorageStats, Theme, ThemeStorageStats,
 };
 use crate::ports::image_processor::{ImageProcessor, ResizeStrategy};
 use crate::ports::storage::{StorageError, StorageRepository};
@@ -61,6 +61,52 @@ impl FilesystemStorage {
     /// Full path to the `rejections.json` log file.
     pub fn rejections_file(&self) -> PathBuf {
         self.rejected_dir().join("rejections.json")
+    }
+
+    /// Directory where telemetry and cost logs reside.
+    pub fn telemetry_dir(&self) -> PathBuf {
+        self.root_dir.join("telemetry")
+    }
+
+    /// Recursively scans a directory to calculate total byte size and total file count.
+    /// Skips files and directories starting with `.`.
+    pub fn scan_dir_stats(dir: &Path) -> DirectoryStats {
+        if !dir.is_dir() {
+            return DirectoryStats::default();
+        }
+        let mut total_bytes = 0u64;
+        let mut total_files = 0usize;
+        let mut stack = vec![dir.to_path_buf()];
+
+        while let Some(current) = stack.pop() {
+            if let Ok(entries) = std::fs::read_dir(&current) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let file_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default();
+                    if file_name.starts_with('.') {
+                        continue;
+                    }
+                    if let Ok(file_type) = entry.file_type() {
+                        if file_type.is_dir() {
+                            stack.push(path);
+                        } else if file_type.is_file() {
+                            total_files += 1;
+                            if let Ok(meta) = entry.metadata() {
+                                total_bytes += meta.len();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        DirectoryStats {
+            bytes: total_bytes,
+            file_count: total_files,
+        }
     }
 
     /// Sanitize a filename to prevent directory traversal.
@@ -1983,6 +2029,160 @@ impl StorageRepository for FilesystemStorage {
         Self::atomic_write(&regrouped_dir.join("manifest.json"), manifest_json.as_bytes())?;
 
         Ok(regrouped)
+    }
+
+    fn get_storage_stats(&self) -> Result<StorageStats, StorageError> {
+        let _ = self.migrate_legacy_storage();
+
+        // 1. Staging Breakdown & Totals
+        let mut staging_breakdown: HashMap<String, DirectoryStats> = HashMap::new();
+        staging_breakdown.insert("root".to_string(), DirectoryStats::default());
+        staging_breakdown.insert("reddit".to_string(), DirectoryStats::default());
+        staging_breakdown.insert("generated".to_string(), DirectoryStats::default());
+
+        let staging_dir = self.staging_dir();
+        if staging_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&staging_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default();
+                    if name.starts_with('.') {
+                        continue;
+                    }
+                    if path.is_dir() {
+                        if path.join("manifest.json").is_file() {
+                            // Bundle directly in staging root
+                            let bundle_stats = Self::scan_dir_stats(&path);
+                            let root_stats = staging_breakdown.entry("root".to_string()).or_default();
+                            root_stats.bytes += bundle_stats.bytes;
+                            root_stats.file_count += bundle_stats.file_count;
+                        } else {
+                            // Subdirectory (e.g. "reddit", "generated", etc.)
+                            let sub_stats = Self::scan_dir_stats(&path);
+                            staging_breakdown.insert(name.to_string(), sub_stats);
+                        }
+                    } else if path.is_file() {
+                        let root_stats = staging_breakdown.entry("root".to_string()).or_default();
+                        root_stats.file_count += 1;
+                        if let Ok(meta) = entry.metadata() {
+                            root_stats.bytes += meta.len();
+                        }
+                    }
+                }
+            }
+        }
+
+        let staging_bytes: u64 = staging_breakdown.values().map(|s| s.bytes).sum();
+        let staging_files: usize = staging_breakdown.values().map(|s| s.file_count).sum();
+        let staging = DirectoryStats::new(staging_bytes, staging_files);
+
+        // 2. Curated By Theme & Curated Totals
+        let mut curated_by_theme = HashMap::new();
+        let mut curated_total_bytes = 0u64;
+        let mut curated_total_files = 0usize;
+
+        for theme in Theme::ALL {
+            let theme_dir = self.curated_theme_dir(theme);
+            let stats = Self::scan_dir_stats(&theme_dir);
+            let map_count = self
+                .list_curated(Some(theme))
+                .map(|maps| maps.len())
+                .unwrap_or(0);
+
+            curated_total_bytes += stats.bytes;
+            curated_total_files += stats.file_count;
+
+            curated_by_theme.insert(
+                *theme,
+                ThemeStorageStats::new(*theme, stats.bytes, stats.file_count, map_count),
+            );
+        }
+
+        // Account for any loose top-level files in curated/ root if any exist
+        let curated_dir = self.curated_dir();
+        if curated_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&curated_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or_default();
+                        if !name.starts_with('.') {
+                            curated_total_files += 1;
+                            if let Ok(meta) = entry.metadata() {
+                                curated_total_bytes += meta.len();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let curated = DirectoryStats::new(curated_total_bytes, curated_total_files);
+
+        // 3. Rejected Stats (rejections.json size and rejection records count)
+        let rejections_file = self.rejections_file();
+        let rejected = if rejections_file.is_file() {
+            let bytes = std::fs::metadata(&rejections_file)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let records = self.read_rejections().unwrap_or_default();
+            DirectoryStats::new(bytes, records.len())
+        } else {
+            DirectoryStats::default()
+        };
+
+        // 4. Telemetry Stats
+        let telemetry = Self::scan_dir_stats(&self.telemetry_dir());
+
+        // 5. Total Footprint
+        let total_bytes = staging.bytes + curated.bytes + rejected.bytes + telemetry.bytes;
+        let total_files =
+            staging.file_count + curated.file_count + rejected.file_count + telemetry.file_count;
+
+        Ok(StorageStats {
+            staging,
+            staging_breakdown,
+            curated,
+            curated_by_theme,
+            rejected,
+            telemetry,
+            total_bytes,
+            total_files,
+        })
+    }
+
+    fn purge_staging(&self) -> Result<PurgeStagingResult, StorageError> {
+        let staging_dir = self.staging_dir();
+        let staging_stats = Self::scan_dir_stats(&staging_dir);
+        let purged_files = staging_stats.file_count;
+        let reclaimed_bytes = staging_stats.bytes;
+
+        if staging_dir.is_dir() {
+            for entry in std::fs::read_dir(&staging_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    std::fs::remove_dir_all(&path)?;
+                } else if path.is_file() {
+                    std::fs::remove_file(&path)?;
+                }
+            }
+        }
+
+        std::fs::create_dir_all(&staging_dir)?;
+        let remaining_staging_files = Self::scan_dir_stats(&staging_dir).file_count;
+
+        Ok(PurgeStagingResult {
+            purged_files,
+            reclaimed_bytes,
+            remaining_staging_files,
+        })
     }
 }
 

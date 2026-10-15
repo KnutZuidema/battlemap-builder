@@ -16,7 +16,8 @@ use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{
     BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
-    CuratedMap, CustomPrompt, RedditHarvestRequest, RejectionReason, Theme,
+    CuratedMap, CustomPrompt, PurgeStagingResult, RedditHarvestRequest, RejectionReason,
+    StorageStats, Theme,
 };
 use crate::ports::cost_tracker::CostStats;
 use crate::services::{IngestionSummary, RedditIngestionService};
@@ -697,6 +698,22 @@ pub async fn post_benchmark_cancel(
         status: "ok",
         message: "Benchmark batch cancellation requested",
     }))
+}
+
+/// GET /api/storage/stats - Returns comprehensive storage quota and usage statistics.
+pub async fn get_storage_stats(
+    State(state): State<AppState>,
+) -> Result<Json<StorageStats>, ApiError> {
+    let stats = state.storage.get_storage_stats()?;
+    Ok(Json(stats))
+}
+
+/// POST /api/storage/purge-staging - Purges all unreviewed candidates and files from the staging area.
+pub async fn post_purge_staging(
+    State(state): State<AppState>,
+) -> Result<Json<PurgeStagingResult>, ApiError> {
+    let result = state.storage.purge_staging()?;
+    Ok(Json(result))
 }
 
 #[cfg(test)]

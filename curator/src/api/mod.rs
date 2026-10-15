@@ -37,7 +37,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/cost/stats", get(get_cost_stats))
         .route("/api/cost/reset-session", post(post_reset_cost_session))
         .route("/api/benchmark/run", post(post_benchmark_run))
-        .route("/api/benchmark/cancel", post(post_benchmark_cancel));
+        .route("/api/benchmark/cancel", post(post_benchmark_cancel))
+        .route("/api/storage/stats", get(get_storage_stats))
+        .route("/api/storage/purge-staging", post(post_purge_staging));
 
     Router::new()
         .merge(api_routes)

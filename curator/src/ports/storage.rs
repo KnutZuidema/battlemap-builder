@@ -1,6 +1,6 @@
 use crate::domain::{
-    BenchmarkMetadata, Candidate, CandidateLayer, CuratedMap, RedditSidecarMetadata,
-    RejectionReason, Theme,
+    BenchmarkMetadata, Candidate, CandidateLayer, CuratedMap, PurgeStagingResult,
+    RedditSidecarMetadata, RejectionReason, StorageStats, Theme,
 };
 use thiserror::Error;
 
@@ -213,6 +213,14 @@ pub trait StorageRepository: Send + Sync {
             "regroup_staging_bundle not implemented".into(),
         ))
     }
+
+    /// Returns comprehensive storage footprint statistics across staging, curated themes,
+    /// rejections, and telemetry.
+    fn get_storage_stats(&self) -> Result<StorageStats, StorageError>;
+
+    /// Purges all unreviewed candidates and files from the staging area while strictly preserving
+    /// curated themes, rejection history, and telemetry.
+    fn purge_staging(&self) -> Result<PurgeStagingResult, StorageError>;
 }
 impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
     fn save_staging(&self, candidate: &Candidate, data: &[u8]) -> Result<(), StorageError> {
@@ -353,5 +361,13 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
 
     fn regroup_staging_bundle(&self, parent_id: &str) -> Result<Candidate, StorageError> {
         (**self).regroup_staging_bundle(parent_id)
+    }
+
+    fn get_storage_stats(&self) -> Result<StorageStats, StorageError> {
+        (**self).get_storage_stats()
+    }
+
+    fn purge_staging(&self) -> Result<PurgeStagingResult, StorageError> {
+        (**self).purge_staging()
     }
 }

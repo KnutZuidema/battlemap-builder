@@ -38,6 +38,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/staging/{id}/suggest-themes",
             post(post_suggest_themes).get(post_suggest_themes),
         )
+        .route(
+            "/api/staging/{id}/describe",
+            post(post_describe_candidate).get(post_describe_candidate),
+        )
         .route("/api/curate", post(post_curate))
         .route("/api/reject", post(post_reject))
         .route("/api/harvest/reddit", post(post_harvest_reddit))

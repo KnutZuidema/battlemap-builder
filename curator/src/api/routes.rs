@@ -1,5 +1,5 @@
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
@@ -16,8 +16,8 @@ use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{
     BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
-    CuratedMap, CustomPrompt, PurgeStagingResult, RedditHarvestRequest, RejectionReason,
-    StorageStats, Theme,
+    CaptionGenerator, CuratedMap, CustomPrompt, PurgeStagingResult, RedditHarvestRequest,
+    RejectionReason, StorageStats, Theme,
 };
 use crate::ports::cost_tracker::CostStats;
 use crate::services::{IngestionSummary, RedditIngestionService};
@@ -330,7 +330,7 @@ pub struct CurateRequest {
     pub tags: Vec<String>,
     #[serde(default)]
     pub layers: Option<Vec<CandidateLayer>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
@@ -414,15 +414,71 @@ pub async fn post_curate(
     if let Some(layers) = payload.layers {
         state.storage.update_staging_layers(&payload.id, layers)?;
     }
-    let mut curated = CuratedMap::with_now(
+    let primary_theme = themes
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("dungeon");
+
+    let fallback_description = || {
+        CaptionGenerator::generate_with_theme_str(
+            primary_theme,
+            &payload.tags,
+            candidate.title.as_deref(),
+        )
+    };
+
+    let description = if let Some(desc) = payload
+        .description
+        .as_ref()
+        .map(|d| d.trim())
+        .filter(|d| !d.is_empty())
+    {
+        desc.to_string()
+    } else if let Some(adapter) = state.openrouter_client() {
+        match state.storage.get_staging_image(&payload.id) {
+            Ok(bytes) => {
+                let filename = candidate.resolved_filename();
+                let mime = detect_image_mime(&bytes, Some(&filename));
+                match adapter
+                    .generate_battlemap_description(&bytes, mime, &themes, &payload.tags)
+                    .await
+                {
+                    Ok(desc) if !desc.trim().is_empty() => desc,
+                    Ok(_) => fallback_description(),
+                    Err(err) => {
+                        tracing::warn!(
+                            candidate_id = %payload.id,
+                            error = %err,
+                            "Auto-generating description on curate failed; falling back to caption generator"
+                        );
+                        fallback_description()
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    candidate_id = %payload.id,
+                    error = %err,
+                    "Reading candidate image for description generation failed; falling back to caption generator"
+                );
+                fallback_description()
+            }
+        }
+    } else {
+        tracing::info!(
+            candidate_id = %payload.id,
+            "OpenRouter client not configured; falling back to caption generator"
+        );
+        fallback_description()
+    };
+
+    let curated = CuratedMap::with_now(
         &payload.id,
         themes,
         payload.tags,
         dimensions,
-    );
-    if let Some(desc) = payload.description {
-        curated = curated.with_description(desc);
-    }
+    )
+    .with_description(description);
 
     state.storage.curate_staging(&curated)?;
 
@@ -562,6 +618,111 @@ pub async fn post_suggest_themes(
     }
 
     Ok(Json(SuggestThemesResponse { id, suggestions }))
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DescribeRequest {
+    #[serde(default)]
+    pub themes: Option<Vec<String>>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DescribeResponse {
+    pub id: String,
+    pub description: String,
+}
+
+/// POST /api/staging/{id}/describe or GET /api/staging/{id}/describe
+/// Generate a rich, physical battlemap description from candidate image and optional themes/tags.
+pub async fn post_describe_candidate(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Json<DescribeResponse>, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Candidate ID cannot be empty"));
+    }
+
+    let req: DescribeRequest = if body.trim_ascii().is_empty() {
+        DescribeRequest::default()
+    } else {
+        serde_json::from_slice::<Option<DescribeRequest>>(&body)
+            .map_err(|e| ApiError::bad_request(format!("Invalid JSON payload: {e}")))?
+            .unwrap_or_default()
+    };
+
+    // 1. Locate staging candidate
+    let candidates = state.storage.list_staging()?;
+    let candidate = candidates
+        .into_iter()
+        .find(|c| c.id == id)
+        .ok_or_else(|| ApiError::not_found(format!("Candidate '{id}' not found in staging")))?;
+
+    // 2. Read primary image bytes (from candidate layer 0 or candidate primary image)
+    let bytes = state.storage.get_staging_image(&id)?;
+    let filename = candidate.resolved_filename();
+    let mime = detect_image_mime(&bytes, Some(&filename));
+
+    // 3. Resolve themes and tags (prefer payload themes/tags, fallback to candidate tags/title)
+    let mut themes = req.themes.unwrap_or_default();
+    if themes.is_empty() {
+        let cache = state.theme_suggestions_cache.read().await;
+        if let Some(cached) = cache.get(&id) {
+            themes = cached.clone();
+        }
+    }
+    let primary_theme = themes
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("dungeon");
+
+    let tags = req.tags.unwrap_or_default();
+
+    // 4. Invoke OpenRouter vision model if available, falling back gracefully to CaptionGenerator
+    let description = match state.openrouter_client() {
+        Some(adapter) => {
+            match adapter
+                .generate_battlemap_description(&bytes, mime, &themes, &tags)
+                .await
+            {
+                Ok(desc) if !desc.trim().is_empty() => desc,
+                Ok(_) => {
+                    CaptionGenerator::generate_with_theme_str(
+                        primary_theme,
+                        &tags,
+                        candidate.title.as_deref(),
+                    )
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        candidate_id = %id,
+                        error = %err,
+                        "OpenRouter description generation failed; falling back to caption generator"
+                    );
+                    CaptionGenerator::generate_with_theme_str(
+                        primary_theme,
+                        &tags,
+                        candidate.title.as_deref(),
+                    )
+                }
+            }
+        }
+        None => {
+            tracing::info!(
+                candidate_id = %id,
+                "OpenRouter client not configured; falling back to caption generator"
+            );
+            CaptionGenerator::generate_with_theme_str(
+                primary_theme,
+                &tags,
+                candidate.title.as_deref(),
+            )
+        }
+    };
+
+    Ok(Json(DescribeResponse { id, description }))
 }
 
 /// Request payload for rejecting a candidate.

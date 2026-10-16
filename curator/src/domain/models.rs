@@ -649,12 +649,60 @@ impl TryFrom<Candidate> for RedditSidecarMetadata {
     }
 }
 
-/// An approved battlemap filed into a theme folder with quality rating and metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Helper trait allowing flexible theme initialization for `CuratedMap`.
+pub trait IntoThemes {
+    fn into_themes(self) -> Vec<String>;
+}
+
+impl<T: Into<String>> IntoThemes for Vec<T> {
+    fn into_themes(self) -> Vec<String> {
+        self.into_iter().map(Into::into).collect()
+    }
+}
+
+impl<T: Into<String>, const N: usize> IntoThemes for [T; N] {
+    fn into_themes(self) -> Vec<String> {
+        self.into_iter().map(Into::into).collect()
+    }
+}
+
+impl IntoThemes for &[&str] {
+    fn into_themes(self) -> Vec<String> {
+        self.iter().map(|s| s.to_string()).collect()
+    }
+}
+
+impl IntoThemes for String {
+    fn into_themes(self) -> Vec<String> {
+        vec![self]
+    }
+}
+
+impl IntoThemes for &str {
+    fn into_themes(self) -> Vec<String> {
+        vec![self.to_string()]
+    }
+}
+
+impl IntoThemes for Theme {
+    fn into_themes(self) -> Vec<String> {
+        vec![self.as_str().to_string()]
+    }
+}
+
+impl IntoThemes for &Theme {
+    fn into_themes(self) -> Vec<String> {
+        vec![self.as_str().to_string()]
+    }
+}
+
+/// An approved battlemap filed into curated storage with dynamic theme labels and metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CuratedMap {
     pub id: String,
-    pub theme: Theme,
-    pub rating: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Source>,
+    pub themes: Vec<String>,
     #[serde(default)]
     pub tags: Vec<String>,
     pub dimensions: (u32, u32),
@@ -663,19 +711,64 @@ pub struct CuratedMap {
     pub layers: Vec<CuratedLayer>,
 }
 
+#[derive(Deserialize)]
+struct CuratedMapHelper {
+    id: String,
+    #[serde(default)]
+    source: Option<Source>,
+    #[serde(default)]
+    themes: Vec<String>,
+    #[serde(default)]
+    theme: Option<String>,
+    #[serde(default)]
+    rating: Option<u8>,
+    #[serde(default)]
+    tags: Vec<String>,
+    dimensions: (u32, u32),
+    curated_at: DateTime<Utc>,
+    #[serde(default)]
+    layers: Vec<CuratedLayer>,
+}
+
+impl<'de> Deserialize<'de> for CuratedMap {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let helper = CuratedMapHelper::deserialize(deserializer)?;
+        let mut themes = helper.themes;
+        if themes.is_empty() {
+            if let Some(t) = helper.theme {
+                if !t.trim().is_empty() {
+                    themes.push(t);
+                }
+            }
+        }
+        let _ = helper.rating;
+        Ok(CuratedMap {
+            id: helper.id,
+            source: helper.source,
+            themes,
+            tags: helper.tags,
+            dimensions: helper.dimensions,
+            curated_at: helper.curated_at,
+            layers: helper.layers,
+        })
+    }
+}
+
 impl CuratedMap {
     pub fn new(
         id: impl Into<String>,
-        theme: Theme,
-        rating: u8,
+        themes: impl IntoThemes,
         tags: Vec<String>,
         dimensions: (u32, u32),
         curated_at: DateTime<Utc>,
     ) -> Self {
         Self {
             id: id.into(),
-            theme,
-            rating,
+            source: None,
+            themes: themes.into_themes(),
             tags,
             dimensions,
             curated_at,
@@ -685,12 +778,11 @@ impl CuratedMap {
 
     pub fn with_now(
         id: impl Into<String>,
-        theme: Theme,
-        rating: u8,
+        themes: impl IntoThemes,
         tags: Vec<String>,
         dimensions: (u32, u32),
     ) -> Self {
-        Self::new(id, theme, rating, tags, dimensions, Utc::now())
+        Self::new(id, themes, tags, dimensions, Utc::now())
     }
 
     pub fn with_layers(mut self, layers: Vec<CuratedLayer>) -> Self {
@@ -698,7 +790,30 @@ impl CuratedMap {
         self
     }
 
-    /// Validates that the quality rating falls within the required 1-5 range.
+    pub fn with_source(mut self, source: Source) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// Primary (first) theme string, defaulting to "dungeon" if themes is empty.
+    pub fn primary_theme(&self) -> &str {
+        self.themes.first().map(|s| s.as_str()).unwrap_or("dungeon")
+    }
+
+    /// First theme parsed into `Theme` enum if it matches one of the canonical variants.
+    pub fn theme(&self) -> Option<Theme> {
+        self.themes.iter().find_map(|t| t.parse::<Theme>().ok())
+    }
+
+    /// Validates that the map has at least one theme label.
+    pub fn validate_themes(&self) -> Result<(), String> {
+        if self.themes.is_empty() || self.themes.iter().all(|t| t.trim().is_empty()) {
+            return Err("CuratedMap requires at least 1 theme label".into());
+        }
+        Ok(())
+    }
+
+    /// Validates that the quality rating falls within the required 1-5 range (legacy helper).
     pub fn is_valid_rating(rating: u8) -> bool {
         (1..=5).contains(&rating)
     }
@@ -1572,24 +1687,49 @@ mod tests {
         );
     }
     #[test]
-    fn test_curated_map_rating_and_serde() {
+    fn test_curated_map_themes_and_serde() {
         let curated = CuratedMap::with_now(
             "map_456",
-            Theme::Cave,
-            5,
+            vec!["cave".to_string(), "underdark".to_string()],
             vec!["water".into(), "stalagmites".into()],
             (4096, 4096),
         );
-        assert!(CuratedMap::is_valid_rating(curated.rating));
-        assert!(!CuratedMap::is_valid_rating(0));
-        assert!(!CuratedMap::is_valid_rating(6));
+        assert!(curated.validate_themes().is_ok());
+        assert_eq!(curated.primary_theme(), "cave");
+        assert_eq!(curated.theme(), Some(Theme::Cave));
 
+        let empty_themes = CuratedMap::with_now(
+            "map_empty",
+            Vec::<String>::new(),
+            vec![],
+            (1024, 1024),
+        );
+        assert!(empty_themes.validate_themes().is_err());
+
+        // New format serialization & deserialization
         let json = serde_json::to_string(&curated).unwrap();
+        assert!(!json.contains("\"rating\""));
+        assert!(json.contains("\"themes\":[\"cave\",\"underdark\"]"));
         let parsed: CuratedMap = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, "map_456");
-        assert_eq!(parsed.theme, Theme::Cave);
-        assert_eq!(parsed.rating, 5);
+        assert_eq!(parsed.themes, vec!["cave", "underdark"]);
         assert_eq!(parsed.tags, vec!["water", "stalagmites"]);
+
+        // Legacy format deserialization (single "theme", "rating" present)
+        let legacy_json = r#"{
+            "id": "legacy_map_1",
+            "theme": "dungeon",
+            "rating": 5,
+            "tags": ["crypt", "stone"],
+            "dimensions": [2048, 2048],
+            "curated_at": "2026-10-16T12:00:00Z"
+        }"#;
+        let legacy_parsed: CuratedMap = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(legacy_parsed.id, "legacy_map_1");
+        assert_eq!(legacy_parsed.themes, vec!["dungeon"]);
+        assert_eq!(legacy_parsed.theme(), Some(Theme::Dungeon));
+        assert_eq!(legacy_parsed.primary_theme(), "dungeon");
+        assert_eq!(legacy_parsed.tags, vec!["crypt", "stone"]);
     }
 
     #[test]

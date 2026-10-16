@@ -127,11 +127,10 @@ async fn test_api_curate_endpoint() {
     let cand = Candidate::with_now("map_to_curate", Source::Generated, "dungeon.png", (1920, 1080));
     storage.save_staging(&cand, img_bytes).unwrap();
 
-    // Curate candidate with rating 4
+    // Curate candidate with themes
     let curate_payload = json!({
         "id": "map_to_curate",
-        "theme": "dungeon",
-        "rating": 4,
+        "themes": ["dungeon"],
         "tags": ["crypt", "stone-floor"]
     });
 
@@ -149,8 +148,7 @@ async fn test_api_curate_endpoint() {
     let res_json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(res_json["status"], "ok");
     assert_eq!(res_json["curated"]["id"], "map_to_curate");
-    assert_eq!(res_json["curated"]["theme"], "dungeon");
-    assert_eq!(res_json["curated"]["rating"], 4);
+    assert_eq!(res_json["curated"]["themes"], json!(["dungeon"]));
     assert_eq!(res_json["curated"]["dimensions"], json!([1920, 1080]));
 
     // Staging should now be empty
@@ -179,22 +177,21 @@ async fn test_api_curate_endpoint() {
     let img_body = to_bytes(resp_img.into_body(), usize::MAX).await.unwrap();
     assert_eq!(img_body.as_ref(), img_bytes);
 
-    // Invalid rating should return 400
-    let invalid_rating_req = Request::builder()
+    // Empty themes should return 400
+    let empty_themes_req = Request::builder()
         .uri("/api/curate")
         .method("POST")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(
             json!({
                 "id": "map_to_curate",
-                "theme": "dungeon",
-                "rating": 6,
+                "themes": [],
                 "tags": []
             })
             .to_string(),
         ))
         .unwrap();
-    let resp_invalid = app.oneshot(invalid_rating_req).await.unwrap();
+    let resp_invalid = app.oneshot(empty_themes_req).await.unwrap();
     assert_eq!(resp_invalid.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -228,14 +225,13 @@ async fn test_api_curate_building_theme_and_aliases() {
     let res_json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(res_json["status"], "ok");
     assert_eq!(res_json["curated"]["id"], "cabin_map");
-    assert_eq!(res_json["curated"]["theme"], "building");
-    assert_eq!(res_json["curated"]["rating"], 5);
+    assert_eq!(res_json["curated"]["themes"], json!(["building"]));
 
     // Verify stored under Theme::Building
     let curated = storage.list_curated(Some(&Theme::Building)).unwrap();
     assert_eq!(curated.len(), 1);
     assert_eq!(curated[0].id, "cabin_map");
-    assert_eq!(curated[0].theme, Theme::Building);
+    assert_eq!(curated[0].theme(), Some(Theme::Building));
 
     // Fetch the curated image via /api/image/curated/building/cabin_map
     let req_img = Request::builder()
@@ -267,7 +263,7 @@ async fn test_api_curate_building_theme_and_aliases() {
     assert_eq!(resp2.status(), StatusCode::OK);
     let body2 = to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
     let res_json2: Value = serde_json::from_slice(&body2).unwrap();
-    assert_eq!(res_json2["curated"]["theme"], "building");
+    assert_eq!(res_json2["curated"]["themes"], json!(["building"]));
 
     let building_list = storage.list_curated(Some(&Theme::Building)).unwrap();
     assert_eq!(building_list.len(), 2);
@@ -1066,7 +1062,6 @@ async fn test_api_benchmark_reference_conditioning_curated_prioritization_and_pe
     let map = CuratedMap::new(
         "curated-dungeon-5star",
         Theme::Dungeon,
-        5,
         vec!["dungeon".to_string(), "crypt".to_string()],
         (1024, 1024),
         Utc::now(),
@@ -1101,7 +1096,7 @@ async fn test_api_benchmark_reference_conditioning_curated_prioritization_and_pe
 
     // Verify SSE progress message shows curated reference provenance
     assert!(
-        body_str.contains("Generating Stone Crypt for meta/muse-image (curated reference: 5★ curated-dungeon-5star)"),
+        body_str.contains("Generating Stone Crypt for meta/muse-image (curated reference: curated-dungeon-5star)"),
         "Expected curated reference provenance in SSE stream: {}",
         body_str
     );
@@ -1351,7 +1346,7 @@ async fn test_api_curate_bundle_validation_and_success() {
     let curate_json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(curate_json["status"], "ok");
     assert_eq!(curate_json["curated"]["id"], "cand_unassigned");
-    assert_eq!(curate_json["curated"]["theme"], "dungeon");
+    assert_eq!(curate_json["curated"]["themes"], json!(["dungeon"]));
 
     // Staging should no longer contain cand_unassigned
     let remaining_staging = storage.list_staging().unwrap();

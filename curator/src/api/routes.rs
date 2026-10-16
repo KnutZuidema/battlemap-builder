@@ -253,7 +253,7 @@ pub async fn get_curated_layer_image(
 
     let filename = state
         .storage
-        .list_curated(Some(&theme))
+        .list_curated(None)
         .ok()
         .and_then(|list| {
             list.into_iter().find(|m| m.id == id).and_then(|m| {
@@ -263,7 +263,6 @@ pub async fn get_curated_layer_image(
                     .map(|l| l.filename)
             })
         });
-
     let mime = detect_image_mime(&bytes, filename.as_deref());
 
     let response = Response::builder()
@@ -284,12 +283,34 @@ pub async fn get_curated_layer_image(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurateRequest {
     pub id: String,
-    pub theme: Theme,
-    pub rating: u8,
+    #[serde(default)]
+    pub themes: Vec<String>,
+    #[serde(default)]
+    pub theme: Option<String>,
+    #[serde(default)]
+    pub rating: Option<u8>,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
     pub layers: Option<Vec<CandidateLayer>>,
+}
+
+impl CurateRequest {
+    pub fn resolved_themes(&self) -> Vec<String> {
+        let mut list = self.themes.clone();
+        if list.is_empty() {
+            if let Some(t) = &self.theme {
+                if !t.trim().is_empty() {
+                    let normalized = t
+                        .parse::<Theme>()
+                        .map(|th| th.as_str().to_string())
+                        .unwrap_or_else(|_| t.clone());
+                    list.push(normalized);
+                }
+            }
+        }
+        list
+    }
 }
 
 /// Request payload for updating candidate layers.
@@ -305,7 +326,7 @@ pub struct CurateResponse {
     pub curated: CuratedMap,
 }
 
-/// POST /api/curate - Move candidate to curated theme directory with rating and tags.
+/// POST /api/curate - Move candidate to curated directory with dynamic themes and tags.
 pub async fn post_curate(
     State(state): State<AppState>,
     Json(payload): Json<CurateRequest>,
@@ -314,13 +335,10 @@ pub async fn post_curate(
         return Err(ApiError::bad_request("Candidate ID cannot be empty"));
     }
 
-    if !CuratedMap::is_valid_rating(payload.rating) {
-        return Err(ApiError::bad_request(format!(
-            "Rating must be between 1 and 5, got {}",
-            payload.rating
-        )));
+    let themes = payload.resolved_themes();
+    if themes.is_empty() || themes.iter().all(|t| t.trim().is_empty()) {
+        return Err(ApiError::bad_request("At least 1 theme label is required"));
     }
-
     // Inspect candidate in staging to preserve dimensions and validate layers
     let candidates = state.storage.list_staging()?;
     let candidate = candidates
@@ -357,11 +375,9 @@ pub async fn post_curate(
     if let Some(layers) = payload.layers {
         state.storage.update_staging_layers(&payload.id, layers)?;
     }
-
     let curated = CuratedMap::with_now(
         &payload.id,
-        payload.theme,
-        payload.rating,
+        themes,
         payload.tags,
         dimensions,
     );
@@ -371,17 +387,16 @@ pub async fn post_curate(
     // Read back curated map with populated layers if available
     let curated_result = state
         .storage
-        .list_curated(Some(&payload.theme))
+        .list_curated(None)
         .ok()
         .and_then(|list| list.into_iter().find(|m| m.id == payload.id))
         .unwrap_or(curated);
 
     tracing::info!(
         id = %payload.id,
-        theme = %payload.theme,
+        themes = ?curated_result.themes,
         "Curated candidate image"
     );
-
     Ok(Json(CurateResponse {
         status: "ok",
         curated: curated_result,

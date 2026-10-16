@@ -27,7 +27,7 @@ const STATIC_BYTES_REF_4: &[u8] = include_bytes!("../../../data/battlemap-refere
 /// Provenance of a resolved reference image.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReferenceProvenance {
-    Curated { id: String, theme: Theme, rating: u8 },
+    Curated { id: String, theme: Theme },
     StaticFallback { name: String, theme: Theme },
 }
 
@@ -242,6 +242,30 @@ pub fn detect_theme_for_prompt(prompt: &str) -> Option<Theme> {
 
     best_theme
 }
+/// Scores keyword overlap between a prompt and a curated map's themes and tags.
+pub fn score_curated_map_for_prompt(map: &crate::domain::CuratedMap, prompt: &str) -> usize {
+    let prompt_lower = prompt.to_lowercase();
+    let prompt_words: std::collections::HashSet<&str> = prompt_lower
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .map(|s| s.trim())
+        .filter(|s| s.len() >= 2)
+        .collect();
+
+    let mut score = 0usize;
+    for theme in &map.themes {
+        let th_lower = theme.to_lowercase();
+        if prompt_words.contains(th_lower.as_str()) || prompt_lower.contains(&th_lower) {
+            score += 2;
+        }
+    }
+    for tag in &map.tags {
+        let tag_lower = tag.to_lowercase();
+        if prompt_words.contains(tag_lower.as_str()) || prompt_lower.contains(&tag_lower) {
+            score += 1;
+        }
+    }
+    score
+}
 
 /// Service providing visual reference conditioning images for few-shot benchmark generation.
 #[derive(Clone)]
@@ -274,7 +298,7 @@ impl ReferenceProvider {
 
     /// Resolves reference image for a given theme:
     /// 1. Queries curated maps in storage for the theme.
-    /// 2. If a map with rating >= 4 (favoring 5 stars and latest) is found, pre-processes it.
+    /// 2. If a map is found, selects the most recently curated map.
     /// 3. Otherwise, falls back to the static reference image for the theme.
     pub fn resolve_reference_for_theme(
         &self,
@@ -283,15 +307,10 @@ impl ReferenceProvider {
         // 1. Query curated maps in storage
         let curated_maps = self.storage.list_curated(Some(theme))?;
 
-        // 2. Select highest rated map (prioritizing rating 5, tie-breaking on curated_at)
+        // 2. Select top curated map (tie-breaking on curated_at, most recent first)
         let top_curated = curated_maps
             .into_iter()
-            .filter(|m| m.rating >= 4)
-            .max_by(|a, b| {
-                a.rating
-                    .cmp(&b.rating)
-                    .then_with(|| a.curated_at.cmp(&b.curated_at))
-            });
+            .max_by(|a, b| a.curated_at.cmp(&b.curated_at));
 
         // 3. If found, load bytes and preprocess
         if let Some(map) = top_curated {
@@ -307,7 +326,6 @@ impl ReferenceProvider {
                             info!(
                                 id = %map.id,
                                 theme = %theme,
-                                rating = map.rating,
                                 "Resolved curated map reference image"
                             );
                             return Ok(Some(ReferenceResolution {
@@ -315,7 +333,6 @@ impl ReferenceProvider {
                                 provenance: ReferenceProvenance::Curated {
                                     id: map.id,
                                     theme: *theme,
-                                    rating: map.rating,
                                 },
                             }));
                         }
@@ -352,13 +369,83 @@ impl ReferenceProvider {
         }))
     }
 
-    /// Resolves reference image by detecting theme keywords from a prompt.
+    /// Resolves reference image by scoring curated maps on tag/theme overlap with prompt keywords,
+    /// tie-breaking on curated_at (most recent first). Falls back to static reference if none match.
     pub fn resolve_reference_for_prompt(
         &self,
         prompt: &str,
     ) -> Result<Option<ReferenceResolution>, ReferenceProviderError> {
+        let curated_maps = self.storage.list_curated(None)?;
+
+        let top_curated = curated_maps
+            .into_iter()
+            .map(|map| {
+                let score = score_curated_map_for_prompt(&map, prompt);
+                (score, map)
+            })
+            .filter(|(score, _)| *score > 0)
+            .max_by(|(score_a, map_a), (score_b, map_b)| {
+                score_a
+                    .cmp(score_b)
+                    .then_with(|| map_a.curated_at.cmp(&map_b.curated_at))
+            })
+            .map(|(_, map)| map);
+
+        if let Some(map) = top_curated {
+            let primary_theme = map.theme().unwrap_or(Theme::Dungeon);
+            match self.storage.get_curated_image(&primary_theme, &map.id) {
+                Ok(raw_bytes) => {
+                    match preprocess_reference_image(&raw_bytes, self.target_size) {
+                        Ok(jpeg_bytes) => {
+                            let label = format!(
+                                "Perspective Reference: 2D {} Plan View",
+                                primary_theme.as_str()
+                            );
+                            let image = ReferenceImage::jpeg(label, jpeg_bytes);
+                            info!(
+                                id = %map.id,
+                                theme = %primary_theme,
+                                "Resolved curated map reference image for prompt"
+                            );
+                            return Ok(Some(ReferenceResolution {
+                                image,
+                                provenance: ReferenceProvenance::Curated {
+                                    id: map.id,
+                                    theme: primary_theme,
+                                },
+                            }));
+                        }
+                        Err(err) => {
+                            warn!(
+                                id = %map.id,
+                                error = %err,
+                                "Failed to preprocess curated image; falling back to static reference"
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        id = %map.id,
+                        error = %err,
+                        "Failed to load curated image bytes from storage; falling back to static reference"
+                    );
+                }
+            }
+        }
+
+        // Fall back to static reference if theme keywords detected in prompt
         if let Some(theme) = detect_theme_for_prompt(prompt) {
-            self.resolve_reference_for_theme(&theme)
+            let static_def = static_reference_for_theme(&theme);
+            let jpeg_bytes = self.get_static_reference_bytes(static_def)?;
+            let image = ReferenceImage::jpeg(static_def.label, jpeg_bytes);
+            Ok(Some(ReferenceResolution {
+                image,
+                provenance: ReferenceProvenance::StaticFallback {
+                    name: static_def.id.to_string(),
+                    theme,
+                },
+            }))
         } else {
             Ok(None)
         }
@@ -511,97 +598,112 @@ mod tests {
     }
 
     #[test]
-    fn test_curated_map_prioritization_over_static() {
+    fn test_curated_map_recency_prioritization() {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let provider = ReferenceProvider::new(storage.clone());
 
-        // Save a 4-star map
-        let map_4 = CuratedMap::new(
-            "curated-dungeon-4star",
+        let older_time = Utc::now() - chrono::Duration::hours(2);
+        let newer_time = Utc::now();
+
+        let map_older = CuratedMap::new(
+            "curated-dungeon-older",
             Theme::Dungeon,
-            4,
             vec!["dungeon".to_string()],
             (1024, 1024),
-            Utc::now() - chrono::Duration::hours(1),
+            older_time,
         );
-        let img_bytes_4 = create_test_image_bytes(512, 512, [0, 255, 0]);
-        storage.save_curated(&map_4, &img_bytes_4).unwrap();
+        let img_bytes = create_test_image_bytes(512, 512, [0, 255, 0]);
+        storage.save_curated(&map_older, &img_bytes).unwrap();
 
-        // Check it resolves 4-star curated map
-        let res1 = provider
-            .resolve_reference_for_theme(&Theme::Dungeon)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            res1.provenance,
-            ReferenceProvenance::Curated {
-                id: "curated-dungeon-4star".to_string(),
-                theme: Theme::Dungeon,
-                rating: 4,
-            }
-        );
-
-        // Now save a 5-star map
-        let map_5 = CuratedMap::new(
-            "curated-dungeon-5star",
+        let map_newer = CuratedMap::new(
+            "curated-dungeon-newer",
             Theme::Dungeon,
-            5,
             vec!["dungeon".to_string()],
             (1024, 1024),
-            Utc::now(),
+            newer_time,
         );
-        let img_bytes_5 = create_test_image_bytes(512, 512, [0, 0, 255]);
-        storage.save_curated(&map_5, &img_bytes_5).unwrap();
-
-        // It MUST prioritize the 5-star map!
-        let res2 = provider
-            .resolve_reference_for_theme(&Theme::Dungeon)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            res2.provenance,
-            ReferenceProvenance::Curated {
-                id: "curated-dungeon-5star".to_string(),
-                theme: Theme::Dungeon,
-                rating: 5,
-            }
-        );
-        assert_eq!(
-            res2.image.label,
-            "Perspective Reference: 2D dungeon Plan View"
-        );
-    }
-
-    #[test]
-    fn test_curated_map_below_4_stars_falls_back_to_static() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
-        let provider = ReferenceProvider::new(storage.clone());
-
-        // Save a 3-star map (quality not high enough for few-shot conditioning)
-        let map_3 = CuratedMap::new(
-            "curated-dungeon-3star",
-            Theme::Dungeon,
-            3,
-            vec!["dungeon".to_string()],
-            (1024, 1024),
-            Utc::now(),
-        );
-        let img_bytes_3 = create_test_image_bytes(512, 512, [100, 100, 100]);
-        storage.save_curated(&map_3, &img_bytes_3).unwrap();
+        storage.save_curated(&map_newer, &img_bytes).unwrap();
 
         let res = provider
             .resolve_reference_for_theme(&Theme::Dungeon)
             .unwrap()
             .unwrap();
+        assert_eq!(
+            res.provenance,
+            ReferenceProvenance::Curated {
+                id: "curated-dungeon-newer".to_string(),
+                theme: Theme::Dungeon,
+            }
+        );
+    }
 
-        // Should fall back to static reference because rating < 4
+    #[test]
+    fn test_prompt_keyword_overlap_prioritization() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
+        let provider = ReferenceProvider::new(storage.clone());
+
+        // Map A: 1 overlap with prompt ("dungeon")
+        let map_a = CuratedMap::new(
+            "curated-a",
+            vec!["dungeon".to_string()],
+            vec!["corridor".to_string()],
+            (1024, 1024),
+            Utc::now() - chrono::Duration::hours(1),
+        );
+        let img_bytes = create_test_image_bytes(512, 512, [0, 0, 255]);
+        storage.save_curated(&map_a, &img_bytes).unwrap();
+
+        // Map B: 3 overlaps with prompt ("dungeon", "crypt", "sarcophagus")
+        let map_b = CuratedMap::new(
+            "curated-b",
+            vec!["dungeon".to_string(), "crypt".to_string()],
+            vec!["sarcophagus".to_string(), "torches".to_string()],
+            (1024, 1024),
+            Utc::now() - chrono::Duration::hours(2),
+        );
+        storage.save_curated(&map_b, &img_bytes).unwrap();
+
+        let prompt = "Stone dungeon crypt with central sarcophagus and iron gate";
+        let res = provider.resolve_reference_for_prompt(prompt).unwrap().unwrap();
+        assert_eq!(
+            res.provenance,
+            ReferenceProvenance::Curated {
+                id: "curated-b".to_string(),
+                theme: Theme::Dungeon,
+            }
+        );
+    }
+
+    #[test]
+    fn test_curated_map_unmatched_prompt_falls_back_to_static() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
+        let provider = ReferenceProvider::new(storage.clone());
+
+        // Storage only has dungeon maps
+        let map_dungeon = CuratedMap::new(
+            "curated-dungeon-only",
+            Theme::Dungeon,
+            vec!["dungeon".to_string()],
+            (1024, 1024),
+            Utc::now(),
+        );
+        let img_bytes = create_test_image_bytes(512, 512, [100, 100, 100]);
+        storage.save_curated(&map_dungeon, &img_bytes).unwrap();
+
+        // Prompt is about wilderness
+        let res = provider
+            .resolve_reference_for_prompt("Forest river crossing with wooden bridge")
+            .unwrap()
+            .unwrap();
+
         assert_eq!(
             res.provenance,
             ReferenceProvenance::StaticFallback {
-                name: "stone-dungeon".to_string(),
-                theme: Theme::Dungeon,
+                name: "ruins-courtyard".to_string(),
+                theme: Theme::Wilderness,
             }
         );
     }

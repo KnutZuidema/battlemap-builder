@@ -136,7 +136,6 @@ async fn test_ingestion_deduplication_against_curated() {
     let curated = CuratedMap::with_now(
         "curated_map_1",
         Theme::Dungeon,
-        4,
         vec!["dungeon".into()],
         (30, 30),
     );
@@ -268,7 +267,6 @@ async fn test_end_to_end_ingestion_download_and_staging_persistence() {
     let curated = CuratedMap::with_now(
         "harvest_1",
         Theme::SciFi,
-        5,
         vec!["crystal".into(), "spire".into()],
         (50, 50),
     );
@@ -492,7 +490,6 @@ async fn test_split_post_deduplication() {
     let curated = CuratedMap::with_now(
         "gallery_curated_0",
         Theme::Dungeon,
-        4,
         vec!["dungeon".into()],
         (25, 25),
     );

@@ -1040,6 +1040,7 @@
             card.className = `layer-card${isActive ? " active" : ""}${isUnassigned ? " unassigned" : ""}${isExcluded ? " excluded" : ""}`;
             card.setAttribute("role", "tab");
             card.setAttribute("aria-selected", isActive ? "true" : "false");
+            card.setAttribute("tabindex", "0");
             card.title = `Layer #${idx}: ${formatRoleName(l.role, l.elevation)}${l.caption ? ` — ${l.caption}` : ""}`;
 
             const thumbContainer = document.createElement("div");
@@ -1411,21 +1412,17 @@
 
         return candidate._fetchPromise;
     }
-
     /**
-     * Opens the interactive curate decision modal with vision suggestion cards
-     * and custom tag input workflow.
+     * Curate Validation Gate:
+     * 1. If candidate has layers and all layers are excluded (role === 'exclude'), block curation.
+     * 2. If candidate has any included layer with role unassigned, block curation, focus that layer
+     *    in the filmstrip deck, and enter role labeling mode.
+     * Returns true if candidate layers pass validation, false otherwise.
      */
-    async function openCurateDecisionModal() {
-        exitLabelingMode();
-        if (state.isSubmitting || state.currentIndex < 0 || state.currentIndex >= state.candidates.length) {
-            return;
-        }
-
-        const candidate = state.candidates[state.currentIndex];
+    function validateCandidateLayers(candidate) {
+        if (!candidate) return false;
         const layers = getCandidateLayers(candidate);
 
-        // Curate Validation Gate:
         // 1. If all layers are Exclude, block curation
         const allExcluded = layers.length > 0 && layers.every((l) => {
             const r = (l.role || "").toLowerCase().replace(/[-_]/g, "");
@@ -1433,7 +1430,7 @@
         });
         if (allExcluded) {
             showToast("Cannot curate: at least 1 layer must be included", "danger");
-            return;
+            return false;
         }
 
         // 2. If any included layer has role Unassigned, block curation
@@ -1446,10 +1443,34 @@
             const layerNum = unassignedLayer.index !== undefined ? unassignedLayer.index : unassignedIdx;
             showToast(`Cannot curate: layer ${layerNum} is Unassigned. Please assign a role.`, "danger");
             setLayer(unassignedIdx);
+            if (layerFilmstrip && layerFilmstrip.children[unassignedIdx]) {
+                const card = layerFilmstrip.children[unassignedIdx];
+                card.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+                if (typeof card.focus === "function") {
+                    card.focus();
+                }
+            }
             enterLabelingMode("role");
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Opens the interactive curate decision modal with vision suggestion cards
+     * and custom tag input workflow.
+     */
+    async function openCurateDecisionModal() {
+        exitLabelingMode();
+        if (state.isSubmitting || state.currentIndex < 0 || state.currentIndex >= state.candidates.length) {
             return;
         }
 
+        const candidate = state.candidates[state.currentIndex];
+        if (!validateCandidateLayers(candidate)) {
+            return;
+        }
         // If suggestions are still being fetched, wait for them
         if (candidate._fetchPromise || (candidate._themeSuggestions === undefined && !candidate._suggestionsOffline)) {
             await fetchThemeSuggestions(candidate);
@@ -1906,6 +1927,13 @@
         if (state.isSubmitting || state.currentIndex < 0 || state.currentIndex >= state.candidates.length) {
             return;
         }
+
+        // Curate Validation Gate: validate layers upfront before opening decision modal
+        const candidate = state.candidates[state.currentIndex];
+        if (!validateCandidateLayers(candidate)) {
+            return;
+        }
+
         await openCurateDecisionModal();
     }
 
@@ -1947,6 +1975,10 @@
             }
             if (e.key === "Backspace" || e.key === "ArrowUp" || e.key === "Up") {
                 handleDecisionUndo();
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "Left" || e.key === "Right") {
                 e.preventDefault();
                 return;
             }

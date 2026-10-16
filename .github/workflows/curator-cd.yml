@@ -56,7 +56,7 @@ jobs:
       - name: Deploy to Kubernetes Cluster
         env:
           KUBECONFIG_DATA: ${{ secrets.KUBECONFIG }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         if: env.KUBECONFIG_DATA != ''
         run: |
           mkdir -p $HOME/.kube

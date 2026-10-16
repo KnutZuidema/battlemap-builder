@@ -178,36 +178,26 @@ impl FilesystemStorage {
             }
         }
     }
-    /// Helper to process primary image bytes and write LoRA 1024x1024 PNG and companion .txt caption.
+    /// Helper to process primary image bytes and write LoRA 1024x1024 PNG and companion .txt caption in bundle dir.
     fn write_lora_companions(
         &self,
-        theme: &Theme,
         id: &str,
         primary_image_bytes: &[u8],
         caption_text: &str,
-        bundle_dir: Option<&Path>,
+        bundle_dir: &Path,
     ) {
-        let theme_dir = self.curated_theme_dir(theme);
-        let _ = std::fs::create_dir_all(&theme_dir);
+        let _ = std::fs::create_dir_all(bundle_dir);
 
         // Always write caption text (.txt)
-        let theme_txt = theme_dir.join(format!("{id}_lora1024.txt"));
-        let _ = Self::atomic_write(&theme_txt, caption_text.as_bytes());
-        if let Some(b_dir) = bundle_dir {
-            let bundle_txt = b_dir.join(format!("{id}_lora1024.txt"));
-            let _ = Self::atomic_write(&bundle_txt, caption_text.as_bytes());
-        }
+        let bundle_txt = bundle_dir.join(format!("{id}_lora1024.txt"));
+        let _ = Self::atomic_write(&bundle_txt, caption_text.as_bytes());
 
         // Try normalizing to 1024x1024 PNG using SIMD Lanczos3 resizer
         let processor = SimdImageProcessor::new();
         match processor.normalize_lora(primary_image_bytes, ResizeStrategy::FitWithPadding) {
             Ok(lora_png) => {
-                let theme_png = theme_dir.join(format!("{id}_lora1024.png"));
-                let _ = Self::atomic_write(&theme_png, &lora_png);
-                if let Some(b_dir) = bundle_dir {
-                    let bundle_png = b_dir.join(format!("{id}_lora1024.png"));
-                    let _ = Self::atomic_write(&bundle_png, &lora_png);
-                }
+                let bundle_png = bundle_dir.join(format!("{id}_lora1024.png"));
+                let _ = Self::atomic_write(&bundle_png, &lora_png);
             }
             Err(e) => {
                 tracing::debug!("Skipping LoRA 1024x1024 image normalization for '{id}': {e}");
@@ -479,16 +469,29 @@ impl FilesystemStorage {
         Self::find_image_by_stem_recursive(&staging, id)
     }
 
-    /// Locate curated layer image in a theme directory by ID and layer index.
+    /// Helper to find the bundle directory for a curated map ID (flat curated/<id>/ first, fallback to legacy theme dirs).
+    pub fn find_curated_bundle_dir(&self, id: &str) -> Option<PathBuf> {
+        let flat = self.curated_dir().join(id);
+        if flat.is_dir() {
+            return Some(flat);
+        }
+        for theme in Theme::ALL {
+            let legacy = self.curated_theme_dir(theme).join(id);
+            if legacy.is_dir() {
+                return Some(legacy);
+            }
+        }
+        None
+    }
+
+    /// Locate curated layer image by ID and layer index.
     fn find_curated_layer_image_path(
         &self,
         theme: &Theme,
         id: &str,
         layer_index: usize,
     ) -> Option<PathBuf> {
-        let theme_dir = self.curated_theme_dir(theme);
-        let bundle_dir = theme_dir.join(id);
-        if bundle_dir.is_dir() {
+        if let Some(bundle_dir) = self.find_curated_bundle_dir(id) {
             let manifest_path = bundle_dir.join("manifest.json");
             if let Ok(content) = std::fs::read_to_string(&manifest_path) {
                 if let Ok(map) = serde_json::from_str::<CuratedMap>(&content) {
@@ -534,16 +537,24 @@ impl FilesystemStorage {
         None
     }
 
-    /// Locate primary curated image in a theme directory by ID.
+    /// Locate primary curated image by ID.
     fn find_curated_image_path(&self, theme: &Theme, id: &str) -> Option<PathBuf> {
-        let theme_dir = self.curated_theme_dir(theme);
-        let bundle_dir = theme_dir.join(id);
-        if bundle_dir.is_dir() {
+        if let Some(_bundle_dir) = self.find_curated_bundle_dir(id) {
             if let Some(p) = self.find_curated_layer_image_path(theme, id, 0) {
                 return Some(p);
             }
         }
 
+        // Check flat curated directory for loose images
+        for ext in &["png", "jpg", "jpeg", "webp"] {
+            let candidate_path = self.curated_dir().join(format!("{id}.{ext}"));
+            if candidate_path.is_file() {
+                return Some(candidate_path);
+            }
+        }
+
+        // Fallback for unmigrated legacy theme directories
+        let theme_dir = self.curated_theme_dir(theme);
         for ext in &["png", "jpg", "jpeg", "webp"] {
             let candidate_path = theme_dir.join(format!("{id}.{ext}"));
             if candidate_path.is_file() {
@@ -623,7 +634,45 @@ impl FilesystemStorage {
             for theme in Theme::ALL {
                 let theme_dir = self.curated_theme_dir(theme);
                 if theme_dir.is_dir() {
-                    self.migrate_curated_theme_directory(theme, &theme_dir)?;
+                    let _ = self.migrate_curated_theme_directory(theme, &theme_dir);
+
+                    // Move all subdirectories from theme_dir up to curated/<id>
+                    if let Ok(entries) = std::fs::read_dir(&theme_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_dir() {
+                                let id = match path.file_name().and_then(|n| n.to_str()) {
+                                    Some(name) => name.to_string(),
+                                    None => continue,
+                                };
+                                let target_dir = curated.join(&id);
+                                if !target_dir.exists() {
+                                    let _ = Self::atomic_move(&path, &target_dir);
+                                } else {
+                                    if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                                        for sub in sub_entries.flatten() {
+                                            let sub_path = sub.path();
+                                            if let Some(sub_name) = sub_path.file_name() {
+                                                let target_file = target_dir.join(sub_name);
+                                                if !target_file.exists() {
+                                                    let _ = Self::atomic_move(&sub_path, &target_file);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    let _ = std::fs::remove_dir_all(&path);
+                                }
+                            }
+                        }
+                    }
+
+                    // Remove empty theme_dir
+                    let is_empty = std::fs::read_dir(&theme_dir)
+                        .map(|mut r| r.next().is_none())
+                        .unwrap_or(false);
+                    if is_empty {
+                        let _ = std::fs::remove_dir(&theme_dir);
+                    }
                 }
             }
         }
@@ -919,7 +968,9 @@ impl FilesystemStorage {
                 let _ = std::fs::remove_file(json_path);
 
                 map.id = stem;
-                map.theme = *theme;
+                if map.themes.is_empty() {
+                    map.themes = vec![theme.as_str().to_string()];
+                }
                 if map.layers.is_empty() {
                     map.layers = vec![CuratedLayer {
                         index: 0,
@@ -930,7 +981,6 @@ impl FilesystemStorage {
                         dimensions: map.dimensions,
                     }];
                 }
-
                 let manifest_json = serde_json::to_string_pretty(&map)?;
                 Self::atomic_write(&bundle_dir.join("manifest.json"), manifest_json.as_bytes())?;
             }
@@ -1052,8 +1102,9 @@ impl FilesystemStorage {
     fn ensure_curated_caption(&self, map: &mut CuratedMap) {
         let has_caption = map.layers.first().and_then(|l| l.caption.as_ref()).is_some();
         if !has_caption {
+            let primary_theme = map.theme().unwrap_or(Theme::Dungeon);
             let cap = self
-                .get_curated_lora_caption(&map.theme, &map.id)
+                .get_curated_lora_caption(&primary_theme, &map.id)
                 .unwrap_or_else(|_| CaptionGenerator::generate_for_curated(map, None));
             if let Some(first) = map.layers.first_mut() {
                 first.caption = Some(cap);
@@ -1355,15 +1406,10 @@ impl StorageRepository for FilesystemStorage {
     }
 
     fn save_curated(&self, map: &CuratedMap, data: &[u8]) -> Result<(), StorageError> {
-        if !CuratedMap::is_valid_rating(map.rating) {
-            return Err(StorageError::InvalidData(format!(
-                "Rating must be between 1 and 5, got {}",
-                map.rating
-            )));
-        }
+        map.validate_themes().map_err(StorageError::InvalidData)?;
         map.validate_layers().map_err(StorageError::InvalidData)?;
 
-        let bundle_dir = self.curated_theme_dir(&map.theme).join(&map.id);
+        let bundle_dir = self.curated_dir().join(&map.id);
         std::fs::create_dir_all(&bundle_dir)?;
 
         let mut stored_map = map.clone();
@@ -1386,7 +1432,7 @@ impl StorageRepository for FilesystemStorage {
         Self::atomic_write(&bundle_dir.join("manifest.json"), manifest_json.as_bytes())?;
 
         let caption = CaptionGenerator::generate_for_curated(&stored_map, None);
-        self.write_lora_companions(&map.theme, &map.id, data, &caption, Some(&bundle_dir));
+        self.write_lora_companions(&map.id, data, &caption, &bundle_dir);
         Ok(())
     }
 
@@ -1412,6 +1458,12 @@ impl StorageRepository for FilesystemStorage {
         Ok(bytes)
     }
     fn get_curated_lora_image(&self, theme: &Theme, id: &str) -> Result<Vec<u8>, StorageError> {
+        if let Some(bundle_dir) = self.find_curated_bundle_dir(id) {
+            let bundle_png = bundle_dir.join(format!("{id}_lora1024.png"));
+            if bundle_png.is_file() {
+                return std::fs::read(bundle_png).map_err(StorageError::Io);
+            }
+        }
         let theme_dir = self.curated_theme_dir(theme);
         let bundle_png = theme_dir.join(id).join(format!("{id}_lora1024.png"));
         if bundle_png.is_file() {
@@ -1422,11 +1474,17 @@ impl StorageRepository for FilesystemStorage {
             return std::fs::read(theme_png).map_err(StorageError::Io);
         }
         Err(StorageError::NotFound(format!(
-            "Curated LoRA image for candidate '{id}' not found in theme '{theme}'"
+            "Curated LoRA image for candidate '{id}' not found"
         )))
     }
 
     fn get_curated_lora_caption(&self, theme: &Theme, id: &str) -> Result<String, StorageError> {
+        if let Some(bundle_dir) = self.find_curated_bundle_dir(id) {
+            let bundle_txt = bundle_dir.join(format!("{id}_lora1024.txt"));
+            if bundle_txt.is_file() {
+                return std::fs::read_to_string(bundle_txt).map_err(StorageError::Io);
+            }
+        }
         let theme_dir = self.curated_theme_dir(theme);
         let bundle_txt = theme_dir.join(id).join(format!("{id}_lora1024.txt"));
         if bundle_txt.is_file() {
@@ -1437,11 +1495,17 @@ impl StorageRepository for FilesystemStorage {
             return std::fs::read_to_string(theme_txt).map_err(StorageError::Io);
         }
         Err(StorageError::NotFound(format!(
-            "Curated LoRA caption for candidate '{id}' not found in theme '{theme}'"
+            "Curated LoRA caption for candidate '{id}' not found"
         )))
     }
 
     fn is_lora_normalized(&self, theme: &Theme, id: &str) -> Result<bool, StorageError> {
+        if let Some(bundle_dir) = self.find_curated_bundle_dir(id) {
+            let bundle_png = bundle_dir.join(format!("{id}_lora1024.png"));
+            if bundle_png.is_file() {
+                return Ok(true);
+            }
+        }
         let theme_dir = self.curated_theme_dir(theme);
         let bundle_png = theme_dir.join(id).join(format!("{id}_lora1024.png"));
         let theme_png = theme_dir.join(format!("{id}_lora1024.png"));
@@ -1451,43 +1515,53 @@ impl StorageRepository for FilesystemStorage {
     fn list_curated(&self, theme: Option<&Theme>) -> Result<Vec<CuratedMap>, StorageError> {
         let _ = self.migrate_legacy_storage();
         let mut results = Vec::new();
+        let curated_dir = self.curated_dir();
+        if !curated_dir.is_dir() {
+            return Ok(results);
+        }
 
-        let themes_to_scan: Vec<Theme> = match theme {
-            Some(t) => vec![*t],
-            None => Theme::ALL.to_vec(),
-        };
-
-        for t in themes_to_scan {
-            let theme_dir = self.curated_theme_dir(&t);
-            if !theme_dir.is_dir() {
-                continue;
-            }
-
-            if let Ok(entries) = std::fs::read_dir(&theme_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or_default();
-                    if name.starts_with('.') {
-                        continue;
-                    }
-                    if path.is_dir() {
-                        let manifest_path = path.join("manifest.json");
-                        if manifest_path.is_file() {
-                            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-                                if let Ok(mut map) = serde_json::from_str::<CuratedMap>(&content) {
+        if let Ok(entries) = std::fs::read_dir(&curated_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                if name.starts_with('.') {
+                    continue;
+                }
+                if path.is_dir() {
+                    let manifest_path = path.join("manifest.json");
+                    if manifest_path.is_file() {
+                        if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+                            if let Ok(mut map) = serde_json::from_str::<CuratedMap>(&content) {
+                                let matches_theme = match theme {
+                                    Some(t) => map.themes.iter().any(|m_theme| {
+                                        m_theme.eq_ignore_ascii_case(t.as_str())
+                                            || m_theme.parse::<Theme>().ok().as_ref() == Some(t)
+                                    }),
+                                    None => true,
+                                };
+                                if matches_theme {
                                     self.ensure_curated_caption(&mut map);
                                     results.push(map);
                                 }
                             }
                         }
-                    } else if path.is_file() {
-                        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                            if ext == "json" {
-                                if let Ok(content) = std::fs::read_to_string(&path) {
-                                    if let Ok(mut map) = serde_json::from_str::<CuratedMap>(&content) {
+                    }
+                } else if path.is_file() {
+                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                        if ext == "json" && name != "manifest.json" {
+                            if let Ok(content) = std::fs::read_to_string(&path) {
+                                if let Ok(mut map) = serde_json::from_str::<CuratedMap>(&content) {
+                                    let matches_theme = match theme {
+                                        Some(t) => map.themes.iter().any(|m_theme| {
+                                            m_theme.eq_ignore_ascii_case(t.as_str())
+                                                || m_theme.parse::<Theme>().ok().as_ref() == Some(t)
+                                        }),
+                                        None => true,
+                                    };
+                                    if matches_theme {
                                         self.ensure_curated_caption(&mut map);
                                         results.push(map);
                                     }
@@ -1502,6 +1576,7 @@ impl StorageRepository for FilesystemStorage {
         results.sort_by(|a, b| a.curated_at.cmp(&b.curated_at).then_with(|| a.id.cmp(&b.id)));
         Ok(results)
     }
+
     fn export_lora_dataset(&self, theme: Option<&Theme>) -> Result<Vec<u8>, StorageError> {
         let curated_maps = self.list_curated(theme)?;
         let mut buffer = std::io::Cursor::new(Vec::new());
@@ -1511,12 +1586,13 @@ impl StorageRepository for FilesystemStorage {
                 .compression_method(zip::CompressionMethod::Deflated);
 
             for map in &curated_maps {
-                let theme_str = map.theme.as_str();
+                let theme_str = map.primary_theme();
+                let primary_theme = map.theme().unwrap_or(Theme::Dungeon);
 
-                let image_bytes = match self.get_curated_lora_image(&map.theme, &map.id) {
+                let image_bytes = match self.get_curated_lora_image(&primary_theme, &map.id) {
                     Ok(bytes) => bytes,
                     Err(_) => {
-                        if let Ok(primary) = self.get_curated_image(&map.theme, &map.id) {
+                        if let Ok(primary) = self.get_curated_image(&primary_theme, &map.id) {
                             let processor = SimdImageProcessor::new();
                             match processor.normalize_lora(&primary, ResizeStrategy::FitWithPadding) {
                                 Ok(normalized) => normalized,
@@ -1528,7 +1604,7 @@ impl StorageRepository for FilesystemStorage {
                     }
                 };
 
-                let caption_text = match self.get_curated_lora_caption(&map.theme, &map.id) {
+                let caption_text = match self.get_curated_lora_caption(&primary_theme, &map.id) {
                     Ok(c) => c,
                     Err(_) => CaptionGenerator::generate_for_curated(map, None),
                 };
@@ -1596,6 +1672,11 @@ impl StorageRepository for FilesystemStorage {
     }
 
     fn is_curated(&self, id: &str) -> Result<bool, StorageError> {
+        if let Some(bundle_dir) = self.find_curated_bundle_dir(id) {
+            if bundle_dir.join("manifest.json").is_file() {
+                return Ok(true);
+            }
+        }
         for theme in Theme::ALL {
             let theme_dir = self.curated_theme_dir(theme);
             let bundle_manifest = theme_dir.join(id).join("manifest.json");
@@ -1636,12 +1717,7 @@ impl StorageRepository for FilesystemStorage {
     }
 
     fn curate_staging(&self, map: &CuratedMap) -> Result<(), StorageError> {
-        if !CuratedMap::is_valid_rating(map.rating) {
-            return Err(StorageError::InvalidData(format!(
-                "Rating must be between 1 and 5, got {}",
-                map.rating
-            )));
-        }
+        map.validate_themes().map_err(StorageError::InvalidData)?;
         map.validate_layers().map_err(StorageError::InvalidData)?;
 
         if let Some(bundle_dir) = self.find_staging_bundle_dir(&map.id) {
@@ -1699,7 +1775,7 @@ impl StorageRepository for FilesystemStorage {
             crate::domain::validate_layers_for_curation(&role_pairs)
                 .map_err(StorageError::InvalidData)?;
 
-            let curated_bundle_dir = self.curated_theme_dir(&map.theme).join(&map.id);
+            let curated_bundle_dir = self.curated_dir().join(&map.id);
             std::fs::create_dir_all(&curated_bundle_dir)?;
 
             let mut curated_layers = Vec::new();
@@ -1767,11 +1843,10 @@ impl StorageRepository for FilesystemStorage {
                         Some(&candidate),
                     );
                     self.write_lora_companions(
-                        &map.theme,
                         &map.id,
                         &primary_bytes,
                         &caption,
-                        Some(&curated_bundle_dir),
+                        &curated_bundle_dir,
                     );
                 }
             }
@@ -1817,7 +1892,7 @@ impl StorageRepository for FilesystemStorage {
             .and_then(|e| e.to_str())
             .unwrap_or("png");
 
-        let curated_bundle_dir = self.curated_theme_dir(&map.theme).join(&map.id);
+        let curated_bundle_dir = self.curated_dir().join(&map.id);
         std::fs::create_dir_all(&curated_bundle_dir)?;
 
         let dest_filename = CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), ext);
@@ -1845,11 +1920,10 @@ impl StorageRepository for FilesystemStorage {
                 candidate.as_ref(),
             );
             self.write_lora_companions(
-                &map.theme,
                 &map.id,
                 &primary_bytes,
                 &caption,
-                Some(&curated_bundle_dir),
+                &curated_bundle_dir,
             );
         }
 
@@ -2150,49 +2224,35 @@ impl StorageRepository for FilesystemStorage {
 
         // 2. Curated By Theme & Curated Totals
         let mut curated_by_theme = HashMap::new();
-        let mut curated_total_bytes = 0u64;
-        let mut curated_total_files = 0usize;
-
         for theme in Theme::ALL {
-            let theme_dir = self.curated_theme_dir(theme);
-            let stats = Self::scan_dir_stats(&theme_dir);
-            let map_count = self
-                .list_curated(Some(theme))
-                .map(|maps| maps.len())
-                .unwrap_or(0);
-
-            curated_total_bytes += stats.bytes;
-            curated_total_files += stats.file_count;
-
             curated_by_theme.insert(
                 *theme,
-                ThemeStorageStats::new(*theme, stats.bytes, stats.file_count, map_count),
+                ThemeStorageStats::new(*theme, 0, 0, 0),
             );
         }
 
-        // Account for any loose top-level files in curated/ root if any exist
         let curated_dir = self.curated_dir();
-        if curated_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&curated_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        let name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or_default();
-                        if !name.starts_with('.') {
-                            curated_total_files += 1;
-                            if let Ok(meta) = entry.metadata() {
-                                curated_total_bytes += meta.len();
-                            }
+        let curated = Self::scan_dir_stats(&curated_dir);
+
+        if let Ok(all_maps) = self.list_curated(None) {
+            for map in all_maps {
+                let map_dir = curated_dir.join(&map.id);
+                let map_stats = if map_dir.is_dir() {
+                    Self::scan_dir_stats(&map_dir)
+                } else {
+                    DirectoryStats::default()
+                };
+                for theme_str in &map.themes {
+                    if let Ok(th) = theme_str.parse::<Theme>() {
+                        if let Some(entry) = curated_by_theme.get_mut(&th) {
+                            entry.map_count += 1;
+                            entry.bytes += map_stats.bytes;
+                            entry.file_count += map_stats.file_count;
                         }
                     }
                 }
             }
         }
-
-        let curated = DirectoryStats::new(curated_total_bytes, curated_total_files);
 
         // 3. Rejected Stats (rejections.json size and rejection records count)
         let rejections_file = self.rejections_file();
@@ -2310,11 +2370,9 @@ mod tests {
         let curated = CuratedMap::with_now(
             "map_dungeon_1",
             Theme::Dungeon,
-            5,
             vec!["boss-room".into(), "gridless".into()],
             (2048, 2048),
         );
-
         storage.curate_staging(&curated).unwrap();
 
         // Staging must now be empty
@@ -2331,8 +2389,8 @@ mod tests {
         let dungeon_maps = storage.list_curated(Some(&Theme::Dungeon)).unwrap();
         assert_eq!(dungeon_maps.len(), 1);
         assert_eq!(dungeon_maps[0].id, "map_dungeon_1");
-        assert_eq!(dungeon_maps[0].rating, 5);
-        assert_eq!(dungeon_maps[0].theme, Theme::Dungeon);
+        assert_eq!(dungeon_maps[0].themes, vec!["dungeon"]);
+        assert_eq!(dungeon_maps[0].theme(), Some(Theme::Dungeon));
 
         // Other theme list should be empty
         let cave_maps = storage.list_curated(Some(&Theme::Cave)).unwrap();
@@ -2390,33 +2448,19 @@ mod tests {
     }
 
     #[test]
-    fn test_curated_rating_validation() {
+    fn test_curated_themes_validation() {
         let dir = tempdir().unwrap();
         let storage = FilesystemStorage::new(dir.path());
 
-        let invalid_map_zero = CuratedMap::with_now(
-            "invalid_0",
-            Theme::Tavern,
-            0,
+        let invalid_map_empty = CuratedMap::with_now(
+            "invalid_empty",
+            Vec::<String>::new(),
             vec![],
             (1024, 1024),
         );
-        let err0 = storage.save_curated(&invalid_map_zero, b"test").unwrap_err();
-        match err0 {
-            StorageError::InvalidData(msg) => assert!(msg.contains("between 1 and 5")),
-            other => panic!("Expected InvalidData error, got {other:?}"),
-        }
-
-        let invalid_map_six = CuratedMap::with_now(
-            "invalid_6",
-            Theme::Tavern,
-            6,
-            vec![],
-            (1024, 1024),
-        );
-        let err6 = storage.save_curated(&invalid_map_six, b"test").unwrap_err();
-        match err6 {
-            StorageError::InvalidData(msg) => assert!(msg.contains("between 1 and 5")),
+        let err = storage.save_curated(&invalid_map_empty, b"test").unwrap_err();
+        match err {
+            StorageError::InvalidData(msg) => assert!(msg.contains("1 theme label")),
             other => panic!("Expected InvalidData error, got {other:?}"),
         }
     }
@@ -2429,7 +2473,6 @@ mod tests {
         let map = CuratedMap::with_now(
             "direct_tavern",
             Theme::Tavern,
-            4,
             vec!["cozy".into()],
             (1024, 768),
         );
@@ -2488,7 +2531,6 @@ mod tests {
         let map = CuratedMap::with_now(
             "ghost_map",
             Theme::Wilderness,
-            3,
             vec![],
             (1024, 1024),
         );
@@ -2552,7 +2594,6 @@ mod tests {
         let curated = CuratedMap::with_now(
             "raw_map",
             Theme::Dungeon,
-            5,
             vec!["dungeon-crawl".into()],
             (800, 600),
         );
@@ -2573,8 +2614,8 @@ mod tests {
         let curated_maps = storage.list_curated(Some(&Theme::Dungeon)).unwrap();
         assert_eq!(curated_maps.len(), 1);
         assert_eq!(curated_maps[0].id, "raw_map");
-        assert_eq!(curated_maps[0].theme, Theme::Dungeon);
-        assert_eq!(curated_maps[0].rating, 5);
+        assert_eq!(curated_maps[0].themes, vec!["dungeon"]);
+        assert_eq!(curated_maps[0].theme(), Some(Theme::Dungeon));
     }
 
     #[test]
@@ -2620,7 +2661,6 @@ mod tests {
         let curated = CuratedMap::with_now(
             "direct_map",
             Theme::Cave,
-            4,
             vec!["crystal-cave".into()],
             (500, 500),
         );
@@ -2679,7 +2719,6 @@ mod tests {
         let curated = CuratedMap::with_now(
             "reddit_dungeon_1",
             Theme::Dungeon,
-            5,
             vec!["gridless".into(), "40x30".into()],
             (40, 30),
         );
@@ -2840,7 +2879,6 @@ mod tests {
         let curated = CuratedMap::with_now(
             "keep_bundle",
             Theme::Dungeon,
-            5,
             vec!["stronghold".into()],
             (2048, 2048),
         );
@@ -2849,8 +2887,8 @@ mod tests {
         // Staging bundle directory is cleaned up
         assert!(!storage.staging_dir().join("keep_bundle").exists());
 
-        // Curated directory layout: <theme>/<id>/manifest.json + deterministic included layer filenames
-        let curated_bundle_dir = storage.curated_theme_dir(&Theme::Dungeon).join("keep_bundle");
+        // Curated directory layout: <id>/manifest.json + deterministic included layer filenames
+        let curated_bundle_dir = storage.curated_dir().join("keep_bundle");
         assert!(curated_bundle_dir.is_dir());
 
         let manifest_path = curated_bundle_dir.join("manifest.json");
@@ -2979,7 +3017,6 @@ mod tests {
         let curated_map = CuratedMap::with_now(
             "legacy_dungeon_flat",
             Theme::Dungeon,
-            4,
             vec!["crypt".into()],
             (1200, 1200),
         );
@@ -3026,15 +3063,15 @@ mod tests {
             standalone_bytes
         );
 
-        // Verify curated flat map migrated into uniform bundle: curated/dungeon/legacy_dungeon_flat/
-        let curated_bundle = curated_dungeon.join("legacy_dungeon_flat");
+        // Verify curated flat map migrated into uniform bundle: curated/legacy_dungeon_flat/
+        let curated_bundle = dir.path().join("curated").join("legacy_dungeon_flat");
         assert!(curated_bundle.is_dir());
         assert!(curated_bundle.join("manifest.json").is_file());
         assert_eq!(
             std::fs::read(curated_bundle.join("0_ground.png")).unwrap(),
             curated_bytes
         );
-
+        assert!(!curated_dungeon.exists());
         // Verify storage queries work on migrated bundles
         assert_eq!(
             storage.get_staging_layer_image("legacy_post", 0).unwrap(),

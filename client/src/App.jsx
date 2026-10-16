@@ -826,13 +826,35 @@ export default function App() {
       setPrompt(mapData.prompt || '');
       setWikiContext(mapData.wikiContext || null);
 
-      if (mapData.cost) {
-        setMapCost(mapData.cost);
+      if (mapData.cost && typeof mapData.cost === 'object') {
+        const restored = {
+          totalCost: Number(mapData.cost.totalCost ?? 0),
+          promptTokens: Number(mapData.cost.promptTokens ?? 0),
+          completionTokens: Number(mapData.cost.completionTokens ?? 0),
+          totalTokens: Number(mapData.cost.totalTokens ?? 0),
+          promptCost: Number(mapData.cost.promptCost ?? 0),
+          completionCost: Number(mapData.cost.completionCost ?? 0),
+          requestsCount: Number(mapData.cost.requestsCount ?? 1)
+        };
+        setMapCost(restored);
         try {
-          localStorage.setItem('dungeon_forge_map_cost', JSON.stringify(mapData.cost));
-        } catch {
-          // ignore
-        }
+          localStorage.setItem('dungeon_forge_map_cost', JSON.stringify(restored));
+        } catch {}
+      } else if (typeof mapData.cost === 'number') {
+        const restored = {
+          ...DEFAULT_MAP_COST,
+          totalCost: mapData.cost,
+          requestsCount: 1
+        };
+        setMapCost(restored);
+        try {
+          localStorage.setItem('dungeon_forge_map_cost', JSON.stringify(restored));
+        } catch {}
+      } else {
+        setMapCost(DEFAULT_MAP_COST);
+        try {
+          localStorage.removeItem('dungeon_forge_map_cost');
+        } catch {}
       }
 
       if (Array.isArray(mapData.history) && mapData.history.length > 0) {
@@ -1113,7 +1135,6 @@ export default function App() {
         hasMap={Boolean(mapImage)}
         currentView={currentView}
         onSetView={setCurrentView}
-        onToggleView={(view) => setCurrentView(view || ((prev) => (prev === 'library' ? 'studio' : 'library')))}
         onSaveMap={handleSaveMapToDisk}
         isSavingMap={isSavingMap}
         saveStatus={saveStatus}

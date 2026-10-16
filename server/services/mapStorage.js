@@ -122,7 +122,9 @@ async function saveMap(mapData) {
     dimensions,
     createdAt: mapData.createdAt || nowIso,
     updatedAt: mapData.updatedAt || nowIso,
-    cost: typeof mapData.cost === 'number' ? mapData.cost : 0,
+    cost: (typeof mapData.cost === 'object' && mapData.cost !== null)
+      ? mapData.cost
+      : (typeof mapData.cost === 'number' ? mapData.cost : 0),
     features: Array.isArray(mapData.features) ? mapData.features : [],
     wikiContext: mapData.wikiContext || null,
     history: Array.isArray(mapData.history) ? mapData.history : [],
@@ -173,7 +175,9 @@ async function listMaps() {
         dimensions: meta.dimensions || null,
         createdAt: meta.createdAt || null,
         updatedAt: meta.updatedAt || null,
-        cost: typeof meta.cost === 'number' ? meta.cost : 0,
+        cost: (typeof meta.cost === 'object' && meta.cost !== null)
+          ? meta.cost
+          : (typeof meta.cost === 'number' ? meta.cost : 0),
         featureCount: Array.isArray(meta.features) ? meta.features.length : 0,
         thumbnailDataUrl
       });
@@ -272,7 +276,11 @@ async function updateMap(id, updates = {}) {
   if (updates.prompt !== undefined) existing.prompt = updates.prompt;
   if (updates.dimensions !== undefined) existing.dimensions = updates.dimensions;
   if (updates.features !== undefined) existing.features = updates.features;
-  if (updates.cost !== undefined) existing.cost = updates.cost;
+  if (updates.cost !== undefined) {
+    existing.cost = (typeof updates.cost === 'object' && updates.cost !== null)
+      ? updates.cost
+      : (typeof updates.cost === 'number' ? updates.cost : 0);
+  }
   if (updates.history !== undefined) existing.history = updates.history;
   if (updates.historyIndex !== undefined) existing.historyIndex = updates.historyIndex;
   if (updates.wikiContext !== undefined) existing.wikiContext = updates.wikiContext;

@@ -111,7 +111,6 @@ export default function Navbar({
   hasMap = false,
   currentView = 'studio',
   onSetView,
-  onToggleView,
   onSaveMap,
   isSavingMap = false,
   saveStatus = 'idle',
@@ -220,10 +219,7 @@ export default function Navbar({
         <div className="flex items-center gap-0.5 bg-black/25 p-1 rounded-xl border border-white/[0.07]">
           <button
             type="button"
-            onClick={() => {
-              if (onSetView) onSetView('studio');
-              else if (onToggleView) onToggleView('studio');
-            }}
+            onClick={() => onSetView?.('studio')}
             title="Studio View: Forge, edit, and play your map"
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
               currentView === 'studio'
@@ -237,10 +233,7 @@ export default function Navbar({
 
           <button
             type="button"
-            onClick={() => {
-              if (onToggleView) onToggleView('library');
-              else if (onSetView) onSetView(currentView === 'library' ? 'studio' : 'library');
-            }}
+            onClick={() => onSetView?.('library')}
             title="Library View: Browse and load saved battlemaps (Shortcut: L)"
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
               currentView === 'library'
@@ -260,7 +253,6 @@ export default function Navbar({
             onClick={() => {
               if (currentView !== 'studio') {
                 onSetView?.('studio');
-                onToggleView?.('studio');
               }
               onSetMode?.('edit');
             }}
@@ -280,7 +272,6 @@ export default function Navbar({
             onClick={() => {
               if (currentView !== 'studio') {
                 onSetView?.('studio');
-                onToggleView?.('studio');
               }
               onSetMode?.('play');
             }}

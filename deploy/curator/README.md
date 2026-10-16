@@ -59,7 +59,7 @@ Curator requires API credentials for OpenRouter model benchmarking and Reddit co
 
 Because Curator images are stored in a private/restricted GitHub Packages registry (`ghcr.io/knutzuidema/curator`), Kubernetes requires an image pull secret named `ghcr-secret`.
 
-- **Automated by CD Pipeline**: When Continuous Deployment runs via GitHub Actions, the workflow automatically creates or updates `ghcr-secret` in the `curator` namespace using the ephemeral `GITHUB_TOKEN`.
+- **Automated by CD Pipeline**: When Continuous Deployment runs via GitHub Actions, the workflow automatically creates or updates `ghcr-secret` in the `curator` namespace using the persistent `GHCR_TOKEN` secret.
 - **Manual Provisioning (for manual deploys or troubleshooting)**:
   ```bash
   kubectl create secret docker-registry ghcr-secret \
@@ -81,6 +81,17 @@ To enable automated cluster deployment from GitHub Actions:
 5. Save the secret.
 
 > **Safety Guard**: The CD workflow checks `if: ${{ secrets.KUBECONFIG != '' }}`. If `KUBECONFIG` is not configured, the container image will still be built and published to GHCR, but the cluster rollout step will be skipped safely without failing the job.
+
+### 2.5. Configure GitHub Actions Repository Secret (`GHCR_TOKEN`)
+
+Because the default `GITHUB_TOKEN` expires after 1 hour, a persistent Personal Access Token is used to populate `ghcr-secret` so that pod restarts or node rescheduling can always pull images without encountering `403 Forbidden`:
+
+1. Generate a GitHub Personal Access Token (classic with `read:packages` scope, or fine-grained PAT with read access to the `knutzuidema/curator` package).
+2. Navigate to your repository on GitHub: **Settings** &rarr; **Secrets and variables** &rarr; **Actions**.
+3. Click **New repository secret**.
+4. Name: `GHCR_TOKEN`.
+5. Value: Paste your Personal Access Token.
+6. Save the secret.
 
 ---
 
@@ -104,7 +115,7 @@ Check secrets.KUBECONFIG ────(Not Set)───► Safe Exit (Image publ
 Apply Base Manifests (namespace, pvc, service)
     │
     ▼
-Refresh ghcr-secret from GITHUB_TOKEN
+Refresh ghcr-secret from GHCR_TOKEN
     │
     ▼
 Deploy with Immutable SHA Tag (kubectl set image)
@@ -126,7 +137,7 @@ Rollout Verification (kubectl rollout status)
 3. **Cluster Rollout**:
    - Extracts `KUBECONFIG` and installs `kubectl`.
    - Applies core manifests (`namespace.yaml`, `pvc.yaml`, `service.yaml`).
-   - Automatically synchronizes `ghcr-secret` with the current run's `GITHUB_TOKEN`.
+   - Automatically synchronizes `ghcr-secret` with the configured `GHCR_TOKEN` secret.
    - Dynamically points the deployment to the immutable commit SHA tag:
      ```bash
      IMAGE_TAG="ghcr.io/knutzuidema/curator:${{ github.sha }}"

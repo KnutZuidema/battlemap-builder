@@ -73,17 +73,27 @@ Battlemap Builder/
 │   │   ├── App.jsx                 # Main state manager & history stack
 │   │   └── index.css              # Design tokens, glassmorphism & animation utilities
 │   └── package.json
-└── server/                    # Node Express Backend
-    ├── index.js               # Express routes (/api/generate, /api/forge-region, /api/wiki/*, /api/health)
-    ├── services/
-    │   ├── battlemapService.js    # Orchestrator: configured model, compositing, failure shape
-    │   ├── modelCatalog.js        # Backend model configuration (provider, vision, cost notes)
-    │   ├── prompts.js             # IMAGE_PROMPTS + builder functions
-    │   ├── failure.js             # Upstream error summarising + user-facing failure sentences
-    │   ├── imageProcessor.js      # Sharp context framing, binary masks & inward seam feathering
-    │   └── providers/
-    │       └── openrouterProvider.js  # OpenRouter chat completions (image contract)
-    └── .env                   # Server environment & API key
+├── server/                    # Node Express Backend
+│   ├── index.js               # Express routes (/api/generate, /api/forge-region, /api/wiki/*, /api/health)
+│   ├── services/
+│   │   ├── battlemapService.js    # Orchestrator: configured model, compositing, failure shape
+│   │   ├── modelCatalog.js        # Backend model configuration (provider, vision, cost notes)
+│   │   ├── prompts.js             # IMAGE_PROMPTS + builder functions
+│   │   ├── failure.js             # Upstream error summarising + user-facing failure sentences
+│   │   ├── imageProcessor.js      # Sharp context framing, binary masks & inward seam feathering
+│   │   └── providers/
+│   │       └── openrouterProvider.js  # OpenRouter chat completions (image contract)
+│   └── .env                   # Server environment & API key
+└── curator/                   # Internal Ingestion, Benchmarking & Curation Service (Rust)
+    ├── Cargo.toml             # Rust workspace & dependencies
+    ├── src/
+    │   ├── api/               # Axum REST endpoints (/api/curate, /api/staging, /api/status)
+    │   ├── domain/            # Domain models (Candidate, CuratedMap, Theme, LayerRole)
+    │   ├── adapters/          # Filesystem storage, OpenRouter client, Reddit harvester
+    │   ├── services/          # Benchmark & Reference conditioning services
+    │   └── ui/                # Embedded triage SPA assets (HTML, CSS, JS)
+    ├── tests/                 # Integration tests (api_integration_tests.rs, etc.)
+    └── README.md              # Curator documentation and runbook
 ```
 
 ---
@@ -98,6 +108,8 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
 |**Start Server Only**|`npm run dev:server`|Runs `node server/index.js`|
 |**Start Client Only**|`npm run dev:client`|Runs Vite dev server inside `client/`|
 |**Build Frontend**|`cd client && npm run build`|Compiles Vite production bundle|
+|**Test Curator**|`cargo test --manifest-path curator/Cargo.toml`|Runs Curator Rust test suite (unit + integration)|
+|**Run Curator Service**|`cargo run --manifest-path curator/Cargo.toml`|Starts Curator Axum web service on port `3002`|
 
 ---
 
@@ -134,6 +146,21 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
 - **Region Selection**: Right-click drag selects any 64px grid-snapped region (inside map to edit, outside to expand, or spanning both). Handles and box dragging allow adjusting dimensions.
 - **Forge Region**: Clicking Forge Region opens the popover modal to enter details or expansion prompt.
 - **5ft Grid Overlay**: Interactive 2D canvas renders a non-interactive, single-draw-call 64px = 5ft grid overlay over the clean ungridded battlemap, toggleable via the top-right canvas control bar or the 'G' keyboard shortcut.
+
+### E. Curator Service & Decision Flow (`curator/`)
+- **Internal Triage & Curation Engine**: A standalone Rust service on port `3002` that ingests battlemaps harvested from `/r/battlemaps` and OpenRouter benchmark runs, enabling interactive review, layer role assignment, and few-shot reference curation.
+- **Upfront Layer Validation Gate**: Triggered upon pressing `Enter` or clicking **Curate**:
+  - Candidate must have at least 1 included layer (blocked with danger toast if all layers have role `exclude`).
+  - Candidate must not contain any included layer with role `unassigned` (blocked with danger toast; automatically focuses and scrolls to that layer card in the filmstrip deck, opening role labeling mode `1-6`).
+  - The curate decision modal only opens when layer validation passes.
+- **Interactive Curate Decision Modal (`#curate-decision-modal`)**:
+  - **AI Vision Theme Suggestions**: Asynchronously queries OpenRouter vision models (`POST /api/staging/:id/suggest-themes`) to provide high-signal theme cards. Reviewers accept (`ArrowRight`), reject (`ArrowLeft`), or undo (`Backspace` / `ArrowUp`) suggestion cards.
+  - **Custom Tags & Autocomplete**: Reviewers can type custom tags or accept taxonomy autocomplete pills via `Tab`. Pressing `Enter` on an empty field submits curation (requiring >= 1 accepted theme). Gracefully falls back to offline mode when the vision API is unavailable.
+  - **Keyboard Event Routing & Trapping**: While the decision modal is active, background canvas navigation (`ArrowLeft` / `ArrowRight`, `j` / `k`) and global triage shortcuts (`1-6`, `g`, `f`) are strictly trapped and suppressed.
+- **Dynamic Theme Labeling & Star Rating Removal**: Replaces legacy 1–5 star ratings and single fixed themes with rich multi-label dynamic themes (e.g. `["dungeon", "crypt", "boss-arena"]`). Curation is binary (curated into dataset or rejected with structured reasons to `rejections.jsonl`).
+- **Flat Curated Storage Structure**:
+  - Assets are stored under `data/curated/<id>/manifest.json` with deterministically named layer files (`0_ground.png`, `1_upper_1.png`), paired LoRA caption companions (`<id>.txt`), and primary display image (`<id>.png`).
+  - Eliminates redundant nested theme directories (`data/curated/<theme>/<id>/`), enabling zero-copy atomic file migrations and multi-theme associations.
 
 ---
 

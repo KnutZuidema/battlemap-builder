@@ -322,6 +322,7 @@ mod tests {
         assert!(js.contains("fetchThemeSuggestions"));
         assert!(js.contains("openCurateDecisionModal"));
         assert!(js.contains("closeCurateDecisionModal"));
+        assert!(js.contains("validateCandidateLayers"));
         assert!(js.contains("handleDecisionReject"));
         assert!(js.contains("handleDecisionAccept"));
         assert!(js.contains("handleDecisionUndo"));

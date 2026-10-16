@@ -207,6 +207,167 @@ async fn test_api_curate_endpoint() {
 }
 
 #[tokio::test]
+async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() {
+    let (app, storage, dir) = setup_test_app();
+
+    // 1. Prepare candidate in staging with multi-layer bundle
+    let img0 = b"\x89PNG\r\n\x1a\nlayer0_ground_map";
+    let img1 = b"\x89PNG\r\n\x1a\nlayer1_upper_map";
+    let mut cand = Candidate::with_now("dungeon_complex", Source::Reddit, "0.png", (1920, 1080));
+    cand.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1920, 1080)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1920, 1080)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand, &[img0.to_vec(), img1.to_vec()])
+        .unwrap();
+
+    // Verify candidate is in staging
+    assert_eq!(storage.list_staging().unwrap().len(), 1);
+
+    // 2. Curate rejection when themes is empty: returns HTTP 400 Bad Request
+    let req_empty_themes = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "dungeon_complex",
+                "themes": [],
+                "tags": ["crypt"]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp_empty = app.clone().oneshot(req_empty_themes).await.unwrap();
+    assert_eq!(resp_empty.status(), StatusCode::BAD_REQUEST);
+
+    // 3. Curate rejection when themes has only empty / whitespace strings: returns HTTP 400
+    let req_whitespace_themes = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "dungeon_complex",
+                "themes": ["   ", ""],
+                "tags": ["crypt"]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp_whitespace = app.clone().oneshot(req_whitespace_themes).await.unwrap();
+    assert_eq!(resp_whitespace.status(), StatusCode::BAD_REQUEST);
+
+    // 4. Successful curation with multi-label dynamic themes (e.g. from decision modal) and no rating
+    let curate_payload = json!({
+        "id": "dungeon_complex",
+        "themes": ["dungeon", "crypt", "boss-arena"],
+        "tags": ["crypt", "torchlight", "fantasy"],
+        "layers": [
+            {
+                "index": 0,
+                "filename": "0.png",
+                "role": "ground",
+                "elevation": 0,
+                "dimensions": [1920, 1080],
+                "caption": "Ground floor dungeon hall"
+            },
+            {
+                "index": 1,
+                "filename": "1.png",
+                "role": "upper_floor",
+                "elevation": 1,
+                "dimensions": [1920, 1080],
+                "caption": "Upper balcony"
+            }
+        ]
+    });
+
+    let req_success = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+    let resp_success = app.clone().oneshot(req_success).await.unwrap();
+    assert_eq!(resp_success.status(), StatusCode::OK);
+
+    let body = to_bytes(resp_success.into_body(), usize::MAX).await.unwrap();
+    let res_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(res_json["status"], "ok");
+    assert_eq!(res_json["curated"]["id"], "dungeon_complex");
+    assert_eq!(
+        res_json["curated"]["themes"],
+        json!(["dungeon", "crypt", "boss-arena"])
+    );
+    // Rating must not be present in response
+    assert!(res_json["curated"]["rating"].is_null());
+
+    // 5. Staging should now be empty (candidate removed from queue)
+    assert_eq!(storage.list_staging().unwrap().len(), 0);
+
+    // 6. Verify flat storage directory on disk: data/curated/<id>/manifest.json
+    let curated_bundle_dir = dir.path().join("curated").join("dungeon_complex");
+    assert!(
+        curated_bundle_dir.is_dir(),
+        "Curated bundle directory must exist at flat layout: {:?}",
+        curated_bundle_dir
+    );
+
+    let manifest_path = curated_bundle_dir.join("manifest.json");
+    assert!(
+        manifest_path.is_file(),
+        "manifest.json must exist in curated bundle directory: {:?}",
+        manifest_path
+    );
+
+    let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
+    let manifest: Value = serde_json::from_str(&manifest_content).unwrap();
+
+    assert_eq!(manifest["id"], "dungeon_complex");
+    assert_eq!(
+        manifest["themes"],
+        json!(["dungeon", "crypt", "boss-arena"])
+    );
+    assert_eq!(manifest["dimensions"], json!([1920, 1080]));
+    assert!(manifest["rating"].is_null(), "Curated map manifest must not have rating");
+
+    // Verify deterministically named layer image files exist in flat directory
+    let layer0_path = curated_bundle_dir.join("0_ground.png");
+    assert!(
+        layer0_path.is_file(),
+        "Layer 0 image must exist at deterministic path: {:?}",
+        layer0_path
+    );
+    let layer1_path = curated_bundle_dir.join("1_upper_1.png");
+    assert!(
+        layer1_path.is_file(),
+        "Layer 1 image must exist at deterministic path: {:?}",
+        layer1_path
+    );
+
+    // 7. Verify API image retrieval by direct ID and by theme
+    let req_direct = Request::builder()
+        .uri("/api/image/curated/dungeon_complex")
+        .body(Body::empty())
+        .unwrap();
+    let resp_direct = app.clone().oneshot(req_direct).await.unwrap();
+    assert_eq!(resp_direct.status(), StatusCode::OK);
+    let direct_bytes = to_bytes(resp_direct.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(direct_bytes.as_ref(), img0);
+
+    let req_theme = Request::builder()
+        .uri("/api/image/curated/dungeon/dungeon_complex")
+        .body(Body::empty())
+        .unwrap();
+    let resp_theme = app.oneshot(req_theme).await.unwrap();
+    assert_eq!(resp_theme.status(), StatusCode::OK);
+    let theme_bytes = to_bytes(resp_theme.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(theme_bytes.as_ref(), img0);
+}
+
+#[tokio::test]
 async fn test_api_curate_building_theme_and_aliases() {
     let (app, storage, _dir) = setup_test_app();
 

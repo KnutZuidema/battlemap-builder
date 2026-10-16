@@ -5,16 +5,51 @@ on:
     paths:
       - 'curator/**'
       - 'deploy/curator/**'
+      - 'data/battlemap-reference-*'
       - '.github/workflows/curator-ci.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
   actions: write
 
 jobs:
+  detect-changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      build_image: ${{ steps.filter.outputs.build_image }}
+      run_tests: ${{ steps.filter.outputs.run_tests }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect changes to source code and tests
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            build_image:
+              - 'curator/src/**'
+              - 'curator/Cargo.toml'
+              - 'curator/Cargo.lock'
+              - 'curator/Dockerfile'
+              - 'data/battlemap-reference-*'
+            run_tests:
+              - 'curator/src/**'
+              - 'curator/tests/**'
+              - 'curator/Cargo.toml'
+              - 'curator/Cargo.lock'
+              - 'data/battlemap-reference-*'
+
   test:
     name: Test & Lint
+    needs: detect-changes
+    if: github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.run_tests == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -41,6 +76,8 @@ jobs:
 
   build-container:
     name: Build Container
+    needs: detect-changes
+    if: github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.build_image == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

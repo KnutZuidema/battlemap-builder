@@ -7,6 +7,14 @@ const { detectFeatures } = require('./services/featureService');
 const { isProviderConfigured, MODEL_CATALOG, DEFAULT_MODEL_ID } = require('./services/modelCatalog');
 const { getWikiTree, getWikiArticle } = require('./services/wikiService');
 const { suggestBattlemaps, generateCustomBattlemapPrompt, suggestRegionForging } = require('./services/wikiPrompter');
+const {
+  listMaps,
+  getMap,
+  saveMap,
+  updateMap,
+  deleteMap,
+  duplicateMap
+} = require('./services/mapStorage');
 
 // The server config lives next to this file; `process.cwd()` is the repo root under `npm run dev`.
 dotenv.config({ path: path.join(__dirname, '.env') });
@@ -316,6 +324,78 @@ app.post('/api/features/forge-state', async (req, res) => {
     res.json(result);
   } catch (err) {
     sendGenerationError(res, err);
+  }
+});
+
+// ============================================================================
+// Persistent Map Storage Endpoints
+// ============================================================================
+
+function handleMapError(res, err) {
+  let status = 500;
+  if (err.code === 'MAP_NOT_FOUND') {
+    status = 404;
+  } else if (err.code === 'INVALID_MAP_ID' || err.code === 'INVALID_PARAMETERS' || err.code === 'INVALID_MAP_DATA') {
+    status = 400;
+  }
+  return res.status(status).json({
+    ok: false,
+    error: err.message,
+    code: err.code || 'STORAGE_ERROR'
+  });
+}
+
+app.get('/api/maps', async (req, res) => {
+  try {
+    const maps = await listMaps();
+    res.json({ ok: true, maps });
+  } catch (err) {
+    handleMapError(res, err);
+  }
+});
+
+app.post('/api/maps', async (req, res) => {
+  try {
+    const map = await saveMap(req.body);
+    res.status(201).json({ ok: true, map });
+  } catch (err) {
+    handleMapError(res, err);
+  }
+});
+
+app.get('/api/maps/:id', async (req, res) => {
+  try {
+    const map = await getMap(req.params.id);
+    res.json({ ok: true, map });
+  } catch (err) {
+    handleMapError(res, err);
+  }
+});
+
+app.put('/api/maps/:id', async (req, res) => {
+  try {
+    const map = await updateMap(req.params.id, req.body);
+    res.json({ ok: true, map });
+  } catch (err) {
+    handleMapError(res, err);
+  }
+});
+
+app.delete('/api/maps/:id', async (req, res) => {
+  try {
+    const result = await deleteMap(req.params.id);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    handleMapError(res, err);
+  }
+});
+
+app.post('/api/maps/:id/duplicate', async (req, res) => {
+  try {
+    const map = await duplicateMap(req.params.id);
+    res.status(201).json({ ok: true, map });
+  } catch (err) {
+    handleMapError(res, err);
   }
 });
 

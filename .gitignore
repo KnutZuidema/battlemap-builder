@@ -21,3 +21,6 @@ data/curated/
 data/rejected/
 data/telemetry/
 !data/battlemap-reference-*
+
+# Persistent map storage
+data/maps/

@@ -51,7 +51,7 @@ System & Forge Directives:
 8. Return only the image — no commentary.";
 
 /// Default vision model used for battlemap theme and environment suggestions.
-pub const DEFAULT_VISION_MODEL: &str = "google/gemini-2.0-flash-lite-001";
+pub const DEFAULT_VISION_MODEL: &str = "google/gemini-3.5-flash-lite";
 
 /// System instruction for the vision model analyzing battlemap themes.
 pub const SYSTEM_INSTRUCTION_SUGGEST_THEMES: &str = "You are a TTRPG battlemap classification expert. \

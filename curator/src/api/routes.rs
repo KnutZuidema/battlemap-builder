@@ -678,11 +678,7 @@ pub async fn post_describe_candidate(
         .map(|s| s.as_str())
         .unwrap_or("dungeon");
 
-    let tags = if let Some(req_tags) = req.tags {
-        req_tags
-    } else {
-        Vec::new()
-    };
+    let tags = req.tags.unwrap_or_default();
 
     // 4. Invoke OpenRouter vision model if available, falling back gracefully to CaptionGenerator
     let description = match state.openrouter_client() {

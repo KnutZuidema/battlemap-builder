@@ -709,6 +709,8 @@ pub struct CuratedMap {
     pub curated_at: DateTime<Utc>,
     #[serde(default)]
     pub layers: Vec<CuratedLayer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -728,6 +730,8 @@ struct CuratedMapHelper {
     curated_at: DateTime<Utc>,
     #[serde(default)]
     layers: Vec<CuratedLayer>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for CuratedMap {
@@ -753,6 +757,7 @@ impl<'de> Deserialize<'de> for CuratedMap {
             dimensions: helper.dimensions,
             curated_at: helper.curated_at,
             layers: helper.layers,
+            description: helper.description,
         })
     }
 }
@@ -773,6 +778,7 @@ impl CuratedMap {
             dimensions,
             curated_at,
             layers: Vec::new(),
+            description: None,
         }
     }
 
@@ -792,6 +798,17 @@ impl CuratedMap {
 
     pub fn with_source(mut self, source: Source) -> Self {
         self.source = Some(source);
+        self
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        let desc = description.into();
+        self.description = if desc.trim().is_empty() { None } else { Some(desc) };
+        self
+    }
+
+    pub fn with_optional_description(mut self, description: Option<String>) -> Self {
+        self.description = description.filter(|s| !s.trim().is_empty());
         self
     }
 
@@ -1730,6 +1747,54 @@ mod tests {
         assert_eq!(legacy_parsed.theme(), Some(Theme::Dungeon));
         assert_eq!(legacy_parsed.primary_theme(), "dungeon");
         assert_eq!(legacy_parsed.tags, vec!["crypt", "stone"]);
+    }
+
+    #[test]
+    fn test_curated_map_description_serde_and_backward_compatibility() {
+        let map_without_desc = CuratedMap::with_now(
+            "map_nodesc",
+            vec!["dungeon".to_string()],
+            vec!["stone".into()],
+            (2048, 2048),
+        );
+        assert_eq!(map_without_desc.description, None);
+
+        // Serializing without description must omit "description" field
+        let json_nodesc = serde_json::to_string(&map_without_desc).unwrap();
+        assert!(!json_nodesc.contains("\"description\""));
+
+        // Deserializing without description
+        let parsed_nodesc: CuratedMap = serde_json::from_str(&json_nodesc).unwrap();
+        assert_eq!(parsed_nodesc.description, None);
+
+        // With description
+        let desc_text = "Ancient limestone crypt with carved granite pillars and glowing braziers.";
+        let map_with_desc = map_without_desc.clone().with_description(desc_text);
+        assert_eq!(map_with_desc.description.as_deref(), Some(desc_text));
+
+        let json_with_desc = serde_json::to_string(&map_with_desc).unwrap();
+        assert!(json_with_desc.contains("\"description\":\"Ancient limestone crypt"));
+
+        let parsed_with_desc: CuratedMap = serde_json::from_str(&json_with_desc).unwrap();
+        assert_eq!(parsed_with_desc.description.as_deref(), Some(desc_text));
+        assert_eq!(parsed_with_desc, map_with_desc);
+
+        // Backward compatibility with legacy manifest JSON lacking "description"
+        let legacy_manifest = r#"{
+            "id": "legacy_map_no_desc",
+            "themes": ["crypt"],
+            "tags": ["sarcophagus"],
+            "dimensions": [1024, 1024],
+            "curated_at": "2026-10-16T12:00:00Z",
+            "layers": []
+        }"#;
+        let legacy_map: CuratedMap = serde_json::from_str(legacy_manifest).unwrap();
+        assert_eq!(legacy_map.id, "legacy_map_no_desc");
+        assert_eq!(legacy_map.description, None);
+
+        // Empty or whitespace description via with_description sets None
+        let map_empty_desc = map_without_desc.clone().with_description("   \t  ");
+        assert_eq!(map_empty_desc.description, None);
     }
 
     #[test]

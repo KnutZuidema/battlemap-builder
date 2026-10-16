@@ -330,6 +330,8 @@ pub struct CurateRequest {
     pub tags: Vec<String>,
     #[serde(default)]
     pub layers: Option<Vec<CandidateLayer>>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 impl CurateRequest {
@@ -412,12 +414,15 @@ pub async fn post_curate(
     if let Some(layers) = payload.layers {
         state.storage.update_staging_layers(&payload.id, layers)?;
     }
-    let curated = CuratedMap::with_now(
+    let mut curated = CuratedMap::with_now(
         &payload.id,
         themes,
         payload.tags,
         dimensions,
     );
+    if let Some(desc) = payload.description {
+        curated = curated.with_description(desc);
+    }
 
     state.storage.curate_staging(&curated)?;
 

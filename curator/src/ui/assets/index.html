@@ -532,6 +532,26 @@
                         <div id="decision-autocomplete-list" class="decision-autocomplete-list"></div>
                         <p class="decision-helper-note">Press Enter to add tag. Press Enter with empty text to finish.</p>
                         <div id="decision-validation-error" class="decision-validation-error hidden">At least one theme label required</div>
+
+                        <!-- Step 2b: Map Description Preview & Editing -->
+                        <div class="decision-description-section">
+                            <div class="decision-description-header">
+                                <div class="decision-description-title-group">
+                                    <label for="decision-description-input" class="decision-description-label">Map Description (Gemini 3.5 Flash Lite)</label>
+                                    <span id="decision-description-status" class="decision-description-indicator status-dot status-ready" title="AI Vision Ready"></span>
+                                </div>
+                                <button type="button" id="btn-regenerate-description" class="btn btn-secondary btn-sm" title="Re-query vision endpoint with accepted tags">
+                                    <span class="btn-icon">↻</span>
+                                    <span>Regenerate</span>
+                                </button>
+                            </div>
+                            <div id="decision-description-loading" class="decision-description-loading hidden">
+                                <div class="description-skeleton-line skeleton"></div>
+                                <div class="description-skeleton-line skeleton"></div>
+                                <div class="description-skeleton-line skeleton short"></div>
+                            </div>
+                            <textarea id="decision-description-input" class="text-input decision-description-textarea" rows="3" placeholder="AI vision map description will appear here..." autocomplete="off"></textarea>
+                        </div>
                     </div>
 
                     <!-- Active Accepted Tags Strip (bottom of both steps) -->

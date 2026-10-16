@@ -2122,4 +2122,18 @@ async fn test_curate_without_description_graceful() {
     assert_eq!(storage.list_staging().unwrap().len(), 0);
     // Curated directory created
     assert!(dir.path().join("curated").join("cand_curate_no_desc").join("manifest.json").is_file());
+
+    // Verify fallback description was populated on response, manifest.json, and storage
+    let desc = json["curated"]["description"].as_str().unwrap();
+    assert!(desc.contains("dungeon"));
+    assert!(desc.contains("hallway"));
+
+    let manifest_path = dir.path().join("curated").join("cand_curate_no_desc").join("manifest.json");
+    let manifest_str = std::fs::read_to_string(&manifest_path).unwrap();
+    assert!(manifest_str.contains("dungeon"));
+    assert!(manifest_str.contains("hallway"));
+
+    let curated_list = storage.list_curated(None).unwrap();
+    assert_eq!(curated_list.len(), 1);
+    assert_eq!(curated_list[0].description.as_deref(), Some(desc));
 }

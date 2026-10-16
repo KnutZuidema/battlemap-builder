@@ -1,57 +1,13 @@
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{
         sse::{Event, Sse},
         IntoResponse, Response,
     },
+    Json,
 };
-
-/// Wrapper for JSON extractors and responses supporting optional payloads with empty bodies.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Json<T>(pub T);
-
-impl<T> From<T> for Json<T> {
-    fn from(inner: T) -> Self {
-        Self(inner)
-    }
-}
-
-impl<T: Serialize> IntoResponse for Json<T> {
-    fn into_response(self) -> Response {
-        axum::Json(self.0).into_response()
-    }
-}
-
-impl<S, T> axum::extract::FromRequest<S> for Json<T>
-where
-    S: Send + Sync,
-    T: serde::de::DeserializeOwned,
-{
-    type Rejection = ApiError;
-
-    async fn from_request(
-        req: axum::extract::Request,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        let (_parts, body) = req.into_parts();
-        let bytes = axum::body::to_bytes(body, usize::MAX)
-            .await
-            .map_err(|e| ApiError::bad_request(format!("Failed to read request body: {e}")))?;
-
-        let trimmed = bytes.trim_ascii();
-        if trimmed.is_empty() {
-            if let Ok(val) = serde_json::from_str::<T>("null") {
-                return Ok(Json(val));
-            }
-        }
-
-        let val = serde_json::from_slice::<T>(&bytes)
-            .map_err(|e| ApiError::bad_request(format!("Invalid JSON payload: {e}")))?;
-        Ok(Json(val))
-    }
-}
 use std::sync::atomic::Ordering;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -458,13 +414,26 @@ pub async fn post_curate(
     if let Some(layers) = payload.layers {
         state.storage.update_staging_layers(&payload.id, layers)?;
     }
+    let primary_theme = themes
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("dungeon");
+
+    let fallback_description = || {
+        CaptionGenerator::generate_with_theme_str(
+            primary_theme,
+            &payload.tags,
+            candidate.title.as_deref(),
+        )
+    };
+
     let description = if let Some(desc) = payload
         .description
         .as_ref()
         .map(|d| d.trim())
         .filter(|d| !d.is_empty())
     {
-        Some(desc.to_string())
+        desc.to_string()
     } else if let Some(adapter) = state.openrouter_client() {
         match state.storage.get_staging_image(&payload.id) {
             Ok(bytes) => {
@@ -474,15 +443,15 @@ pub async fn post_curate(
                     .generate_battlemap_description(&bytes, mime, &themes, &payload.tags)
                     .await
                 {
-                    Ok(desc) if !desc.trim().is_empty() => Some(desc),
-                    Ok(_) => None,
+                    Ok(desc) if !desc.trim().is_empty() => desc,
+                    Ok(_) => fallback_description(),
                     Err(err) => {
                         tracing::warn!(
                             candidate_id = %payload.id,
                             error = %err,
-                            "Auto-generating description on curate failed; falling back to None"
+                            "Auto-generating description on curate failed; falling back to caption generator"
                         );
-                        None
+                        fallback_description()
                     }
                 }
             }
@@ -490,24 +459,26 @@ pub async fn post_curate(
                 tracing::warn!(
                     candidate_id = %payload.id,
                     error = %err,
-                    "Reading candidate image for description generation failed; falling back to None"
+                    "Reading candidate image for description generation failed; falling back to caption generator"
                 );
-                None
+                fallback_description()
             }
         }
     } else {
-        None
+        tracing::info!(
+            candidate_id = %payload.id,
+            "OpenRouter client not configured; falling back to caption generator"
+        );
+        fallback_description()
     };
 
-    let mut curated = CuratedMap::with_now(
+    let curated = CuratedMap::with_now(
         &payload.id,
         themes,
         payload.tags,
         dimensions,
-    );
-    if let Some(desc) = description {
-        curated = curated.with_description(desc);
-    }
+    )
+    .with_description(description);
 
     state.storage.curate_staging(&curated)?;
 
@@ -668,11 +639,19 @@ pub struct DescribeResponse {
 pub async fn post_describe_candidate(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(payload): Json<Option<DescribeRequest>>,
+    body: Bytes,
 ) -> Result<Json<DescribeResponse>, ApiError> {
     if id.trim().is_empty() {
         return Err(ApiError::bad_request("Candidate ID cannot be empty"));
     }
+
+    let req: DescribeRequest = if body.trim_ascii().is_empty() {
+        DescribeRequest::default()
+    } else {
+        serde_json::from_slice::<Option<DescribeRequest>>(&body)
+            .map_err(|e| ApiError::bad_request(format!("Invalid JSON payload: {e}")))?
+            .unwrap_or_default()
+    };
 
     // 1. Locate staging candidate
     let candidates = state.storage.list_staging()?;
@@ -687,7 +666,6 @@ pub async fn post_describe_candidate(
     let mime = detect_image_mime(&bytes, Some(&filename));
 
     // 3. Resolve themes and tags (prefer payload themes/tags, fallback to candidate tags/title)
-    let req = payload.unwrap_or_default();
     let mut themes = req.themes.unwrap_or_default();
     if themes.is_empty() {
         let cache = state.theme_suggestions_cache.read().await;

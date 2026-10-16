@@ -21,7 +21,10 @@ import {
   Settings,
   Sliders,
   Layers,
-  Grid3X3
+  Grid3X3,
+  Save,
+  Library,
+  Loader2
 } from 'lucide-react';
 import CostTracker from './CostTracker';
 
@@ -105,7 +108,14 @@ export default function Navbar({
   onDetectFeatures,
   isDetectingFeatures = false,
   featureCount = 0,
-  hasMap = false
+  hasMap = false,
+  currentView = 'studio',
+  onSetView,
+  onToggleView,
+  onSaveMap,
+  isSavingMap = false,
+  saveStatus = 'idle',
+  currentMapId = null
 }) {
   const fileInputRef = useRef(null);
   const modelDropdownRef = useRef(null);
@@ -204,13 +214,56 @@ export default function Navbar({
         </div>
       </div>
 
-      {/* Center Controls: Mode Toggle, Feature Detection & Model Picker */}
+      {/* Center Controls: View Switcher, Mode Toggle, Feature Detection & Model Picker */}
       <div className="flex items-center gap-2 shrink-0">
+        {/* View Switcher: Studio vs Library */}
+        <div className="flex items-center gap-0.5 bg-black/25 p-1 rounded-xl border border-white/[0.07]">
+          <button
+            type="button"
+            onClick={() => {
+              if (onSetView) onSetView('studio');
+              else if (onToggleView) onToggleView('studio');
+            }}
+            title="Studio View: Forge, edit, and play your map"
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+              currentView === 'studio'
+                ? 'bg-amber-500/20 text-amber-200 border border-amber-500/40 shadow-sm shadow-amber-950/50'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-transparent'
+            }`}
+          >
+            <Shield className={`w-3.5 h-3.5 ${currentView === 'studio' ? 'text-amber-400' : 'text-slate-500'}`} />
+            <span>Studio</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (onToggleView) onToggleView('library');
+              else if (onSetView) onSetView(currentView === 'library' ? 'studio' : 'library');
+            }}
+            title="Library View: Browse and load saved battlemaps (Shortcut: L)"
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+              currentView === 'library'
+                ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-500/40 shadow-sm shadow-cyan-950/50'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04] border border-transparent'
+            }`}
+          >
+            <Library className={`w-3.5 h-3.5 ${currentView === 'library' ? 'text-cyan-400' : 'text-slate-500'}`} />
+            <span>Library</span>
+          </button>
+        </div>
+
         {/* Mode Toggle & Tactical Features Pill */}
         <div className="flex items-center gap-0.5 bg-black/25 p-1 rounded-xl border border-white/[0.07]">
           <button
             type="button"
-            onClick={() => onSetMode && onSetMode('edit')}
+            onClick={() => {
+              if (currentView !== 'studio') {
+                onSetView?.('studio');
+                onToggleView?.('studio');
+              }
+              onSetMode?.('edit');
+            }}
             title="Edit Mode: Inspect, forge, and adjust interactive map features and regions"
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
               activeMode === 'edit'
@@ -224,7 +277,13 @@ export default function Navbar({
 
           <button
             type="button"
-            onClick={() => onSetMode && onSetMode('play')}
+            onClick={() => {
+              if (currentView !== 'studio') {
+                onSetView?.('studio');
+                onToggleView?.('studio');
+              }
+              onSetMode?.('play');
+            }}
             disabled={!hasMap}
             title={
               !hasMap
@@ -242,7 +301,6 @@ export default function Navbar({
             <Gamepad2 className={`w-3.5 h-3.5 ${activeMode === 'play' ? 'text-amber-400' : 'text-slate-500'}`} />
             <span>Play</span>
           </button>
-
           <span className="w-px h-3.5 bg-white/[0.08]" />
 
           <button
@@ -403,6 +461,41 @@ export default function Navbar({
         <div className="hidden 2xl:block">
           <CostTracker mapCost={mapCost} />
         </div>
+
+        {/* Save to Library Button (In Edit mode when hasMap is true) */}
+        {activeMode === 'edit' && hasMap && (
+          <button
+            type="button"
+            onClick={onSaveMap}
+            disabled={!hasMap || isSavingMap}
+            title={currentMapId ? "Save map changes to disk (Ctrl+S / Cmd+S)" : "Save map to disk (Ctrl+S / Cmd+S)"}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+              saveStatus === 'saved'
+                ? 'bg-emerald-500/20 text-emerald-200 border-emerald-500/40 shadow-sm shadow-emerald-950/50'
+                : isSavingMap
+                ? 'bg-cyan-500/20 text-cyan-200 border-cyan-500/40 shadow-sm shadow-cyan-950/50'
+                : 'bg-black/35 hover:bg-black/50 text-slate-200 hover:text-white border-white/[0.08] hover:border-amber-500/30 shadow-inner shadow-black/40'
+            } ${(!hasMap || isSavingMap) ? 'opacity-60 cursor-not-allowed' : ''}`}
+          >
+            {isSavingMap ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+                <span className="hidden sm:inline">Saving…</span>
+                <span className="sm:hidden">…</span>
+              </>
+            ) : saveStatus === 'saved' ? (
+              <>
+                <Check className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="text-emerald-300">Saved!</span>
+              </>
+            ) : (
+              <>
+                <Save className="w-3.5 h-3.5 text-amber-400" />
+                <span>Save</span>
+              </>
+            )}
+          </button>
+        )}
 
         <div className="flex items-center gap-0.5 bg-black/25 p-1 rounded-xl border border-white/[0.07]">
           <button onClick={onUndo} disabled={!canUndo} title="Undo (Ctrl+Z)" className="icon-btn p-1.5">
@@ -640,41 +733,69 @@ export default function Navbar({
                   <span>Project Files & Canvas</span>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-2">
                   <button
                     type="button"
                     onClick={() => {
-                      fileInputRef.current?.click();
+                      onSaveMap?.();
                       setIsSettingsOpen(false);
                     }}
-                    className="flex items-center gap-2 p-2 rounded-xl bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.08] text-slate-200 text-left transition cursor-pointer"
-                  >
-                    <Upload className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                    <div className="min-w-0">
-                      <div className="font-medium text-xs truncate">Load JSON</div>
-                      <div className="text-[10px] text-slate-500 truncate">Import project</div>
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onExportJson();
-                      setIsSettingsOpen(false);
-                    }}
-                    disabled={!hasMap}
-                    className={`flex items-center gap-2 p-2 rounded-xl border text-left transition ${
-                      hasMap
-                        ? 'bg-white/[0.03] hover:bg-white/[0.07] border-white/[0.08] text-slate-200 cursor-pointer'
+                    disabled={!hasMap || isSavingMap}
+                    title="Save map to disk (Ctrl+S / Cmd+S)"
+                    className={`w-full flex items-center justify-between p-2.5 rounded-xl border text-left transition ${
+                      hasMap && !isSavingMap
+                        ? 'bg-amber-500/10 hover:bg-amber-500/20 border-amber-500/30 text-amber-200 cursor-pointer'
                         : 'bg-white/[0.01] border-white/[0.04] text-slate-600 opacity-50 cursor-not-allowed'
                     }`}
                   >
-                    <FileJson className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                    <div className="min-w-0">
-                      <div className="font-medium text-xs truncate">Save JSON</div>
-                      <div className="text-[10px] text-slate-500 truncate">Export project</div>
+                    <div className="flex items-center gap-2">
+                      <Save className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      <div>
+                        <div className="font-medium text-xs">Save Map to Disk</div>
+                        <div className="text-[10px] text-slate-400">Save current map to library (Ctrl+S)</div>
+                      </div>
                     </div>
+                    {saveStatus === 'saved' && (
+                      <span className="text-[10px] font-mono text-emerald-400">Saved!</span>
+                    )}
                   </button>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        fileInputRef.current?.click();
+                        setIsSettingsOpen(false);
+                      }}
+                      className="flex items-center gap-2 p-2 rounded-xl bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.08] text-slate-200 text-left transition cursor-pointer"
+                    >
+                      <Upload className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      <div className="min-w-0">
+                        <div className="font-medium text-xs truncate">Load JSON</div>
+                        <div className="text-[10px] text-slate-500 truncate">Import project</div>
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onExportJson();
+                        setIsSettingsOpen(false);
+                      }}
+                      disabled={!hasMap}
+                      className={`flex items-center gap-2 p-2 rounded-xl border text-left transition ${
+                        hasMap
+                          ? 'bg-white/[0.03] hover:bg-white/[0.07] border-white/[0.08] text-slate-200 cursor-pointer'
+                          : 'bg-white/[0.01] border-white/[0.04] text-slate-600 opacity-50 cursor-not-allowed'
+                      }`}
+                    >
+                      <FileJson className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      <div className="min-w-0">
+                        <div className="font-medium text-xs truncate">Save JSON</div>
+                        <div className="text-[10px] text-slate-500 truncate">Export project</div>
+                      </div>
+                    </button>
+                  </div>
                 </div>
 
                 <button

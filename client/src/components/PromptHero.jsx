@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { Sparkles, Crop, Wand2, Layers, Clock, BookOpen } from 'lucide-react';
+import { Sparkles, Crop, Wand2, Layers, Clock, BookOpen, Library } from 'lucide-react';
 import { formatTimer } from '../utils/format';
 
 /**
@@ -13,7 +13,8 @@ export default function PromptHero({
   isGenerating,
   phaseText,
   elapsedSeconds,
-  onOpenWikiDrawer
+  onOpenWikiDrawer,
+  onOpenLibrary
 }) {
   const textareaRef = useRef(null);
 
@@ -110,6 +111,21 @@ export default function PromptHero({
             </button>
           </div>
         </div>
+
+        {onOpenLibrary && (
+          <div className="mt-4 flex flex-col sm:flex-row items-center justify-center gap-2 text-xs text-slate-400">
+            <span className="text-slate-500">Or choose from your saved battlemaps</span>
+            <button
+              type="button"
+              onClick={onOpenLibrary}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-white/[0.1] bg-white/[0.04] hover:bg-white/[0.08] hover:border-cyan-500/40 text-cyan-300 hover:text-cyan-200 transition-all font-medium cursor-pointer shadow-sm shadow-black/30"
+              title="Browse saved battlemaps in the Map Library"
+            >
+              <Library className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Browse Map Library</span>
+            </button>
+          </div>
+        )}
 
         <div className="mt-6 grid grid-cols-3 gap-2 text-left">
           {[

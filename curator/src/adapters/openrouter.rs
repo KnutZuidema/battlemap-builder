@@ -17,10 +17,12 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info, instrument};
 
 use crate::domain::{
-    build_battlemap_prompt, generate_benchmark_id, BenchmarkArchetype, BenchmarkMetadata,
-    BenchmarkModelSpec, BenchmarkResult, GenerationRequest, GenerationResponse, ModelApiType,
-    DEFAULT_VISION_MODEL, MODEL_GEMINI_31_FLASH, MODEL_GEMINI_31_FLASH_LITE, MODEL_MUSE,
-    MODEL_SEEDREAM_50_FLASH, SYSTEM_INSTRUCTION_SUGGEST_THEMES, USER_PROMPT_SUGGEST_THEMES,
+    build_battlemap_prompt, build_description_user_prompt, generate_benchmark_id,
+    BenchmarkArchetype, BenchmarkMetadata, BenchmarkModelSpec, BenchmarkResult,
+    DEFAULT_DESCRIPTION_MODEL, DEFAULT_VISION_MODEL, GenerationRequest, GenerationResponse,
+    ModelApiType, MODEL_GEMINI_31_FLASH, MODEL_GEMINI_31_FLASH_LITE, MODEL_MUSE,
+    MODEL_SEEDREAM_50_FLASH, SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION,
+    SYSTEM_INSTRUCTION_SUGGEST_THEMES, USER_PROMPT_SUGGEST_THEMES,
 };
 use crate::ports::model_engine::{ModelEngine, ModelEngineError};
 
@@ -303,6 +305,100 @@ impl OpenRouterAdapter {
 
         let suggestions = parse_theme_suggestions(&content_str);
         Ok(suggestions)
+    }
+
+    /// Generates a rich, tangible battlemap description from an image and assigned themes/tags
+    /// using Gemini 3.5 Flash Lite via OpenRouter.
+    pub async fn generate_battlemap_description(
+        &self,
+        image_bytes: &[u8],
+        mime_type: &str,
+        themes: &[String],
+        tags: &[String],
+    ) -> Result<String, ModelEngineError> {
+        if self.inner.api_key.trim().is_empty() {
+            return Err(ModelEngineError::Auth("API key is empty".to_string()));
+        }
+
+        let _permit = self.inner.semaphore.acquire().await.map_err(|e| {
+            ModelEngineError::WorkerPool(format!("Failed to acquire worker pool permit: {e}"))
+        })?;
+
+        let model = std::env::var("CURATOR_DESCRIPTION_MODEL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                std::env::var("CURATOR_VISION_MODEL")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .unwrap_or_else(|| DEFAULT_DESCRIPTION_MODEL.to_string());
+
+        let endpoint = self.chat_endpoint_url();
+        let b64_data = BASE64_STANDARD.encode(image_bytes);
+        let data_url = format!("data:{mime_type};base64,{b64_data}");
+        let user_prompt = build_description_user_prompt(themes, tags);
+
+        let body = json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION,
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": user_prompt,
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": data_url,
+                            },
+                        }
+                    ],
+                }
+            ],
+        });
+
+        let res = self
+            .inner
+            .client
+            .post(&endpoint)
+            .header("Authorization", format!("Bearer {}", self.inner.api_key))
+            .header("Content-Type", "application/json")
+            .header("X-Title", APPLICATION_TITLE)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = res.status();
+        if !status.is_success() {
+            let err_text = res.text().await.unwrap_or_default();
+            return Err(classify_http_error(status.as_u16(), &err_text));
+        }
+
+        let json: Value = res.json().await.map_err(|e| ModelEngineError::Api {
+            status: status.as_u16(),
+            message: format!("Failed to parse response JSON: {e}"),
+        })?;
+
+        let content_str = if let Some(s) = json.pointer("/choices/0/message/content").and_then(|v| v.as_str()) {
+            s.to_string()
+        } else if let Some(arr) = json.pointer("/choices/0/message/content").and_then(|v| v.as_array()) {
+            arr.iter()
+                .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            String::new()
+        };
+
+        let description = clean_description_text(&content_str);
+        Ok(description)
     }
 }
 
@@ -1003,6 +1099,28 @@ pub fn parse_theme_suggestions(content: &str) -> Vec<String> {
     clean_tags(candidate_tags)
 }
 
+/// Trims whitespace, markdown code fences, and surrounding quotes from model description output.
+pub fn clean_description_text(content: &str) -> String {
+    let mut text = content.trim();
+
+    // Strip markdown code fences if model enclosed output in ``` ... ```
+    if let Some(stripped) = text.strip_prefix("```") {
+        let inner = stripped.split_once('\n').map(|(_, rest)| rest).unwrap_or(stripped);
+        text = inner.strip_suffix("```").unwrap_or(inner).trim();
+    }
+
+    // Strip surrounding quotes (double quotes, single quotes, or typographical quotes)
+    if let Some(stripped) = text.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        text = stripped.trim();
+    } else if let Some(stripped) = text.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+        text = stripped.trim();
+    } else if let Some(stripped) = text.strip_prefix('“').and_then(|s| s.strip_suffix('”')) {
+        text = stripped.trim();
+    }
+
+    text.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1602,5 +1720,167 @@ mod tests {
         assert!(url.starts_with("data:image/png;base64,"));
 
         server_task.abort();
+    }
+
+    #[test]
+    fn test_clean_description_text_variations() {
+        assert_eq!(
+            clean_description_text("  A damp stone crypt with iron braziers.  "),
+            "A damp stone crypt with iron braziers."
+        );
+        assert_eq!(
+            clean_description_text("\"A damp stone crypt with iron braziers.\""),
+            "A damp stone crypt with iron braziers."
+        );
+        assert_eq!(
+            clean_description_text("'A damp stone crypt with iron braziers.'"),
+            "A damp stone crypt with iron braziers."
+        );
+        assert_eq!(
+            clean_description_text("“A damp stone crypt with iron braziers.”"),
+            "A damp stone crypt with iron braziers."
+        );
+        assert_eq!(
+            clean_description_text("```\nA damp stone crypt with iron braziers.\n```"),
+            "A damp stone crypt with iron braziers."
+        );
+        assert_eq!(
+            clean_description_text("```text\n\"A damp stone crypt with iron braziers.\"\n```"),
+            "A damp stone crypt with iron braziers."
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_battlemap_description_mock_server() {
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tokio::net::TcpListener;
+
+        let last_payload = Arc::new(tokio::sync::Mutex::new(Value::Null));
+        let lp = last_payload.clone();
+
+        let expected_desc = "A damp subterranean dungeon crypt with rough-hewn limestone walls and cracked flagstone floors. Iron braziers cast flickering amber light against heavy oak doors and rotting timber support pillars, while stagnant greenish water pools along the lower sunken floor.";
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let lp = lp.clone();
+                let desc = expected_desc;
+                async move {
+                    *lp.lock().await = body;
+                    Json(json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": format!("\"{desc}\"")
+                                }
+                            }
+                        ]
+                    }))
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let adapter = OpenRouterAdapter::with_config(
+            "test_key",
+            format!("http://127.0.0.1:{}", addr.port()),
+            2,
+        );
+
+        let fake_image = b"fake-png-data";
+        let themes = vec!["Dungeon".to_string(), "Crypt".to_string()];
+        let tags = vec!["flooded".to_string()];
+
+        let result = adapter
+            .generate_battlemap_description(fake_image, "image/png", &themes, &tags)
+            .await
+            .expect("generate_battlemap_description");
+
+        assert_eq!(result, expected_desc);
+
+        let recorded = last_payload.lock().await.clone();
+        assert_eq!(recorded["model"], "google/gemini-3.5-flash-lite");
+
+        let messages = recorded["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION);
+        assert_eq!(messages[1]["role"], "user");
+
+        let user_parts = messages[1]["content"].as_array().unwrap();
+        assert_eq!(user_parts[0]["type"], "text");
+        let prompt_text = user_parts[0]["text"].as_str().unwrap();
+        assert!(prompt_text.contains("Assigned themes: Dungeon, Crypt."));
+        assert!(prompt_text.contains("Identified tags: flooded."));
+        assert_eq!(user_parts[1]["type"], "image_url");
+        let url = user_parts[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"));
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_generate_battlemap_description_array_content() {
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tokio::net::TcpListener;
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|Json(_body): Json<Value>| async move {
+                Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "Rough stone walls and flickering braziers."
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }))
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let adapter = OpenRouterAdapter::with_config(
+            "test_key",
+            format!("http://127.0.0.1:{}", addr.port()),
+            2,
+        );
+
+        let result = adapter
+            .generate_battlemap_description(b"test", "image/png", &[], &[])
+            .await
+            .expect("parse array content");
+
+        assert_eq!(result, "Rough stone walls and flickering braziers.");
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_generate_battlemap_description_empty_api_key() {
+        let adapter = OpenRouterAdapter::new("");
+        let err = adapter
+            .generate_battlemap_description(b"bytes", "image/png", &[], &[])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ModelEngineError::Auth(_)));
     }
 }

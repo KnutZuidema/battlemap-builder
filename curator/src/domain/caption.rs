@@ -142,10 +142,26 @@ impl CaptionGenerator {
         Self::generate_with_theme_str(theme.as_str(), tags, prompt_or_title)
     }
 
+    /// Generates a standardized LoRA caption string adhering to Kohya / AI-Toolkit format from a theme string, tags, and description.
+    pub fn generate_with_description(
+        theme_str: &str,
+        tags: &[String],
+        description: Option<&str>,
+    ) -> String {
+        Self::generate_with_theme_str(theme_str, tags, description)
+    }
+
     /// Convenience helper to generate caption for an approved `CuratedMap` and optional `Candidate`.
+    ///
+    /// If `map.description` is present and non-empty, it is used as the descriptive text source;
+    /// otherwise falls back to `candidate.title`.
     pub fn generate_for_curated(map: &CuratedMap, candidate: Option<&Candidate>) -> String {
-        let title_or_prompt = candidate.and_then(|c| c.title.as_deref());
-        Self::generate_with_theme_str(map.primary_theme(), &map.tags, title_or_prompt)
+        let text_source = map
+            .description
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| candidate.and_then(|c| c.title.as_deref()));
+        Self::generate_with_theme_str(map.primary_theme(), &map.tags, text_source)
     }
 
     /// Sanitizes an individual tag or short fragment:
@@ -185,6 +201,7 @@ pub fn generate_lora_caption(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::Source;
 
     #[test]
     fn test_caption_generator_format_and_prefix() {
@@ -226,5 +243,61 @@ mod tests {
         assert!(caption.contains("torches"));
         assert!(caption.contains("stone walls"));
         assert!(caption.contains("timber walls"));
+    }
+
+    #[test]
+    fn test_caption_generator_generate_with_description() {
+        let tags = vec!["boss-room".to_string()];
+        let description = "Ancient crypt with carved limestone sarcophagus, burning braziers, and solid timber doors.";
+        let caption = CaptionGenerator::generate_with_description("dungeon", &tags, Some(description));
+
+        assert!(caption.starts_with(LORA_CAPTION_PREFIX));
+        assert!(caption.contains("dungeon"));
+        assert!(caption.contains("boss-room"));
+        assert!(caption.contains("sarcophagus"));
+        assert!(caption.contains("doors"));
+
+        let no_desc = CaptionGenerator::generate_with_description("cave", &[], None);
+        assert_eq!(
+            no_desc,
+            "ttrpg battlemap, flat 2D plan view, perpendicular orthographic camera, poché cut walls, strictly gridless, cave"
+        );
+    }
+
+    #[test]
+    fn test_caption_generator_generate_for_curated_prioritizes_description() {
+        let mut map = CuratedMap::with_now(
+            "curated_test_map",
+            vec!["dungeon".to_string()],
+            vec!["crypt".to_string()],
+            (2048, 2048),
+        );
+
+        // 1. Map without description and no candidate
+        let cap_plain = CaptionGenerator::generate_for_curated(&map, None);
+        assert!(cap_plain.starts_with(LORA_CAPTION_PREFIX));
+        assert!(cap_plain.contains("dungeon"));
+        assert!(cap_plain.contains("crypt"));
+
+        // 2. Map without description, candidate present
+        let candidate = Candidate::with_now("cand_1", Source::Reddit, "raw.png", (2048, 2048))
+            .with_title("Wooden bridge over river [50x50]");
+        let cap_cand = CaptionGenerator::generate_for_curated(&map, Some(&candidate));
+        assert!(cap_cand.contains("bridge"));
+        assert!(cap_cand.contains("water stream"));
+
+        // 3. Map with description present -> description takes priority over candidate title
+        map = map.with_description("Granite throne room with stone pillars and ornate iron altar.");
+        let cap_desc = CaptionGenerator::generate_for_curated(&map, Some(&candidate));
+        assert!(cap_desc.contains("throne"));
+        assert!(cap_desc.contains("pillars"));
+        assert!(cap_desc.contains("altar"));
+        assert!(!cap_desc.contains("bridge"));
+
+        // 4. Map with description and no candidate
+        let cap_desc_no_cand = CaptionGenerator::generate_for_curated(&map, None);
+        assert!(cap_desc_no_cand.contains("throne"));
+        assert!(cap_desc_no_cand.contains("pillars"));
+        assert!(cap_desc_no_cand.contains("altar"));
     }
 }

@@ -64,6 +64,63 @@ Do not include any explanation, markdown, or extra commentary.";
 pub const USER_PROMPT_SUGGEST_THEMES: &str =
     "Identify 3 to 5 focused TTRPG battlemap theme and environment tags for this image. Return strictly a JSON array of strings.";
 
+
+/// Default description vision model used for generating rich, tangible battlemap descriptions.
+pub const DEFAULT_DESCRIPTION_MODEL: &str = "google/gemini-3.5-flash-lite";
+
+/// System instruction for the vision model generating rich, tangible battlemap descriptions.
+///
+/// Focuses strictly on physical environment and tangible map details inspired by DungeonForge prompts:
+/// - Room architecture, construction materials, masonry, stonework, woodwork, pillars, doors, furnishings.
+/// - Environmental hazards, terrain obstacles, water, elevation differences, tactical cover.
+/// - Lighting sources (braziers, torches, glowing moss, luminescence) and atmospheric floor textures.
+/// - Strict negative constraints: NO camera angles ("top-down", "2D flat view", "orthographic", "poché"),
+///   NO art style meta-prompts, NO game mechanics, statistics, or grid square counts.
+/// - Length: dense, evocative 40–90 word description. Plain text only, no markdown formatting or commentary.
+pub const SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION: &str = "You are an expert tabletop RPG cartographer and DungeonForge prompt designer. \
+Analyze the provided battlemap image and describe rich, tangible, and tactically evocative physical map details.
+
+Focus strictly on the physical environment and tangible map details:
+- Room architecture, construction materials, masonry, stonework, woodwork, pillars, doors, and furnishings.
+- Environmental hazards, terrain obstacles, water, elevation differences, and tactical cover.
+- Visible lighting sources (braziers, torches, glowing moss, luminescence) and atmospheric floor textures.
+
+Strict Negative Constraints:
+- Absolutely NO camera angles or perspective directives (do NOT use \"top-down\", \"2D flat view\", \"orthographic\", or \"poché\") — camera and perspective are handled by the renderer.
+- Absolutely NO art style meta-prompts (e.g. \"digital art\", \"hand-painted\", \"photorealistic\").
+- Absolutely NO game mechanics, statistics, or grid square counts.
+
+Output Directives:
+- Provide a dense, evocative 40–90 word description.
+- Plain text only — NO markdown formatting, NO bullet points, NO title, and NO conversational commentary.";
+
+/// Formats assigned themes and tags into a user prompt for battlemap description generation.
+pub fn build_description_user_prompt(themes: &[String], tags: &[String]) -> String {
+    let mut parts = Vec::new();
+    parts.push("Analyze this battlemap image and describe its tangible physical environment.".to_string());
+
+    let clean_themes: Vec<&str> = themes
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !clean_themes.is_empty() {
+        parts.push(format!("Assigned themes: {}.", clean_themes.join(", ")));
+    }
+
+    let clean_tags: Vec<&str> = tags
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !clean_tags.is_empty() {
+        parts.push(format!("Identified tags: {}.", clean_tags.join(", ")));
+    }
+
+    parts.push("Return a dense, evocative 40–90 word description in plain text only. Focus on architecture, construction materials, furnishings, terrain hazards, lighting sources, and tactical cover without mentioning perspective, art styles, or game mechanics.".to_string());
+
+    parts.join(" ")
+}
 /// Default architectural prompt details used when user input is empty or whitespace.
 pub const DEFAULT_BATTLEMAP_PROMPT_DETAILS: &str =
     "A detailed battle map with rooms, corridors, lighting, and environmental hazards";
@@ -281,5 +338,57 @@ mod tests {
         let img: ReferenceImage = serde_json::from_str(json_seq).expect("deserialize seq");
         assert_eq!(img.label, "seq");
         assert_eq!(img.data, vec![0, 1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn test_system_instruction_generate_description_constraints() {
+        assert_eq!(DEFAULT_DESCRIPTION_MODEL, "google/gemini-3.5-flash-lite");
+        assert!(SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION.contains("You are an expert tabletop RPG cartographer and DungeonForge prompt designer."));
+        // Tangible physical environment details
+        assert!(SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION.contains("Room architecture, construction materials, masonry, stonework, woodwork, pillars, doors, and furnishings."));
+        assert!(SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION.contains("Environmental hazards, terrain obstacles, water, elevation differences, and tactical cover."));
+        assert!(SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION.contains("Visible lighting sources (braziers, torches, glowing moss, luminescence)"));
+        // Strict negative constraints
+        assert!(SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION.contains("Strict Negative Constraints:"));
+        assert!(SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION.contains("top-down"));
+        assert!(SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION.contains("2D flat view"));
+        assert!(SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION.contains("orthographic"));
+        assert!(SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION.contains("poché"));
+        assert!(SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION.contains("NO art style meta-prompts"));
+        assert!(SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION.contains("NO game mechanics, statistics, or grid square counts"));
+        // Length & formatting
+        assert!(SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION.contains("40–90 word"));
+        assert!(SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION.contains("Plain text only"));
+        assert!(SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION.contains("NO markdown formatting"));
+    }
+
+    #[test]
+    fn test_build_description_user_prompt_with_themes_and_tags() {
+        let themes = vec!["Dungeon".to_string(), "Crypt".to_string()];
+        let tags = vec!["flooded".to_string(), "iron-bars".to_string()];
+        let prompt = build_description_user_prompt(&themes, &tags);
+
+        assert!(prompt.contains("Assigned themes: Dungeon, Crypt."));
+        assert!(prompt.contains("Identified tags: flooded, iron-bars."));
+        assert!(prompt.contains("40–90 word description"));
+        assert!(prompt.contains("without mentioning perspective, art styles, or game mechanics"));
+    }
+
+    #[test]
+    fn test_build_description_user_prompt_empty_and_whitespace() {
+        let empty_themes = Vec::new();
+        let empty_tags = Vec::new();
+        let prompt = build_description_user_prompt(&empty_themes, &empty_tags);
+
+        assert!(!prompt.contains("Assigned themes:"));
+        assert!(!prompt.contains("Identified tags:"));
+        assert!(prompt.contains("Analyze this battlemap image"));
+        assert!(prompt.contains("40–90 word description"));
+
+        let whitespace_themes = vec!["   ".to_string(), "".to_string()];
+        let whitespace_tags = vec!["\t".to_string()];
+        let ws_prompt = build_description_user_prompt(&whitespace_themes, &whitespace_tags);
+        assert!(!ws_prompt.contains("Assigned themes:"));
+        assert!(!ws_prompt.contains("Identified tags:"));
     }
 }

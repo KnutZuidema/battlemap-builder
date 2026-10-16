@@ -66,6 +66,18 @@
         librarySearchQuery: "",
         curatedMaps: [],
         isExporting: false,
+        // Interactive Decision Modal (Issue #102)
+        decisionModalOpen: false,
+    };
+
+    // Curate Decision Modal Flow State
+    const decisionState = {
+        isOpen: false,
+        candidate: null,
+        cardIndex: 0,
+        acceptedTags: [],
+        cardDecisions: [],
+        step: "cards",
     };
 
     // Constants
@@ -155,6 +167,16 @@
     let triageViewport, libraryViewport;
     let librarySearchInput, libraryTagPills, libraryGrid, libraryEmpty, libraryCountBadge;
     let btnExportLora, btnExportLabel, btnRefreshLibrary, btnSwitchToTriage;
+
+    // Curate Decision Modal DOM Elements (Issue #102)
+    let curateDecisionModal;
+    let decisionProgressBadge, decisionOfflineBadge;
+    let decisionCardStep, decisionFocalCard, decisionCardTag;
+    let btnDecisionReject, btnDecisionUndo, btnDecisionAccept;
+    let decisionCustomStep, decisionOfflineNote, decisionTagInput, btnAddCustomTag;
+    let decisionAutocompleteList, decisionValidationError;
+    let decisionAcceptedTags;
+    let btnCloseDecisionModal, btnCancelDecision, btnFinishDecision;
 
     // ==========================================================================
     // Initialization & Bootstrap
@@ -324,6 +346,27 @@
         btnExportLabel = document.getElementById("btn-export-label");
         btnRefreshLibrary = document.getElementById("btn-refresh-library");
         btnSwitchToTriage = document.getElementById("btn-switch-to-triage");
+
+        // Curate Decision Modal Elements (Issue #102)
+        curateDecisionModal = document.getElementById("curate-decision-modal");
+        decisionProgressBadge = document.getElementById("decision-progress-badge");
+        decisionOfflineBadge = document.getElementById("decision-offline-badge");
+        decisionCardStep = document.getElementById("decision-card-step");
+        decisionFocalCard = document.getElementById("decision-focal-card");
+        decisionCardTag = document.getElementById("decision-card-tag");
+        btnDecisionReject = document.getElementById("btn-decision-reject");
+        btnDecisionUndo = document.getElementById("btn-decision-undo");
+        btnDecisionAccept = document.getElementById("btn-decision-accept");
+        decisionCustomStep = document.getElementById("decision-custom-step");
+        decisionOfflineNote = document.getElementById("decision-offline-note");
+        decisionTagInput = document.getElementById("decision-tag-input");
+        btnAddCustomTag = document.getElementById("btn-add-custom-tag");
+        decisionAutocompleteList = document.getElementById("decision-autocomplete-list");
+        decisionValidationError = document.getElementById("decision-validation-error");
+        decisionAcceptedTags = document.getElementById("decision-accepted-tags");
+        btnCloseDecisionModal = document.getElementById("btn-close-decision-modal");
+        btnCancelDecision = document.getElementById("btn-cancel-decision");
+        btnFinishDecision = document.getElementById("btn-finish-decision");
     }
 
     // ==========================================================================
@@ -639,6 +682,7 @@
         state.currentIndex = index;
         state.currentLayerIndex = 0;
         const candidate = state.candidates[index];
+        fetchThemeSuggestions(candidate);
         if (candidateGridSettings.has(candidate.id)) {
             const saved = candidateGridSettings.get(candidate.id);
             state.gridSize = saved.size;
@@ -724,6 +768,7 @@
             const nextIdx = state.currentIndex + offset;
             if (nextIdx < state.candidates.length) {
                 const nextCand = state.candidates[nextIdx];
+                fetchThemeSuggestions(nextCand);
                 const layers = getCandidateLayers(nextCand);
                 layers.forEach((l, idx) => {
                     const key = `${nextCand.id}_layer_${idx}`;
@@ -1326,7 +1371,44 @@
     // Curation & Rejection Actions
     // ==========================================================================
 
-    async function curateCurrentCandidate() {
+    /**
+     * Proactively pre-fetches AI vision theme suggestions for candidate in background.
+     * Caches suggestions on candidate._themeSuggestions or flags candidate._suggestionsOffline.
+     */
+    function fetchThemeSuggestions(candidate) {
+        if (!candidate || candidate._themeSuggestions !== undefined || candidate._fetchingThemeSuggestions) {
+            return Promise.resolve(candidate ? (candidate._themeSuggestions || []) : []);
+        }
+
+        candidate._fetchingThemeSuggestions = true;
+        return fetch("/api/staging/" + encodeURIComponent(candidate.id) + "/suggest-themes", {
+            method: "POST",
+        })
+            .then((res) => {
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return res.json();
+            })
+            .then((data) => {
+                candidate._themeSuggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
+                candidate._suggestionsOffline = false;
+                return candidate._themeSuggestions;
+            })
+            .catch((err) => {
+                console.warn(`Vision theme suggestions offline/failed for candidate ${candidate.id}:`, err);
+                candidate._themeSuggestions = [];
+                candidate._suggestionsOffline = true;
+                return [];
+            })
+            .finally(() => {
+                candidate._fetchingThemeSuggestions = false;
+            });
+    }
+
+    /**
+     * Opens the interactive curate decision modal with vision suggestion cards
+     * and custom tag input workflow.
+     */
+    async function openCurateDecisionModal() {
         exitLabelingMode();
         if (state.isSubmitting || state.currentIndex < 0 || state.currentIndex >= state.candidates.length) {
             return;
@@ -1360,15 +1442,415 @@
             return;
         }
 
+        // If suggestions are still being fetched, wait for them
+        if (candidate._themeSuggestions === undefined && !candidate._suggestionsOffline) {
+            await fetchThemeSuggestions(candidate);
+        }
+
+        decisionState.isOpen = true;
+        state.decisionModalOpen = true;
+        decisionState.candidate = candidate;
+        decisionState.cardIndex = 0;
+        decisionState.acceptedTags = [];
+        decisionState.cardDecisions = [];
+
+        if (curateDecisionModal) {
+            curateDecisionModal.classList.remove("hidden");
+        }
+        if (decisionValidationError) {
+            decisionValidationError.classList.add("hidden");
+        }
+
+        const suggestions = candidate._themeSuggestions || [];
+        if (suggestions.length > 0) {
+            decisionState.step = "cards";
+            if (decisionOfflineBadge) decisionOfflineBadge.classList.add("hidden");
+            if (decisionOfflineNote) decisionOfflineNote.classList.add("hidden");
+            renderDecisionCard();
+        } else {
+            // No suggestions or offline: directly show custom step with offline indicator
+            if (candidate._suggestionsOffline) {
+                if (decisionOfflineBadge) decisionOfflineBadge.classList.remove("hidden");
+                if (decisionOfflineNote) decisionOfflineNote.classList.remove("hidden");
+            } else {
+                if (decisionOfflineBadge) decisionOfflineBadge.classList.add("hidden");
+                if (decisionOfflineNote) decisionOfflineNote.classList.add("hidden");
+            }
+            transitionToCustomStep();
+        }
+    }
+
+    function closeCurateDecisionModal() {
+        decisionState.isOpen = false;
+        state.decisionModalOpen = false;
+        if (curateDecisionModal) {
+            curateDecisionModal.classList.add("hidden");
+        }
+        decisionState.candidate = null;
+        decisionState.cardIndex = 0;
+        decisionState.acceptedTags = [];
+        decisionState.cardDecisions = [];
+        decisionState.step = "cards";
+    }
+
+    function renderDecisionCard() {
+        const suggestions = decisionState.candidate?._themeSuggestions || [];
+        if (decisionState.cardIndex >= suggestions.length) {
+            transitionToCustomStep();
+            return;
+        }
+
+        decisionState.step = "cards";
+        if (decisionCardStep) decisionCardStep.classList.remove("hidden");
+        if (decisionCustomStep) decisionCustomStep.classList.add("hidden");
+
+        const currentTag = suggestions[decisionState.cardIndex];
+        if (decisionCardTag) {
+            decisionCardTag.textContent = currentTag;
+        }
+        if (decisionProgressBadge) {
+            decisionProgressBadge.classList.remove("hidden");
+            decisionProgressBadge.textContent = `Suggestion ${decisionState.cardIndex + 1} of ${suggestions.length}`;
+        }
+        if (btnDecisionUndo) {
+            btnDecisionUndo.disabled = (decisionState.cardIndex === 0);
+        }
+
+        renderAcceptedTags();
+    }
+
+    function handleDecisionReject() {
+        if (decisionState.step !== "cards") return;
+        const suggestions = decisionState.candidate?._themeSuggestions || [];
+        if (decisionState.cardIndex >= suggestions.length) return;
+        const tag = suggestions[decisionState.cardIndex];
+
+        decisionState.cardDecisions[decisionState.cardIndex] = { suggestion: tag, accepted: false };
+        removeAcceptedTag(tag);
+
+        decisionState.cardIndex++;
+        renderDecisionCard();
+    }
+
+    function handleDecisionAccept() {
+        if (decisionState.step !== "cards") return;
+        const suggestions = decisionState.candidate?._themeSuggestions || [];
+        if (decisionState.cardIndex >= suggestions.length) return;
+        const tag = suggestions[decisionState.cardIndex];
+
+        decisionState.cardDecisions[decisionState.cardIndex] = { suggestion: tag, accepted: true };
+        addAcceptedTag(tag);
+
+        decisionState.cardIndex++;
+        renderDecisionCard();
+    }
+
+    function handleDecisionUndo() {
+        if (decisionState.cardIndex > 0) {
+            decisionState.cardIndex--;
+            const prev = decisionState.cardDecisions[decisionState.cardIndex];
+            if (prev && prev.accepted) {
+                removeAcceptedTag(prev.suggestion);
+            }
+            delete decisionState.cardDecisions[decisionState.cardIndex];
+            renderDecisionCard();
+        }
+    }
+
+    function transitionToCustomStep() {
+        decisionState.step = "custom";
+        if (decisionCardStep) decisionCardStep.classList.add("hidden");
+        if (decisionCustomStep) decisionCustomStep.classList.remove("hidden");
+
+        const suggestions = decisionState.candidate?._themeSuggestions || [];
+        if (decisionProgressBadge) {
+            if (suggestions.length > 0) {
+                decisionProgressBadge.classList.remove("hidden");
+                decisionProgressBadge.textContent = "Custom Tags";
+            } else {
+                decisionProgressBadge.classList.add("hidden");
+            }
+        }
+        if (decisionTagInput) {
+            decisionTagInput.value = "";
+            setTimeout(() => decisionTagInput.focus(), 50);
+        }
+
+        renderAutocompletePills("");
+        renderAcceptedTags();
+    }
+
+    function getKnownDatasetTags() {
+        const tagMap = new Map();
+        const defaultThemes = ["Dungeon", "Cave", "Tavern", "Wilderness", "Ruins", "Urban", "SciFi", "Building"];
+        for (const t of defaultThemes) {
+            tagMap.set(t.toLowerCase(), t);
+        }
+
+        if (state.curatedMaps && Array.isArray(state.curatedMaps)) {
+            for (const map of state.curatedMaps) {
+                const themes = (map.themes && map.themes.length > 0)
+                    ? map.themes
+                    : (map.theme ? [map.theme] : []);
+                const tags = map.tags || [];
+                for (const t of themes) {
+                    if (t && t.trim()) tagMap.set(t.trim().toLowerCase(), t.trim());
+                }
+                for (const t of tags) {
+                    if (t && t.trim()) tagMap.set(t.trim().toLowerCase(), t.trim());
+                }
+            }
+        }
+
+        if (state.candidates && Array.isArray(state.candidates)) {
+            for (const c of state.candidates) {
+                const themes = (c.themes && c.themes.length > 0)
+                    ? c.themes
+                    : (c.theme ? [c.theme] : []);
+                const tags = c.tags || [];
+                for (const t of themes) {
+                    if (t && t.trim()) tagMap.set(t.trim().toLowerCase(), t.trim());
+                }
+                for (const t of tags) {
+                    if (t && t.trim()) tagMap.set(t.trim().toLowerCase(), t.trim());
+                }
+            }
+        }
+
+        return Array.from(tagMap.values());
+    }
+
+    function renderAutocompletePills(query) {
+        if (!decisionAutocompleteList) return;
+        decisionAutocompleteList.innerHTML = "";
+
+        const allTags = getKnownDatasetTags();
+        const cleanQuery = (query || "").trim().toLowerCase();
+
+        let matches = [];
+        if (cleanQuery.length > 0) {
+            matches = allTags.filter((t) => {
+                const lower = t.toLowerCase();
+                return lower.includes(cleanQuery) && !hasAcceptedTag(lower);
+            });
+        } else {
+            // Show canonical defaults that aren't yet accepted
+            const defaults = ["Dungeon", "Cave", "Tavern", "Wilderness", "Ruins", "Urban", "SciFi", "Building"];
+            matches = defaults.filter((t) => !hasAcceptedTag(t));
+        }
+
+        // Limit to 8 pills to keep modal uncluttered
+        const displayMatches = matches.slice(0, 8);
+        for (const tag of displayMatches) {
+            const pill = document.createElement("button");
+            pill.type = "button";
+            pill.className = "autocomplete-pill";
+            pill.dataset.tag = tag;
+            pill.textContent = tag;
+            pill.addEventListener("click", () => {
+                addAcceptedTag(tag);
+                if (decisionTagInput) {
+                    decisionTagInput.value = "";
+                    decisionTagInput.focus();
+                }
+                renderAcceptedTags();
+                renderAutocompletePills("");
+            });
+            decisionAutocompleteList.appendChild(pill);
+        }
+    }
+
+    function hasAcceptedTag(tag) {
+        const lower = tag.trim().toLowerCase();
+        return decisionState.acceptedTags.some((t) => t.toLowerCase() === lower);
+    }
+
+    function addAcceptedTag(tag) {
+        const trimmed = tag.trim();
+        if (!trimmed) return;
+        if (!hasAcceptedTag(trimmed)) {
+            decisionState.acceptedTags.push(trimmed);
+            if (decisionValidationError) {
+                decisionValidationError.classList.add("hidden");
+            }
+        }
+    }
+
+    function removeAcceptedTag(tag) {
+        const lower = tag.trim().toLowerCase();
+        decisionState.acceptedTags = decisionState.acceptedTags.filter(
+            (t) => t.toLowerCase() !== lower
+        );
+    }
+
+    function renderAcceptedTags() {
+        if (!decisionAcceptedTags) return;
+        decisionAcceptedTags.innerHTML = "";
+
+         if (decisionState.acceptedTags.length === 0) {
+            const hint = document.createElement("span");
+            hint.className = "decision-empty-tags-hint";
+            hint.textContent = "No tags accepted yet";
+            decisionAcceptedTags.appendChild(hint);
+            return;
+        }
+
+        for (const tag of decisionState.acceptedTags) {
+            const chip = document.createElement("span");
+            chip.className = "tag-chip";
+            chip.dataset.tag = tag;
+
+            const label = document.createElement("span");
+            label.textContent = tag;
+            chip.appendChild(label);
+
+            const btnRemove = document.createElement("button");
+            btnRemove.type = "button";
+            btnRemove.className = "btn-remove-tag";
+            btnRemove.setAttribute("aria-label", `Remove ${tag}`);
+            btnRemove.textContent = "✕";
+            btnRemove.addEventListener("click", (e) => {
+                e.stopPropagation();
+                removeAcceptedTag(tag);
+                renderAcceptedTags();
+                if (decisionState.step === "custom" && decisionTagInput) {
+                    renderAutocompletePills(decisionTagInput.value.trim());
+                }
+            });
+            chip.appendChild(btnRemove);
+
+            decisionAcceptedTags.appendChild(chip);
+        }
+    }
+
+    function onDecisionTagInput(e) {
+        const query = decisionTagInput ? decisionTagInput.value.trim() : "";
+        renderAutocompletePills(query);
+        if (decisionValidationError) {
+            decisionValidationError.classList.add("hidden");
+        }
+    }
+
+    function onDecisionTagInputKeydown(e) {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            handleCustomTagInputEnter();
+            return;
+        }
+
+        if (e.key === "Tab") {
+            const firstPill = decisionAutocompleteList?.querySelector(".autocomplete-pill");
+            if (firstPill && firstPill.dataset.tag) {
+                e.preventDefault();
+                addAcceptedTag(firstPill.dataset.tag);
+                if (decisionTagInput) {
+                    decisionTagInput.value = "";
+                    decisionTagInput.focus();
+                }
+                renderAcceptedTags();
+                renderAutocompletePills("");
+            }
+            return;
+        }
+
+        if (e.key === "Backspace" || e.key === "ArrowUp" || e.key === "Up") {
+            if (decisionTagInput && decisionTagInput.value === "") {
+                const suggestions = decisionState.candidate?._themeSuggestions || [];
+                if (suggestions.length > 0 && decisionState.cardIndex > 0) {
+                    e.preventDefault();
+                    handleDecisionUndo();
+                }
+            }
+        }
+    }
+
+    function handleCustomTagAdd() {
+        if (!decisionTagInput) return;
+        const text = decisionTagInput.value.trim();
+        if (text) {
+            addAcceptedTag(text);
+            decisionTagInput.value = "";
+            renderAcceptedTags();
+            renderAutocompletePills("");
+            decisionTagInput.focus();
+        } else {
+            if (decisionState.acceptedTags.length === 0) {
+                triggerDecisionShake();
+            } else {
+                decisionTagInput.focus();
+            }
+        }
+    }
+
+    function handleCustomTagInputEnter() {
+        if (!decisionTagInput) return;
+        const text = decisionTagInput.value.trim();
+        if (text) {
+            addAcceptedTag(text);
+            decisionTagInput.value = "";
+            renderAcceptedTags();
+            renderAutocompletePills("");
+            decisionTagInput.focus();
+        } else {
+            // Empty Enter: finish if acceptedTags.length >= 1, else shake
+            if (decisionState.acceptedTags.length >= 1) {
+                submitDecisionCuration();
+            } else {
+                triggerDecisionShake();
+            }
+        }
+    }
+
+    function handleCustomTagSubmit() {
+        if (decisionTagInput && decisionTagInput.value.trim()) {
+            addAcceptedTag(decisionTagInput.value.trim());
+            decisionTagInput.value = "";
+            renderAcceptedTags();
+        }
+
+        if (decisionState.acceptedTags.length >= 1) {
+            submitDecisionCuration();
+        } else {
+            triggerDecisionShake();
+        }
+    }
+
+    function triggerDecisionShake() {
+        const card = curateDecisionModal?.querySelector(".modal-card") || decisionTagInput;
+        if (card) {
+            card.classList.remove("shake");
+            void card.offsetWidth;
+            card.classList.add("shake");
+            setTimeout(() => card.classList.remove("shake"), 500);
+        }
+        if (decisionValidationError) {
+            decisionValidationError.textContent = "At least one theme label required";
+            decisionValidationError.classList.remove("hidden");
+        }
+        if (decisionTagInput) {
+            decisionTagInput.focus();
+        }
+    }
+
+    async function submitDecisionCuration() {
+        if (decisionState.acceptedTags.length === 0) {
+            triggerDecisionShake();
+            return;
+        }
+
+        const candidate = decisionState.candidate;
+        if (!candidate) return;
+
+        const acceptedThemes = [...decisionState.acceptedTags];
+        closeCurateDecisionModal();
+
         state.isSubmitting = true;
         btnCurate.disabled = true;
 
         try {
             const payload = {
                 id: candidate.id,
-                themes: (candidate.themes && candidate.themes.length > 0)
-                    ? candidate.themes
-                    : (candidate.theme ? [candidate.theme] : ["dungeon"]),
+                themes: acceptedThemes,
                 tags: candidate.tags || [],
                 layers: candidate.layers && candidate.layers.length > 0 ? candidate.layers : undefined,
             };
@@ -1408,6 +1890,61 @@
         } finally {
             state.isSubmitting = false;
             btnCurate.disabled = false;
+        }
+    }
+
+    async function curateCurrentCandidate() {
+        exitLabelingMode();
+        if (state.isSubmitting || state.currentIndex < 0 || state.currentIndex >= state.candidates.length) {
+            return;
+        }
+        await openCurateDecisionModal();
+    }
+
+    function handleDecisionModalKeydown(e) {
+        if (e.key === "Escape") {
+            closeCurateDecisionModal();
+            e.preventDefault();
+            return;
+        }
+
+        if (decisionState.step === "cards") {
+            if (e.key === "ArrowLeft" || e.key === "Left") {
+                handleDecisionReject();
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "ArrowRight" || e.key === "Right") {
+                handleDecisionAccept();
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "Backspace" || e.key === "ArrowUp" || e.key === "Up") {
+                handleDecisionUndo();
+                e.preventDefault();
+                return;
+            }
+            e.preventDefault();
+            return;
+        }
+
+        if (decisionState.step === "custom") {
+            if (document.activeElement === decisionTagInput) {
+                return;
+            }
+
+            if (e.key === "Enter") {
+                handleCustomTagSubmit();
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "Backspace" || e.key === "ArrowUp" || e.key === "Up") {
+                handleDecisionUndo();
+                e.preventDefault();
+                return;
+            }
+            e.preventDefault();
+            return;
         }
     }
 
@@ -2895,6 +3432,41 @@
         });
     }
 
+    function setupDecisionModalControls() {
+        if (btnCloseDecisionModal) {
+            btnCloseDecisionModal.addEventListener("click", () => closeCurateDecisionModal());
+        }
+        if (btnCancelDecision) {
+            btnCancelDecision.addEventListener("click", () => closeCurateDecisionModal());
+        }
+        if (btnDecisionReject) {
+            btnDecisionReject.addEventListener("click", () => handleDecisionReject());
+        }
+        if (btnDecisionAccept) {
+            btnDecisionAccept.addEventListener("click", () => handleDecisionAccept());
+        }
+        if (btnDecisionUndo) {
+            btnDecisionUndo.addEventListener("click", () => handleDecisionUndo());
+        }
+        if (btnAddCustomTag) {
+            btnAddCustomTag.addEventListener("click", () => handleCustomTagAdd());
+        }
+        if (btnFinishDecision) {
+            btnFinishDecision.addEventListener("click", () => handleCustomTagSubmit());
+        }
+        if (decisionTagInput) {
+            decisionTagInput.addEventListener("input", (e) => onDecisionTagInput(e));
+            decisionTagInput.addEventListener("keydown", (e) => onDecisionTagInputKeydown(e));
+        }
+        if (curateDecisionModal) {
+            curateDecisionModal.addEventListener("click", (e) => {
+                if (e.target === curateDecisionModal) {
+                    closeCurateDecisionModal();
+                }
+            });
+        }
+    }
+
     // ==========================================================================
     // UI Event Listeners & Hotkeys
     // ==========================================================================
@@ -3094,6 +3666,7 @@
         setupDrawerControls();
         setupStorageControls();
         setupLibraryControls();
+        setupDecisionModalControls();
 
 
         // --- Keyboard Hotkey Dispatcher ---
@@ -3161,6 +3734,11 @@
                 e.preventDefault();
                 return;
             }
+            if (state.decisionModalOpen) {
+                closeCurateDecisionModal();
+                e.preventDefault();
+                return;
+            }
             if (state.rejectionModalOpen) {
                 closeRejectionModal();
                 e.preventDefault();
@@ -3173,6 +3751,12 @@
             }
             openRejectionModal();
             e.preventDefault();
+            return;
+        }
+
+        // Hotkeys inside Curate Decision Modal (Issue #102)
+        if (state.decisionModalOpen) {
+            handleDecisionModalKeydown(e);
             return;
         }
 

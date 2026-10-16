@@ -65,7 +65,7 @@ The decision modal presents a streamlined two-step flow:
 
 - **Step 1: AI Vision Theme Suggestions**:
   - Automatically fetches suggestions from `POST /api/staging/:id/suggest-themes`.
-  - A multimodal vision model (e.g. `google/gemini-2.5-flash` via OpenRouter) evaluates visual map features and proposes 3–5 contextual theme tags with rationale notes.
+  - A multimodal vision model (e.g. `google/gemini-3.5-flash-lite` via OpenRouter) evaluates visual map features and proposes 3–5 contextual theme tags with rationale notes.
   - **Review Cards**: Reviewers step through cards with rapid keyboard shortcuts:
     - `ArrowRight` (or click Accept): Accepts the theme into `acceptedTags`.
     - `ArrowLeft` (or click Reject): Skips the suggestion.

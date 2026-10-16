@@ -85,46 +85,6 @@
                 </div>
             </div>
 
-            <!-- Theme Selection Hotkeys 1-8 (Two-Step Workflow: 1, then 1-8) -->
-            <div class="hud-section hud-themes">
-                <div id="theme-selector" class="theme-selector" role="radiogroup" aria-label="Theme Selection" title="Theme Selection (Press 1, then 1-8)">
-                    <button type="button" class="theme-badge active" data-theme="dungeon" data-index="1" title="Dungeon (Press 1, then 1)">
-                        <kbd>1</kbd><span>Dungeon</span>
-                    </button>
-                    <button type="button" class="theme-badge" data-theme="cave" data-index="2" title="Cave (Press 1, then 2)">
-                        <kbd>2</kbd><span>Cave</span>
-                    </button>
-                    <button type="button" class="theme-badge" data-theme="tavern" data-index="3" title="Tavern (Press 1, then 3)">
-                        <kbd>3</kbd><span>Tavern</span>
-                    </button>
-                    <button type="button" class="theme-badge" data-theme="wilderness" data-index="4" title="Wilderness (Press 1, then 4)">
-                        <kbd>4</kbd><span>Wilderness</span>
-                    </button>
-                    <button type="button" class="theme-badge" data-theme="ruins" data-index="5" title="Ruins (Press 1, then 5)">
-                        <kbd>5</kbd><span>Ruins</span>
-                    </button>
-                    <button type="button" class="theme-badge" data-theme="urban" data-index="6" title="Urban (Press 1, then 6)">
-                        <kbd>6</kbd><span>Urban</span>
-                    </button>
-                    <button type="button" class="theme-badge" data-theme="scifi" data-index="7" title="SciFi (Press 1, then 7)">
-                        <kbd>7</kbd><span>SciFi</span>
-                    </button>
-                    <button type="button" class="theme-badge" data-theme="building" data-index="8" title="Building (Press 1, then 8)">
-                        <kbd>8</kbd><span>Building</span>
-                    </button>
-                </div>
-            </div>
-
-            <!-- Quality Rating 1-5 Stars (Two-Step Workflow: 2, then 1-5) -->
-            <div class="hud-section hud-rating">
-                <div id="rating-selector" class="rating-selector rating-stars" role="radiogroup" aria-label="Rating Selection" title="Quality Rating (Press 2, then 1-5)">
-                    <button type="button" class="star-btn" data-rating="1" aria-label="1 Star" title="1 Star (Press 2, then 1)">★</button>
-                    <button type="button" class="star-btn" data-rating="2" aria-label="2 Stars" title="2 Stars (Press 2, then 2)">★</button>
-                    <button type="button" class="star-btn" data-rating="3" aria-label="3 Stars" title="3 Stars (Press 2, then 3)">★</button>
-                    <button type="button" class="star-btn active" data-rating="4" aria-label="4 Stars" title="4 Stars (Press 2, then 4)">★</button>
-                    <button type="button" class="star-btn" data-rating="5" aria-label="5 Stars" title="5 Stars (Press 2, then 5)">★</button>
-                </div>
-            </div>
 
             <!-- Viewport Tools & Triage Action Controls -->
             <div class="hud-section hud-actions">
@@ -404,18 +364,9 @@
                         <span id="library-count-badge" class="library-count-badge mono">0 Maps</span>
                     </div>
 
-                    <!-- Theme Filter Tabs -->
-                    <div id="library-theme-tabs" class="library-theme-tabs" role="tablist" aria-label="Theme Filter">
-                        <button type="button" class="lib-tab active" data-theme="all">All</button>
-                        <button type="button" class="lib-tab" data-theme="dungeon">Dungeon</button>
-                        <button type="button" class="lib-tab" data-theme="cave">Cave</button>
-                        <button type="button" class="lib-tab" data-theme="tavern">Tavern</button>
-                        <button type="button" class="lib-tab" data-theme="wilderness">Wilderness</button>
-                        <button type="button" class="lib-tab" data-theme="ruins">Ruins</button>
-                        <button type="button" class="lib-tab" data-theme="urban">Urban</button>
-                        <button type="button" class="lib-tab" data-theme="scifi">SciFi</button>
-                        <button type="button" class="lib-tab" data-theme="building">Building</button>
-                    </div>
+                    <!-- Dynamic Library Filter Toolbar -->
+                    <input type="text" id="library-search-input" class="search-input" placeholder="Search by tag, theme, or ID..." />
+                    <div id="library-tag-pills" class="library-tag-pills"></div>
                 </div>
 
                 <div class="library-toolbar-right">
@@ -453,7 +404,7 @@
                             </svg>
                         </div>
                         <h3>No Curated Maps Found</h3>
-                        <p id="library-empty-desc">No battlemaps matching the selected theme filter have been approved yet.</p>
+                        <p id="library-empty-desc">No battlemaps matching the selected filter have been approved yet.</p>
                         <button type="button" id="btn-switch-to-triage" class="btn btn-primary">
                             <span>Go to Staging Triage</span>
                         </button>
@@ -537,7 +488,8 @@
                     <div class="help-section">
                         <h4>Rapid Triage Actions</h4>
                         <div class="help-grid">
-                            <div class="help-row"><kbd>Enter</kbd><span>Approve & Curate active map to selected theme</span></div>
+                            <div class="help-row"><kbd>Enter</kbd><span>Approve & Curate active map</span></div>
+                            <div class="help-row"><kbd>L</kbd> / <kbd>T</kbd><span>Switch to Dataset Library / Staging Triage</span></div>
                             <div class="help-row"><kbd>Esc</kbd><span>Open Rejection dialogue (quick-select reason with 1-5 + Enter)</span></div>
                             <div class="help-row"><kbd>J</kbd> or <kbd>→</kbd><span>Advance to next candidate (without curating)</span></div>
                             <div class="help-row"><kbd>K</kbd> or <kbd>←</kbd><span>Return to previous candidate</span></div>
@@ -546,23 +498,6 @@
                         </div>
                     </div>
 
-                    <div class="help-section">
-                        <h4>Theme Classification (Two-Step Hotkey)</h4>
-                        <div class="help-grid">
-                            <div class="help-row"><kbd>1</kbd><span>Trigger Theme selection mode</span></div>
-                            <div class="help-row"><kbd>1-8</kbd><span>Select theme value (1 Dungeon, 2 Cave, 3 Tavern, 4 Wilderness, 5 Ruins, 6 Urban, 7 SciFi, 8 Building)</span></div>
-                            <div class="help-row"><kbd>Esc</kbd><span>Cancel active theme labeling mode</span></div>
-                        </div>
-                    </div>
-
-                    <div class="help-section">
-                        <h4>Quality Rating (Two-Step Hotkey)</h4>
-                        <div class="help-grid">
-                            <div class="help-row"><kbd>2</kbd><span>Trigger Quality rating mode</span></div>
-                            <div class="help-row"><kbd>1-5</kbd><span>Set quality star rating (1 to 5 stars)</span></div>
-                            <div class="help-row"><kbd>Esc</kbd><span>Cancel active rating labeling mode</span></div>
-                        </div>
-                    </div>
                     <div class="help-section">
                         <h4>Multi-Layer Canvas Deck Controls</h4>
                         <div class="help-grid">

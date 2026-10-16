@@ -87,11 +87,10 @@ mod tests {
 
         assert!(html.contains("DUNGEON FORGE"));
         assert!(html.contains("triage-canvas"));
-        assert!(html.contains("theme-selector"));
-        assert!(html.contains("Theme Selection (Press 1, then 1-8)"));
-        assert!(html.contains("data-theme=\"building\""));
-        assert!(html.contains("rating-selector"));
-        assert!(html.contains("Quality Rating (Press 2, then 1-5)"));
+        assert!(!html.contains("theme-selector"));
+        assert!(!html.contains("rating-selector"));
+        assert!(html.contains("library-search-input"));
+        assert!(html.contains("library-tag-pills"));
         assert!(html.contains("btn-grid-toggle"));
         assert!(html.contains("btn-fit-screen"));
         assert!(html.contains("btn-reject"));
@@ -167,10 +166,9 @@ mod tests {
         let css = std::str::from_utf8(file.data.as_ref()).expect("style.css must be valid utf8");
 
         assert!(css.contains("triage-viewport"));
-        assert!(css.contains("theme-badge"));
-        assert!(css.contains("rating-stars"));
+        assert!(css.contains("search-input"));
+        assert!(css.contains("library-tag-pills"));
         assert!(css.contains("selecting-mode"));
-        assert!(css.contains("[data-theme=\"building\"]"));
         assert!(css.contains("modal-backdrop"));
         assert!(css.contains("toast-container"));
         // Ingestion drawer & harvesting styling
@@ -191,17 +189,16 @@ mod tests {
         // Verify helper functions
         assert!(js.contains("function enterLabelingMode(mode)"));
         assert!(js.contains("function exitLabelingMode()"));
-        assert!(js.contains("themeSelector.classList.add(\"selecting-mode\")"));
-        assert!(js.contains("ratingSelector.classList.add(\"selecting-mode\")"));
-        assert!(js.contains("themeSelector.classList.remove(\"selecting-mode\")"));
-        assert!(js.contains("ratingSelector.classList.remove(\"selecting-mode\")"));
+        assert!(js.contains("roleSelectorEl.classList.add(\"selecting-mode\")"));
+        assert!(js.contains("roleSelectorEl.classList.remove(\"selecting-mode\")"));
 
-        // Verify two-step hotkey dispatching
-        assert!(js.contains("enterLabelingMode(\"theme\")"));
-        assert!(js.contains("enterLabelingMode(\"rating\")"));
-        assert!(js.contains("state.labelingMode === \"theme\""));
-        assert!(js.contains("state.labelingMode === \"rating\""));
+        // Verify upfront theme and rating labeling mode triggers are stripped
+        assert!(!js.contains("enterLabelingMode(\"theme\")"));
+        assert!(!js.contains("enterLabelingMode(\"rating\")"));
 
+        // Verify role mode hotkey dispatching
+        assert!(js.contains("enterLabelingMode(\"role\")"));
+        assert!(js.contains("state.labelingMode === \"role\""));
         // Verify Escape dismisses labeling mode
         assert!(js.contains("if (state.labelingMode)"));
         assert!(js.contains("exitLabelingMode();"));
@@ -209,18 +206,17 @@ mod tests {
         // Verify HTML tooltips & guide
         let index_html = Assets::get("index.html").expect("index.html must be embedded");
         let html = std::str::from_utf8(index_html.data.as_ref()).expect("index.html must be valid utf8");
-        assert!(html.contains("Theme Selection (Press 1, then 1-8)"));
-        assert!(html.contains("Quality Rating (Press 2, then 1-5)"));
-        assert!(html.contains("Theme Classification (Two-Step Hotkey)"));
-        assert!(html.contains("Quality Rating (Two-Step Hotkey)"));
+        assert!(!html.contains("Theme Selection (Press 1, then 1-8)"));
+        assert!(!html.contains("Quality Rating (Press 2, then 1-5)"));
+        assert!(!html.contains("Theme Classification (Two-Step Hotkey)"));
+        assert!(!html.contains("Quality Rating (Two-Step Hotkey)"));
+        assert!(html.contains("Trigger Layer Role mode"));
 
         // Verify CSS styling
         let style_css = Assets::get("style.css").expect("style.css must be embedded");
         let css = std::str::from_utf8(style_css.data.as_ref()).expect("style.css must be valid utf8");
-        assert!(css.contains(".theme-selector.selecting-mode"));
-        assert!(css.contains(".rating-selector.selecting-mode"));
-        assert!(css.contains("selecting-mode-pulse-cyan"));
-        assert!(css.contains("selecting-mode-pulse-amber"));
+        assert!(css.contains(".role-selector.selecting-mode"));
+        assert!(css.contains("selecting-mode-pulse-violet"));
     }
 
     #[test]

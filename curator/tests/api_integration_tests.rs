@@ -321,7 +321,7 @@ async fn test_static_asset_and_spa_routing() {
     let html_str = String::from_utf8(body.to_vec()).unwrap();
     assert!(html_str.contains("DUNGEON FORGE"));
     assert!(html_str.contains("triage-canvas"));
-    assert!(html_str.contains("theme-selector"));
+    assert!(html_str.contains("library-search-input"));
     assert!(html_str.contains("rejection-modal"));
     assert!(html_str.contains("help-modal"));
 

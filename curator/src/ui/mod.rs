@@ -329,6 +329,8 @@ mod tests {
         assert!(js.contains("submitDecisionCuration"));
         assert!(js.contains("decisionModalOpen"));
         assert!(js.contains("suggest-themes"));
+        assert!(js.contains("_fetchPromise"));
+        assert!(js.contains("_suggestionsOffline"));
 
         let style_css = Assets::get("style.css").expect("style.css must be embedded");
         let css = std::str::from_utf8(style_css.data.as_ref()).expect("style.css must be valid utf8");

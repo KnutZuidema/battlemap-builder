@@ -1376,12 +1376,17 @@
      * Caches suggestions on candidate._themeSuggestions or flags candidate._suggestionsOffline.
      */
     function fetchThemeSuggestions(candidate) {
-        if (!candidate || candidate._themeSuggestions !== undefined || candidate._fetchingThemeSuggestions) {
-            return Promise.resolve(candidate ? (candidate._themeSuggestions || []) : []);
+        if (!candidate) {
+            return Promise.resolve([]);
+        }
+        if (candidate._themeSuggestions !== undefined) {
+            return Promise.resolve(candidate._themeSuggestions);
+        }
+        if (candidate._fetchPromise) {
+            return candidate._fetchPromise;
         }
 
-        candidate._fetchingThemeSuggestions = true;
-        return fetch("/api/staging/" + encodeURIComponent(candidate.id) + "/suggest-themes", {
+        candidate._fetchPromise = fetch("/api/staging/" + encodeURIComponent(candidate.id) + "/suggest-themes", {
             method: "POST",
         })
             .then((res) => {
@@ -1389,8 +1394,9 @@
                 return res.json();
             })
             .then((data) => {
-                candidate._themeSuggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
-                candidate._suggestionsOffline = false;
+                const suggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
+                candidate._themeSuggestions = suggestions;
+                candidate._suggestionsOffline = suggestions.length === 0;
                 return candidate._themeSuggestions;
             })
             .catch((err) => {
@@ -1400,8 +1406,10 @@
                 return [];
             })
             .finally(() => {
-                candidate._fetchingThemeSuggestions = false;
+                candidate._fetchPromise = null;
             });
+
+        return candidate._fetchPromise;
     }
 
     /**
@@ -1443,7 +1451,7 @@
         }
 
         // If suggestions are still being fetched, wait for them
-        if (candidate._themeSuggestions === undefined && !candidate._suggestionsOffline) {
+        if (candidate._fetchPromise || (candidate._themeSuggestions === undefined && !candidate._suggestionsOffline)) {
             await fetchThemeSuggestions(candidate);
         }
 
@@ -1469,7 +1477,7 @@
             renderDecisionCard();
         } else {
             // No suggestions or offline: directly show custom step with offline indicator
-            if (candidate._suggestionsOffline) {
+            if (candidate._suggestionsOffline || suggestions.length === 0) {
                 if (decisionOfflineBadge) decisionOfflineBadge.classList.remove("hidden");
                 if (decisionOfflineNote) decisionOfflineNote.classList.remove("hidden");
             } else {
@@ -1924,7 +1932,6 @@
                 e.preventDefault();
                 return;
             }
-            e.preventDefault();
             return;
         }
 
@@ -1943,7 +1950,6 @@
                 e.preventDefault();
                 return;
             }
-            e.preventDefault();
             return;
         }
     }

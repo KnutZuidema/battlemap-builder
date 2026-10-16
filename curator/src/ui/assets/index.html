@@ -477,6 +477,84 @@
             </div>
         </div>
 
+        <!-- Curate Decision Modal (Vision Suggestions & Custom Tags) -->
+        <div id="curate-decision-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="decision-modal-title">
+            <div class="modal-card decision-modal-card">
+                <div class="modal-header">
+                    <div class="decision-header-info">
+                        <h3 id="decision-modal-title">Curate Battlemap</h3>
+                        <span id="decision-progress-badge" class="decision-progress-badge">Suggestion 1 of 4</span>
+                        <span id="decision-offline-badge" class="decision-offline-badge hidden">AI suggestions offline</span>
+                    </div>
+                    <button type="button" id="btn-close-decision-modal" class="btn-close" aria-label="Close modal">×</button>
+                </div>
+                <div class="modal-body decision-modal-body">
+                    <!-- Step 1: Suggestion Cards Review -->
+                    <div id="decision-card-step" class="decision-step">
+                        <div class="decision-card-container">
+                            <div class="decision-card" id="decision-focal-card">
+                                <span class="decision-card-badge">Suggested Theme / Tag</span>
+                                <div id="decision-card-tag" class="decision-card-tag">Dungeon</div>
+                                <span class="decision-card-subhint">Accept or skip this AI vision tag</span>
+                            </div>
+                        </div>
+                        <div class="decision-card-actions">
+                            <button type="button" id="btn-decision-reject" class="btn decision-btn-reject" title="Skip Tag (Left Arrow)">
+                                <span class="decision-btn-icon">✕</span>
+                                <span class="decision-btn-label">No</span>
+                                <kbd>←</kbd>
+                            </button>
+                            <button type="button" id="btn-decision-undo" class="btn btn-secondary decision-btn-undo" title="Step Back (Backspace or Up Arrow)">
+                                <kbd>Backspace</kbd> / <kbd>↑</kbd>
+                                <span>Undo</span>
+                            </button>
+                            <button type="button" id="btn-decision-accept" class="btn decision-btn-accept" title="Accept Tag (Right Arrow)">
+                                <span class="decision-btn-icon">✓</span>
+                                <span class="decision-btn-label">Yes</span>
+                                <kbd>→</kbd>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Step 2: Custom Tag Input -->
+                    <div id="decision-custom-step" class="decision-step hidden">
+                        <div class="decision-custom-header">
+                            <h4>Add Custom Themes / Tags</h4>
+                            <div id="decision-offline-note" class="decision-offline-note hidden">
+                                <span class="status-dot status-offline"></span>
+                                <span>AI suggestions offline</span>
+                            </div>
+                        </div>
+                        <div class="decision-input-group">
+                            <input type="text" id="decision-tag-input" class="text-input" placeholder="Type a theme and press Enter..." autocomplete="off">
+                            <button type="button" id="btn-add-custom-tag" class="btn btn-secondary">Add</button>
+                        </div>
+                        <div id="decision-autocomplete-list" class="decision-autocomplete-list"></div>
+                        <p class="decision-helper-note">Press Enter to add tag. Press Enter with empty text to finish.</p>
+                        <div id="decision-validation-error" class="decision-validation-error hidden">At least one theme label required</div>
+                    </div>
+
+                    <!-- Active Accepted Tags Strip (bottom of both steps) -->
+                    <div class="decision-accepted-container">
+                        <div class="decision-accepted-label">
+                            <span>Accepted Themes &amp; Tags</span>
+                        </div>
+                        <div id="decision-accepted-tags" class="decision-accepted-tags"></div>
+                    </div>
+                </div>
+                <div class="modal-footer decision-modal-footer">
+                    <button type="button" id="btn-cancel-decision" class="btn btn-secondary">
+                        <kbd>Esc</kbd>
+                        <span>Cancel</span>
+                    </button>
+                    <button type="button" id="btn-finish-decision" class="btn btn-primary">
+                        <span>Finish &amp; Curate</span>
+                        <kbd>↵</kbd>
+                    </button>
+                </div>
+            </div>
+        </div>
+
         <!-- Hotkey Guide Modal -->
         <div id="help-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="help-modal-title">
             <div class="modal-card help-modal-card">

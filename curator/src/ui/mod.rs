@@ -300,6 +300,51 @@ mod tests {
         assert!(css.contains(".grid-dragging"));
     }
 
+    #[test]
+    fn test_embedded_assets_contain_decision_dialog_and_cards() {
+        let index_html = Assets::get("index.html").expect("index.html must be embedded");
+        let html = std::str::from_utf8(index_html.data.as_ref()).expect("index.html must be valid utf8");
+
+        assert!(html.contains("curate-decision-modal"));
+        assert!(html.contains("decision-card-step"));
+        assert!(html.contains("decision-custom-step"));
+        assert!(html.contains("decision-card"));
+        assert!(html.contains("decision-btn-reject"));
+        assert!(html.contains("decision-btn-accept"));
+        assert!(html.contains("decision-btn-undo"));
+        assert!(html.contains("decision-tag-input"));
+        assert!(html.contains("decision-autocomplete-list"));
+        assert!(html.contains("decision-accepted-tags"));
+
+        let app_js = Assets::get("app.js").expect("app.js must be embedded");
+        let js = std::str::from_utf8(app_js.data.as_ref()).expect("app.js must be valid utf8");
+
+        assert!(js.contains("fetchThemeSuggestions"));
+        assert!(js.contains("openCurateDecisionModal"));
+        assert!(js.contains("closeCurateDecisionModal"));
+        assert!(js.contains("handleDecisionReject"));
+        assert!(js.contains("handleDecisionAccept"));
+        assert!(js.contains("handleDecisionUndo"));
+        assert!(js.contains("renderAutocompletePills"));
+        assert!(js.contains("submitDecisionCuration"));
+        assert!(js.contains("decisionModalOpen"));
+        assert!(js.contains("suggest-themes"));
+        assert!(js.contains("_fetchPromise"));
+        assert!(js.contains("_suggestionsOffline"));
+
+        let style_css = Assets::get("style.css").expect("style.css must be embedded");
+        let css = std::str::from_utf8(style_css.data.as_ref()).expect("style.css must be valid utf8");
+
+        assert!(css.contains("#curate-decision-modal"));
+        assert!(css.contains(".decision-card"));
+        assert!(css.contains(".decision-btn-reject"));
+        assert!(css.contains(".decision-btn-accept"));
+        assert!(css.contains(".tag-chip"));
+        assert!(css.contains(".autocomplete-pill"));
+        assert!(css.contains(".shake"));
+        assert!(css.contains("@keyframes shake"));
+    }
+
 
     #[tokio::test]
     async fn test_static_handler_index() {

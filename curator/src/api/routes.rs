@@ -237,6 +237,42 @@ pub async fn get_curated_image(
 
     Ok(response)
 }
+/// GET /api/image/curated/{id} - Stream binary image for a curated map by ID directly.
+pub async fn get_curated_image_by_id(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Map ID cannot be empty"));
+    }
+
+    let mut bytes_result = state.storage.get_curated_image(&Theme::Dungeon, &id);
+    if bytes_result.is_err() {
+        for theme in Theme::ALL {
+            if *theme == Theme::Dungeon {
+                continue;
+            }
+            if let Ok(bytes) = state.storage.get_curated_image(theme, &id) {
+                bytes_result = Ok(bytes);
+                break;
+            }
+        }
+    }
+    let bytes = bytes_result?;
+    let mime = detect_image_mime(&bytes, None);
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, HeaderValue::from_static(mime))
+        .header(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=3600"),
+        )
+        .body(Body::from(bytes))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(response)
+}
 /// GET /api/image/curated/{theme}/{id}/{layer_index} - Stream binary image bytes for a specific layer of a curated map.
 pub async fn get_curated_layer_image(
     State(state): State<AppState>,

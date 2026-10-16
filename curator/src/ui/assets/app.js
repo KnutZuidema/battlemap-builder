@@ -86,7 +86,7 @@
         "bytedance-seed/seedream-5-0-flash": 0.018,
     };
     const BUDGET_GUARDRAIL_THRESHOLD = 2.00;
-    const THEMES = [
+    const CANONICAL_THEMES = [
         "dungeon",
         "cave",
         "tavern",
@@ -96,6 +96,7 @@
         "scifi",
         "building",
     ];
+    const THEMES = CANONICAL_THEMES;
 
     const REJECTION_REASONS = [
         "GridBurnedIn",
@@ -2767,7 +2768,17 @@
             const primaryTheme = (map.themes && map.themes.length > 0) ? map.themes[0] : (map.theme || "dungeon");
             card.dataset.theme = primaryTheme;
 
-            const thumbUrl = `/api/image/curated/${encodeURIComponent(primaryTheme)}/${encodeURIComponent(map.id)}`;
+            let themeParam = "dungeon";
+            if (primaryTheme && CANONICAL_THEMES.includes(primaryTheme.toLowerCase())) {
+                themeParam = primaryTheme.toLowerCase();
+            } else if (map.themes && Array.isArray(map.themes)) {
+                const found = map.themes.find(t => CANONICAL_THEMES.includes((t || "").toLowerCase()));
+                if (found) {
+                    themeParam = found.toLowerCase();
+                }
+            }
+
+            const thumbUrl = `/api/image/curated/${encodeURIComponent(themeParam)}/${encodeURIComponent(map.id)}`;
             const layerCount = (map.layers && map.layers.length > 0) ? map.layers.length : 1;
             const layerLabel = `${layerCount} Layer${layerCount === 1 ? "" : "s"}`;
 
@@ -2823,12 +2834,27 @@
         if (btnExportLora) btnExportLora.disabled = true;
         if (btnExportLabel) btnExportLabel.textContent = "Packaging ZIP...";
 
+        const CANONICAL_THEMES = [
+            "dungeon",
+            "cave",
+            "tavern",
+            "wilderness",
+            "ruins",
+            "urban",
+            "scifi",
+            "building",
+        ];
+
         const tag = state.libraryActiveTag || "all";
         const tagLabel = tag === "all" ? "all maps" : tag;
         showToast(`Packaging LoRA dataset ZIP archive (${tagLabel})...`, "info");
 
         try {
-            const url = (tag === "all") ? "/api/dataset/export" : `/api/dataset/export?theme=${encodeURIComponent(tag)}`;
+            const normalizedTag = (tag || "").toLowerCase();
+            const isCanonical = CANONICAL_THEMES.includes(normalizedTag);
+            const url = isCanonical
+                ? `/api/dataset/export?theme=${encodeURIComponent(normalizedTag)}`
+                : "/api/dataset/export";
             const res = await fetch(url);
             if (!res.ok) {
                 throw new Error(`Export failed (HTTP ${res.status}: ${res.statusText})`);

@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::RwLock;
 
 use crate::adapters::{FileCostLedger, OpenRouterAdapter, RedditCrawler};
 use crate::api::error::ApiError;
@@ -8,6 +10,7 @@ use crate::ports::cost_tracker::CostTracker;
 use crate::ports::harvester::RedditHarvester;
 use crate::ports::storage::StorageRepository;
 use crate::services::BenchmarkService;
+
 /// Shared application state for the Axum HTTP server.
 #[derive(Clone)]
 pub struct AppState {
@@ -16,6 +19,8 @@ pub struct AppState {
     pub cost_tracker: Arc<dyn CostTracker + Send + Sync>,
     pub benchmark_service: Option<Arc<BenchmarkService>>,
     pub benchmark_cancelled: Arc<AtomicBool>,
+    pub theme_suggestions_cache: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    pub openrouter: Option<Arc<OpenRouterAdapter>>,
     pub start_time: Instant,
 }
 
@@ -24,12 +29,15 @@ impl AppState {
     pub fn new(storage: Arc<dyn StorageRepository + Send + Sync>) -> Self {
         let cost_tracker: Arc<dyn CostTracker + Send + Sync> = Arc::new(FileCostLedger::default());
         let benchmark_service = Self::default_benchmark_service(storage.clone(), cost_tracker.clone());
+        let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
         Self {
             storage,
             harvester: Arc::new(RedditCrawler::from_env()),
             cost_tracker,
             benchmark_service,
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
+            theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
+            openrouter,
             start_time: Instant::now(),
         }
     }
@@ -41,12 +49,15 @@ impl AppState {
     ) -> Self {
         let cost_tracker: Arc<dyn CostTracker + Send + Sync> = Arc::new(FileCostLedger::default());
         let benchmark_service = Self::default_benchmark_service(storage.clone(), cost_tracker.clone());
+        let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
         Self {
             storage,
             harvester,
             cost_tracker,
             benchmark_service,
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
+            theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
+            openrouter,
             start_time: Instant::now(),
         }
     }
@@ -57,12 +68,15 @@ impl AppState {
         cost_tracker: Arc<dyn CostTracker + Send + Sync>,
     ) -> Self {
         let benchmark_service = Self::default_benchmark_service(storage.clone(), cost_tracker.clone());
+        let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
         Self {
             storage,
             harvester: Arc::new(RedditCrawler::from_env()),
             cost_tracker,
             benchmark_service,
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
+            theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
+            openrouter,
             start_time: Instant::now(),
         }
     }
@@ -74,12 +88,15 @@ impl AppState {
         cost_tracker: Arc<dyn CostTracker + Send + Sync>,
     ) -> Self {
         let benchmark_service = Self::default_benchmark_service(storage.clone(), cost_tracker.clone());
+        let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
         Self {
             storage,
             harvester,
             cost_tracker,
             benchmark_service,
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
+            theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
+            openrouter,
             start_time: Instant::now(),
         }
     }
@@ -90,14 +107,31 @@ impl AppState {
         benchmark_service: Arc<BenchmarkService>,
         cost_tracker: Arc<dyn CostTracker + Send + Sync>,
     ) -> Self {
+        let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
         Self {
             storage,
             harvester: Arc::new(RedditCrawler::from_env()),
             cost_tracker,
             benchmark_service: Some(benchmark_service),
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
+            theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
+            openrouter,
             start_time: Instant::now(),
         }
+    }
+
+    /// Creates a new `AppState` with an explicit OpenRouter adapter (ideal for testing).
+    pub fn with_openrouter(mut self, openrouter: Arc<OpenRouterAdapter>) -> Self {
+        self.openrouter = Some(openrouter);
+        self
+    }
+
+    /// Obtains reference to existing OpenRouter adapter or attempts on-demand resolution.
+    pub fn openrouter_client(&self) -> Option<Arc<OpenRouterAdapter>> {
+        if let Some(adapter) = &self.openrouter {
+            return Some(adapter.clone());
+        }
+        OpenRouterAdapter::from_env().ok().map(Arc::new)
     }
 
     /// Helper to try instantiating OpenRouterAdapter from environment if keys are present.

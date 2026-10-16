@@ -33,6 +33,10 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/staging/{id}/split", post(post_split_staging))
         .route("/api/staging/{parent_id}/regroup", post(post_regroup_staging))
+        .route(
+            "/api/staging/{id}/suggest-themes",
+            post(post_suggest_themes).get(post_suggest_themes),
+        )
         .route("/api/curate", post(post_curate))
         .route("/api/reject", post(post_reject))
         .route("/api/harvest/reddit", post(post_harvest_reddit))

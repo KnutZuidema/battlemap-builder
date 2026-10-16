@@ -19,7 +19,8 @@ use tracing::{debug, info, instrument};
 use crate::domain::{
     build_battlemap_prompt, generate_benchmark_id, BenchmarkArchetype, BenchmarkMetadata,
     BenchmarkModelSpec, BenchmarkResult, GenerationRequest, GenerationResponse, ModelApiType,
-    MODEL_GEMINI_31_FLASH, MODEL_GEMINI_31_FLASH_LITE, MODEL_MUSE, MODEL_SEEDREAM_50_FLASH,
+    DEFAULT_VISION_MODEL, MODEL_GEMINI_31_FLASH, MODEL_GEMINI_31_FLASH_LITE, MODEL_MUSE,
+    MODEL_SEEDREAM_50_FLASH, SYSTEM_INSTRUCTION_SUGGEST_THEMES, USER_PROMPT_SUGGEST_THEMES,
 };
 use crate::ports::model_engine::{ModelEngine, ModelEngineError};
 
@@ -217,6 +218,91 @@ impl OpenRouterAdapter {
         }
 
         body
+    }
+
+    /// Suggests 3–5 focused TTRPG theme and environment tags for an image using the OpenRouter vision model.
+    pub async fn suggest_themes(
+        &self,
+        image_bytes: &[u8],
+        mime_type: &str,
+    ) -> Result<Vec<String>, ModelEngineError> {
+        if self.inner.api_key.trim().is_empty() {
+            return Err(ModelEngineError::Auth("API key is empty".to_string()));
+        }
+
+        let _permit = self.inner.semaphore.acquire().await.map_err(|e| {
+            ModelEngineError::WorkerPool(format!("Failed to acquire worker pool permit: {e}"))
+        })?;
+
+        let model = std::env::var("CURATOR_VISION_MODEL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_VISION_MODEL.to_string());
+
+        let endpoint = self.chat_endpoint_url();
+        let b64_data = BASE64_STANDARD.encode(image_bytes);
+        let data_url = format!("data:{mime_type};base64,{b64_data}");
+
+        let body = json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": SYSTEM_INSTRUCTION_SUGGEST_THEMES,
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": USER_PROMPT_SUGGEST_THEMES,
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": data_url,
+                            },
+                        }
+                    ],
+                }
+            ],
+        });
+
+        let res = self
+            .inner
+            .client
+            .post(&endpoint)
+            .header("Authorization", format!("Bearer {}", self.inner.api_key))
+            .header("Content-Type", "application/json")
+            .header("X-Title", APPLICATION_TITLE)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = res.status();
+        if !status.is_success() {
+            let err_text = res.text().await.unwrap_or_default();
+            return Err(classify_http_error(status.as_u16(), &err_text));
+        }
+
+        let json: Value = res.json().await.map_err(|e| ModelEngineError::Api {
+            status: status.as_u16(),
+            message: format!("Failed to parse response JSON: {e}"),
+        })?;
+
+        let content_str = if let Some(s) = json.pointer("/choices/0/message/content").and_then(|v| v.as_str()) {
+            s.to_string()
+        } else if let Some(arr) = json.pointer("/choices/0/message/content").and_then(|v| v.as_array()) {
+            arr.iter()
+                .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            String::new()
+        };
+
+        let suggestions = parse_theme_suggestions(&content_str);
+        Ok(suggestions)
     }
 }
 
@@ -764,6 +850,159 @@ fn looks_like_image(bytes: &[u8]) -> bool {
     false
 }
 
+/// Standardizes, deduplicates (case-insensitively), and limits suggested theme tags to at most 5 items.
+pub fn clean_tags(tags: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut cleaned = Vec::new();
+    let mut seen_lower = std::collections::HashSet::new();
+
+    for raw in tags {
+        let tag = raw
+            .trim()
+            .trim_matches(|c| {
+                c == '"'
+                    || c == '\''
+                    || c == '`'
+                    || c == '['
+                    || c == ']'
+                    || c == '{'
+                    || c == '}'
+                    || c == ','
+                    || c == '.'
+                    || c == ';'
+            })
+            .trim();
+
+        if tag.is_empty() {
+            continue;
+        }
+
+        // Standardize capitalization: e.g. "scifi" / "sci-fi" -> "SciFi",
+        // or capitalize the first letter if it's all lowercase.
+        let formatted = if tag.eq_ignore_ascii_case("scifi") || tag.eq_ignore_ascii_case("sci-fi") {
+            "SciFi".to_string()
+        } else if tag.chars().all(|c| c.is_ascii_lowercase()) {
+            let mut chars = tag.chars();
+            match chars.next() {
+                Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+                None => tag.to_string(),
+            }
+        } else {
+            tag.to_string()
+        };
+
+        let lower = formatted.to_lowercase();
+        if !seen_lower.contains(&lower) {
+            seen_lower.insert(lower);
+            cleaned.push(formatted);
+            if cleaned.len() >= 5 {
+                break;
+            }
+        }
+    }
+
+    cleaned
+}
+
+/// Robustly extracts 3–5 theme tags from model output.
+/// Handles clean JSON arrays, markdown code blocks (```json ... ```),
+/// embedded JSON arrays, and line/bullet/comma delimited text fallbacks.
+pub fn parse_theme_suggestions(content: &str) -> Vec<String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    // 1. Check for markdown code blocks first (e.g. ```json [...] ``` or ``` [...] ```)
+    let code_block_re = Regex::new(r"```(?:json)?\s*([\s\S]*?)\s*```").ok();
+    if let Some(re) = &code_block_re {
+        if let Some(caps) = re.captures(trimmed) {
+            if let Some(inner) = caps.get(1) {
+                let inner_text = inner.as_str().trim();
+                if let (Some(start), Some(end)) = (inner_text.find('['), inner_text.rfind(']')) {
+                    if start < end {
+                        let array_str = &inner_text[start..=end];
+                        if let Ok(tags) = serde_json::from_str::<Vec<String>>(array_str) {
+                            return clean_tags(tags);
+                        }
+                        if let Ok(vals) = serde_json::from_str::<Vec<Value>>(array_str) {
+                            let tags: Vec<String> = vals
+                                .into_iter()
+                                .filter_map(|v| match v {
+                                    Value::String(s) => Some(s),
+                                    Value::Number(n) => Some(n.to_string()),
+                                    _ => None,
+                                })
+                                .collect();
+                            if !tags.is_empty() {
+                                return clean_tags(tags);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Direct JSON array search in the raw string [ ... ]
+    if let (Some(start), Some(end)) = (trimmed.find('['), trimmed.rfind(']')) {
+        if start < end {
+            let array_str = &trimmed[start..=end];
+            if let Ok(tags) = serde_json::from_str::<Vec<String>>(array_str) {
+                return clean_tags(tags);
+            }
+            if let Ok(vals) = serde_json::from_str::<Vec<Value>>(array_str) {
+                let tags: Vec<String> = vals
+                    .into_iter()
+                    .filter_map(|v| match v {
+                        Value::String(s) => Some(s),
+                        Value::Number(n) => Some(n.to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                if !tags.is_empty() {
+                    return clean_tags(tags);
+                }
+            }
+        }
+    }
+
+    // 3. Fallback: parse bullet points, numbered lists, or comma-separated tags
+    let mut candidate_tags = Vec::new();
+    for line in trimmed.lines() {
+        let line = line.trim();
+        if line.starts_with("```") || line.is_empty() {
+            continue;
+        }
+
+        // Strip bullet / number prefixes
+        let cleaned_line = if let Some(stripped) = line.strip_prefix('-') {
+            stripped.trim()
+        } else if let Some(stripped) = line.strip_prefix('*') {
+            stripped.trim()
+        } else if let Some(stripped) = line.strip_prefix('•') {
+            stripped.trim()
+        } else if let Some(idx) = line.find(". ") {
+            if line[..idx].chars().all(|c| c.is_ascii_digit()) {
+                line[idx + 2..].trim()
+            } else {
+                line
+            }
+        } else {
+            line
+        };
+
+        if cleaned_line.contains(',') {
+            for part in cleaned_line.split(',') {
+                candidate_tags.push(part.to_string());
+            }
+        } else {
+            candidate_tags.push(cleaned_line.to_string());
+        }
+    }
+
+    clean_tags(candidate_tags)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1232,6 +1471,135 @@ mod tests {
         let user_text = messages[1]["content"].as_str().unwrap();
         assert!(user_text.contains("Perspective: Strict 2D architectural floor plan cut"));
         assert!(user_text.contains(BenchmarkArchetype::StoneCrypt.prompt()));
+
+        server_task.abort();
+    }
+
+    #[test]
+    fn test_clean_tags_formatting_dedup_and_limit() {
+        let raw = vec![
+            "  \"dungeon\"  ".to_string(),
+            "dungeon".to_string(),
+            "DUNGEON".to_string(),
+            "cave".to_string(),
+            "sci-fi".to_string(),
+            "crypt".to_string(),
+            "ruins".to_string(),
+            "wilderness".to_string(),
+        ];
+        let cleaned = clean_tags(raw);
+        assert_eq!(
+            cleaned,
+            vec!["Dungeon", "Cave", "SciFi", "Crypt", "Ruins"]
+        );
+    }
+
+    #[test]
+    fn test_parse_theme_suggestions_clean_json() {
+        let input = r#"["Dungeon", "Cave", "Ruins"]"#;
+        let parsed = parse_theme_suggestions(input);
+        assert_eq!(parsed, vec!["Dungeon", "Cave", "Ruins"]);
+    }
+
+    #[test]
+    fn test_parse_theme_suggestions_markdown_json() {
+        let input_json_block = "```json\n[\"Dungeon\", \"Crypt\", \"Flooded\"]\n```";
+        let parsed = parse_theme_suggestions(input_json_block);
+        assert_eq!(parsed, vec!["Dungeon", "Crypt", "Flooded"]);
+
+        let input_plain_block = "```\n[\"Cave\", \"Wilderness\"]\n```";
+        let parsed2 = parse_theme_suggestions(input_plain_block);
+        assert_eq!(parsed2, vec!["Cave", "Wilderness"]);
+    }
+
+    #[test]
+    fn test_parse_theme_suggestions_embedded_json() {
+        let input = "Based on the image, here are the themes: [\"Dungeon\", \"Cave\", \"Ruins\"].";
+        let parsed = parse_theme_suggestions(input);
+        assert_eq!(parsed, vec!["Dungeon", "Cave", "Ruins"]);
+    }
+
+    #[test]
+    fn test_parse_theme_suggestions_fallbacks() {
+        let comma_separated = "Dungeon, Cave, Crypt, Flooded";
+        let parsed_comma = parse_theme_suggestions(comma_separated);
+        assert_eq!(parsed_comma, vec!["Dungeon", "Cave", "Crypt", "Flooded"]);
+
+        let bullets = "- Dungeon\n- Cave\n- Crypt";
+        let parsed_bullets = parse_theme_suggestions(bullets);
+        assert_eq!(parsed_bullets, vec!["Dungeon", "Cave", "Crypt"]);
+
+        let numbered = "1. Dungeon\n2. Cave\n3. Crypt";
+        let parsed_numbered = parse_theme_suggestions(numbered);
+        assert_eq!(parsed_numbered, vec!["Dungeon", "Cave", "Crypt"]);
+
+        let empty = "   \n\n  ";
+        let parsed_empty = parse_theme_suggestions(empty);
+        assert!(parsed_empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_suggest_themes_mock_server() {
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use tokio::net::TcpListener;
+
+        let last_payload = Arc::new(tokio::sync::Mutex::new(Value::Null));
+        let lp = last_payload.clone();
+
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let lp = lp.clone();
+                async move {
+                    *lp.lock().await = body;
+                    Json(json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "```json\n[\"Dungeon\", \"Crypt\", \"Flooded\"]\n```"
+                                }
+                            }
+                        ]
+                    }))
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let adapter = OpenRouterAdapter::with_config(
+            "test_key",
+            format!("http://127.0.0.1:{}", addr.port()),
+            2,
+        );
+
+        let fake_image = b"fake-png-data";
+        let themes = adapter
+            .suggest_themes(fake_image, "image/png")
+            .await
+            .expect("suggest_themes");
+
+        assert_eq!(themes, vec!["Dungeon", "Crypt", "Flooded"]);
+
+        let recorded = last_payload.lock().await.clone();
+        let messages = recorded["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], SYSTEM_INSTRUCTION_SUGGEST_THEMES);
+        assert_eq!(messages[1]["role"], "user");
+
+        let user_parts = messages[1]["content"].as_array().unwrap();
+        assert_eq!(user_parts[0]["type"], "text");
+        assert_eq!(user_parts[0]["text"], USER_PROMPT_SUGGEST_THEMES);
+        assert_eq!(user_parts[1]["type"], "image_url");
+        let url = user_parts[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"));
 
         server_task.abort();
     }

@@ -50,6 +50,20 @@ System & Forge Directives:
 7. The cyan highlight box is for location guidance only and must never appear in the output.
 8. Return only the image — no commentary.";
 
+/// Default vision model used for battlemap theme and environment suggestions.
+pub const DEFAULT_VISION_MODEL: &str = "google/gemini-2.0-flash-lite-001";
+
+/// System instruction for the vision model analyzing battlemap themes.
+pub const SYSTEM_INSTRUCTION_SUGGEST_THEMES: &str = "You are a TTRPG battlemap classification expert. \
+Analyze the provided battlemap image and identify 3 to 5 focused TTRPG theme and environment descriptors \
+(e.g., Dungeon, Cave, Crypt, Flooded, Ruins, Wilderness, SciFi, Urban, Forest, Swamp). \
+Output ONLY a JSON array of strings, for example: [\"Dungeon\", \"Crypt\", \"Flooded\"]. \
+Do not include any explanation, markdown, or extra commentary.";
+
+/// User prompt instructing the vision model to analyze the image and return tags.
+pub const USER_PROMPT_SUGGEST_THEMES: &str =
+    "Identify 3 to 5 focused TTRPG battlemap theme and environment tags for this image. Return strictly a JSON array of strings.";
+
 /// Default architectural prompt details used when user input is empty or whitespace.
 pub const DEFAULT_BATTLEMAP_PROMPT_DETAILS: &str =
     "A detailed battle map with rooms, corridors, lighting, and environmental hazards";

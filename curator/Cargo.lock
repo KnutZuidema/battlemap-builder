@@ -421,6 +421,7 @@ dependencies = [
  "fast_image_resize",
  "image",
  "mime_guess",
+ "parking_lot",
  "regex",
  "reqwest",
  "rust-embed",

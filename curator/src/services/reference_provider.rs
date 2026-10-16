@@ -242,7 +242,7 @@ pub fn detect_theme_for_prompt(prompt: &str) -> Option<Theme> {
 
     best_theme
 }
-/// Scores keyword overlap between a prompt and a curated map's themes and tags.
+/// Scores keyword overlap between a prompt and a curated map's themes, tags, and description.
 pub fn score_curated_map_for_prompt(map: &crate::domain::CuratedMap, prompt: &str) -> usize {
     let prompt_lower = prompt.to_lowercase();
     let prompt_words: std::collections::HashSet<&str> = prompt_lower
@@ -262,6 +262,19 @@ pub fn score_curated_map_for_prompt(map: &crate::domain::CuratedMap, prompt: &st
         let tag_lower = tag.to_lowercase();
         if prompt_words.contains(tag_lower.as_str()) || prompt_lower.contains(&tag_lower) {
             score += 1;
+        }
+    }
+    if let Some(desc) = map.description.as_deref() {
+        let desc_lower = desc.to_lowercase();
+        let desc_words: std::collections::HashSet<&str> = desc_lower
+            .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+            .map(|s| s.trim())
+            .filter(|s| s.len() >= 2)
+            .collect();
+        for word in desc_words {
+            if prompt_words.contains(word) {
+                score += 1;
+            }
         }
     }
     score
@@ -704,6 +717,68 @@ mod tests {
             ReferenceProvenance::StaticFallback {
                 name: "ruins-courtyard".to_string(),
                 theme: Theme::Wilderness,
+            }
+        );
+    }
+
+    #[test]
+    fn test_score_curated_map_for_prompt_includes_description() {
+        let map_without_desc = CuratedMap::new(
+            "map-no-desc",
+            vec!["dungeon".to_string()],
+            vec!["stone".to_string()],
+            (1024, 1024),
+            Utc::now(),
+        );
+
+        let prompt = "Stone dungeon crypt with carved limestone sarcophagus and burning braziers";
+        let base_score = score_curated_map_for_prompt(&map_without_desc, prompt);
+        // "dungeon" theme (2) + "stone" tag (1) = 3
+        assert_eq!(base_score, 3);
+
+        let map_with_desc = map_without_desc.with_description(
+            "Ancient crypt with carved limestone sarcophagus, burning braziers, and iron gates.",
+        );
+        let score_with_desc = score_curated_map_for_prompt(&map_with_desc, prompt);
+        assert!(score_with_desc > base_score);
+        // base_score (3) + 8 overlapping words ("crypt", "with", "carved", "limestone", "sarcophagus", "and", "burning", "braziers")
+        assert_eq!(score_with_desc, 11);
+    }
+
+    #[test]
+    fn test_prompt_keyword_overlap_prioritizes_description_match() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
+        let provider = ReferenceProvider::new(storage.clone());
+
+        // Map A: Newer, but only generic theme ("dungeon")
+        let map_a = CuratedMap::new(
+            "curated-a-generic",
+            vec!["dungeon".to_string()],
+            vec!["stone".to_string()],
+            (1024, 1024),
+            Utc::now(),
+        );
+        let img_bytes = create_test_image_bytes(512, 512, [0, 0, 255]);
+        storage.save_curated(&map_a, &img_bytes).unwrap();
+
+        // Map B: Older, but rich description matching specific prompt elements ("altar", "obsidian", "braziers")
+        let map_b = CuratedMap::new(
+            "curated-b-rich-desc",
+            vec!["dungeon".to_string()],
+            vec!["room".to_string()],
+            (1024, 1024),
+            Utc::now() - chrono::Duration::hours(5),
+        ).with_description("Dark sacrificial chamber with obsidian altar, glowing runes, and twin iron braziers.");
+        storage.save_curated(&map_b, &img_bytes).unwrap();
+
+        let prompt = "Dark dungeon with obsidian altar and flaming braziers";
+        let res = provider.resolve_reference_for_prompt(prompt).unwrap().unwrap();
+        assert_eq!(
+            res.provenance,
+            ReferenceProvenance::Curated {
+                id: "curated-b-rich-desc".to_string(),
+                theme: Theme::Dungeon,
             }
         );
     }

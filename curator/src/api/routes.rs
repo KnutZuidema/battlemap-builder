@@ -6,8 +6,52 @@ use axum::{
         sse::{Event, Sse},
         IntoResponse, Response,
     },
-    Json,
 };
+
+/// Wrapper for JSON extractors and responses supporting optional payloads with empty bodies.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Json<T>(pub T);
+
+impl<T> From<T> for Json<T> {
+    fn from(inner: T) -> Self {
+        Self(inner)
+    }
+}
+
+impl<T: Serialize> IntoResponse for Json<T> {
+    fn into_response(self) -> Response {
+        axum::Json(self.0).into_response()
+    }
+}
+
+impl<S, T> axum::extract::FromRequest<S> for Json<T>
+where
+    S: Send + Sync,
+    T: serde::de::DeserializeOwned,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(
+        req: axum::extract::Request,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let (_parts, body) = req.into_parts();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .map_err(|e| ApiError::bad_request(format!("Failed to read request body: {e}")))?;
+
+        let trimmed = bytes.trim_ascii();
+        if trimmed.is_empty() {
+            if let Ok(val) = serde_json::from_str::<T>("null") {
+                return Ok(Json(val));
+            }
+        }
+
+        let val = serde_json::from_slice::<T>(&bytes)
+            .map_err(|e| ApiError::bad_request(format!("Invalid JSON payload: {e}")))?;
+        Ok(Json(val))
+    }
+}
 use std::sync::atomic::Ordering;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -16,8 +60,8 @@ use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{
     BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
-    CuratedMap, CustomPrompt, PurgeStagingResult, RedditHarvestRequest, RejectionReason,
-    StorageStats, Theme,
+    CaptionGenerator, CuratedMap, CustomPrompt, PurgeStagingResult, RedditHarvestRequest,
+    RejectionReason, StorageStats, Theme,
 };
 use crate::ports::cost_tracker::CostStats;
 use crate::services::{IngestionSummary, RedditIngestionService};
@@ -330,7 +374,7 @@ pub struct CurateRequest {
     pub tags: Vec<String>,
     #[serde(default)]
     pub layers: Option<Vec<CandidateLayer>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
@@ -414,13 +458,54 @@ pub async fn post_curate(
     if let Some(layers) = payload.layers {
         state.storage.update_staging_layers(&payload.id, layers)?;
     }
+    let description = if let Some(desc) = payload
+        .description
+        .as_ref()
+        .map(|d| d.trim())
+        .filter(|d| !d.is_empty())
+    {
+        Some(desc.to_string())
+    } else if let Some(adapter) = state.openrouter_client() {
+        match state.storage.get_staging_image(&payload.id) {
+            Ok(bytes) => {
+                let filename = candidate.resolved_filename();
+                let mime = detect_image_mime(&bytes, Some(&filename));
+                match adapter
+                    .generate_battlemap_description(&bytes, mime, &themes, &payload.tags)
+                    .await
+                {
+                    Ok(desc) if !desc.trim().is_empty() => Some(desc),
+                    Ok(_) => None,
+                    Err(err) => {
+                        tracing::warn!(
+                            candidate_id = %payload.id,
+                            error = %err,
+                            "Auto-generating description on curate failed; falling back to None"
+                        );
+                        None
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    candidate_id = %payload.id,
+                    error = %err,
+                    "Reading candidate image for description generation failed; falling back to None"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut curated = CuratedMap::with_now(
         &payload.id,
         themes,
         payload.tags,
         dimensions,
     );
-    if let Some(desc) = payload.description {
+    if let Some(desc) = description {
         curated = curated.with_description(desc);
     }
 
@@ -562,6 +647,108 @@ pub async fn post_suggest_themes(
     }
 
     Ok(Json(SuggestThemesResponse { id, suggestions }))
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DescribeRequest {
+    #[serde(default)]
+    pub themes: Option<Vec<String>>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DescribeResponse {
+    pub id: String,
+    pub description: String,
+}
+
+/// POST /api/staging/{id}/describe or GET /api/staging/{id}/describe
+/// Generate a rich, physical battlemap description from candidate image and optional themes/tags.
+pub async fn post_describe_candidate(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<Option<DescribeRequest>>,
+) -> Result<Json<DescribeResponse>, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Candidate ID cannot be empty"));
+    }
+
+    // 1. Locate staging candidate
+    let candidates = state.storage.list_staging()?;
+    let candidate = candidates
+        .into_iter()
+        .find(|c| c.id == id)
+        .ok_or_else(|| ApiError::not_found(format!("Candidate '{id}' not found in staging")))?;
+
+    // 2. Read primary image bytes (from candidate layer 0 or candidate primary image)
+    let bytes = state.storage.get_staging_image(&id)?;
+    let filename = candidate.resolved_filename();
+    let mime = detect_image_mime(&bytes, Some(&filename));
+
+    // 3. Resolve themes and tags (prefer payload themes/tags, fallback to candidate tags/title)
+    let req = payload.unwrap_or_default();
+    let mut themes = req.themes.unwrap_or_default();
+    if themes.is_empty() {
+        let cache = state.theme_suggestions_cache.read().await;
+        if let Some(cached) = cache.get(&id) {
+            themes = cached.clone();
+        }
+    }
+    let primary_theme = themes
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("dungeon");
+
+    let tags = if let Some(req_tags) = req.tags {
+        req_tags
+    } else {
+        Vec::new()
+    };
+
+    // 4. Invoke OpenRouter vision model if available, falling back gracefully to CaptionGenerator
+    let description = match state.openrouter_client() {
+        Some(adapter) => {
+            match adapter
+                .generate_battlemap_description(&bytes, mime, &themes, &tags)
+                .await
+            {
+                Ok(desc) if !desc.trim().is_empty() => desc,
+                Ok(_) => {
+                    CaptionGenerator::generate_with_theme_str(
+                        primary_theme,
+                        &tags,
+                        candidate.title.as_deref(),
+                    )
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        candidate_id = %id,
+                        error = %err,
+                        "OpenRouter description generation failed; falling back to caption generator"
+                    );
+                    CaptionGenerator::generate_with_theme_str(
+                        primary_theme,
+                        &tags,
+                        candidate.title.as_deref(),
+                    )
+                }
+            }
+        }
+        None => {
+            tracing::info!(
+                candidate_id = %id,
+                "OpenRouter client not configured; falling back to caption generator"
+            );
+            CaptionGenerator::generate_with_theme_str(
+                primary_theme,
+                &tags,
+                candidate.title.as_deref(),
+            )
+        }
+    };
+
+    Ok(Json(DescribeResponse { id, description }))
 }
 
 /// Request payload for rejecting a candidate.

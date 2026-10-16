@@ -1119,6 +1119,18 @@ impl FilesystemStorage {
                 });
             }
         }
+        if map.description.is_none() {
+            let primary_cap = map
+                .layers
+                .iter()
+                .find(|l| l.role == LayerRole::Ground)
+                .or_else(|| map.layers.first())
+                .and_then(|l| l.caption.as_ref())
+                .filter(|c| !c.trim().is_empty());
+            if let Some(cap) = primary_cap {
+                map.description = Some(cap.clone());
+            }
+        }
     }
 }
 
@@ -1822,8 +1834,18 @@ impl StorageRepository for FilesystemStorage {
                     .map(|l| l.dimensions)
                     .unwrap_or(candidate.dimensions);
             }
+            if let Some(desc) = &stored_map.description {
+                let primary_idx = curated_layers
+                    .iter()
+                    .position(|l| l.role == LayerRole::Ground)
+                    .unwrap_or(0);
+                if let Some(layer) = curated_layers.get_mut(primary_idx) {
+                    if layer.caption.is_none() {
+                        layer.caption = Some(desc.clone());
+                    }
+                }
+            }
             stored_map.layers = curated_layers;
-
             let curated_json = serde_json::to_string_pretty(&stored_map)?;
             Self::atomic_write(
                 &curated_bundle_dir.join("manifest.json"),
@@ -1908,9 +1930,20 @@ impl StorageRepository for FilesystemStorage {
                 filename: dest_filename,
                 role: LayerRole::Ground,
                 elevation: Some(0),
-                caption: None,
+                caption: stored_map.description.clone(),
                 dimensions: stored_map.dimensions,
             }];
+        } else if let Some(desc) = &stored_map.description {
+            let primary_idx = stored_map
+                .layers
+                .iter()
+                .position(|l| l.role == LayerRole::Ground)
+                .unwrap_or(0);
+            if let Some(layer) = stored_map.layers.get_mut(primary_idx) {
+                if layer.caption.is_none() {
+                    layer.caption = Some(desc.clone());
+                }
+            }
         }
         let curated_json = serde_json::to_string_pretty(&stored_map)?;
         Self::atomic_write(&target_manifest, curated_json.as_bytes())?;
@@ -2399,6 +2432,58 @@ mod tests {
         // List all curated
         let all_curated = storage.list_curated(None).unwrap();
         assert_eq!(all_curated.len(), 1);
+    }
+
+    #[test]
+    fn test_curate_staging_preserves_description_and_lora_companions() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+
+        let candidate = Candidate::with_now(
+            "map_desc_1",
+            Source::Reddit,
+            "map_desc_1.png",
+            (1024, 1024),
+        ).with_title("Ancient Crypt [50x50]");
+
+        let image_bytes = b"\x89PNG\r\n\x1a\nfake-curated-png-bytes";
+        storage.save_staging(&candidate, image_bytes).unwrap();
+
+        let desc_text = "Ancient stone crypt with carved limestone sarcophagus and glowing braziers.";
+        let curated = CuratedMap::with_now(
+            "map_desc_1",
+            Theme::Dungeon,
+            vec!["boss-room".into()],
+            (1024, 1024),
+        ).with_description(desc_text);
+
+        storage.curate_staging(&curated).unwrap();
+
+        // Verify manifest.json contains description
+        let manifest_path = dir.path().join("curated").join("map_desc_1").join("manifest.json");
+        let manifest_str = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest_str.contains(desc_text));
+
+        // Verify <id>_lora1024.txt companion exists and incorporates description
+        let lora_txt_path = dir.path().join("curated").join("map_desc_1").join("map_desc_1_lora1024.txt");
+        assert!(lora_txt_path.is_file());
+        let lora_txt = std::fs::read_to_string(&lora_txt_path).unwrap();
+        assert!(lora_txt.contains("limestone"));
+        assert!(lora_txt.contains("sarcophagus"));
+
+        // Verify list_curated preserves description and layer caption
+        let list = storage.list_curated(None).unwrap();
+        assert_eq!(list.len(), 1);
+        let map = &list[0];
+        assert_eq!(map.description.as_deref(), Some(desc_text));
+        let ground_layer = map.layers.iter().find(|l| l.role == LayerRole::Ground).unwrap();
+        assert_eq!(ground_layer.caption.as_deref(), Some(desc_text));
+
+        // Test ensure_curated_caption populates map.description when manifest description is None
+        let mut map_without_desc = map.clone();
+        map_without_desc.description = None;
+        storage.ensure_curated_caption(&mut map_without_desc);
+        assert_eq!(map_without_desc.description.as_deref(), Some(desc_text));
     }
 
     #[test]

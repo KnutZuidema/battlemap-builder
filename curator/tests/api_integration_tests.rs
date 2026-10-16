@@ -9,7 +9,7 @@ use tower::ServiceExt;
 
 use async_trait::async_trait;
 use curator::adapters::{FileCostLedger, FilesystemStorage, OpenRouterAdapter};
-use curator::api::{create_router, AppState, SuggestThemesResponse};
+use curator::api::{create_router, AppState, DescribeResponse, SuggestThemesResponse};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use curator::ports::cost_tracker::{CostTracker, GenerationCostRecord};
 use curator::domain::{
@@ -1874,4 +1874,252 @@ async fn test_suggest_themes_empty_candidate_id_returns_bad_request() {
 
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_describe_candidate_fallback_when_no_api_key() {
+    let (app, storage, _dir) = setup_test_app();
+
+    let cand = Candidate::with_now(
+        "cand_desc_fallback",
+        Source::Reddit,
+        "cand_desc_fallback.png",
+        (1024, 1024),
+    )
+    .with_title("Flooded Stone Dungeon Crypt [50x50]");
+
+    storage
+        .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
+        .unwrap();
+
+    // 1. GET /api/staging/{id}/describe with empty body
+    let req_get = Request::builder()
+        .uri("/api/staging/cand_desc_fallback/describe")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp_get = app.clone().oneshot(req_get).await.unwrap();
+    assert_eq!(resp_get.status(), StatusCode::OK);
+    let body_get = to_bytes(resp_get.into_body(), usize::MAX).await.unwrap();
+    let json_get: DescribeResponse = serde_json::from_slice(&body_get).unwrap();
+    assert_eq!(json_get.id, "cand_desc_fallback");
+    assert!(json_get.description.contains("dungeon"));
+    assert!(json_get.description.contains("crypt") || json_get.description.contains("stone"));
+
+    // 2. POST /api/staging/{id}/describe with empty body
+    let req_post_empty = Request::builder()
+        .uri("/api/staging/cand_desc_fallback/describe")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp_post_empty = app.oneshot(req_post_empty).await.unwrap();
+    assert_eq!(resp_post_empty.status(), StatusCode::OK);
+    let body_post_empty = to_bytes(resp_post_empty.into_body(), usize::MAX).await.unwrap();
+    let json_post_empty: DescribeResponse = serde_json::from_slice(&body_post_empty).unwrap();
+    assert_eq!(json_post_empty.id, "cand_desc_fallback");
+    assert!(!json_post_empty.description.is_empty());
+}
+
+#[tokio::test]
+async fn test_describe_candidate_with_payload_themes_and_tags() {
+    let (app, storage, _dir) = setup_test_app();
+
+    let cand = Candidate::with_now(
+        "cand_desc_payload",
+        Source::Reddit,
+        "cand_desc_payload.png",
+        (1024, 1024),
+    );
+    storage
+        .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
+        .unwrap();
+
+    let payload = json!({
+        "themes": ["cave"],
+        "tags": ["underground", "stalagmites", "crystals"]
+    });
+
+    let req = Request::builder()
+        .uri("/api/staging/cand_desc_payload/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: DescribeResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json.id, "cand_desc_payload");
+    assert!(json.description.contains("cave"));
+    assert!(json.description.contains("stalagmites"));
+}
+
+#[tokio::test]
+async fn test_describe_candidate_with_mock_openrouter() {
+    use axum::routing::post;
+    use tokio::net::TcpListener;
+
+    let mock_desc = "Ancient sunken temple with moss-covered stone carvings and glowing runes.";
+    let mock_desc_clone = mock_desc.to_string();
+
+    let mock_app = axum::Router::new().route(
+        "/chat/completions",
+        post(move |_body: axum::Json<Value>| {
+            let desc = mock_desc_clone.clone();
+            async move {
+                axum::Json(json!({
+                    "id": "gen-desc-1",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": desc
+                        }
+                    }]
+                }))
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, mock_app).await.unwrap();
+    });
+
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let cand = Candidate::with_now("cand_mock_ai", Source::Manual, "cand_mock_ai.png", (1024, 1024));
+    storage.save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-bytes").unwrap();
+
+    let adapter = Arc::new(OpenRouterAdapter::with_config(
+        "sk-test-key",
+        format!("http://127.0.0.1:{}", addr.port()),
+        2,
+    ));
+    let state = AppState::new(storage.clone()).with_openrouter(adapter);
+    let app = create_router(state);
+
+    let req = Request::builder()
+        .uri("/api/staging/cand_mock_ai/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "themes": ["temple"] }).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: DescribeResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json.id, "cand_mock_ai");
+    assert_eq!(json.description, mock_desc);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn test_describe_candidate_error_handling() {
+    let (app, _storage, _dir) = setup_test_app();
+
+    // 1. Not found candidate
+    let req_not_found = Request::builder()
+        .uri("/api/staging/nonexistent_cand_xyz/describe")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp_not_found = app.clone().oneshot(req_not_found).await.unwrap();
+    assert_eq!(resp_not_found.status(), StatusCode::NOT_FOUND);
+
+    // 2. Empty candidate ID
+    let req_empty_id = Request::builder()
+        .uri("/api/staging/%20/describe")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp_empty_id = app.oneshot(req_empty_id).await.unwrap();
+    assert_eq!(resp_empty_id.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_curate_with_description_persistence() {
+    let (app, storage, dir) = setup_test_app();
+
+    let cand = Candidate::with_now("cand_curate_desc", Source::Reddit, "cand_curate_desc.png", (1024, 1024));
+    storage.save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-curated-bytes").unwrap();
+
+    let custom_desc = "Grand limestone throne room with ornate stone pillars, banners, and obsidian dais.";
+    let curate_payload = json!({
+        "id": "cand_curate_desc",
+        "themes": ["dungeon"],
+        "tags": ["throne-room", "pillars"],
+        "description": custom_desc
+    });
+
+    let req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["curated"]["description"].as_str(), Some(custom_desc));
+
+    // Verify storage has description preserved on manifest.json
+    let manifest_path = dir.path().join("curated").join("cand_curate_desc").join("manifest.json");
+    let manifest_str = std::fs::read_to_string(&manifest_path).unwrap();
+    assert!(manifest_str.contains("obsidian dais"));
+
+    // Verify lora companion incorporates description
+    let lora_path = dir.path().join("curated").join("cand_curate_desc").join("cand_curate_desc_lora1024.txt");
+    assert!(lora_path.is_file());
+    let lora_str = std::fs::read_to_string(&lora_path).unwrap();
+    assert!(lora_str.contains("obsidian"));
+
+    // Verify list_curated has description
+    let curated_list = storage.list_curated(None).unwrap();
+    assert_eq!(curated_list.len(), 1);
+    assert_eq!(curated_list[0].description.as_deref(), Some(custom_desc));
+    let ground_layer = curated_list[0].layers.iter().find(|l| l.role == LayerRole::Ground).unwrap();
+    assert_eq!(ground_layer.caption.as_deref(), Some(custom_desc));
+}
+
+#[tokio::test]
+async fn test_curate_without_description_graceful() {
+    let (app, storage, dir) = setup_test_app();
+
+    let cand = Candidate::with_now("cand_curate_no_desc", Source::Reddit, "cand_curate_no_desc.png", (1024, 1024));
+    storage.save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-curated-bytes").unwrap();
+
+    let curate_payload = json!({
+        "id": "cand_curate_no_desc",
+        "themes": ["dungeon"],
+        "tags": ["hallway"]
+    });
+
+    let req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "ok");
+
+    // Staging removed
+    assert_eq!(storage.list_staging().unwrap().len(), 0);
+    // Curated directory created
+    assert!(dir.path().join("curated").join("cand_curate_no_desc").join("manifest.json").is_file());
 }

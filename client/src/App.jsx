@@ -9,6 +9,7 @@ import DebugModal from './components/DebugModal';
 import WikiDrawer from './components/WikiDrawer';
 import FeatureInspector from './components/FeatureInspector';
 import PlayFeatureCard from './components/PlayFeatureCard';
+import MapLibrary from './components/MapLibrary';
 import {
   checkServerHealth,
   fetchModelsApi,
@@ -16,7 +17,10 @@ import {
   forgeRegionApi,
   deleteRegionApi,
   detectFeaturesApi,
-  forgeFeatureStateApi
+  forgeFeatureStateApi,
+  fetchMapByIdApi,
+  saveMapApi,
+  updateMapApi
 } from './services/api';
 import { describeRegion, getRegionInCanvasCoordinates, deleteRegionClient } from './utils/regionSelection';
 
@@ -44,6 +48,19 @@ export default function App() {
   const [debugLogs, setDebugLogs] = useState([]);
 
   const [mapTitle, setMapTitle] = useState('Dungeon Hallways Map');
+
+  // View Navigation & Map Session Persistence State
+  const [currentView, setCurrentView] = useState('studio'); // 'studio' | 'library'
+  const [currentMapId, setCurrentMapId] = useState(null);
+  const [isSavingMap, setIsSavingMap] = useState(false);
+  const [saveStatus, setSaveStatus] = useState('idle'); // 'idle' | 'saving' | 'saved'
+  const saveTimeoutRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      clearTimeout(saveTimeoutRef.current);
+    };
+  }, []);
   const [showGrid, setShowGrid] = useState(true);
 
   // Selected Image Gen Model — defaults to Nano Banana 2 Flash, persisted in localStorage
@@ -381,6 +398,37 @@ export default function App() {
       addMapCost(res.usage || res.debug?.usage, true);
       pushDebugLog('GENERATE', prompt, res, startTimeMs);
       confetti({ particleCount: 55, spread: 65, origin: { y: 0.8 } });
+
+      // Automatically persist newly forged map to disk library
+      try {
+        const initialCost = res.usage || res.debug?.usage;
+        const initialMapCost = initialCost ? {
+          totalCost: typeof initialCost.cost === 'number' ? initialCost.cost : ((Number(initialCost.promptCost) || 0) + (Number(initialCost.completionCost) || 0)),
+          promptTokens: Number(initialCost.promptTokens) || 0,
+          completionTokens: Number(initialCost.completionTokens) || 0,
+          totalTokens: Number(initialCost.totalTokens) || 0,
+          promptCost: Number(initialCost.promptCost) || 0,
+          completionCost: Number(initialCost.completionCost) || 0,
+          requestsCount: 1
+        } : DEFAULT_MAP_COST;
+
+        const saveRes = await saveMapApi({
+          title: mapTitle || 'Dungeon Hallways Map',
+          prompt,
+          mapImage: res.imageDataUrl,
+          features: [],
+          cost: initialMapCost,
+          wikiContext: wikiContext || null,
+          history: [{ mapImage: res.imageDataUrl, features: [] }],
+          historyIndex: 0,
+          dimensions: { width: 1024, height: 1024 }
+        });
+        if (saveRes?.map?.id) {
+          setCurrentMapId(saveRes.map.id);
+        }
+      } catch (saveErr) {
+        console.warn('Auto-save newly generated battlemap failed:', saveErr);
+      }
     } catch (err) {
       reportFailure('GENERATE', prompt, err, startTimeMs);
     } finally {
@@ -558,16 +606,38 @@ export default function App() {
   const handleRetryRef = useRef(handleRetry);
   const handleUndoRef = useRef(handleUndo);
   const handleRedoRef = useRef(handleRedo);
+  const handleSaveMapRef = useRef(handleSaveMapToDisk);
+  const handleToggleViewRef = useRef(() => {
+    setCurrentView((prev) => (prev === 'library' ? 'studio' : 'library'));
+  });
 
   useEffect(() => {
     handleRetryRef.current = handleRetry;
     handleUndoRef.current = handleUndo;
     handleRedoRef.current = handleRedo;
+    handleSaveMapRef.current = handleSaveMapToDisk;
+    handleToggleViewRef.current = () => {
+      setCurrentView((prev) => (prev === 'library' ? 'studio' : 'library'));
+    };
   });
   useEffect(() => {
     const handleKeyDown = (e) => {
+      // Save to disk: Ctrl+S or Cmd+S
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        handleSaveMapRef.current?.();
+        return;
+      }
+
       const isInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
       if (isInput) return;
+
+      // Toggle Library / Studio view: L
+      if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'l') {
+        e.preventDefault();
+        handleToggleViewRef.current?.();
+        return;
+      }
 
       // Undo: Ctrl+Z or Cmd+Z (without Shift)
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
@@ -741,28 +811,156 @@ export default function App() {
     }
   };
 
-  // Start over: back to the prompt with no map
-  const handleClearCanvas = () => {
-    if (window.confirm('Start a new map? This clears the current one.')) {
-      setMapImage(null);
+  // Load saved battlemap from library
+  const handleSelectMapFromLibrary = async (mapId, targetMode = 'edit') => {
+    try {
+      const res = await fetchMapByIdApi(mapId);
+      const mapData = res?.map || res;
+      if (!mapData || !mapData.mapImage) {
+        throw new Error('Invalid map payload received from server');
+      }
+
+      setMapImage(mapData.mapImage);
+      setFeatures(mapData.features || []);
+      setMapTitle(mapData.title || 'Untitled Map');
+      setPrompt(mapData.prompt || '');
+      setWikiContext(mapData.wikiContext || null);
+
+      if (mapData.cost && typeof mapData.cost === 'object') {
+        const restored = {
+          totalCost: Number(mapData.cost.totalCost ?? 0),
+          promptTokens: Number(mapData.cost.promptTokens ?? 0),
+          completionTokens: Number(mapData.cost.completionTokens ?? 0),
+          totalTokens: Number(mapData.cost.totalTokens ?? 0),
+          promptCost: Number(mapData.cost.promptCost ?? 0),
+          completionCost: Number(mapData.cost.completionCost ?? 0),
+          requestsCount: Number(mapData.cost.requestsCount ?? 1)
+        };
+        setMapCost(restored);
+        try {
+          localStorage.setItem('dungeon_forge_map_cost', JSON.stringify(restored));
+        } catch {}
+      } else if (typeof mapData.cost === 'number') {
+        const restored = {
+          ...DEFAULT_MAP_COST,
+          totalCost: mapData.cost,
+          requestsCount: 1
+        };
+        setMapCost(restored);
+        try {
+          localStorage.setItem('dungeon_forge_map_cost', JSON.stringify(restored));
+        } catch {}
+      } else {
+        setMapCost(DEFAULT_MAP_COST);
+        try {
+          localStorage.removeItem('dungeon_forge_map_cost');
+        } catch {}
+      }
+
+      if (Array.isArray(mapData.history) && mapData.history.length > 0) {
+        setHistory(mapData.history);
+        setHistoryIndex(
+          typeof mapData.historyIndex === 'number' && mapData.historyIndex >= 0
+            ? mapData.historyIndex
+            : mapData.history.length - 1
+        );
+      } else {
+        setHistory([{ mapImage: mapData.mapImage, features: mapData.features || [] }]);
+        setHistoryIndex(0);
+      }
+
+      setCurrentMapId(mapId);
+      setActiveMode(targetMode === 'play' ? 'play' : 'edit');
+      setCurrentView('studio');
       setMapSessionId((prev) => prev + 1);
-      setFeatures([]);
-      setSelectedFeatureId(null);
-      setActiveMode('edit');
+
+      // Reset selection and inspector overlays
       setRegionSelection(null);
       setRegionPrompt('');
       setIsRegionModalOpen(false);
-      setHistory([]);
-      setHistoryIndex(-1);
+      setSelectedFeatureId(null);
       setRetryContext(null);
       setIsRetryPillDismissed(false);
-      setMapCost(DEFAULT_MAP_COST);
-      setWikiContext(null);
-      try {
-        localStorage.removeItem('dungeon_forge_map_cost');
-      } catch {
-        // ignore
+    } catch (err) {
+      console.error('Failed to load map from disk library:', err);
+      alert(`Failed to load map: ${err.message || 'Unknown error'}`);
+    }
+  };
+
+  // Save or update active map to disk library
+  const handleSaveMapToDisk = async () => {
+    if (!mapImage || isSavingMap) return;
+
+    setIsSavingMap(true);
+    setSaveStatus('saving');
+    clearTimeout(saveTimeoutRef.current);
+
+    const payload = {
+      title: mapTitle || 'Untitled Map',
+      prompt,
+      mapImage,
+      features: features || [],
+      cost: mapCost,
+      wikiContext: wikiContext || null,
+      history: history.length > 0 ? history : [{ mapImage, features }],
+      historyIndex: history.length > 0 ? historyIndex : 0,
+      dimensions: { width: 1024, height: 1024 }
+    };
+
+    try {
+      if (currentMapId) {
+        await updateMapApi(currentMapId, payload);
+      } else {
+        const res = await saveMapApi(payload);
+        if (res?.map?.id) {
+          setCurrentMapId(res.map.id);
+        }
       }
+
+      setSaveStatus('saved');
+      saveTimeoutRef.current = setTimeout(() => {
+        setSaveStatus('idle');
+      }, 3000);
+    } catch (err) {
+      console.error('Failed to save map to disk:', err);
+      setSaveStatus('idle');
+      alert(`Failed to save map: ${err.message || 'Unknown error'}`);
+    } finally {
+      setIsSavingMap(false);
+    }
+  };
+
+  // Create a brand new map: reset canvas, ID, and return to studio edit mode
+  const handleCreateNewMap = () => {
+    setMapImage(null);
+    setCurrentMapId(null);
+    setFeatures([]);
+    setSelectedFeatureId(null);
+    setMapTitle('Dungeon Hallways Map');
+    setPrompt('Flooded stone dungeon room with ancient pillars, glowing torches, and a central boss altar');
+    setHistory([]);
+    setHistoryIndex(-1);
+    setRegionSelection(null);
+    setRegionPrompt('');
+    setIsRegionModalOpen(false);
+    setRetryContext(null);
+    setIsRetryPillDismissed(false);
+    setMapCost(DEFAULT_MAP_COST);
+    setWikiContext(null);
+    try {
+      localStorage.removeItem('dungeon_forge_map_cost');
+    } catch {
+      // ignore
+    }
+    setMapSessionId((prev) => prev + 1);
+    setCurrentView('studio');
+    setActiveMode('edit');
+  };
+
+  // Start over: back to the prompt with no map
+  const handleClearCanvas = () => {
+    if (window.confirm('Start a new map? This clears the current one.')) {
+      handleCreateNewMap();
     }
   };
 
@@ -935,10 +1133,23 @@ export default function App() {
         isDetectingFeatures={isDetectingFeatures}
         featureCount={features.length}
         hasMap={Boolean(mapImage)}
+        currentView={currentView}
+        onSetView={setCurrentView}
+        onSaveMap={handleSaveMapToDisk}
+        isSavingMap={isSavingMap}
+        saveStatus={saveStatus}
+        currentMapId={currentMapId}
       />
-      {/* Workspace: the prompt while there is no map, the canvas once there is */}
+      {/* Workspace: the prompt while there is no map, the canvas once there is, or the map library */}
       <div className="flex flex-1 overflow-hidden relative z-10">
-        {mapImage ? (
+        {currentView === 'library' ? (
+          <MapLibrary
+            onSelectMap={handleSelectMapFromLibrary}
+            onCreateNewMap={handleCreateNewMap}
+            currentMapId={currentMapId}
+            onClose={() => setCurrentView('studio')}
+          />
+        ) : mapImage ? (
           <BattlemapCanvas
             key={mapSessionId}
             mapImage={mapImage}
@@ -1003,11 +1214,12 @@ export default function App() {
             phaseText={generationPhaseText}
             elapsedSeconds={elapsedSeconds}
             onOpenWikiDrawer={() => setIsWikiDrawerOpen(true)}
+            onOpenLibrary={() => setCurrentView('library')}
           />
         )}
 
         {/* Edit Mode: Feature Inspector Modal */}
-        {mapImage && activeMode === 'edit' && selectedFeatureId && (
+        {currentView === 'studio' && mapImage && activeMode === 'edit' && selectedFeatureId && (
           <FeatureInspector
             feature={features.find((f) => f.id === selectedFeatureId)}
             onClose={() => setSelectedFeatureId(null)}
@@ -1021,7 +1233,7 @@ export default function App() {
         )}
 
         {/* Play Mode: Tactical Feature Card */}
-        {mapImage && activeMode === 'play' && selectedFeatureId && (
+        {currentView === 'studio' && mapImage && activeMode === 'play' && selectedFeatureId && (
           <PlayFeatureCard
             feature={features.find((f) => f.id === selectedFeatureId)}
             onClose={() => setSelectedFeatureId(null)}

@@ -71,8 +71,7 @@ pub struct CaptionGenerator;
 impl CaptionGenerator {
     /// Generates a standardized LoRA caption string adhering to Kohya / AI-Toolkit format:
     /// `ttrpg battlemap, flat 2D plan view, perpendicular orthographic camera, poché cut walls, strictly gridless, {theme}, {sanitized_tags_or_prompt}`
-    pub fn generate(theme: &Theme, tags: &[String], prompt_or_title: Option<&str>) -> String {
-        let theme_str = theme.as_str();
+    pub fn generate_with_theme_str(theme_str: &str, tags: &[String], prompt_or_title: Option<&str>) -> String {
         let mut tokens: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
 
@@ -138,10 +137,15 @@ impl CaptionGenerator {
         }
     }
 
+    /// Generates a standardized LoRA caption string adhering to Kohya / AI-Toolkit format from a `Theme`.
+    pub fn generate(theme: &Theme, tags: &[String], prompt_or_title: Option<&str>) -> String {
+        Self::generate_with_theme_str(theme.as_str(), tags, prompt_or_title)
+    }
+
     /// Convenience helper to generate caption for an approved `CuratedMap` and optional `Candidate`.
     pub fn generate_for_curated(map: &CuratedMap, candidate: Option<&Candidate>) -> String {
         let title_or_prompt = candidate.and_then(|c| c.title.as_deref());
-        Self::generate(&map.theme, &map.tags, title_or_prompt)
+        Self::generate_with_theme_str(map.primary_theme(), &map.tags, title_or_prompt)
     }
 
     /// Sanitizes an individual tag or short fragment:

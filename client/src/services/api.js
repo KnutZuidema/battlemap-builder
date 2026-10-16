@@ -10,11 +10,14 @@ const API_BASE = '';
  * bare status.
  */
 async function postJson(path, body) {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const options = {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
+    headers: { 'Content-Type': 'application/json' }
+  };
+  if (body !== undefined) {
+    options.body = JSON.stringify(body);
+  }
+  const res = await fetch(`${API_BASE}${path}`, options);
 
   const data = await res.json().catch(() => null);
 
@@ -33,6 +36,50 @@ async function postJson(path, body) {
  */
 async function getJson(path) {
   const res = await fetch(`${API_BASE}${path}`);
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `Server error ${res.status}`);
+    err.code = (data && data.code) || 'REQUEST_FAILED';
+    err.debug = (data && data.debug) || null;
+    throw err;
+  }
+
+  return data;
+}
+/**
+ * Puts JSON to a backend route.
+ */
+async function putJson(path, body) {
+  const options = {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' }
+  };
+  if (body !== undefined) {
+    options.body = JSON.stringify(body);
+  }
+  const res = await fetch(`${API_BASE}${path}`, options);
+
+  const data = await res.json().catch(() => null);
+
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `Server error ${res.status}`);
+    err.code = (data && data.code) || 'REQUEST_FAILED';
+    err.debug = (data && data.debug) || null;
+    throw err;
+  }
+
+  return data;
+}
+
+/**
+ * Deletes a backend resource.
+ */
+async function deleteJson(path) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'DELETE'
+  });
+
   const data = await res.json().catch(() => null);
 
   if (!res.ok) {
@@ -119,4 +166,31 @@ export async function detectFeaturesApi({ mapDataUrl, prompt, wikiContext, mapDi
 
 export async function forgeFeatureStateApi({ originalDataUrl, box, prompt, model, forgeImageMode }) {
   return postJson('/api/features/forge-state', { originalDataUrl, box, prompt, model, forgeImageMode });
+}
+
+/**
+ * Battlemap persistence and library management endpoints
+ */
+export async function fetchMapsApi() {
+  return getJson('/api/maps');
+}
+
+export async function fetchMapByIdApi(id) {
+  return getJson(`/api/maps/${encodeURIComponent(id)}`);
+}
+
+export async function saveMapApi(mapData) {
+  return postJson('/api/maps', mapData);
+}
+
+export async function updateMapApi(id, mapData) {
+  return putJson(`/api/maps/${encodeURIComponent(id)}`, mapData);
+}
+
+export async function deleteMapApi(id) {
+  return deleteJson(`/api/maps/${encodeURIComponent(id)}`);
+}
+
+export async function duplicateMapApi(id) {
+  return postJson(`/api/maps/${encodeURIComponent(id)}/duplicate`);
 }

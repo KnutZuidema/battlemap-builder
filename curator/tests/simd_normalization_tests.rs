@@ -215,7 +215,6 @@ fn test_full_curation_workflow_bundle_lora_files() {
     let curated = CuratedMap::with_now(
         "crypt_bundle_1",
         Theme::Dungeon,
-        5,
         vec!["crypt".into(), "stone".into()],
         (800, 600),
     );
@@ -227,14 +226,10 @@ fn test_full_curation_workflow_bundle_lora_files() {
     assert!(storage.is_curated("crypt_bundle_1").unwrap());
 
     // 3. Verify LoRA companion files on disk
-    let theme_dir = storage.curated_theme_dir(&Theme::Dungeon);
-    let theme_lora_png = theme_dir.join("crypt_bundle_1_lora1024.png");
-    let theme_lora_txt = theme_dir.join("crypt_bundle_1_lora1024.txt");
-    let bundle_lora_png = theme_dir.join("crypt_bundle_1").join("crypt_bundle_1_lora1024.png");
-    let bundle_lora_txt = theme_dir.join("crypt_bundle_1").join("crypt_bundle_1_lora1024.txt");
+    let bundle_dir = storage.curated_dir().join("crypt_bundle_1");
+    let bundle_lora_png = bundle_dir.join("crypt_bundle_1_lora1024.png");
+    let bundle_lora_txt = bundle_dir.join("crypt_bundle_1_lora1024.txt");
 
-    assert!(theme_lora_png.is_file(), "theme_lora_png must exist on disk");
-    assert!(theme_lora_txt.is_file(), "theme_lora_txt must exist on disk");
     assert!(bundle_lora_png.is_file(), "bundle_lora_png must exist in bundle dir");
     assert!(bundle_lora_txt.is_file(), "bundle_lora_txt must exist in bundle dir");
 
@@ -277,7 +272,6 @@ fn test_full_curation_workflow_flat_candidate_lora_files() {
     let curated = CuratedMap::with_now(
         "tavern_map_42",
         Theme::Tavern,
-        4,
         vec!["cozy".into()],
         (1200, 800),
     );

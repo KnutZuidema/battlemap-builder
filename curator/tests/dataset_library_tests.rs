@@ -39,28 +39,24 @@ async fn test_api_curated_listing_with_and_without_theme_filtering() {
     let map_dungeon1 = CuratedMap::with_now(
         "dungeon_crypt",
         Theme::Dungeon,
-        5,
         vec!["crypt".into(), "stone-walls".into()],
         (1024, 1024),
     );
     let map_dungeon2 = CuratedMap::with_now(
         "dungeon_prison",
         Theme::Dungeon,
-        4,
         vec!["cells".into(), "iron-bars".into()],
         (1024, 1024),
     );
     let map_cave = CuratedMap::with_now(
         "cave_chasm",
         Theme::Cave,
-        3,
         vec!["stalagmites".into(), "chasm".into()],
         (1024, 1024),
     );
     let map_wilderness = CuratedMap::with_now(
         "forest_clearing",
         Theme::Wilderness,
-        4,
         vec!["trees".into(), "river".into()],
         (1024, 1024),
     );
@@ -87,7 +83,7 @@ async fn test_api_curated_listing_with_and_without_theme_filtering() {
     // Verify fields and companion caption populated on first layer
     for map in &list_all {
         assert!(!map.id.is_empty());
-        assert!(map.rating >= 1 && map.rating <= 5);
+        assert!(!map.themes.is_empty());
         assert!(!map.layers.is_empty());
         assert!(
             map.layers[0].caption.is_some(),
@@ -111,7 +107,7 @@ async fn test_api_curated_listing_with_and_without_theme_filtering() {
     let body_dungeon = to_bytes(resp_dungeon.into_body(), usize::MAX).await.unwrap();
     let list_dungeon: Vec<CuratedMap> = serde_json::from_slice(&body_dungeon).unwrap();
     assert_eq!(list_dungeon.len(), 2);
-    assert!(list_dungeon.iter().all(|m| m.theme == Theme::Dungeon));
+    assert!(list_dungeon.iter().all(|m| m.theme() == Some(Theme::Dungeon)));
 
     // 3. GET /api/curated?theme=cave returns 1 map
     let req_cave = Request::builder()
@@ -161,14 +157,12 @@ fn test_storage_export_lora_dataset_paired_png_and_txt() {
     let map1 = CuratedMap::with_now(
         "dungeon_temple",
         Theme::Dungeon,
-        5,
         vec!["altar".into(), "pillars".into()],
         (1024, 1024),
     );
     let map2 = CuratedMap::with_now(
         "cave_grotto",
         Theme::Cave,
-        4,
         vec!["water-stream".into()],
         (1024, 1024),
     );
@@ -223,7 +217,6 @@ async fn test_api_dataset_export_headers_and_stream() {
     let map = CuratedMap::with_now(
         "catacomb_map",
         Theme::Dungeon,
-        5,
         vec!["sarcophagus".into()],
         (1024, 1024),
     );

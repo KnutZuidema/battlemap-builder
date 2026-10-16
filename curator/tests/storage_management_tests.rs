@@ -126,7 +126,6 @@ fn test_get_storage_stats_populated() {
     let dungeon_map = CuratedMap::with_now(
         "dungeon_map_1",
         Theme::Dungeon,
-        5,
         vec!["dungeon".into(), "stone".into()],
         (1920, 1080),
     );
@@ -138,7 +137,6 @@ fn test_get_storage_stats_populated() {
     let wilderness_map = CuratedMap::with_now(
         "wilderness_map_1",
         Theme::Wilderness,
-        4,
         vec!["forest".into(), "river".into()],
         (2048, 2048),
     );
@@ -264,7 +262,6 @@ fn test_purge_staging_resets_staging_and_preserves_curated_rejected_telemetry() 
     let dungeon_map = CuratedMap::with_now(
         "curated_keep_1",
         Theme::Dungeon,
-        5,
         vec!["dungeon".into()],
         (1920, 1080),
     );
@@ -274,7 +271,7 @@ fn test_purge_staging_resets_staging_and_preserves_curated_rejected_telemetry() 
         .expect("save curated");
 
     // Verify companion files exist before purge
-    let dungeon_bundle_dir = dir.path().join("curated/dungeon/curated_keep_1");
+    let dungeon_bundle_dir = dir.path().join("curated/curated_keep_1");
     let lora_png = dungeon_bundle_dir.join("curated_keep_1_lora1024.png");
     let lora_txt = dungeon_bundle_dir.join("curated_keep_1_lora1024.txt");
     assert!(lora_png.is_file(), "LoRA companion png should exist");
@@ -395,7 +392,6 @@ async fn test_api_storage_stats_and_purge_endpoints() {
     let dungeon_map = CuratedMap::with_now(
         "api_curated_1",
         Theme::Dungeon,
-        5,
         vec!["dungeon".into()],
         (1024, 768),
     );

@@ -408,10 +408,10 @@ impl BenchmarkService {
                     current_spend,
                     message: if let Some(ref_res) = self.resolve_reference_for_item(item) {
                         match ref_res.provenance {
-                            ReferenceProvenance::Curated { id, rating, .. } => {
+                            ReferenceProvenance::Curated { id, .. } => {
                                 format!(
-                                    "Generating {} for {} (curated reference: {}★ {})",
-                                    item.name, model, rating, id
+                                    "Generating {} for {} (curated reference: {})",
+                                    item.name, model, id
                                 )
                             }
                             ReferenceProvenance::StaticFallback { name, .. } => {
@@ -869,7 +869,6 @@ mod tests {
         let map = CuratedMap::new(
             "curated-crypt-champion",
             Theme::Dungeon,
-            5,
             vec!["crypt".to_string(), "dungeon".to_string()],
             (1024, 1024),
             Utc::now(),

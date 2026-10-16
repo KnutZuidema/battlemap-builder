@@ -18,8 +18,6 @@
         imageCache: new Map(),
 
         // Curation parameters
-        selectedTheme: "dungeon",
-        selectedRating: 4,
         selectedReason: "GridBurnedIn",
         labelingMode: null,
         currentLayerIndex: 0,
@@ -64,7 +62,8 @@
         harvestTime: "all",
         // Dataset Library View state (Issue #31)
         currentView: "triage",
-        libraryTheme: "all",
+        libraryActiveTag: null,
+        librarySearchQuery: "",
         curatedMaps: [],
         isExporting: false,
     };
@@ -87,7 +86,7 @@
         "bytedance-seed/seedream-5-0-flash": 0.018,
     };
     const BUDGET_GUARDRAIL_THRESHOLD = 2.00;
-    const THEMES = [
+    const CANONICAL_THEMES = [
         "dungeon",
         "cave",
         "tavern",
@@ -97,6 +96,7 @@
         "scifi",
         "building",
     ];
+    const THEMES = CANONICAL_THEMES;
 
     const REJECTION_REASONS = [
         "GridBurnedIn",
@@ -153,7 +153,7 @@
     // Dataset Library View DOM Elements (Issue #31)
     let tabNavTriage, tabNavLibrary;
     let triageViewport, libraryViewport;
-    let libraryThemeTabs, libraryGrid, libraryEmpty, libraryCountBadge;
+    let librarySearchInput, libraryTagPills, libraryGrid, libraryEmpty, libraryCountBadge;
     let btnExportLora, btnExportLabel, btnRefreshLibrary, btnSwitchToTriage;
 
     // ==========================================================================
@@ -315,7 +315,8 @@
         tabNavLibrary = document.getElementById("tab-nav-library");
         triageViewport = document.getElementById("triage-viewport");
         libraryViewport = document.getElementById("library-viewport");
-        libraryThemeTabs = document.getElementById("library-theme-tabs");
+        librarySearchInput = document.getElementById("library-search-input");
+        libraryTagPills = document.getElementById("library-tag-pills");
         libraryGrid = document.getElementById("library-grid");
         libraryEmpty = document.getElementById("library-empty");
         libraryCountBadge = document.getElementById("library-count-badge");
@@ -1365,9 +1366,10 @@
         try {
             const payload = {
                 id: candidate.id,
-                theme: state.selectedTheme,
-                rating: state.selectedRating,
-                tags: [],
+                themes: (candidate.themes && candidate.themes.length > 0)
+                    ? candidate.themes
+                    : (candidate.theme ? [candidate.theme] : ["dungeon"]),
+                tags: candidate.tags || [],
                 layers: candidate.layers && candidate.layers.length > 0 ? candidate.layers : undefined,
             };
 
@@ -1382,8 +1384,7 @@
                 throw new Error(errJson.message || `HTTP ${res.status}`);
             }
 
-            const themeName = state.selectedTheme.charAt(0).toUpperCase() + state.selectedTheme.slice(1);
-            showToast(`Candidate #${candidate.id} curated to ${themeName} (★${state.selectedRating})`, "success");
+            showToast(`Candidate #${candidate.id} curated`, "success");
 
             // Remove curated item from local queue and memory cache
             state.imageCache.delete(candidate.id);
@@ -2621,33 +2622,129 @@
             tabNavTriage?.classList.remove("active");
             libraryViewport?.classList.remove("hidden");
             triageViewport?.classList.add("hidden");
-            fetchLibraryMaps(state.libraryTheme);
+            fetchLibraryMaps();
         }
     }
 
-    async function fetchLibraryMaps(theme = "all") {
+    async function fetchLibraryMaps() {
         if (!libraryGrid) return;
         libraryGrid.setAttribute("aria-busy", "true");
 
         try {
-            const url = (!theme || theme === "all") ? "/api/curated" : `/api/curated?theme=${encodeURIComponent(theme)}`;
-            const res = await fetch(url);
+            const res = await fetch("/api/curated");
             if (!res.ok) {
                 throw new Error(`HTTP ${res.status}: ${res.statusText}`);
             }
             const maps = await res.json();
             state.curatedMaps = maps;
 
-            if (libraryCountBadge) {
-                libraryCountBadge.textContent = `${maps.length} Map${maps.length === 1 ? "" : "s"}`;
-            }
-
-            renderLibraryGrid(maps);
+            applyLibraryFilters();
         } catch (err) {
             showToast(`Failed to load dataset library: ${err.message}`, "danger");
         } finally {
             if (libraryGrid) libraryGrid.setAttribute("aria-busy", "false");
         }
+    }
+
+    function applyLibraryFilters() {
+        if (!state.curatedMaps) return;
+
+        const activeTag = (state.libraryActiveTag || "").toLowerCase().trim();
+        const query = (state.librarySearchQuery || "").toLowerCase().trim();
+
+        const filtered = state.curatedMaps.filter((map) => {
+            const themes = (map.themes && map.themes.length > 0)
+                ? map.themes
+                : (map.theme ? [map.theme] : []);
+            const tags = map.tags || [];
+
+            // Active tag filter
+            if (activeTag && activeTag !== "all") {
+                const matchesTheme = themes.some(t => t.toLowerCase() === activeTag);
+                const matchesTag = tags.some(t => t.toLowerCase() === activeTag);
+                if (!matchesTheme && !matchesTag) {
+                    return false;
+                }
+            }
+
+            // Search query filter
+            if (query) {
+                const matchesId = (map.id || "").toLowerCase().includes(query);
+                const matchesTheme = themes.some(t => t.toLowerCase().includes(query));
+                const matchesTag = tags.some(t => t.toLowerCase().includes(query));
+                if (!matchesId && !matchesTheme && !matchesTag) {
+                    return false;
+                }
+            }
+
+            return true;
+        });
+
+        if (libraryCountBadge) {
+            libraryCountBadge.textContent = `${filtered.length} Map${filtered.length === 1 ? "" : "s"}`;
+        }
+
+        renderLibraryTagPills();
+        renderLibraryGrid(filtered);
+    }
+
+    function renderLibraryTagPills() {
+        if (!libraryTagPills) return;
+        libraryTagPills.innerHTML = "";
+
+        // Dynamically calculate unique tags/themes across all curated maps
+        const tagMap = new Map();
+        for (const map of state.curatedMaps) {
+            const themes = (map.themes && map.themes.length > 0)
+                ? map.themes
+                : (map.theme ? [map.theme] : []);
+            const tags = map.tags || [];
+
+            for (const t of themes) {
+                if (t && t.trim()) tagMap.set(t.trim().toLowerCase(), t.trim());
+            }
+            for (const t of tags) {
+                if (t && t.trim()) tagMap.set(t.trim().toLowerCase(), t.trim());
+            }
+        }
+
+        const sortedKeys = Array.from(tagMap.keys()).sort();
+        const fragment = document.createDocumentFragment();
+
+        // "All" pill
+        const allBtn = document.createElement("button");
+        allBtn.type = "button";
+        allBtn.className = `lib-tag-pill ${(!state.libraryActiveTag || state.libraryActiveTag === "all") ? "active" : ""}`;
+        allBtn.textContent = "All";
+        allBtn.addEventListener("click", () => {
+            state.libraryActiveTag = null;
+            applyLibraryFilters();
+        });
+        fragment.appendChild(allBtn);
+
+        // Individual tag pills
+        for (const key of sortedKeys) {
+            const displayName = tagMap.get(key);
+            const pill = document.createElement("button");
+            pill.type = "button";
+            const isActive = state.libraryActiveTag && state.libraryActiveTag.toLowerCase() === key;
+            pill.className = `lib-tag-pill ${isActive ? "active" : ""}`;
+            pill.textContent = displayName;
+            pill.dataset.tag = displayName;
+
+            pill.addEventListener("click", () => {
+                if (state.libraryActiveTag && state.libraryActiveTag.toLowerCase() === key) {
+                    state.libraryActiveTag = null;
+                } else {
+                    state.libraryActiveTag = displayName;
+                }
+                applyLibraryFilters();
+            });
+
+            fragment.appendChild(pill);
+        }
+
+        libraryTagPills.appendChild(fragment);
     }
 
     function renderLibraryGrid(maps) {
@@ -2668,35 +2765,52 @@
             const card = document.createElement("div");
             card.className = "curated-card";
             card.dataset.id = map.id;
-            card.dataset.theme = map.theme;
+            const primaryTheme = (map.themes && map.themes.length > 0) ? map.themes[0] : (map.theme || "dungeon");
+            card.dataset.theme = primaryTheme;
 
-            const thumbUrl = `/api/image/curated/${encodeURIComponent(map.theme)}/${encodeURIComponent(map.id)}`;
-            const ratingVal = Math.max(1, Math.min(5, map.rating || 1));
-            const stars = "★".repeat(ratingVal) + "☆".repeat(5 - ratingVal);
+            let themeParam = "dungeon";
+            if (primaryTheme && CANONICAL_THEMES.includes(primaryTheme.toLowerCase())) {
+                themeParam = primaryTheme.toLowerCase();
+            } else if (map.themes && Array.isArray(map.themes)) {
+                const found = map.themes.find(t => CANONICAL_THEMES.includes((t || "").toLowerCase()));
+                if (found) {
+                    themeParam = found.toLowerCase();
+                }
+            }
 
+            const thumbUrl = `/api/image/curated/${encodeURIComponent(themeParam)}/${encodeURIComponent(map.id)}`;
             const layerCount = (map.layers && map.layers.length > 0) ? map.layers.length : 1;
             const layerLabel = `${layerCount} Layer${layerCount === 1 ? "" : "s"}`;
 
-            const tagsHtml = (map.tags && map.tags.length > 0)
-                ? map.tags.map(t => `<span class="curated-tag-pill">${escapeHtml(t)}</span>`).join("")
+            const themesList = (map.themes && map.themes.length > 0)
+                ? map.themes
+                : (map.theme ? [map.theme] : []);
+            const tagsList = map.tags || [];
+
+            const pills = [
+                ...themesList.map(t => `<span class="curated-tag-pill curated-theme-pill">${escapeHtml(t)}</span>`),
+                ...tagsList.map(t => `<span class="curated-tag-pill">${escapeHtml(t)}</span>`),
+            ];
+
+            const tagsHtml = pills.length > 0
+                ? pills.join("")
                 : `<span class="curated-tag-pill text-muted">no tags</span>`;
 
             const captionText = (map.layers && map.layers[0] && map.layers[0].caption)
                 ? map.layers[0].caption
-                : `ttrpg battlemap, flat 2D plan view, perpendicular orthographic camera, poché cut walls, strictly gridless, ${map.theme}`;
+                : `ttrpg battlemap, flat 2D plan view, perpendicular orthographic camera, poché cut walls, strictly gridless, ${primaryTheme}`;
 
             card.innerHTML = `
                 <div class="curated-thumb-box">
                     <img class="curated-thumb-img" src="${thumbUrl}" alt="Map ${escapeHtml(map.id)}" loading="lazy">
                     <div class="curated-thumb-overlay">
-                        <span class="curated-theme-badge">${escapeHtml(map.theme)}</span>
+                        <span class="curated-theme-badge">${escapeHtml(primaryTheme)}</span>
                         <span class="curated-layers-badge">${layerLabel}</span>
                     </div>
                 </div>
                 <div class="curated-card-body">
                     <div class="curated-header-row">
                         <span class="curated-card-id mono" title="${escapeHtml(map.id)}">${escapeHtml(map.id)}</span>
-                        <span class="curated-card-stars" title="${map.rating} Stars">${stars}</span>
                     </div>
                     <div class="curated-tags-row">
                         ${tagsHtml}
@@ -2720,12 +2834,27 @@
         if (btnExportLora) btnExportLora.disabled = true;
         if (btnExportLabel) btnExportLabel.textContent = "Packaging ZIP...";
 
-        const theme = state.libraryTheme || "all";
-        const themeLabel = theme === "all" ? "all themes" : theme;
-        showToast(`Packaging LoRA dataset ZIP archive (${themeLabel})...`, "info");
+        const CANONICAL_THEMES = [
+            "dungeon",
+            "cave",
+            "tavern",
+            "wilderness",
+            "ruins",
+            "urban",
+            "scifi",
+            "building",
+        ];
+
+        const tag = state.libraryActiveTag || "all";
+        const tagLabel = tag === "all" ? "all maps" : tag;
+        showToast(`Packaging LoRA dataset ZIP archive (${tagLabel})...`, "info");
 
         try {
-            const url = (theme === "all") ? "/api/dataset/export" : `/api/dataset/export?theme=${encodeURIComponent(theme)}`;
+            const normalizedTag = (tag || "").toLowerCase();
+            const isCanonical = CANONICAL_THEMES.includes(normalizedTag);
+            const url = isCanonical
+                ? `/api/dataset/export?theme=${encodeURIComponent(normalizedTag)}`
+                : "/api/dataset/export";
             const res = await fetch(url);
             if (!res.ok) {
                 throw new Error(`Export failed (HTTP ${res.status}: ${res.statusText})`);
@@ -2757,22 +2886,13 @@
         tabNavTriage?.addEventListener("click", () => switchView("triage"));
         tabNavLibrary?.addEventListener("click", () => switchView("library"));
         btnSwitchToTriage?.addEventListener("click", () => switchView("triage"));
-        btnRefreshLibrary?.addEventListener("click", () => fetchLibraryMaps(state.libraryTheme));
+        btnRefreshLibrary?.addEventListener("click", () => fetchLibraryMaps());
         btnExportLora?.addEventListener("click", () => exportLoraDataset());
 
-        if (libraryThemeTabs) {
-            libraryThemeTabs.addEventListener("click", (e) => {
-                const tab = e.target.closest(".lib-tab");
-                if (!tab) return;
-                const theme = tab.dataset.theme;
-                if (!theme) return;
-
-                libraryThemeTabs.querySelectorAll(".lib-tab").forEach(t => t.classList.remove("active"));
-                tab.classList.add("active");
-                state.libraryTheme = theme;
-                fetchLibraryMaps(theme);
-            });
-        }
+        librarySearchInput?.addEventListener("input", (e) => {
+            state.librarySearchQuery = e.target.value;
+            applyLibraryFilters();
+        });
     }
 
     // ==========================================================================
@@ -2945,24 +3065,6 @@
             });
         });
 
-        // Theme badges click
-        const themeBadges = document.querySelectorAll(".theme-badge");
-        themeBadges.forEach((badge) => {
-            badge.addEventListener("click", () => {
-                const theme = badge.getAttribute("data-theme");
-                if (theme) setTheme(theme);
-            });
-        });
-
-        // Rating stars click
-        const starBtns = document.querySelectorAll(".star-btn");
-        starBtns.forEach((btn) => {
-            btn.addEventListener("click", () => {
-                const rating = parseInt(btn.getAttribute("data-rating"), 10);
-                if (rating) setRating(rating);
-            });
-        });
-
         // Filmstrip deck buttons & role badges
         if (btnOnionSkin) {
             btnOnionSkin.addEventListener("click", () => toggleOnionSkin());
@@ -3116,31 +3218,6 @@
 
 
         // Secondary selection handling for active labeling mode
-        if (state.labelingMode === "theme") {
-            if (["1", "2", "3", "4", "5", "6", "7", "8", "9"].includes(e.key)) {
-                const idx = parseInt(e.key, 10) - 1;
-                if (idx >= 0 && idx < THEMES.length) {
-                    setTheme(THEMES[idx]);
-                }
-                exitLabelingMode();
-                e.preventDefault();
-                return;
-            }
-        }
-
-        if (state.labelingMode === "rating") {
-            if (["1", "2", "3", "4", "5"].includes(e.key)) {
-                const rating = parseInt(e.key, 10);
-                setRating(rating);
-                exitLabelingMode();
-                e.preventDefault();
-                return;
-            }
-            if (["6", "7", "8", "9"].includes(e.key)) {
-                e.preventDefault();
-                return;
-            }
-        }
 
         if (state.labelingMode === "role") {
             const roleKeys = {
@@ -3183,17 +3260,7 @@
             return;
         }
 
-        // Two-step labeling mode triggers: 1 (Theme), 2 (Rating)
-        if (e.key === "1" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-            enterLabelingMode("theme");
-            e.preventDefault();
-            return;
-        }
-        if (e.key === "2" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-            enterLabelingMode("rating");
-            e.preventDefault();
-            return;
-        }
+        // Two-step labeling mode trigger: 3 (Layer Role)
         if (e.key === "3" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
             enterLabelingMode("role");
             e.preventDefault();
@@ -3494,20 +3561,10 @@
     function enterLabelingMode(mode) {
         stopPanLoop();
         state.labelingMode = mode;
-        const themeSelector = document.getElementById("theme-selector");
-        const ratingSelector = document.getElementById("rating-selector");
         const roleSelectorEl = document.getElementById("role-selector");
-        if (themeSelector) themeSelector.classList.remove("selecting-mode");
-        if (ratingSelector) ratingSelector.classList.remove("selecting-mode");
         if (roleSelectorEl) roleSelectorEl.classList.remove("selecting-mode");
 
-        if (mode === "theme" && themeSelector) {
-            themeSelector.classList.add("selecting-mode");
-            showToast("Select Theme: press 1-8 (Esc to cancel)", "info");
-        } else if (mode === "rating" && ratingSelector) {
-            ratingSelector.classList.add("selecting-mode");
-            showToast("Select Rating: press 1-5 (Esc to cancel)", "info");
-        } else if (mode === "role" && roleSelectorEl) {
+        if (mode === "role" && roleSelectorEl) {
             roleSelectorEl.classList.add("selecting-mode");
             showToast("Assign Layer Role: 1 Ground, 2 Upper, 3 Basement, 4 Roof, 5 Variant, 6 Exclude (Esc to cancel)", "info");
         }
@@ -3516,41 +3573,8 @@
     function exitLabelingMode() {
         stopPanLoop();
         state.labelingMode = null;
-        const themeSelector = document.getElementById("theme-selector");
-        const ratingSelector = document.getElementById("rating-selector");
         const roleSelectorEl = document.getElementById("role-selector");
-        if (themeSelector) themeSelector.classList.remove("selecting-mode");
-        if (ratingSelector) ratingSelector.classList.remove("selecting-mode");
         if (roleSelectorEl) roleSelectorEl.classList.remove("selecting-mode");
-    }
-
-    function setTheme(theme) {
-        exitLabelingMode();
-        state.selectedTheme = theme;
-        const badges = document.querySelectorAll(".theme-badge");
-        badges.forEach((b) => {
-            if (b.getAttribute("data-theme") === theme) {
-                b.classList.add("active");
-            } else {
-                b.classList.remove("active");
-            }
-        });
-        const capitalized = theme.charAt(0).toUpperCase() + theme.slice(1);
-        showToast(`Theme: ${capitalized}`, "info");
-    }
-    function setRating(rating) {
-        exitLabelingMode();
-        state.selectedRating = rating;
-        const starBtns = document.querySelectorAll(".star-btn");
-        starBtns.forEach((btn) => {
-            const r = parseInt(btn.getAttribute("data-rating"), 10);
-            if (r <= rating) {
-                btn.classList.add("active");
-            } else {
-                btn.classList.remove("active");
-            }
-        });
-        showToast(`Rating: ${rating} Star${rating > 1 ? "s" : ""}`, "info");
     }
 
     // ==========================================================================

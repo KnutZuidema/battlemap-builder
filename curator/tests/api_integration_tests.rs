@@ -178,6 +178,16 @@ async fn test_api_curate_endpoint() {
     let img_body = to_bytes(resp_img.into_body(), usize::MAX).await.unwrap();
     assert_eq!(img_body.as_ref(), img_bytes);
 
+    // Fetch the curated image via direct ID endpoint /api/image/curated/map_to_curate
+    let req_img_direct = Request::builder()
+        .uri("/api/image/curated/map_to_curate")
+        .body(Body::empty())
+        .unwrap();
+    let resp_img_direct = app.clone().oneshot(req_img_direct).await.unwrap();
+    assert_eq!(resp_img_direct.status(), StatusCode::OK);
+    let direct_body = to_bytes(resp_img_direct.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(direct_body.as_ref(), img_bytes);
+
     // Empty themes should return 400
     let empty_themes_req = Request::builder()
         .uri("/api/curate")
@@ -321,7 +331,7 @@ async fn test_static_asset_and_spa_routing() {
     let html_str = String::from_utf8(body.to_vec()).unwrap();
     assert!(html_str.contains("DUNGEON FORGE"));
     assert!(html_str.contains("triage-canvas"));
-    assert!(html_str.contains("theme-selector"));
+    assert!(html_str.contains("library-search-input"));
     assert!(html_str.contains("rejection-modal"));
     assert!(html_str.contains("help-modal"));
 
@@ -417,8 +427,16 @@ async fn test_curate_errors_and_edge_cases() {
         .uri("/api/image/curated/dungeon/does_not_exist")
         .body(Body::empty())
         .unwrap();
-    let resp_non_existent = app.oneshot(req_non_existent).await.unwrap();
+    let resp_non_existent = app.clone().oneshot(req_non_existent).await.unwrap();
     assert_eq!(resp_non_existent.status(), StatusCode::NOT_FOUND);
+
+    // Curated image direct ID non-existent returns 404
+    let req_direct_non_existent = Request::builder()
+        .uri("/api/image/curated/does_not_exist")
+        .body(Body::empty())
+        .unwrap();
+    let resp_direct_non_existent = app.oneshot(req_direct_non_existent).await.unwrap();
+    assert_eq!(resp_direct_non_existent.status(), StatusCode::NOT_FOUND);
 }
 
 #[derive(Clone, Default)]

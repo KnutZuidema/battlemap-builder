@@ -8,8 +8,9 @@ use tempfile::tempdir;
 use tower::ServiceExt;
 
 use async_trait::async_trait;
-use curator::adapters::{FileCostLedger, FilesystemStorage};
-use curator::api::{create_router, AppState};
+use curator::adapters::{FileCostLedger, FilesystemStorage, OpenRouterAdapter};
+use curator::api::{create_router, AppState, SuggestThemesResponse};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use curator::ports::cost_tracker::{CostTracker, GenerationCostRecord};
 use curator::domain::{
     Candidate, CandidateLayer, HarvestedMedia, LayerRole, ParsedTags, RedditHarvestQuery,
@@ -1488,4 +1489,210 @@ async fn test_api_staging_split_and_regroup() {
     assert!(final_staging.iter().all(|c| c.id != "split_regroup_cand_0"));
     assert!(final_staging.iter().all(|c| c.id != "split_regroup_cand_1"));
     assert!(final_staging.iter().any(|c| c.id == "split_regroup_cand"));
+}
+
+#[tokio::test]
+async fn test_suggest_themes_fallback_when_no_api_key() {
+    let (app, storage, _dir) = setup_test_app();
+
+    // Ensure candidate exists in staging
+    let cand = Candidate::with_now("cand_no_key", Source::Manual, "cand_no_key.png", (1024, 1024));
+    storage
+        .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
+        .unwrap();
+
+    // 1. POST /api/staging/{id}/suggest-themes
+    let req_post = Request::builder()
+        .uri("/api/staging/cand_no_key/suggest-themes")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.clone().oneshot(req_post).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: SuggestThemesResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json.id, "cand_no_key");
+    assert!(json.suggestions.is_empty());
+
+    // 2. GET /api/staging/{id}/suggest-themes
+    let req_get = Request::builder()
+        .uri("/api/staging/cand_no_key/suggest-themes")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp_get = app.oneshot(req_get).await.unwrap();
+    assert_eq!(resp_get.status(), StatusCode::OK);
+    let body_get = to_bytes(resp_get.into_body(), usize::MAX).await.unwrap();
+    let json_get: SuggestThemesResponse = serde_json::from_slice(&body_get).unwrap();
+    assert_eq!(json_get.id, "cand_no_key");
+    assert!(json_get.suggestions.is_empty());
+}
+
+#[tokio::test]
+async fn test_suggest_themes_with_model_and_caching() {
+    use axum::routing::post;
+    use tokio::net::TcpListener;
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let count_clone = call_count.clone();
+
+    // Mock OpenRouter chat completions endpoint
+    let mock_app = axum::Router::new().route(
+        "/chat/completions",
+        post(move |_body: axum::Json<Value>| {
+            let cnt = count_clone.clone();
+            async move {
+                cnt.fetch_add(1, AtomicOrdering::SeqCst);
+                axum::Json(json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "```json\n[\"Dungeon\", \"Crypt\", \"Flooded\"]\n```"
+                            }
+                        }
+                    ]
+                }))
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, mock_app).await.unwrap();
+    });
+
+    let dir = tempdir().expect("Failed to create tempdir");
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let adapter = Arc::new(OpenRouterAdapter::with_config(
+        "test_key",
+        format!("http://127.0.0.1:{}", addr.port()),
+        2,
+    ));
+    let state = AppState::new(storage.clone()).with_openrouter(adapter);
+    let app = create_router(state);
+
+    let cand = Candidate::with_now("cand_cached_1", Source::Manual, "cand_cached_1.png", (1024, 1024));
+    storage
+        .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
+        .unwrap();
+
+    // First request: Cache miss -> invokes mock OpenRouter model
+    let req1 = Request::builder()
+        .uri("/api/staging/cand_cached_1/suggest-themes")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp1 = app.clone().oneshot(req1).await.unwrap();
+    assert_eq!(resp1.status(), StatusCode::OK);
+    let body1 = to_bytes(resp1.into_body(), usize::MAX).await.unwrap();
+    let json1: SuggestThemesResponse = serde_json::from_slice(&body1).unwrap();
+    assert_eq!(json1.id, "cand_cached_1");
+    assert_eq!(json1.suggestions, vec!["Dungeon", "Crypt", "Flooded"]);
+    assert_eq!(call_count.load(AtomicOrdering::SeqCst), 1);
+
+    // Second request via GET: Cache hit -> returns cached suggestions without calling mock model
+    let req2 = Request::builder()
+        .uri("/api/staging/cand_cached_1/suggest-themes")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp2 = app.clone().oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK);
+    let body2 = to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
+    let json2: SuggestThemesResponse = serde_json::from_slice(&body2).unwrap();
+    assert_eq!(json2.id, "cand_cached_1");
+    assert_eq!(json2.suggestions, vec!["Dungeon", "Crypt", "Flooded"]);
+    // Call count MUST remain 1!
+    assert_eq!(call_count.load(AtomicOrdering::SeqCst), 1);
+
+    // Third request via POST: Cache hit -> returns cached suggestions without calling mock model
+    let req3 = Request::builder()
+        .uri("/api/staging/cand_cached_1/suggest-themes")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp3 = app.oneshot(req3).await.unwrap();
+    assert_eq!(resp3.status(), StatusCode::OK);
+    let body3 = to_bytes(resp3.into_body(), usize::MAX).await.unwrap();
+    let json3: SuggestThemesResponse = serde_json::from_slice(&body3).unwrap();
+    assert_eq!(json3.id, "cand_cached_1");
+    assert_eq!(json3.suggestions, vec!["Dungeon", "Crypt", "Flooded"]);
+    assert_eq!(call_count.load(AtomicOrdering::SeqCst), 1);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn test_suggest_themes_fallback_on_model_error() {
+    use axum::routing::post;
+    use tokio::net::TcpListener;
+
+    // Mock OpenRouter returning 500 error
+    let mock_app = axum::Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({"error": "Model overloaded"})),
+            )
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, mock_app).await.unwrap();
+    });
+
+    let dir = tempdir().expect("Failed to create tempdir");
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let adapter = Arc::new(OpenRouterAdapter::with_config(
+        "test_key",
+        format!("http://127.0.0.1:{}", addr.port()),
+        2,
+    ));
+    let state = AppState::new(storage.clone()).with_openrouter(adapter);
+    let app = create_router(state);
+
+    let cand = Candidate::with_now("cand_err_1", Source::Manual, "cand_err_1.png", (1024, 1024));
+    storage
+        .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
+        .unwrap();
+
+    let req = Request::builder()
+        .uri("/api/staging/cand_err_1/suggest-themes")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    // Should return 200 OK with empty suggestions for resilience
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: SuggestThemesResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json.id, "cand_err_1");
+    assert!(json.suggestions.is_empty());
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn test_suggest_themes_empty_candidate_id_returns_bad_request() {
+    let (app, _storage, _dir) = setup_test_app();
+
+    let req = Request::builder()
+        .uri("/api/staging/%20/suggest-themes")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

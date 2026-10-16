@@ -21,6 +21,7 @@ use crate::domain::{
 };
 use crate::ports::cost_tracker::CostStats;
 use crate::services::{IngestionSummary, RedditIngestionService};
+use crate::adapters::clean_tags;
 /// Inspects bytes and optional filename to determine image MIME type.
 pub fn detect_image_mime(bytes: &[u8], filename: Option<&str>) -> &'static str {
     if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
@@ -444,6 +445,82 @@ pub async fn post_regroup_staging(
     let regrouped_candidate = state.storage.regroup_staging_bundle(&parent_id)?;
 
     Ok(Json(regrouped_candidate))
+}
+
+/// Response payload for theme suggestions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SuggestThemesResponse {
+    pub id: String,
+    pub suggestions: Vec<String>,
+}
+
+/// POST /api/staging/{id}/suggest-themes - Vision-assisted theme tag suggestions with caching.
+pub async fn post_suggest_themes(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SuggestThemesResponse>, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Candidate ID cannot be empty"));
+    }
+
+    // 1. Fast in-memory cache check
+    {
+        let cache = state.theme_suggestions_cache.read().await;
+        if let Some(suggestions) = cache.get(&id) {
+            return Ok(Json(SuggestThemesResponse {
+                id,
+                suggestions: suggestions.clone(),
+            }));
+        }
+    }
+
+    // 2. Load candidate image bytes from staging storage
+    let bytes = match state.storage.get_staging_image(&id) {
+        Ok(b) => b,
+        Err(err) => {
+            tracing::warn!(candidate_id = %id, error = %err, "Candidate image not found in staging; returning empty suggestions");
+            return Ok(Json(SuggestThemesResponse {
+                id,
+                suggestions: Vec::new(),
+            }));
+        }
+    };
+
+    let filename = state
+        .storage
+        .list_staging()
+        .ok()
+        .and_then(|list| list.into_iter().find(|c| c.id == id).map(|c| c.filename));
+    let mime = detect_image_mime(&bytes, filename.as_deref());
+
+    // 3. Invoke vision model if OpenRouter adapter is available
+    let raw_suggestions = match state.openrouter_client() {
+        Some(adapter) => match adapter.suggest_themes(&bytes, mime).await {
+            Ok(tags) => tags,
+            Err(err) => {
+                tracing::warn!(candidate_id = %id, error = %err, "OpenRouter vision model call failed; falling back to empty suggestions");
+                Vec::new()
+            }
+        },
+        None => {
+            tracing::warn!(candidate_id = %id, "OpenRouter vision model not configured or missing API key; returning empty suggestions");
+            Vec::new()
+        }
+    };
+
+    // 4. Clean up tags (trim, deduplicate, capitalize, limit to 5)
+    let suggestions = clean_tags(raw_suggestions);
+
+    // 5. Store non-empty results in cache
+    if !suggestions.is_empty() {
+        state
+            .theme_suggestions_cache
+            .write()
+            .await
+            .insert(id.clone(), suggestions.clone());
+    }
+
+    Ok(Json(SuggestThemesResponse { id, suggestions }))
 }
 
 /// Request payload for rejecting a candidate.

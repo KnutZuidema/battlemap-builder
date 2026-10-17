@@ -729,7 +729,8 @@ pub async fn post_describe_candidate(
 #[derive(Debug, Deserialize)]
 pub struct RejectRequest {
     pub id: String,
-    pub reason: RejectionReason,
+    #[serde(default)]
+    pub reason: Option<RejectionReason>,
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -750,16 +751,17 @@ pub async fn post_reject(
         return Err(ApiError::bad_request("Candidate ID cannot be empty"));
     }
 
+    let reason = payload.reason.unwrap_or_default();
+
     state
         .storage
-        .reject_staging(&payload.id, payload.reason, payload.notes.as_deref())?;
+        .reject_staging(&payload.id, reason, payload.notes.as_deref())?;
 
     tracing::info!(
         id = %payload.id,
-        reason = ?payload.reason,
+        reason = ?reason,
         "Rejected candidate image"
     );
-
     Ok(Json(RejectResponse {
         status: "ok",
         id: payload.id,

@@ -1483,59 +1483,6 @@ kbd {
     font-size: 0.85rem;
 }
 
-/* Rejection Reasons Grid */
-.rejection-reasons-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-}
-
-.reason-chip {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.6rem 0.85rem;
-    background: var(--bg-surface-card);
-    border: 1px solid var(--border-subtle);
-    border-radius: 8px;
-    color: var(--text-secondary);
-    cursor: pointer;
-    text-align: left;
-    transition: all 0.15s ease;
-}
-
-.reason-chip:hover {
-    background: var(--bg-surface-hover);
-    color: var(--text-primary);
-    border-color: var(--border-medium);
-}
-
-.reason-chip.active {
-    background: rgba(244, 63, 94, 0.12);
-    border-color: rgba(244, 63, 94, 0.5);
-    color: #fff;
-    box-shadow: 0 0 10px rgba(244, 63, 94, 0.15);
-}
-
-.reason-info {
-    display: flex;
-    flex-direction: column;
-}
-
-.reason-name {
-    font-weight: 600;
-    font-size: 0.88rem;
-}
-
-.reason-hint {
-    font-size: 0.75rem;
-    color: var(--text-muted);
-}
-
-.reason-chip.active .reason-hint {
-    color: #fca5a5;
-}
-
 /* Form inputs */
 .form-group {
     display: flex;

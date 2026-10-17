@@ -474,6 +474,21 @@ async fn test_api_reject_endpoint() {
 
     // Should be recorded in rejections
     assert!(storage.is_rejected("bad_map").unwrap());
+
+    // Test rejecting without explicit reason or notes
+    let cand_simple = Candidate::with_now("bad_map_simple", Source::Reddit, "simple.png", (800, 600));
+    storage.save_staging(&cand_simple, b"\x89PNG\r\n\x1a\nsimple").unwrap();
+
+    let req_simple = Request::builder()
+        .uri("/api/reject")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "id": "bad_map_simple" }).to_string()))
+        .unwrap();
+
+    let response_simple = app.clone().oneshot(req_simple).await.unwrap();
+    assert_eq!(response_simple.status(), StatusCode::OK);
+    assert!(storage.is_rejected("bad_map_simple").unwrap());
 }
 
 #[tokio::test]
@@ -493,7 +508,7 @@ async fn test_static_asset_and_spa_routing() {
     assert!(html_str.contains("DUNGEON FORGE"));
     assert!(html_str.contains("triage-canvas"));
     assert!(html_str.contains("library-search-input"));
-    assert!(html_str.contains("rejection-modal"));
+    assert!(!html_str.contains("rejection-modal"));
     assert!(html_str.contains("help-modal"));
 
     // GET /style.css

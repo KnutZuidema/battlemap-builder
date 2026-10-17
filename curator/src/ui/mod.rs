@@ -97,7 +97,7 @@ mod tests {
         assert!(html.contains("btn-curate"));
         assert!(html.contains("title=\"Curate Candidate (Hotkey: Enter)\""));
         assert!(html.contains("title=\"Reject Candidate (Hotkey: Esc)\""));
-        assert!(html.contains("rejection-modal"));
+        assert!(!html.contains("rejection-modal"));
         assert!(html.contains("help-modal"));
         assert!(html.contains("toast-container"));
         assert!(html.contains("empty-state"));
@@ -145,7 +145,7 @@ mod tests {
         assert!(js.contains("/api/curate"));
         assert!(js.contains("/api/reject"));
         assert!(js.contains("curateCurrentCandidate"));
-        assert!(js.contains("confirmRejection"));
+        assert!(js.contains("rejectCurrentCandidate"));
 
         // Two-step labeling mode hotkeys & selectors
         assert!(js.contains("enterLabelingMode"));

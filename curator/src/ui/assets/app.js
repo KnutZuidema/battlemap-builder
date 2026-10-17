@@ -18,7 +18,6 @@
         imageCache: new Map(),
 
         // Curation parameters
-        selectedReason: "GridBurnedIn",
         labelingMode: null,
         currentLayerIndex: 0,
         onionSkinActive: false,
@@ -40,7 +39,6 @@
         gridDragStart: { x: 0, y: 0 },
         gridOffsetStart: { x: 0, y: 0 },
         // Modal and UI dialog state
-        rejectionModalOpen: false,
         helpModalOpen: false,
         drawerOpen: false,
         isSubmitting: false,
@@ -110,13 +108,6 @@
     ];
     const THEMES = CANONICAL_THEMES;
 
-    const REJECTION_REASONS = [
-        "GridBurnedIn",
-        "IsometricTilt",
-        "BlurryLowRes",
-        "BadGeometry",
-        "Irrelevant",
-    ];
 
     // DOM Elements cache
     let canvas, ctx;
@@ -131,7 +122,7 @@
     let btnGridNudgeUp, btnGridNudgeDown, btnGridNudgeLeft, btnGridNudgeRight;
     let btnGridAlignDrag, btnGridReset, btnGridDone;
     let emptyState, loadingOverlay, loadingText;
-    let rejectionModal, rejectionNotesInput, helpModal;
+    let helpModal;
     let ingestionDrawer, drawerPanel, btnOpenDrawer, btnEmptyHarvest, btnCloseDrawer, btnCancelDrawer;
     let harvestSortGroup, harvestTimeGroup, harvestLimitInput, harvestLimitValue, harvestGridlessOnly;
     let btnStartHarvest, harvestProgressContainer, harvestProgressBar, harvestProgressText;
@@ -251,8 +242,6 @@
         btnSplitLabel = document.getElementById("btn-split-label");
         onionSkinBadge = document.getElementById("onion-skin-badge");
 
-        rejectionModal = document.getElementById("rejection-modal");
-        rejectionNotesInput = document.getElementById("rejection-notes");
         helpModal = document.getElementById("help-modal");
 
         ingestionDrawer = document.getElementById("ingestion-drawer");
@@ -2136,20 +2125,17 @@
         }
     }
 
-    async function confirmRejection() {
+    async function rejectCurrentCandidate() {
         if (state.isSubmitting || state.currentIndex < 0 || state.currentIndex >= state.candidates.length) {
             return;
         }
 
         const candidate = state.candidates[state.currentIndex];
-        const notes = rejectionNotesInput.value.trim();
         state.isSubmitting = true;
 
         try {
             const payload = {
                 id: candidate.id,
-                reason: state.selectedReason,
-                notes: notes || undefined,
             };
 
             const res = await fetch("/api/reject", {
@@ -2163,8 +2149,7 @@
                 throw new Error(errJson.message || `HTTP ${res.status}`);
             }
 
-            closeRejectionModal();
-            showToast(`Candidate #${candidate.id} rejected (${state.selectedReason})`, "danger");
+            showToast(`Candidate #${candidate.id} rejected`, "danger");
 
             // Remove rejected item from local queue and cache
             state.imageCache.delete(candidate.id);
@@ -2187,44 +2172,6 @@
         } finally {
             state.isSubmitting = false;
         }
-    }
-
-    function openRejectionModal() {
-        stopPanLoop();
-        exitLabelingMode();
-        if (state.currentIndex < 0 || state.currentIndex >= state.candidates.length) return;
-        state.rejectionModalOpen = true;
-        rejectionNotesInput.value = "";
-        rejectionModal.classList.remove("hidden");
-        updateRejectionReasonChips();
-        const activeChip = rejectionModal.querySelector(".reason-chip.active");
-        if (activeChip) {
-            activeChip.focus();
-        }
-    }
-
-    function closeRejectionModal() {
-        stopPanLoop();
-        state.rejectionModalOpen = false;
-        rejectionModal.classList.add("hidden");
-        canvas.focus();
-    }
-
-    function selectRejectionReason(reason) {
-        state.selectedReason = reason;
-        updateRejectionReasonChips();
-    }
-
-    function updateRejectionReasonChips() {
-        const chips = rejectionModal.querySelectorAll(".reason-chip");
-        chips.forEach((chip) => {
-            const reason = chip.getAttribute("data-reason");
-            if (reason === state.selectedReason) {
-                chip.classList.add("active");
-            } else {
-                chip.classList.remove("active");
-            }
-        });
     }
 
     function toggleHelpModal() {
@@ -2259,7 +2206,6 @@
 
     function openIngestionDrawer() {
         stopPanLoop();
-        if (state.rejectionModalOpen) closeRejectionModal();
         if (state.helpModalOpen) closeHelpModal();
         state.drawerOpen = true;
         ingestionDrawer?.classList.remove("hidden");
@@ -2464,7 +2410,6 @@
 
     function openBenchmarkDrawer() {
         stopPanLoop();
-        if (state.rejectionModalOpen) closeRejectionModal();
         if (state.helpModalOpen) closeHelpModal();
         if (state.drawerOpen) closeIngestionDrawer();
         state.benchmarkDrawerOpen = true;
@@ -3822,29 +3767,18 @@
         btnPrev.addEventListener("click", () => navigatePrev());
         btnNext.addEventListener("click", () => navigateNext());
         btnCurate.addEventListener("click", () => curateCurrentCandidate());
-        btnReject.addEventListener("click", () => openRejectionModal());
+        btnReject.addEventListener("click", () => rejectCurrentCandidate());
 
         document.getElementById("btn-help").addEventListener("click", () => toggleHelpModal());
         document.getElementById("btn-close-help-modal").addEventListener("click", () => closeHelpModal());
         document.getElementById("btn-dismiss-help").addEventListener("click", () => closeHelpModal());
 
-        document.getElementById("btn-close-reject-modal").addEventListener("click", () => closeRejectionModal());
-        document.getElementById("btn-cancel-reject").addEventListener("click", () => closeRejectionModal());
-        document.getElementById("btn-confirm-reject").addEventListener("click", () => confirmRejection());
 
         document.getElementById("btn-refresh-staging").addEventListener("click", () => {
             fetchStatus();
             fetchStagingQueue();
         });
 
-        // Rejection reasons chip clicks
-        const reasonChips = rejectionModal.querySelectorAll(".reason-chip");
-        reasonChips.forEach((chip) => {
-            chip.addEventListener("click", () => {
-                const reason = chip.getAttribute("data-reason");
-                if (reason) selectRejectionReason(reason);
-            });
-        });
 
         // Filmstrip deck buttons & role badges
         if (btnOnionSkin) {
@@ -3866,9 +3800,6 @@
         });
 
         // Modal backdrop click to close
-        rejectionModal.addEventListener("click", (e) => {
-            if (e.target === rejectionModal) closeRejectionModal();
-        });
         helpModal.addEventListener("click", (e) => {
             if (e.target === helpModal) closeHelpModal();
         });
@@ -3948,17 +3879,12 @@
                 e.preventDefault();
                 return;
             }
-            if (state.rejectionModalOpen) {
-                closeRejectionModal();
-                e.preventDefault();
-                return;
-            }
             if (state.helpModalOpen) {
                 closeHelpModal();
                 e.preventDefault();
                 return;
             }
-            openRejectionModal();
+            rejectCurrentCandidate();
             e.preventDefault();
             return;
         }
@@ -3969,23 +3895,6 @@
             return;
         }
 
-        // Hotkeys inside Rejection Modal
-        if (state.rejectionModalOpen) {
-            if (e.key === "Enter") {
-                confirmRejection();
-                e.preventDefault();
-                return;
-            }
-            if (!isInputFocused && ["1", "2", "3", "4", "5"].includes(e.key)) {
-                const reason = REJECTION_REASONS[parseInt(e.key, 10) - 1];
-                if (reason) {
-                    selectRejectionReason(reason);
-                    e.preventDefault();
-                }
-                return;
-            }
-            return;
-        }
 
         // Ignore triage hotkeys if typing in an input
         if (isInputFocused) return;
@@ -4223,7 +4132,7 @@
 
         // Reject action: X or Delete
         if (e.key === "x" || e.key === "X" || e.key === "Delete") {
-            openRejectionModal();
+            rejectCurrentCandidate();
             e.preventDefault();
             return;
         }

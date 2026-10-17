@@ -135,7 +135,7 @@ impl std::str::FromStr for Source {
 }
 
 /// Reason for rejecting a candidate map from curation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum RejectionReason {
     #[serde(alias = "grid_burned_in", alias = "grid-burned-in")]
     GridBurnedIn,
@@ -147,6 +147,9 @@ pub enum RejectionReason {
     BadGeometry,
     #[serde(alias = "irrelevant")]
     Irrelevant,
+    #[default]
+    #[serde(alias = "unspecified")]
+    Unspecified,
 }
 
 impl RejectionReason {
@@ -157,6 +160,7 @@ impl RejectionReason {
             Self::BlurryLowRes => "BlurryLowRes",
             Self::BadGeometry => "BadGeometry",
             Self::Irrelevant => "Irrelevant",
+            Self::Unspecified => "Unspecified",
         }
     }
 }
@@ -177,6 +181,7 @@ impl std::str::FromStr for RejectionReason {
             "blurrylowres" => Ok(Self::BlurryLowRes),
             "badgeometry" => Ok(Self::BadGeometry),
             "irrelevant" => Ok(Self::Irrelevant),
+            "unspecified" => Ok(Self::Unspecified),
             _ => Err(format!("Unknown rejection reason: {s}")),
         }
     }
@@ -1599,6 +1604,11 @@ mod tests {
         let json = "\"grid_burned_in\"";
         let reason: RejectionReason = serde_json::from_str(json).unwrap();
         assert_eq!(reason, RejectionReason::GridBurnedIn);
+        assert_eq!(RejectionReason::default(), RejectionReason::Unspecified);
+        assert_eq!(
+            RejectionReason::from_str("unspecified").unwrap(),
+            RejectionReason::Unspecified
+        );
     }
 
     #[test]

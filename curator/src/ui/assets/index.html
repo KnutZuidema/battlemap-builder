@@ -413,69 +413,6 @@
             </div>
         </section>
 
-        <!-- Rejection Reason Modal -->
-        <div id="rejection-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="rejection-modal-title">
-            <div class="modal-card">
-                <div class="modal-header">
-                    <h3 id="rejection-modal-title">Reject Battlemap Candidate</h3>
-                    <button type="button" id="btn-close-reject-modal" class="btn-close" aria-label="Close modal">×</button>
-                </div>
-                <div class="modal-body">
-                    <p class="modal-description">Select the primary rejection reason to catalog and prune from staging:</p>
-                    <div id="rejection-reasons" class="rejection-reasons-grid">
-                        <button type="button" class="reason-chip active" data-reason="GridBurnedIn" data-key="1">
-                            <kbd>1</kbd>
-                            <div class="reason-info">
-                                <span class="reason-name">Grid Burned In</span>
-                                <span class="reason-hint">Visible baked-in lines or baked hexes</span>
-                            </div>
-                        </button>
-                        <button type="button" class="reason-chip" data-reason="IsometricTilt" data-key="2">
-                            <kbd>2</kbd>
-                            <div class="reason-info">
-                                <span class="reason-name">Isometric / 3D Tilt</span>
-                                <span class="reason-hint">Non-orthographic camera angle</span>
-                            </div>
-                        </button>
-                        <button type="button" class="reason-chip" data-reason="BlurryLowRes" data-key="3">
-                            <kbd>3</kbd>
-                            <div class="reason-info">
-                                <span class="reason-name">Blurry / Low Res</span>
-                                <span class="reason-hint">JPEG compression artifacts, &lt;1024px</span>
-                            </div>
-                        </button>
-                        <button type="button" class="reason-chip" data-reason="BadGeometry" data-key="4">
-                            <kbd>4</kbd>
-                            <div class="reason-info">
-                                <span class="reason-name">Bad Geometry</span>
-                                <span class="reason-hint">Broken walls, impossible poché cuts</span>
-                            </div>
-                        </button>
-                        <button type="button" class="reason-chip" data-reason="Irrelevant" data-key="5">
-                            <kbd>5</kbd>
-                            <div class="reason-info">
-                                <span class="reason-name">Irrelevant</span>
-                                <span class="reason-hint">Character art, scenery, portrait</span>
-                            </div>
-                        </button>
-                    </div>
-                    <div class="form-group notes-group">
-                        <label for="rejection-notes">Optional Notes / Context:</label>
-                        <input type="text" id="rejection-notes" class="text-input" placeholder="e.g. visible watermarks, skewed perspective..." autocomplete="off">
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" id="btn-cancel-reject" class="btn btn-secondary">
-                        <kbd>Esc</kbd>
-                        <span>Cancel</span>
-                    </button>
-                    <button type="button" id="btn-confirm-reject" class="btn btn-danger">
-                        <kbd>↵</kbd>
-                        <span>Confirm Reject</span>
-                    </button>
-                </div>
-            </div>
-        </div>
 
         <!-- Curate Decision Modal (Vision Suggestions & Custom Tags) -->
         <div id="curate-decision-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="decision-modal-title">
@@ -588,7 +525,7 @@
                         <div class="help-grid">
                             <div class="help-row"><kbd>Enter</kbd><span>Approve & Curate active map</span></div>
                             <div class="help-row"><kbd>L</kbd> / <kbd>T</kbd><span>Switch to Dataset Library / Staging Triage</span></div>
-                            <div class="help-row"><kbd>Esc</kbd><span>Open Rejection dialogue (quick-select reason with 1-5 + Enter)</span></div>
+                            <div class="help-row"><kbd>Esc</kbd><span>Reject Candidate</span></div>
                             <div class="help-row"><kbd>J</kbd> or <kbd>→</kbd><span>Advance to next candidate (without curating)</span></div>
                             <div class="help-row"><kbd>K</kbd> or <kbd>←</kbd><span>Return to previous candidate</span></div>
                             <div class="help-row"><kbd>B</kbd><span>Open AI Benchmark Suite drawer</span></div>

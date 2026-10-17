@@ -161,6 +161,20 @@ mod tests {
     }
 
     #[test]
+    fn test_embedded_app_js_contains_smooth_zoom_loop() {
+        let file = Assets::get("app.js").expect("app.js must be embedded");
+        let js = std::str::from_utf8(file.data.as_ref()).expect("app.js must be valid utf8");
+
+        assert!(js.contains("activeZoomKeys"));
+        assert!(js.contains("zoomLoop"));
+        assert!(js.contains("startZoomLoop"));
+        assert!(js.contains("stopZoomLoop"));
+        assert!(js.contains("ZOOM_SPEED"));
+        assert!(js.contains("BracketLeft"));
+        assert!(js.contains("BracketRight"));
+    }
+
+    #[test]
     fn test_embedded_style_css_contains_triage_styling() {
         let file = Assets::get("style.css").expect("style.css must be embedded");
         let css = std::str::from_utf8(file.data.as_ref()).expect("style.css must be valid utf8");

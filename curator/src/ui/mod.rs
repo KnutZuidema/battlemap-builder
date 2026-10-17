@@ -352,6 +352,32 @@ mod tests {
         assert!(css.contains("decision-description-input"));
         assert!(css.contains("curated-description-box"));
     }
+    #[test]
+    fn test_embedded_assets_contain_left_dock_layer_deck() {
+        let style_css = Assets::get("style.css").expect("style.css must be embedded");
+        let css = std::str::from_utf8(style_css.data.as_ref()).expect("style.css must be valid utf8");
+
+        // Layer deck anchored to left side rather than bottom center
+        assert!(css.contains(".layer-deck {\n    position: absolute;\n    top: 1rem;\n    left: 1rem;"));
+        assert!(!css.contains(".layer-deck {\n    position: absolute;\n    bottom: 1rem;\n    left: 50%;"));
+        // Filmstrip is vertical column with scroll
+        assert!(css.contains(".layer-filmstrip"));
+        assert!(css.contains("flex-direction: column;"));
+        assert!(css.contains("overflow-y: auto;"));
+
+        // Cards are horizontal rows
+        assert!(css.contains(".layer-card"));
+        assert!(css.contains("flex-direction: row;"));
+        assert!(css.contains(".layer-card-info"));
+
+        // Viewport HUD moved to bottom right to avoid left-side dock collision
+        assert!(css.contains(".viewport-hud"));
+        assert!(css.contains("right: 1rem;"));
+
+        let app_js = Assets::get("app.js").expect("app.js must be embedded");
+        let js = std::str::from_utf8(app_js.data.as_ref()).expect("app.js must be valid utf8");
+        assert!(js.contains("layer-card-info"));
+    }
 
 
     #[tokio::test]

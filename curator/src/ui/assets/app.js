@@ -938,7 +938,7 @@
     }
 
     /**
-     * Renders the bottom layer deck, filmstrip cards, and role selectors.
+     * Renders the left-side layer deck, filmstrip cards, and role selectors.
      */
     function renderLayerDeck() {
         if (!layerDeck) return;
@@ -1063,17 +1063,18 @@
             img.loading = "lazy";
             thumbContainer.appendChild(img);
             card.appendChild(thumbContainer);
+            const infoEl = document.createElement("div");
+            infoEl.className = "layer-card-info";
 
             if (l.caption) {
                 const captionEl = document.createElement("div");
                 captionEl.className = "layer-caption-tooltip";
                 captionEl.textContent = l.caption;
-                card.appendChild(captionEl);
+                infoEl.appendChild(captionEl);
             }
 
             const metaEl = document.createElement("div");
             metaEl.className = "layer-meta";
-
             const pill = document.createElement("span");
             pill.className = `layer-role-pill role-${roleCls}`;
             pill.textContent = formatRoleName(l.role, l.elevation);
@@ -1113,8 +1114,8 @@
             steppers.appendChild(btnUp);
 
             metaEl.appendChild(steppers);
-            card.appendChild(metaEl);
-
+            infoEl.appendChild(metaEl);
+            card.appendChild(infoEl);
             card.addEventListener("click", () => {
                 setLayer(idx);
             });

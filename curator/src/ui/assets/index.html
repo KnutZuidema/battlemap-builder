@@ -366,10 +366,32 @@
 
                     <!-- Dynamic Library Filter Toolbar -->
                     <input type="text" id="library-search-input" class="search-input" placeholder="Search by tag, theme, or ID..." />
+                    <div id="library-facet-filters" class="library-facet-filters" role="group" aria-label="Library Facet Filters">
+                        <button type="button" class="lib-facet-chip active" data-facet="all">All</button>
+                        <button type="button" class="lib-facet-chip" data-facet="bundles">Multi-Layer Bundles</button>
+                        <button type="button" class="lib-facet-chip" data-facet="single">Single Layer Only</button>
+                        <button type="button" class="lib-facet-chip" data-facet="has-desc">Has Description</button>
+                        <button type="button" class="lib-facet-chip" data-facet="missing-desc">Missing Description</button>
+                    </div>
                     <div id="library-tag-pills" class="library-tag-pills"></div>
                 </div>
 
                 <div class="library-toolbar-right">
+                    <div class="library-sort-group">
+                        <label for="library-sort-select" class="library-toolbar-label">Sort:</label>
+                        <select id="library-sort-select" class="library-select" aria-label="Sort dataset library">
+                            <option value="date-desc" selected>Newest Curated</option>
+                            <option value="date-asc">Oldest Curated</option>
+                            <option value="layers-desc">Layer Count (Bundles First)</option>
+                            <option value="dimensions-desc">Dimensions (Largest First)</option>
+                            <option value="id-asc">Map ID (A-Z)</option>
+                        </select>
+                    </div>
+                    <div id="library-density-group" class="density-btn-group" role="group" aria-label="Grid Density">
+                        <button type="button" class="btn-density" data-density="compact" title="Compact density (Hotkey: 1)">Compact <kbd>1</kbd></button>
+                        <button type="button" class="btn-density active" data-density="comfortable" title="Comfortable density (Hotkey: 2)">Comfortable <kbd>2</kbd></button>
+                        <button type="button" class="btn-density" data-density="large" title="Large density (Hotkey: 3)">Large <kbd>3</kbd></button>
+                    </div>
                     <button type="button" id="btn-export-lora" class="btn btn-primary btn-export" title="Export 1024x1024 LoRA dataset (.zip) for training">
                         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>

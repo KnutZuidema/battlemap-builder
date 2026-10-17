@@ -47,7 +47,7 @@ graph TD
   ```
   The key may also be supplied through the process environment; a key present in the environment satisfies the provider.
 - **API Key Management**: The backend server centrally authenticates requests using `process.env.OPENROUTER_API_KEY`. **Do not reintroduce client-side API key configuration modals or localStorage key overrides.** `/api/health` reports `providers.openrouter`.
-- **Model Selection**: The model is configured **backend-side only**, in `server/services/modelCatalog.js`: `DEFAULT_MODEL_ID` names the entry every request runs (`google/gemini-3.1-flash-image`), with the rest of `MODEL_CATALOG` kept as documented alternatives. The client never names a model and there is no model API or picker to reintroduce; switching engines is a one-line change to `DEFAULT_MODEL_ID`.
+- **Model Selection**: Available models are defined in `server/services/modelCatalog.js` (`MODEL_CATALOG`, exposed via `/api/models`), with `DEFAULT_MODEL_ID` (`google/gemini-3.1-flash-image`) serving as the default when no model override is specified by the client.
 
 ---
 
@@ -157,7 +157,7 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
   - **AI Vision Theme Suggestions**: Asynchronously queries OpenRouter vision models (`POST /api/staging/:id/suggest-themes`) to provide high-signal theme cards. Reviewers accept (`ArrowRight`), reject (`ArrowLeft`), or undo (`Backspace` / `ArrowUp`) suggestion cards.
   - **Custom Tags & Autocomplete**: Reviewers can type custom tags or accept taxonomy autocomplete pills via `Tab`. Pressing `Enter` on an empty field submits curation (requiring >= 1 accepted theme). Gracefully falls back to offline mode when the vision API is unavailable.
   - **Keyboard Event Routing & Trapping**: While the decision modal is active, background canvas navigation (`ArrowLeft` / `ArrowRight`, `j` / `k`) and global triage shortcuts (`1-6`, `g`, `f`) are strictly trapped and suppressed.
-- **Dynamic Theme Labeling & Star Rating Removal**: Replaces legacy 1–5 star ratings and single fixed themes with rich multi-label dynamic themes (e.g. `["dungeon", "crypt", "boss-arena"]`). Curation is binary (curated into dataset or rejected with structured reasons to `rejections.jsonl`).
+- **Dynamic Tag Labeling & Star Rating Removal**: Replaces legacy 1–5 star ratings and single fixed categories with multi-label dynamic tags (e.g. `["dungeon", "crypt", "boss-arena"]`). Curation is binary (curated into the dataset or immediately rejected with one keystroke without a rejection reason prompt).
 - **Vision Description Generation Workflow (`POST /api/staging/:id/describe`)**:
   - Generates rich, evocative physical descriptions using Google Gemini 3.5 Flash Lite (`google/gemini-3.5-flash-lite`), configurable via the `CURATOR_DESCRIPTION_MODEL` environment variable (falling back to `CURATOR_VISION_MODEL`).
   - **Prompt Structure (DungeonForge Wiki Prompts)**: System instruction focuses strictly on tangible physical features: room architecture, masonry, stonework, woodwork, pillars, doors, furnishings, terrain hazards, water, elevation differences, visible lighting sources (braziers, torches, glowing moss, luminescence), and atmospheric textures.

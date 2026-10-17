@@ -627,6 +627,65 @@
     }
 
     // ==========================================================================
+    // Viewport Zooming Loop & Hotkey Controls
+    // ==========================================================================
+
+    const activeZoomKeys = { in: false, out: false };
+    let zoomAnimationId = null;
+    let lastZoomTimestamp = 0;
+    const ZOOM_SPEED = 2.0;
+
+    function zoomLoop(timestamp) {
+        if (!lastZoomTimestamp) lastZoomTimestamp = timestamp;
+        const dt = Math.min((timestamp - lastZoomTimestamp) / 1000, 0.1);
+        lastZoomTimestamp = timestamp;
+
+        if (activeZoomKeys.in || activeZoomKeys.out) {
+            let factor = 1.0;
+            if (activeZoomKeys.in && !activeZoomKeys.out) {
+                factor = Math.pow(ZOOM_SPEED, dt);
+            } else if (activeZoomKeys.out && !activeZoomKeys.in) {
+                factor = Math.pow(1 / ZOOM_SPEED, dt);
+            }
+
+            if (factor !== 1.0 && state.currentImage) {
+                const prevZoom = state.zoom;
+                const newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, prevZoom * factor));
+                if (newZoom !== prevZoom) {
+                    const focusX = canvas.clientWidth / 2;
+                    const focusY = canvas.clientHeight / 2;
+                    state.pan.x = focusX - (focusX - state.pan.x) * (newZoom / prevZoom);
+                    state.pan.y = focusY - (focusY - state.pan.y) * (newZoom / prevZoom);
+                    state.zoom = newZoom;
+                    requestRender();
+                    updateHud();
+                }
+            }
+            zoomAnimationId = requestAnimationFrame(zoomLoop);
+        } else {
+            zoomAnimationId = null;
+            lastZoomTimestamp = 0;
+        }
+    }
+
+    function startZoomLoop() {
+        if (!zoomAnimationId) {
+            lastZoomTimestamp = performance.now();
+            zoomAnimationId = requestAnimationFrame(zoomLoop);
+        }
+    }
+
+    function stopZoomLoop() {
+        if (zoomAnimationId) {
+            cancelAnimationFrame(zoomAnimationId);
+            zoomAnimationId = null;
+        }
+        lastZoomTimestamp = 0;
+        activeZoomKeys.in = false;
+        activeZoomKeys.out = false;
+    }
+
+    // ==========================================================================
     // Pre-fetching & Candidate Queue Management
     // ==========================================================================
 
@@ -1571,6 +1630,8 @@
      * and custom tag input workflow.
      */
     async function openCurateDecisionModal() {
+        stopPanLoop();
+        stopZoomLoop();
         exitLabelingMode();
         if (state.isSubmitting || state.currentIndex < 0 || state.currentIndex >= state.candidates.length) {
             return;
@@ -1626,6 +1687,8 @@
     }
 
     function closeCurateDecisionModal() {
+        stopPanLoop();
+        stopZoomLoop();
         if (currentDescribeAbortController) {
             currentDescribeAbortController.abort();
             currentDescribeAbortController = null;
@@ -2177,6 +2240,7 @@
 
     function toggleHelpModal() {
         stopPanLoop();
+        stopZoomLoop();
         state.helpModalOpen = !state.helpModalOpen;
         if (state.helpModalOpen) {
             helpModal.classList.remove("hidden");
@@ -2188,6 +2252,7 @@
 
     function closeHelpModal() {
         stopPanLoop();
+        stopZoomLoop();
         state.helpModalOpen = false;
         helpModal.classList.add("hidden");
         canvas.focus();
@@ -2207,6 +2272,7 @@
 
     function openIngestionDrawer() {
         stopPanLoop();
+        stopZoomLoop();
         if (state.helpModalOpen) closeHelpModal();
         state.drawerOpen = true;
         ingestionDrawer?.classList.remove("hidden");
@@ -2215,6 +2281,7 @@
 
     function closeIngestionDrawer() {
         stopPanLoop();
+        stopZoomLoop();
         state.drawerOpen = false;
         ingestionDrawer?.classList.add("hidden");
         canvas.focus();
@@ -2411,6 +2478,7 @@
 
     function openBenchmarkDrawer() {
         stopPanLoop();
+        stopZoomLoop();
         if (state.helpModalOpen) closeHelpModal();
         if (state.drawerOpen) closeIngestionDrawer();
         state.benchmarkDrawerOpen = true;
@@ -2420,6 +2488,7 @@
 
     function closeBenchmarkDrawer() {
         stopPanLoop();
+        stopZoomLoop();
         state.benchmarkDrawerOpen = false;
         benchmarkDrawer?.classList.add("hidden");
         canvas.focus();
@@ -2427,6 +2496,7 @@
 
     function openBudgetGuardModal(estimatedCost, modelCount, promptCount, totalImages) {
         stopPanLoop();
+        stopZoomLoop();
         state.budgetGuardModalOpen = true;
         const costStr = `$${estimatedCost.toFixed(2)}`;
         if (budgetGuardCostAmount) budgetGuardCostAmount.textContent = costStr;
@@ -2441,6 +2511,7 @@
 
     function closeBudgetGuardModal() {
         stopPanLoop();
+        stopZoomLoop();
         state.budgetGuardModalOpen = false;
         budgetGuardModal?.classList.add("hidden");
     }
@@ -2469,6 +2540,7 @@
 
     function openBenchmarkProgressWindow(metrics) {
         stopPanLoop();
+        stopZoomLoop();
         state.benchmarkWindowMinimized = false;
         benchmarkWindowPill?.classList.add("hidden");
         benchmarkProgressWindow?.classList.remove("hidden");
@@ -3181,6 +3253,8 @@
     }
 
     function openStorageModal() {
+        stopPanLoop();
+        stopZoomLoop();
         state.storageModalOpen = true;
         const modal = document.getElementById("storage-modal");
         modal?.classList.remove("hidden");
@@ -3188,16 +3262,19 @@
     }
 
     function closeStorageModal() {
+        stopPanLoop();
+        stopZoomLoop();
         state.storageModalOpen = false;
         const modal = document.getElementById("storage-modal");
         modal?.classList.add("hidden");
     }
 
     function openPurgeModal() {
+        stopPanLoop();
+        stopZoomLoop();
         state.purgeModalOpen = true;
         const modal = document.getElementById("purge-confirm-modal");
         modal?.classList.remove("hidden");
-
         const reclaimBytesEl = document.getElementById("purge-reclaim-bytes");
         const reclaimFilesEl = document.getElementById("purge-reclaim-files");
         const currentStaging = state.storageStats?.staging || { bytes: 0, file_count: 0 };
@@ -3206,6 +3283,8 @@
     }
 
     function closePurgeModal() {
+        stopPanLoop();
+        stopZoomLoop();
         state.purgeModalOpen = false;
         const modal = document.getElementById("purge-confirm-modal");
         modal?.classList.add("hidden");
@@ -3815,6 +3894,7 @@
         window.addEventListener("keyup", handleKeyup);
         window.addEventListener("blur", () => {
             stopPanLoop();
+            stopZoomLoop();
             if (state.isDraggingGrid) {
                 state.isDraggingGrid = false;
                 canvas.classList.remove("grid-dragging");
@@ -3827,6 +3907,7 @@
             const tag = e.target?.tagName?.toLowerCase();
             if (tag === "input" || tag === "textarea" || tag === "select") {
                 stopPanLoop();
+                stopZoomLoop();
             }
         });
     }
@@ -3840,6 +3921,7 @@
         // Global Modal Dismiss: Escape
         if (e.key === "Escape") {
             stopPanLoop();
+            stopZoomLoop();
             if (state.gridPanelOpen) {
                 toggleGridPanel(false);
                 e.preventDefault();
@@ -4042,6 +4124,22 @@
             }
         }
 
+        // Viewport Zooming: [ and ]
+        if (!isInputFocused && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            if (e.key === "]" || e.code === "BracketRight") {
+                activeZoomKeys.in = true;
+                startZoomLoop();
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "[" || e.code === "BracketLeft") {
+                activeZoomKeys.out = true;
+                startZoomLoop();
+                e.preventDefault();
+                return;
+            }
+        }
+
         // Layer Navigation: Tab / Shift+Tab or Up / Down arrows
         if (e.key === "Tab") {
             cycleLayer(e.shiftKey ? -1 : 1);
@@ -4098,13 +4196,13 @@
             }
         }
 
-        // Zoom: + or = or ] / - or _ or [
-        if (e.key === "+" || e.key === "=" || e.key === "]") {
+        // Zoom: + or = / - or _
+        if (e.key === "+" || e.key === "=") {
             zoomStep(1.2);
             e.preventDefault();
             return;
         }
-        if (e.key === "-" || e.key === "_" || e.key === "[") {
+        if (e.key === "-" || e.key === "_") {
             zoomStep(1 / 1.2);
             e.preventDefault();
             return;
@@ -4148,6 +4246,18 @@
             activePanKeys[key] = false;
             if (!activePanKeys.w && !activePanKeys.a && !activePanKeys.s && !activePanKeys.d) {
                 stopPanLoop();
+            }
+        }
+        if (e.key === "]" || e.code === "BracketRight") {
+            activeZoomKeys.in = false;
+            if (!activeZoomKeys.in && !activeZoomKeys.out) {
+                stopZoomLoop();
+            }
+        }
+        if (e.key === "[" || e.code === "BracketLeft") {
+            activeZoomKeys.out = false;
+            if (!activeZoomKeys.in && !activeZoomKeys.out) {
+                stopZoomLoop();
             }
         }
     }
@@ -4263,6 +4373,7 @@
 
     function enterLabelingMode(mode) {
         stopPanLoop();
+        stopZoomLoop();
         state.labelingMode = mode;
         const roleSelectorEl = document.getElementById("role-selector");
         if (roleSelectorEl) roleSelectorEl.classList.remove("selecting-mode");
@@ -4275,6 +4386,7 @@
 
     function exitLabelingMode() {
         stopPanLoop();
+        stopZoomLoop();
         state.labelingMode = null;
         const roleSelectorEl = document.getElementById("role-selector");
         if (roleSelectorEl) roleSelectorEl.classList.remove("selecting-mode");

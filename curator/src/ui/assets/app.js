@@ -174,6 +174,7 @@
     let decisionCardStep, decisionFocalCard, decisionCardTag;
     let btnDecisionReject, btnDecisionUndo, btnDecisionAccept;
     let decisionCustomStep, decisionOfflineNote, decisionTagInput, btnAddCustomTag;
+    let decisionDescriptionInput, decisionDescriptionLoading, btnRegenerateDescription, decisionDescriptionStatus;
     let decisionAutocompleteList, decisionValidationError;
     let decisionAcceptedTags;
     let btnCloseDecisionModal, btnCancelDecision, btnFinishDecision;
@@ -363,6 +364,10 @@
         btnAddCustomTag = document.getElementById("btn-add-custom-tag");
         decisionAutocompleteList = document.getElementById("decision-autocomplete-list");
         decisionValidationError = document.getElementById("decision-validation-error");
+        decisionDescriptionInput = document.getElementById("decision-description-input");
+        decisionDescriptionLoading = document.getElementById("decision-description-loading");
+        btnRegenerateDescription = document.getElementById("btn-regenerate-description");
+        decisionDescriptionStatus = document.getElementById("decision-description-status");
         decisionAcceptedTags = document.getElementById("decision-accepted-tags");
         btnCloseDecisionModal = document.getElementById("btn-close-decision-modal");
         btnCancelDecision = document.getElementById("btn-cancel-decision");
@@ -1412,6 +1417,120 @@
 
         return candidate._fetchPromise;
     }
+
+    let currentDescribeAbortController = null;
+
+    /**
+     * Asynchronously requests vision description for candidate.
+     * @param {Object} candidate
+     * @param {boolean} force - if true, bypasses candidate._description cache
+     */
+    async function fetchCandidateDescription(candidate, force = false) {
+        if (!candidate) return;
+
+        if (currentDescribeAbortController) {
+            currentDescribeAbortController.abort();
+            currentDescribeAbortController = null;
+        }
+
+        if (!force && candidate._description) {
+            if (decisionDescriptionInput) {
+                decisionDescriptionInput.value = candidate._description;
+                decisionDescriptionInput.classList.remove("hidden");
+            }
+            if (decisionDescriptionLoading) {
+                decisionDescriptionLoading.classList.add("hidden");
+            }
+            if (decisionDescriptionStatus) {
+                decisionDescriptionStatus.className = "decision-description-indicator status-dot status-ready";
+                decisionDescriptionStatus.title = "Description ready";
+            }
+            return candidate._description;
+        }
+
+        if (decisionDescriptionLoading) {
+            decisionDescriptionLoading.classList.remove("hidden");
+        }
+        if (decisionDescriptionInput) {
+            decisionDescriptionInput.classList.add("hidden");
+        }
+        if (btnRegenerateDescription) {
+            btnRegenerateDescription.disabled = true;
+        }
+        if (decisionDescriptionStatus) {
+            decisionDescriptionStatus.className = "decision-description-indicator status-dot status-processing";
+            decisionDescriptionStatus.title = "Generating description with Gemini 3.5 Flash Lite...";
+        }
+
+        const controller = new AbortController();
+        currentDescribeAbortController = controller;
+
+        const payload = {
+            themes: decisionState.acceptedTags && decisionState.acceptedTags.length > 0
+                ? decisionState.acceptedTags
+                : (candidate.themes || (candidate.theme ? [candidate.theme] : [])),
+            tags: candidate.tags || [],
+        };
+
+        try {
+            const res = await fetch(`/api/staging/${encodeURIComponent(candidate.id)}/describe`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+                signal: controller.signal,
+            });
+
+            if (!res.ok) {
+                throw new Error(`HTTP ${res.status}`);
+            }
+
+            const data = await res.json();
+            const desc = (data && typeof data.description === "string") ? data.description.trim() : "";
+            candidate._description = desc;
+
+            if (decisionState.candidate && decisionState.candidate.id === candidate.id) {
+                if (decisionDescriptionInput) {
+                    decisionDescriptionInput.value = desc;
+                    decisionDescriptionInput.classList.remove("hidden");
+                }
+                if (decisionDescriptionLoading) {
+                    decisionDescriptionLoading.classList.add("hidden");
+                }
+                if (decisionDescriptionStatus) {
+                    decisionDescriptionStatus.className = "decision-description-indicator status-dot status-ready";
+                    decisionDescriptionStatus.title = "Description generated";
+                }
+            }
+            return desc;
+        } catch (err) {
+            if (err.name === "AbortError") {
+                return;
+            }
+            console.warn(`Vision description failed for candidate ${candidate.id}:`, err);
+            if (decisionState.candidate && decisionState.candidate.id === candidate.id) {
+                if (decisionDescriptionInput) {
+                    if (!decisionDescriptionInput.value.trim()) {
+                        decisionDescriptionInput.value = candidate.description || (candidate.layers && candidate.layers[0]?.caption) || "";
+                    }
+                    decisionDescriptionInput.classList.remove("hidden");
+                }
+                if (decisionDescriptionLoading) {
+                    decisionDescriptionLoading.classList.add("hidden");
+                }
+                if (decisionDescriptionStatus) {
+                    decisionDescriptionStatus.className = "decision-description-indicator status-dot status-offline";
+                    decisionDescriptionStatus.title = "AI vision description unavailable / fallback";
+                }
+            }
+        } finally {
+            if (currentDescribeAbortController === controller) {
+                currentDescribeAbortController = null;
+            }
+            if (btnRegenerateDescription) {
+                btnRegenerateDescription.disabled = false;
+            }
+        }
+    }
     /**
      * Curate Validation Gate:
      * 1. If candidate has layers and all layers are excluded (role === 'exclude'), block curation.
@@ -1489,6 +1608,13 @@
         if (decisionValidationError) {
             decisionValidationError.classList.add("hidden");
         }
+        if (decisionDescriptionInput) {
+            decisionDescriptionInput.value = "";
+            decisionDescriptionInput.classList.remove("hidden");
+        }
+        if (decisionDescriptionLoading) {
+            decisionDescriptionLoading.classList.add("hidden");
+        }
 
         const suggestions = candidate._themeSuggestions || [];
         if (suggestions.length > 0) {
@@ -1510,6 +1636,16 @@
     }
 
     function closeCurateDecisionModal() {
+        if (currentDescribeAbortController) {
+            currentDescribeAbortController.abort();
+            currentDescribeAbortController = null;
+        }
+        if (decisionDescriptionInput) {
+            decisionDescriptionInput.value = "";
+        }
+        if (decisionDescriptionLoading) {
+            decisionDescriptionLoading.classList.add("hidden");
+        }
         decisionState.isOpen = false;
         state.decisionModalOpen = false;
         if (curateDecisionModal) {
@@ -1607,6 +1743,10 @@
 
         renderAutocompletePills("");
         renderAcceptedTags();
+
+        if (decisionState.candidate) {
+            fetchCandidateDescription(decisionState.candidate, false);
+        }
     }
 
     function getKnownDatasetTags() {
@@ -1871,6 +2011,7 @@
         if (!candidate) return;
 
         const acceptedThemes = [...decisionState.acceptedTags];
+        const descriptionValue = decisionDescriptionInput ? decisionDescriptionInput.value.trim() : "";
         closeCurateDecisionModal();
 
         state.isSubmitting = true;
@@ -1882,6 +2023,7 @@
                 themes: acceptedThemes,
                 tags: candidate.tags || [],
                 layers: candidate.layers && candidate.layers.length > 0 ? candidate.layers : undefined,
+                description: descriptionValue || undefined,
             };
 
             const res = await fetch("/api/curate", {
@@ -1964,6 +2106,14 @@
         }
 
         if (decisionState.step === "custom") {
+            if (document.activeElement === decisionDescriptionInput) {
+                if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                    e.preventDefault();
+                    handleCustomTagSubmit();
+                }
+                return;
+            }
+
             if (document.activeElement === decisionTagInput) {
                 return;
             }
@@ -3337,70 +3487,76 @@
 
         const fragment = document.createDocumentFragment();
         for (const map of maps) {
-            const card = document.createElement("div");
-            card.className = "curated-card";
-            card.dataset.id = map.id;
-            const primaryTheme = (map.themes && map.themes.length > 0) ? map.themes[0] : (map.theme || "dungeon");
-            card.dataset.theme = primaryTheme;
-
-            let themeParam = "dungeon";
-            if (primaryTheme && CANONICAL_THEMES.includes(primaryTheme.toLowerCase())) {
-                themeParam = primaryTheme.toLowerCase();
-            } else if (map.themes && Array.isArray(map.themes)) {
-                const found = map.themes.find(t => CANONICAL_THEMES.includes((t || "").toLowerCase()));
-                if (found) {
-                    themeParam = found.toLowerCase();
-                }
-            }
-
-            const thumbUrl = `/api/image/curated/${encodeURIComponent(themeParam)}/${encodeURIComponent(map.id)}`;
-            const layerCount = (map.layers && map.layers.length > 0) ? map.layers.length : 1;
-            const layerLabel = `${layerCount} Layer${layerCount === 1 ? "" : "s"}`;
-
-            const themesList = (map.themes && map.themes.length > 0)
-                ? map.themes
-                : (map.theme ? [map.theme] : []);
-            const tagsList = map.tags || [];
-
-            const pills = [
-                ...themesList.map(t => `<span class="curated-tag-pill curated-theme-pill">${escapeHtml(t)}</span>`),
-                ...tagsList.map(t => `<span class="curated-tag-pill">${escapeHtml(t)}</span>`),
-            ];
-
-            const tagsHtml = pills.length > 0
-                ? pills.join("")
-                : `<span class="curated-tag-pill text-muted">no tags</span>`;
-
-            const captionText = (map.layers && map.layers[0] && map.layers[0].caption)
-                ? map.layers[0].caption
-                : `ttrpg battlemap, flat 2D plan view, perpendicular orthographic camera, poché cut walls, strictly gridless, ${primaryTheme}`;
-
-            card.innerHTML = `
-                <div class="curated-thumb-box">
-                    <img class="curated-thumb-img" src="${thumbUrl}" alt="Map ${escapeHtml(map.id)}" loading="lazy">
-                    <div class="curated-thumb-overlay">
-                        <span class="curated-theme-badge">${escapeHtml(primaryTheme)}</span>
-                        <span class="curated-layers-badge">${layerLabel}</span>
-                    </div>
-                </div>
-                <div class="curated-card-body">
-                    <div class="curated-header-row">
-                        <span class="curated-card-id mono" title="${escapeHtml(map.id)}">${escapeHtml(map.id)}</span>
-                    </div>
-                    <div class="curated-tags-row">
-                        ${tagsHtml}
-                    </div>
-                    <div class="curated-caption-box">
-                        <span class="curated-caption-label">Companion Caption</span>
-                        <div class="mono">${escapeHtml(captionText)}</div>
-                    </div>
-                </div>
-            `;
-
-            fragment.appendChild(card);
+            fragment.appendChild(renderCuratedCard(map));
         }
 
         libraryGrid.appendChild(fragment);
+    }
+
+    function renderCuratedCard(map) {
+        const card = document.createElement("div");
+        card.className = "curated-card";
+        card.dataset.id = map.id;
+        const primaryTheme = (map.themes && map.themes.length > 0) ? map.themes[0] : (map.theme || "dungeon");
+        card.dataset.theme = primaryTheme;
+
+        let themeParam = "dungeon";
+        if (primaryTheme && CANONICAL_THEMES.includes(primaryTheme.toLowerCase())) {
+            themeParam = primaryTheme.toLowerCase();
+        } else if (map.themes && Array.isArray(map.themes)) {
+            const found = map.themes.find(t => CANONICAL_THEMES.includes((t || "").toLowerCase()));
+            if (found) {
+                themeParam = found.toLowerCase();
+            }
+        }
+
+        const thumbUrl = `/api/image/curated/${encodeURIComponent(themeParam)}/${encodeURIComponent(map.id)}`;
+        const layerCount = (map.layers && map.layers.length > 0) ? map.layers.length : 1;
+        const layerLabel = `${layerCount} Layer${layerCount === 1 ? "" : "s"}`;
+
+        const themesList = (map.themes && map.themes.length > 0)
+            ? map.themes
+            : (map.theme ? [map.theme] : []);
+        const tagsList = map.tags || [];
+
+        const pills = [
+            ...themesList.map(t => `<span class="curated-tag-pill curated-theme-pill">${escapeHtml(t)}</span>`),
+            ...tagsList.map(t => `<span class="curated-tag-pill">${escapeHtml(t)}</span>`),
+        ];
+
+        const tagsHtml = pills.length > 0
+            ? pills.join("")
+            : `<span class="curated-tag-pill text-muted">no tags</span>`;
+
+        const descriptionText = (map.description && map.description.trim())
+            ? map.description.trim()
+            : (map.layers && map.layers[0] && map.layers[0].caption
+                ? map.layers[0].caption
+                : `ttrpg battlemap, flat 2D plan view, perpendicular orthographic camera, poché cut walls, strictly gridless, ${primaryTheme}`);
+
+        card.innerHTML = `
+            <div class="curated-thumb-box">
+                <img class="curated-thumb-img" src="${thumbUrl}" alt="Map ${escapeHtml(map.id)}" loading="lazy">
+                <div class="curated-thumb-overlay">
+                    <span class="curated-theme-badge">${escapeHtml(primaryTheme)}</span>
+                    <span class="curated-layers-badge">${layerLabel}</span>
+                </div>
+            </div>
+            <div class="curated-card-body">
+                <div class="curated-header-row">
+                    <span class="curated-card-id mono" title="${escapeHtml(map.id)}">${escapeHtml(map.id)}</span>
+                </div>
+                <div class="curated-tags-row">
+                    ${tagsHtml}
+                </div>
+                <div class="curated-description-box">
+                    <span class="curated-description-label">DungeonForge Prompt Description</span>
+                    <div class="curated-description-text">${escapeHtml(descriptionText)}</div>
+                </div>
+            </div>
+        `;
+
+        return card;
     }
 
     async function exportLoraDataset() {
@@ -3495,6 +3651,21 @@
         if (decisionTagInput) {
             decisionTagInput.addEventListener("input", (e) => onDecisionTagInput(e));
             decisionTagInput.addEventListener("keydown", (e) => onDecisionTagInputKeydown(e));
+        }
+        if (btnRegenerateDescription) {
+            btnRegenerateDescription.addEventListener("click", () => {
+                if (decisionState.candidate) {
+                    fetchCandidateDescription(decisionState.candidate, true);
+                }
+            });
+        }
+        if (decisionDescriptionInput) {
+            decisionDescriptionInput.addEventListener("keydown", (e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                    e.preventDefault();
+                    handleCustomTagSubmit();
+                }
+            });
         }
         if (curateDecisionModal) {
             curateDecisionModal.addEventListener("click", (e) => {

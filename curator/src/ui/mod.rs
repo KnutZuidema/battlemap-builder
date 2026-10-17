@@ -315,6 +315,7 @@ mod tests {
         assert!(html.contains("decision-tag-input"));
         assert!(html.contains("decision-autocomplete-list"));
         assert!(html.contains("decision-accepted-tags"));
+        assert!(html.contains("decision-description-input"));
 
         let app_js = Assets::get("app.js").expect("app.js must be embedded");
         let js = std::str::from_utf8(app_js.data.as_ref()).expect("app.js must be valid utf8");
@@ -332,6 +333,10 @@ mod tests {
         assert!(js.contains("suggest-themes"));
         assert!(js.contains("_fetchPromise"));
         assert!(js.contains("_suggestionsOffline"));
+        assert!(js.contains("decision-description-input"));
+        assert!(js.contains("curated-description-box"));
+        assert!(js.contains("fetchCandidateDescription"));
+        assert!(js.contains("renderCuratedCard"));
 
         let style_css = Assets::get("style.css").expect("style.css must be embedded");
         let css = std::str::from_utf8(style_css.data.as_ref()).expect("style.css must be valid utf8");
@@ -344,6 +349,8 @@ mod tests {
         assert!(css.contains(".autocomplete-pill"));
         assert!(css.contains(".shake"));
         assert!(css.contains("@keyframes shake"));
+        assert!(css.contains("decision-description-input"));
+        assert!(css.contains("curated-description-box"));
     }
 
 

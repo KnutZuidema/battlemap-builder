@@ -3609,6 +3609,42 @@ kbd {
     display: block;
 }
 
+.curated-description-box {
+    margin-top: auto;
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 0.5rem 0.65rem;
+    font-size: 0.75rem;
+    line-height: 1.45;
+    color: var(--text-muted);
+    max-height: 85px;
+    overflow-y: auto;
+    word-break: break-word;
+    transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.curated-description-box:hover {
+    border-color: rgba(56, 189, 248, 0.25);
+    background: rgba(0, 0, 0, 0.45);
+}
+
+.curated-description-label {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--accent-cyan);
+    font-weight: 700;
+    margin-bottom: 0.25rem;
+    display: block;
+}
+
+.curated-description-text {
+    color: var(--text-secondary);
+    font-size: 0.74rem;
+    line-height: 1.4;
+}
+
 
 /* ==========================================================================
    Curate Decision Modal (Vision Suggestions & Custom Tag Flow)
@@ -3885,6 +3921,90 @@ kbd {
     font-weight: 600;
     color: var(--accent-rose);
     margin-top: 0.4rem;
+}
+
+/* Description Preview & Editing in Decision Modal */
+.decision-description-section {
+    margin-top: 0.85rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border-subtle);
+}
+
+.decision-description-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.45rem;
+}
+
+.decision-description-title-group {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+.decision-description-label {
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--text-secondary);
+}
+
+.decision-description-indicator {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.decision-description-loading {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 0.65rem 0.85rem;
+    background: rgba(24, 34, 53, 0.6);
+    border: 1px dashed var(--border-medium);
+    border-radius: 8px;
+    margin-bottom: 0.25rem;
+}
+
+.description-skeleton-line {
+    height: 12px;
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0.05) 25%, rgba(255, 255, 255, 0.12) 50%, rgba(255, 255, 255, 0.05) 75%);
+    background-size: 200% 100%;
+    animation: skeleton-pulse 1.5s infinite;
+    border-radius: 4px;
+}
+
+.description-skeleton-line.short {
+    width: 60%;
+}
+
+@keyframes skeleton-pulse {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+#decision-description-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.65rem 0.85rem;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    background: rgba(24, 34, 53, 0.9);
+    border: 1px solid var(--border-medium);
+    border-radius: 8px;
+    color: var(--text-primary);
+    resize: vertical;
+    min-height: 72px;
+    font-family: inherit;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+#decision-description-input:focus {
+    border-color: var(--accent-cyan);
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.25);
+    outline: none;
 }
 
 /* Accepted Tags Strip */

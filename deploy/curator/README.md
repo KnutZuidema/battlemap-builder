@@ -130,7 +130,7 @@ Rollout Verification (kubectl rollout status)
    - Triggers on push to `main` when paths change under `curator/**`, `deploy/curator/**`, or `.github/workflows/curator-cd.yml`.
    - Can also be triggered manually using `workflow_dispatch`.
 2. **Multi-Stage Build for ARM64**:
-   - Uses QEMU and Docker Buildx to cross-compile for `linux/arm64` targeted at Hetzner `cax11` worker nodes.
+   - Uses Docker Buildx with `--platform=$BUILDPLATFORM` and native cross-linking to compile for `linux/arm64` without QEMU CPU emulation, targeting Hetzner `cax11` worker nodes.
    - Builds the Rust application and embeds UI assets into a minimal container.
    - Pushes both `ghcr.io/knutzuidema/curator:<sha>` (immutable release tag) and `ghcr.io/knutzuidema/curator:latest`.
    - Utilizes GitHub Actions cache (`type=gha`) for fast incremental Cargo compilation.

@@ -188,3 +188,15 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
    - Always run `cd client && npm run build` to verify clean compilation after making frontend changes.
    - Provider work must be verified against the live API: the image generation path and the region forging path — and the region compositor must leave 0 pixels changed outside the selection box.
    - Canvas work must be verified in a real browser: right-drag selection opens the region box, dragging handles resizes it, and the Konva layer canvases are free of uncaught draw errors.
+
+---
+
+## Agent skills
+
+### Issue tracker
+
+GitHub issues tracked via `gh` CLI in `KnutZuidema/battlemap-builder`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context layout (`GLOSSARY.md` and `docs/adr/` at repo root). See `docs/agents/domain.md`.

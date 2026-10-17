@@ -3,14 +3,18 @@
 # ==============================================================================
 # Build Stage
 # ==============================================================================
-FROM rust:1-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
 
-# Install build dependencies required for compiling dependencies (e.g. openssl-sys)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config \
-    libssl-dev \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+ARG TARGETARCH
+
+# Install cross-compilation toolchain when targeting arm64 on an amd64 host
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross && \
+        rustup target add aarch64-unknown-linux-gnu && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
 
 WORKDIR /app
 
@@ -22,18 +26,26 @@ COPY curator/ ./curator/
 
 WORKDIR /app/curator
 
-# Build release binary with embedded assets
-RUN cargo build --release --bin curator
+# Build release binary with embedded assets (native compilation or cross-linking)
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+        cargo build --release --target aarch64-unknown-linux-gnu --bin curator && \
+        cp target/aarch64-unknown-linux-gnu/release/curator /usr/local/bin/curator; \
+    else \
+        cargo build --release --bin curator && \
+        cp target/release/curator /usr/local/bin/curator; \
+    fi
 
 # ==============================================================================
 # Runtime Stage
 # ==============================================================================
 FROM debian:bookworm-slim AS runtime
 
-# Install OpenSSL runtime libraries and certificates
+# Install CA certificates for outbound HTTPS requests
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create dedicated non-root user and group (curator:curator, UID/GID 1000:1000)
@@ -45,7 +57,7 @@ RUN mkdir -p /data && \
     chown -R curator:curator /data
 
 # Copy compiled binary from builder stage
-COPY --from=builder /app/curator/target/release/curator /usr/local/bin/curator
+COPY --from=builder /usr/local/bin/curator /usr/local/bin/curator
 
 # Set runtime environment variables
 ENV PORT=3002 \

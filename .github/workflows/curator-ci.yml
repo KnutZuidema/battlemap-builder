@@ -65,9 +65,6 @@ jobs:
         with:
           workspaces: curator -> target
 
-      - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
-
       - name: Check & Test
         run: cargo test --manifest-path curator/Cargo.toml
 

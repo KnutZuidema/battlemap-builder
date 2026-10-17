@@ -10,14 +10,15 @@ use axum::{
 };
 use std::sync::atomic::Ordering;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{
     BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
-    CaptionGenerator, CuratedMap, CustomPrompt, PurgeStagingResult, RedditHarvestRequest,
-    RejectionReason, StorageStats, Theme,
+    CaptionGenerator, CuratedMap, CuratedMapUpdate, CustomPrompt, LayerRole, PurgeStagingResult,
+    RedditHarvestRequest, RejectionReason, StorageStats, Theme,
 };
 use crate::ports::cost_tracker::CostStats;
 use crate::services::{IngestionSummary, RedditIngestionService};
@@ -109,6 +110,79 @@ pub async fn get_curated(
     Ok(Json(maps))
 }
 
+/// PATCH /api/curated/{id} - Update metadata (themes, tags, description) and/or layer assignments.
+pub async fn patch_curated(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(update): Json<CuratedMapUpdate>,
+) -> Result<Json<CuratedMap>, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Curated map ID cannot be empty"));
+    }
+
+    let updated = state.storage.update_curated(&id, update)?;
+    tracing::info!(id = %id, "Updated curated map metadata and layer assignments");
+    Ok(Json(updated))
+}
+
+/// Request payload for deleting a curated map.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct DeleteCuratedRequest {
+    #[serde(default)]
+    pub reason: Option<RejectionReason>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+/// DELETE /api/curated/{id} - Delete an approved curated map bundle and log rejection.
+pub async fn delete_curated(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<StatusCode, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Curated map ID cannot be empty"));
+    }
+
+    let req: DeleteCuratedRequest = if body.trim_ascii().is_empty() {
+        DeleteCuratedRequest::default()
+    } else {
+        serde_json::from_slice(&body).unwrap_or_default()
+    };
+
+    let reason = req.reason.unwrap_or(RejectionReason::Unspecified);
+    state.storage.delete_curated(&id, reason, req.notes.as_deref())?;
+
+    tracing::info!(id = %id, reason = ?reason, "Deleted curated map");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Request payload for bulk deleting curated maps.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct BulkDeleteCuratedRequest {
+    #[serde(default)]
+    pub ids: Vec<String>,
+    #[serde(default)]
+    pub reason: Option<RejectionReason>,
+}
+
+/// POST /api/curated/bulk-delete - Batch delete curated maps and log rejections.
+pub async fn post_curated_bulk_delete(
+    State(state): State<AppState>,
+    Json(payload): Json<BulkDeleteCuratedRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let reason = payload.reason.unwrap_or(RejectionReason::Unspecified);
+    let mut count = 0;
+    for id in &payload.ids {
+        if state.storage.delete_curated(id, reason, None).is_ok() {
+            count += 1;
+        }
+    }
+
+    tracing::info!(deleted_count = count, total = payload.ids.len(), "Bulk deleted curated maps");
+    Ok(Json(json!({ "deleted_count": count })))
+}
+
 /// GET /api/dataset/export - Export LoRA dataset packaged as a ZIP archive.
 pub async fn get_dataset_export(
     State(state): State<AppState>,
@@ -116,6 +190,33 @@ pub async fn get_dataset_export(
 ) -> Result<Response, ApiError> {
     let theme = parse_optional_theme(query.theme.as_deref())?;
     let zip_bytes = state.storage.export_lora_dataset(theme.as_ref())?;
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"))
+        .header(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment; filename=\"lora-dataset.zip\""),
+        )
+        .body(Body::from(zip_bytes))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(response)
+}
+
+/// Request payload for exporting selected curated maps to a LoRA dataset ZIP archive.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ExportSelectedRequest {
+    #[serde(default)]
+    pub ids: Vec<String>,
+}
+
+/// POST /api/dataset/export-selected - Export selected curated maps packaged as a ZIP archive.
+pub async fn post_dataset_export_selected(
+    State(state): State<AppState>,
+    Json(payload): Json<ExportSelectedRequest>,
+) -> Result<Response, ApiError> {
+    let zip_bytes = state.storage.export_selected_lora_dataset(&payload.ids)?;
 
     let response = Response::builder()
         .status(StatusCode::OK)
@@ -246,19 +347,19 @@ pub async fn get_curated_image_by_id(
         return Err(ApiError::bad_request("Map ID cannot be empty"));
     }
 
-    let mut bytes_result = state.storage.get_curated_image(&Theme::Dungeon, &id);
-    if bytes_result.is_err() {
-        for theme in Theme::ALL {
-            if *theme == Theme::Dungeon {
-                continue;
+    let bytes = match state.storage.get_curated_image_by_id(&id) {
+        Ok(b) => b,
+        Err(_) => {
+            let mut fallback = None;
+            for theme in Theme::ALL {
+                if let Ok(bytes) = state.storage.get_curated_image(theme, &id) {
+                    fallback = Some(bytes);
+                    break;
+                }
             }
-            if let Ok(bytes) = state.storage.get_curated_image(theme, &id) {
-                bytes_result = Ok(bytes);
-                break;
-            }
+            fallback.ok_or_else(|| ApiError::not_found(format!("Curated map '{id}' not found")))?
         }
-    }
-    let bytes = bytes_result?;
+    };
     let mime = detect_image_mime(&bytes, None);
 
     let response = Response::builder()
@@ -313,6 +414,75 @@ pub async fn get_curated_layer_image(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(response)
+}
+
+/// GET /api/image/curated/{id}/{layer_index} - Stream binary image bytes for a specific layer of a curated map directly by ID.
+pub async fn get_curated_layer_image_by_id(
+    State(state): State<AppState>,
+    Path((id, layer_index)): Path<(String, usize)>,
+) -> Result<Response, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Map ID cannot be empty"));
+    }
+
+    let bytes = state
+        .storage
+        .get_curated_layer_image_by_id(&id, layer_index)?;
+
+    let filename = state
+        .storage
+        .list_curated(None)
+        .ok()
+        .and_then(|list| {
+            list.into_iter().find(|m| m.id == id).and_then(|m| {
+                m.layers
+                    .into_iter()
+                    .find(|l| l.index == layer_index)
+                    .map(|l| l.filename)
+            })
+        });
+    let mime = detect_image_mime(&bytes, filename.as_deref());
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, HeaderValue::from_static(mime))
+        .header(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=3600"),
+        )
+        .body(Body::from(bytes))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(response)
+}
+
+/// Dispatcher for 2-segment curated image routes:
+/// GET /api/image/curated/{id}/{layer_index} or legacy GET /api/image/curated/{theme}/{id}.
+pub async fn get_curated_image_or_layer(
+    State(state): State<AppState>,
+    Path((first, second)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    if let Ok(layer_index) = second.parse::<usize>() {
+        match get_curated_layer_image_by_id(
+            State(state.clone()),
+            Path((first.clone(), layer_index)),
+        )
+        .await
+        {
+            Ok(resp) => return Ok(resp),
+            Err(ApiError::NotFound(_)) => {
+                if first.parse::<Theme>().is_ok() {
+                    return get_curated_image(State(state), Path((first, second))).await;
+                }
+                return Err(ApiError::not_found(format!(
+                    "Curated image layer {layer_index} for '{first}' not found"
+                )));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    get_curated_image(State(state), Path((first, second))).await
 }
 
 
@@ -620,6 +790,85 @@ pub async fn post_suggest_themes(
     Ok(Json(SuggestThemesResponse { id, suggestions }))
 }
 
+/// POST /api/curated/{id}/suggest-themes - Vision-assisted theme tag suggestions for curated map with caching.
+pub async fn post_curated_suggest_themes(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SuggestThemesResponse>, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Curated map ID cannot be empty"));
+    }
+
+    // 1. Fast in-memory cache check
+    {
+        let cache = state.theme_suggestions_cache.read().await;
+        if let Some(suggestions) = cache.get(&id) {
+            return Ok(Json(SuggestThemesResponse {
+                id,
+                suggestions: suggestions.clone(),
+            }));
+        }
+    }
+
+    // 2. Load primary ground image bytes
+    let bytes = match state.storage.get_curated_image_by_id(&id) {
+        Ok(b) => b,
+        Err(_) => {
+            let mut fallback = None;
+            for theme in Theme::ALL {
+                if let Ok(b) = state.storage.get_curated_image(theme, &id) {
+                    fallback = Some(b);
+                    break;
+                }
+            }
+            fallback.ok_or_else(|| ApiError::not_found(format!("Curated map '{id}' not found")))?
+        }
+    };
+
+    let filename = state
+        .storage
+        .list_curated(None)
+        .ok()
+        .and_then(|list| {
+            list.into_iter().find(|m| m.id == id).and_then(|m| {
+                m.layers
+                    .into_iter()
+                    .find(|l| l.role == LayerRole::Ground || l.index == 0)
+                    .map(|l| l.filename)
+            })
+        });
+    let mime = detect_image_mime(&bytes, filename.as_deref());
+
+    // 3. Invoke vision model if OpenRouter adapter is available
+    let raw_suggestions = match state.openrouter_client() {
+        Some(adapter) => match adapter.suggest_themes(&bytes, mime).await {
+            Ok(tags) => tags,
+            Err(err) => {
+                tracing::warn!(curated_id = %id, error = %err, "OpenRouter vision model call failed; falling back to empty suggestions");
+                Vec::new()
+            }
+        },
+        None => {
+            tracing::warn!(curated_id = %id, "OpenRouter vision model not configured or missing API key; returning empty suggestions");
+            Vec::new()
+        }
+    };
+
+    // 4. Clean up tags (trim, deduplicate, capitalize, limit to 5)
+    let suggestions = clean_tags(raw_suggestions);
+
+    // 5. Store non-empty results in cache
+    if !suggestions.is_empty() {
+        state
+            .theme_suggestions_cache
+            .write()
+            .await
+            .insert(id.clone(), suggestions.clone());
+    }
+
+    Ok(Json(SuggestThemesResponse { id, suggestions }))
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DescribeRequest {
     #[serde(default)]
@@ -718,6 +967,123 @@ pub async fn post_describe_candidate(
                 primary_theme,
                 &tags,
                 candidate.title.as_deref(),
+            )
+        }
+    };
+
+    Ok(Json(DescribeResponse { id, description }))
+}
+
+/// POST /api/curated/{id}/describe or GET /api/curated/{id}/describe
+/// Generate physical description from curated map image and optional themes/tags.
+pub async fn post_curated_describe(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<Json<DescribeResponse>, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Curated map ID cannot be empty"));
+    }
+
+    let req: DescribeRequest = if body.trim_ascii().is_empty() {
+        DescribeRequest::default()
+    } else {
+        serde_json::from_slice::<Option<DescribeRequest>>(&body)
+            .map_err(|e| ApiError::bad_request(format!("Invalid JSON payload: {e}")))?
+            .unwrap_or_default()
+    };
+
+    let curated_map = state
+        .storage
+        .list_curated(None)
+        .ok()
+        .and_then(|list| list.into_iter().find(|m| m.id == id));
+
+    let bytes = match state.storage.get_curated_image_by_id(&id) {
+        Ok(b) => b,
+        Err(_) => {
+            let mut fallback = None;
+            for theme in Theme::ALL {
+                if let Ok(b) = state.storage.get_curated_image(theme, &id) {
+                    fallback = Some(b);
+                    break;
+                }
+            }
+            fallback.ok_or_else(|| ApiError::not_found(format!("Curated map '{id}' not found")))?
+        }
+    };
+
+    let filename = curated_map.as_ref().and_then(|m| {
+        m.layers
+            .iter()
+            .find(|l| l.role == LayerRole::Ground || l.index == 0)
+            .map(|l| l.filename.as_str())
+    });
+    let mime = detect_image_mime(&bytes, filename);
+
+    let mut themes = req.themes.unwrap_or_default();
+    if themes.is_empty() {
+        if let Some(m) = &curated_map {
+            themes = m.themes.clone();
+        }
+    }
+    if themes.is_empty() {
+        let cache = state.theme_suggestions_cache.read().await;
+        if let Some(cached) = cache.get(&id) {
+            themes = cached.clone();
+        }
+    }
+    let primary_theme = themes
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("dungeon");
+
+    let mut tags = req.tags.unwrap_or_default();
+    if tags.is_empty() {
+        if let Some(m) = &curated_map {
+            tags = m.tags.clone();
+        }
+    }
+
+    let title = curated_map.as_ref().and_then(|m| m.description.clone());
+
+    let description = match state.openrouter_client() {
+        Some(adapter) => {
+            match adapter
+                .generate_battlemap_description(&bytes, mime, &themes, &tags)
+                .await
+            {
+                Ok(desc) if !desc.trim().is_empty() => desc,
+                Ok(_) => {
+                    CaptionGenerator::generate_with_theme_str(
+                        primary_theme,
+                        &tags,
+                        title.as_deref(),
+                    )
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        curated_id = %id,
+                        error = %err,
+                        "OpenRouter description generation failed; falling back to caption generator"
+                    );
+                    CaptionGenerator::generate_with_theme_str(
+                        primary_theme,
+                        &tags,
+                        title.as_deref(),
+                    )
+                }
+            }
+        }
+        None => {
+            tracing::info!(
+                curated_id = %id,
+                "OpenRouter client not configured; falling back to caption generator"
+            );
+            CaptionGenerator::generate_with_theme_str(
+                primary_theme,
+                &tags,
+                title.as_deref(),
             )
         }
     };

@@ -699,7 +699,7 @@ impl FilesystemStorage {
     }
 
     /// Read all rejection records from `rejections.json`.
-    fn read_rejections(&self) -> Result<Vec<RejectionRecord>, StorageError> {
+    pub fn read_rejections(&self) -> Result<Vec<RejectionRecord>, StorageError> {
         let path = self.rejections_file();
         if !path.exists() {
             return Ok(Vec::new());

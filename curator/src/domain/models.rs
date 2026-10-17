@@ -856,6 +856,45 @@ impl CuratedMap {
     }
 }
 
+/// Partial update payload for modifying an existing curated map's metadata and layer assignments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CuratedMapUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub themes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layers: Option<Vec<CuratedLayer>>,
+}
+
+impl CuratedMapUpdate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_themes(mut self, themes: Vec<String>) -> Self {
+        self.themes = Some(themes);
+        self
+    }
+
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = Some(tags);
+        self
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn with_layers(mut self, layers: Vec<CuratedLayer>) -> Self {
+        self.layers = Some(layers);
+        self
+    }
+}
+
 static LAYER_EXCLUDE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(gridded|with\s+grid|hex(?:\s+grid)?|grid\s+version|grid)\b")
         .expect("valid layer exclude regex")
@@ -2301,5 +2340,37 @@ mod tests {
             (1000, 1000),
         );
         assert!(cand_single.validate_for_curation().is_ok());
+    }
+
+    #[test]
+    fn test_curated_map_update_serialization() {
+        let update = CuratedMapUpdate::default()
+            .with_themes(vec!["tavern".into(), "coastal".into()])
+            .with_tags(vec!["dockside".into()])
+            .with_description("A seaside tavern with salty breeze and wooden tables.")
+            .with_layers(vec![CuratedLayer::new(
+                0,
+                "0_ground.png",
+                LayerRole::Ground,
+                Some(0),
+                (2048, 2048),
+            )]);
+
+        let json = serde_json::to_string(&update).unwrap();
+        assert!(json.contains("tavern"));
+        assert!(json.contains("dockside"));
+        assert!(json.contains("seaside tavern"));
+        assert!(json.contains("0_ground.png"));
+
+        let deserialized: CuratedMapUpdate = serde_json::from_str(&json).unwrap();
+        assert_eq!(update, deserialized);
+
+        // Empty update deserializes to all None
+        let empty: CuratedMapUpdate = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty, CuratedMapUpdate::default());
+        assert!(empty.themes.is_none());
+        assert!(empty.tags.is_none());
+        assert!(empty.description.is_none());
+        assert!(empty.layers.is_none());
     }
 }

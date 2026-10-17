@@ -3772,6 +3772,72 @@
         libraryGrid.appendChild(fragment);
     }
 
+    function getShortRoleChip(role, elevation) {
+        const r = (role || "").toLowerCase().replace(/[-_]/g, "");
+        if (r === "ground") {
+            return "G";
+        }
+        if (r === "upperfloor" || r === "upper") {
+            const elev = (typeof elevation === "number" && elevation !== 0) ? Math.abs(elevation) : 1;
+            return `U+${elev}`;
+        }
+        if (r === "basement" || r === "lower" || r === "lowerfloor" || r === "cellar") {
+            const elev = (typeof elevation === "number" && elevation !== 0) ? -Math.abs(elevation) : -1;
+            return `B${elev}`;
+        }
+        if (r === "roof") {
+            return "Roof";
+        }
+        if (r === "variant") {
+            return "Var";
+        }
+        return (role || "").slice(0, 3).toUpperCase() || "?";
+    }
+
+    function getScrubPillRoleClass(role) {
+        const r = (role || "").toLowerCase().replace(/[-_]/g, "");
+        if (r === "ground") return "role-ground";
+        if (r === "upperfloor" || r === "upper") return "role-upper";
+        if (r === "basement" || r === "lower" || r === "lowerfloor" || r === "cellar") return "role-basement";
+        if (r === "roof") return "role-roof";
+        if (r === "variant") return "role-variant";
+        return "role-default";
+    }
+
+    function computeElevationSpan(layers) {
+        if (!layers || layers.length <= 1) return null;
+        let minElev = null;
+        let maxElev = null;
+        let hasElevations = false;
+
+        for (const l of layers) {
+            const r = (l.role || "").toLowerCase().replace(/[-_]/g, "");
+            let elev = null;
+            if (typeof l.elevation === "number") {
+                elev = l.elevation;
+            } else if (r === "ground") {
+                elev = 0;
+            } else if (r === "upperfloor" || r === "upper") {
+                elev = 1;
+            } else if (r === "basement" || r === "lower" || r === "lowerfloor" || r === "cellar") {
+                elev = -1;
+            }
+
+            if (elev !== null) {
+                hasElevations = true;
+                if (minElev === null || elev < minElev) minElev = elev;
+                if (maxElev === null || elev > maxElev) maxElev = elev;
+            }
+        }
+
+        if (!hasElevations || minElev === null || maxElev === null || minElev === maxElev) {
+            return null;
+        }
+
+        const fmt = (n) => (n > 0 ? `+${n}` : n === 0 ? "0" : `−${Math.abs(n)}`);
+        return `${fmt(minElev)} to ${fmt(maxElev)}`;
+    }
+
     function renderCuratedCard(map, index) {
         const card = document.createElement("div");
         const isSelected = state.librarySelectedIds.has(map.id);
@@ -3794,6 +3860,38 @@
         const thumbUrl = `/api/image/curated/${encodeURIComponent(themeParam)}/${encodeURIComponent(map.id)}`;
         const layerCount = (map.layers && map.layers.length > 0) ? map.layers.length : 1;
         const layerLabel = `${layerCount} Layer${layerCount === 1 ? "" : "s"}`;
+        const isBundle = map.layers && Array.isArray(map.layers) && map.layers.length > 1;
+
+        const elevationSpan = isBundle ? computeElevationSpan(map.layers) : null;
+        const elevationBadgeHtml = elevationSpan
+            ? `<span class="curated-elevation-badge" title="Elevation span: ${elevationSpan}">${escapeHtml(elevationSpan)}</span>`
+            : "";
+
+        let scrubberHtml = "";
+        if (isBundle) {
+            const groundIndex = map.layers.findIndex(l => {
+                const r = (l.role || "").toLowerCase().replace(/[-_]/g, "");
+                return r === "ground";
+            });
+            const defaultIndex = groundIndex >= 0 ? groundIndex : 0;
+
+            const pillsHtml = map.layers.map((layer, idx) => {
+                const shortRole = getShortRoleChip(layer.role, layer.elevation);
+                const roleCls = getScrubPillRoleClass(layer.role);
+                const isActive = idx === defaultIndex;
+                const fullRole = formatRoleName(layer.role, layer.elevation);
+                const elevText = (typeof layer.elevation === "number")
+                    ? `Elevation: ${layer.elevation >= 0 ? `+${layer.elevation}` : layer.elevation}`
+                    : "Elevation: 0";
+                const tooltipParts = [fullRole, elevText, layer.filename || ""].filter(Boolean);
+                const tooltip = tooltipParts.join(" • ");
+                const layerIdx = layer.index !== undefined ? layer.index : idx;
+
+                return `<button type="button" class="layer-scrub-pill ${roleCls}${isActive ? " active" : ""}" data-layer-idx="${layerIdx}" title="${escapeHtml(tooltip)}">${escapeHtml(shortRole)}</button>`;
+            }).join("");
+
+            scrubberHtml = `<div class="curated-layer-scrubber">${pillsHtml}</div>`;
+        }
 
         const themesList = (map.themes && map.themes.length > 0)
             ? map.themes
@@ -3823,8 +3921,12 @@
                 <img class="curated-thumb-img" src="${thumbUrl}" alt="Map ${escapeHtml(map.id)}" loading="lazy">
                 <div class="curated-thumb-overlay">
                     <span class="curated-theme-badge">${escapeHtml(primaryTheme)}</span>
-                    <span class="curated-layers-badge">${layerLabel}</span>
+                    <div class="curated-overlay-badges">
+                        ${elevationBadgeHtml}
+                        <span class="curated-layers-badge">${layerLabel}</span>
+                    </div>
                 </div>
+                ${scrubberHtml}
             </div>
             <div class="curated-card-body">
                 <div class="curated-header-row">
@@ -3840,6 +3942,65 @@
             </div>
         `;
 
+        if (isBundle) {
+            const scrubber = card.querySelector(".curated-layer-scrubber");
+            const thumbImg = card.querySelector(".curated-thumb-img");
+
+            if (scrubber && thumbImg) {
+                const groundIndex = map.layers.findIndex(l => {
+                    const r = (l.role || "").toLowerCase().replace(/[-_]/g, "");
+                    return r === "ground";
+                });
+                const defaultIndex = groundIndex >= 0 ? groundIndex : 0;
+                const pillButtons = scrubber.querySelectorAll(".layer-scrub-pill");
+
+                const activateLayer = (layer, pill) => {
+                    pillButtons.forEach(p => p.classList.remove("active"));
+                    pill.classList.add("active");
+
+                    const layerIdx = layer.index !== undefined ? layer.index : parseInt(pill.dataset.layerIdx, 10);
+                    const directUrl = `/api/image/curated/${encodeURIComponent(map.id)}/${layerIdx}`;
+                    const fallbackUrl = `/api/image/curated/${encodeURIComponent(themeParam)}/${encodeURIComponent(map.id)}/${layerIdx}`;
+
+                    thumbImg.onerror = () => {
+                        if (thumbImg.src !== fallbackUrl && !thumbImg.src.endsWith(fallbackUrl)) {
+                            thumbImg.src = fallbackUrl;
+                        }
+                    };
+                    if (thumbImg.src !== directUrl && !thumbImg.src.endsWith(directUrl)) {
+                        thumbImg.src = directUrl;
+                    }
+                };
+
+                pillButtons.forEach((pill, idx) => {
+                    const layer = map.layers[idx];
+                    if (!layer) return;
+
+                    pill.addEventListener("mouseenter", () => {
+                        activateLayer(layer, pill);
+                    });
+
+                    pill.addEventListener("click", (e) => {
+                        e.stopPropagation();
+                        activateLayer(layer, pill);
+                    });
+
+                    pill.addEventListener("touchstart", (e) => {
+                        e.stopPropagation();
+                        activateLayer(layer, pill);
+                    }, { passive: true });
+                });
+
+                scrubber.addEventListener("mouseleave", () => {
+                    pillButtons.forEach((p, idx) => {
+                        p.classList.toggle("active", idx === defaultIndex);
+                    });
+                    thumbImg.onerror = null;
+                    thumbImg.src = thumbUrl;
+                });
+            }
+        }
+
         const checkbox = card.querySelector(".curated-card-checkbox");
         checkbox?.addEventListener("click", (e) => {
             e.stopPropagation();
@@ -3851,6 +4012,7 @@
 
         card.addEventListener("click", (e) => {
             if (e.target.closest(".curated-select-wrapper")) return;
+            if (e.target.closest(".curated-layer-scrubber")) return;
             setLibraryFocus(index, false);
         });
 

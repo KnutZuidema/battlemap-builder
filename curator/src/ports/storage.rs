@@ -1,5 +1,5 @@
 use crate::domain::{
-    BenchmarkMetadata, Candidate, CandidateLayer, CuratedMap, PurgeStagingResult,
+    BenchmarkMetadata, Candidate, CandidateLayer, CuratedMap, CuratedMapUpdate, PurgeStagingResult,
     RedditSidecarMetadata, RejectionReason, StorageStats, Theme,
 };
 use thiserror::Error;
@@ -151,6 +151,50 @@ pub trait StorageRepository: Send + Sync {
     fn list_curated(&self, theme: Option<&Theme>) -> Result<Vec<CuratedMap>, StorageError>;
     /// Package all curated maps' 1024x1024 PNG and companion .txt captions into a valid .zip archive.
     fn export_lora_dataset(&self, theme: Option<&Theme>) -> Result<Vec<u8>, StorageError>;
+    /// Package selected curated maps' 1024x1024 PNG and companion .txt captions into a valid .zip archive.
+    fn export_selected_lora_dataset(&self, ids: &[String]) -> Result<Vec<u8>, StorageError> {
+        let _ = ids;
+        Err(StorageError::InvalidData(
+            "export_selected_lora_dataset not implemented".into(),
+        ))
+    }
+
+    /// Retrieve the raw image bytes for a specific layer of a curated map directly by ID and layer index.
+    fn get_curated_layer_image_by_id(
+        &self,
+        id: &str,
+        layer_index: usize,
+    ) -> Result<Vec<u8>, StorageError> {
+        let _ = (id, layer_index);
+        Err(StorageError::NotFound(format!(
+            "Curated layer {layer_index} for map '{id}' not found"
+        )))
+    }
+
+    /// Delete an approved curated map bundle and log its rejection reason to rejection records.
+    fn delete_curated(
+        &self,
+        id: &str,
+        reason: RejectionReason,
+        notes: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let _ = (id, reason, notes);
+        Err(StorageError::InvalidData(
+            "delete_curated not implemented".into(),
+        ))
+    }
+
+    /// Update metadata (themes, tags, description) and/or layer assignments for an existing curated map.
+    fn update_curated(
+        &self,
+        id: &str,
+        update: CuratedMapUpdate,
+    ) -> Result<CuratedMap, StorageError> {
+        let _ = (id, update);
+        Err(StorageError::InvalidData(
+            "update_curated not implemented".into(),
+        ))
+    }
 
 
     /// Log a rejection for a candidate ID to the rejection record file.
@@ -346,6 +390,35 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
     fn curate_staging(&self, map: &CuratedMap) -> Result<(), StorageError> {
         (**self).curate_staging(map)
     }
+    fn export_selected_lora_dataset(&self, ids: &[String]) -> Result<Vec<u8>, StorageError> {
+        (**self).export_selected_lora_dataset(ids)
+    }
+
+    fn get_curated_layer_image_by_id(
+        &self,
+        id: &str,
+        layer_index: usize,
+    ) -> Result<Vec<u8>, StorageError> {
+        (**self).get_curated_layer_image_by_id(id, layer_index)
+    }
+
+    fn delete_curated(
+        &self,
+        id: &str,
+        reason: RejectionReason,
+        notes: Option<&str>,
+    ) -> Result<(), StorageError> {
+        (**self).delete_curated(id, reason, notes)
+    }
+
+    fn update_curated(
+        &self,
+        id: &str,
+        update: CuratedMapUpdate,
+    ) -> Result<CuratedMap, StorageError> {
+        (**self).update_curated(id, update)
+    }
+
 
     fn reject_staging(
         &self,

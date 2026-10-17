@@ -58,10 +58,24 @@
         // Harvesting parameters
         harvestSort: "hot",
         harvestTime: "all",
-        // Dataset Library View state (Issue #31)
+        // Dataset Library View state (Issue #31 & Issue #132)
         currentView: "triage",
         libraryActiveTag: null,
         librarySearchQuery: "",
+        libraryDensity: (function() {
+            try {
+                const stored = localStorage.getItem("curator_library_density");
+                if (stored && ["compact", "comfortable", "large"].includes(stored)) {
+                    return stored;
+                }
+            } catch (_) {}
+            return "comfortable";
+        })(),
+        librarySort: "date-desc",
+        libraryFacet: "all",
+        libraryFocusedIndex: -1,
+        librarySelectedIds: new Set(),
+        libraryFilteredMaps: [],
         curatedMaps: [],
         isExporting: false,
         // Interactive Decision Modal (Issue #102)
@@ -157,6 +171,7 @@
     let tabNavTriage, tabNavLibrary;
     let triageViewport, libraryViewport;
     let librarySearchInput, libraryTagPills, libraryGrid, libraryEmpty, libraryCountBadge;
+    let librarySortSelect, libraryDensityGroup, libraryFacetFilters;
     let btnExportLora, btnExportLabel, btnRefreshLibrary, btnSwitchToTriage;
 
     // Curate Decision Modal DOM Elements (Issue #102)
@@ -332,6 +347,9 @@
         libraryGrid = document.getElementById("library-grid");
         libraryEmpty = document.getElementById("library-empty");
         libraryCountBadge = document.getElementById("library-count-badge");
+        librarySortSelect = document.getElementById("library-sort-select");
+        libraryDensityGroup = document.getElementById("library-density-group");
+        libraryFacetFilters = document.getElementById("library-facet-filters");
         btnExportLora = document.getElementById("btn-export-lora");
         btnExportLabel = document.getElementById("btn-export-label");
         btnRefreshLibrary = document.getElementById("btn-refresh-library");
@@ -3322,14 +3340,31 @@
 
         const activeTag = (state.libraryActiveTag || "").toLowerCase().trim();
         const query = (state.librarySearchQuery || "").toLowerCase().trim();
+        const facet = state.libraryFacet || "all";
 
         const filtered = state.curatedMaps.filter((map) => {
             const themes = (map.themes && map.themes.length > 0)
                 ? map.themes
                 : (map.theme ? [map.theme] : []);
             const tags = map.tags || [];
+            const layerCount = (map.layers && map.layers.length > 0) ? map.layers.length : 1;
+            const hasDesc = Boolean(map.description && map.description.trim());
 
-            // Active tag filter
+            // 1. Facet filter
+            if (facet === "bundles" && layerCount <= 1) {
+                return false;
+            }
+            if (facet === "single" && layerCount > 1) {
+                return false;
+            }
+            if (facet === "has-desc" && !hasDesc) {
+                return false;
+            }
+            if (facet === "missing-desc" && hasDesc) {
+                return false;
+            }
+
+            // 2. Active tag filter
             if (activeTag && activeTag !== "all") {
                 const matchesTheme = themes.some(t => t.toLowerCase() === activeTag);
                 const matchesTag = tags.some(t => t.toLowerCase() === activeTag);
@@ -3338,12 +3373,13 @@
                 }
             }
 
-            // Search query filter
+            // 3. Search query filter
             if (query) {
                 const matchesId = (map.id || "").toLowerCase().includes(query);
                 const matchesTheme = themes.some(t => t.toLowerCase().includes(query));
                 const matchesTag = tags.some(t => t.toLowerCase().includes(query));
-                if (!matchesId && !matchesTheme && !matchesTag) {
+                const matchesDesc = (map.description || "").toLowerCase().includes(query);
+                if (!matchesId && !matchesTheme && !matchesTag && !matchesDesc) {
                     return false;
                 }
             }
@@ -3351,12 +3387,230 @@
             return true;
         });
 
+        sortCuratedMaps(filtered, state.librarySort);
+        state.libraryFilteredMaps = filtered;
+
+        // Keep focused index within valid bounds
+        if (state.libraryFocusedIndex >= filtered.length) {
+            state.libraryFocusedIndex = filtered.length > 0 ? filtered.length - 1 : -1;
+        }
+
         if (libraryCountBadge) {
             libraryCountBadge.textContent = `${filtered.length} Map${filtered.length === 1 ? "" : "s"}`;
         }
 
         renderLibraryTagPills();
         renderLibraryGrid(filtered);
+    }
+
+    function sortCuratedMaps(maps, sortKey) {
+        if (!maps || maps.length === 0) return;
+        switch (sortKey) {
+            case "date-asc":
+                maps.sort((a, b) => {
+                    const aTime = a.curated_at ? new Date(a.curated_at).getTime() : 0;
+                    const bTime = b.curated_at ? new Date(b.curated_at).getTime() : 0;
+                    if (aTime !== bTime) return aTime - bTime;
+                    return (a.id || "").localeCompare(b.id || "");
+                });
+                break;
+            case "layers-desc":
+                maps.sort((a, b) => {
+                    const aLayers = (a.layers && a.layers.length > 0) ? a.layers.length : 1;
+                    const bLayers = (b.layers && b.layers.length > 0) ? b.layers.length : 1;
+                    if (bLayers !== aLayers) return bLayers - aLayers;
+                    const aTime = a.curated_at ? new Date(a.curated_at).getTime() : 0;
+                    const bTime = b.curated_at ? new Date(b.curated_at).getTime() : 0;
+                    return bTime - aTime;
+                });
+                break;
+            case "dimensions-desc":
+                maps.sort((a, b) => {
+                    const aDim = (a.dimensions && Array.isArray(a.dimensions) && a.dimensions.length >= 2)
+                        ? (a.dimensions[0] * a.dimensions[1]) : 0;
+                    const bDim = (b.dimensions && Array.isArray(b.dimensions) && b.dimensions.length >= 2)
+                        ? (b.dimensions[0] * b.dimensions[1]) : 0;
+                    if (bDim !== aDim) return bDim - aDim;
+                    const aTime = a.curated_at ? new Date(a.curated_at).getTime() : 0;
+                    const bTime = b.curated_at ? new Date(b.curated_at).getTime() : 0;
+                    return bTime - aTime;
+                });
+                break;
+            case "id-asc":
+                maps.sort((a, b) => {
+                    return (a.id || "").localeCompare(b.id || "");
+                });
+                break;
+            case "date-desc":
+            default:
+                maps.sort((a, b) => {
+                    const aTime = a.curated_at ? new Date(a.curated_at).getTime() : 0;
+                    const bTime = b.curated_at ? new Date(b.curated_at).getTime() : 0;
+                    if (bTime !== aTime) return bTime - aTime;
+                    return (b.id || "").localeCompare(a.id || "");
+                });
+                break;
+        }
+    }
+
+    function setLibraryDensity(density) {
+        if (!["compact", "comfortable", "large"].includes(density)) return;
+        state.libraryDensity = density;
+        try {
+            localStorage.setItem("curator_library_density", density);
+        } catch (_) {}
+
+        if (libraryGrid) {
+            libraryGrid.classList.remove("density-compact", "density-comfortable", "density-large");
+            libraryGrid.classList.add(`density-${density}`);
+        }
+
+        const densityButtons = document.querySelectorAll(".btn-density");
+        densityButtons.forEach((btn) => {
+            btn.classList.toggle("active", btn.dataset.density === density);
+        });
+    }
+
+    function setLibraryFacet(facet) {
+        state.libraryFacet = facet;
+        const facetButtons = document.querySelectorAll(".lib-facet-chip");
+        facetButtons.forEach((btn) => {
+            btn.classList.toggle("active", (btn.dataset.facet || "all") === facet);
+        });
+        applyLibraryFilters();
+    }
+
+    function toggleCardSelection(id) {
+        if (!id) return;
+        if (state.librarySelectedIds.has(id)) {
+            state.librarySelectedIds.delete(id);
+        } else {
+            state.librarySelectedIds.add(id);
+        }
+        updateCardSelectionVisual(id);
+    }
+
+    function updateCardSelectionVisual(id) {
+        if (!libraryGrid) return;
+        const cards = libraryGrid.querySelectorAll(".curated-card");
+        for (const card of cards) {
+            if (card.dataset.id === id) {
+                const isSelected = state.librarySelectedIds.has(id);
+                card.classList.toggle("selected", isSelected);
+                const checkbox = card.querySelector(".curated-card-checkbox");
+                if (checkbox) checkbox.checked = isSelected;
+                break;
+            }
+        }
+    }
+
+    function setLibraryFocus(index, scrollIntoView = true) {
+        if (index === -1 || !state.libraryFilteredMaps || state.libraryFilteredMaps.length === 0) {
+            state.libraryFocusedIndex = -1;
+            if (libraryGrid) {
+                const cards = libraryGrid.querySelectorAll(".curated-card");
+                cards.forEach(c => c.classList.remove("focused"));
+            }
+            return;
+        }
+        const maxIdx = state.libraryFilteredMaps.length - 1;
+        const newIdx = Math.max(0, Math.min(index, maxIdx));
+        state.libraryFocusedIndex = newIdx;
+
+        if (!libraryGrid) return;
+        const cards = libraryGrid.querySelectorAll(".curated-card");
+        cards.forEach((c, idx) => {
+            if (idx === newIdx) {
+                c.classList.add("focused");
+                if (scrollIntoView) {
+                    c.scrollIntoView({ block: "nearest", behavior: "smooth" });
+                }
+            } else {
+                c.classList.remove("focused");
+            }
+        });
+    }
+
+    function getGridColumnCount() {
+        if (!libraryGrid) return 1;
+        const cards = libraryGrid.querySelectorAll(".curated-card");
+        if (cards.length < 2) return 1;
+        const firstTop = cards[0].getBoundingClientRect().top;
+        let cols = 0;
+        for (let i = 0; i < cards.length; i++) {
+            if (Math.abs(cards[i].getBoundingClientRect().top - firstTop) < 10) {
+                cols++;
+            } else {
+                break;
+            }
+        }
+        return cols > 0 ? cols : 1;
+    }
+
+    function handleLibraryKeydown(e) {
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+        // Density hotkeys: 1, 2, 3
+        if (e.key === "1") {
+            setLibraryDensity("compact");
+            e.preventDefault();
+            return;
+        }
+        if (e.key === "2") {
+            setLibraryDensity("comfortable");
+            e.preventDefault();
+            return;
+        }
+        if (e.key === "3") {
+            setLibraryDensity("large");
+            e.preventDefault();
+            return;
+        }
+
+        // Toggle selection on focused card: X / x
+        if (e.key === "x" || e.key === "X") {
+            if (state.libraryFilteredMaps && state.libraryFocusedIndex >= 0 && state.libraryFocusedIndex < state.libraryFilteredMaps.length) {
+                const map = state.libraryFilteredMaps[state.libraryFocusedIndex];
+                if (map) {
+                    toggleCardSelection(map.id);
+                }
+            }
+            e.preventDefault();
+            return;
+        }
+
+        // Navigation hotkeys: J/K or ArrowDown/ArrowUp/ArrowLeft/ArrowRight
+        if (["j", "J", "ArrowDown", "k", "K", "ArrowUp", "ArrowRight", "ArrowLeft"].includes(e.key)) {
+            if (!state.libraryFilteredMaps || state.libraryFilteredMaps.length === 0) return;
+
+            const count = state.libraryFilteredMaps.length;
+            const cols = getGridColumnCount();
+
+            if (state.libraryFocusedIndex === -1) {
+                setLibraryFocus(0);
+                e.preventDefault();
+                return;
+            }
+
+            let newIdx = state.libraryFocusedIndex;
+            if (e.key === "j" || e.key === "J") {
+                newIdx = Math.min(count - 1, newIdx + 1);
+            } else if (e.key === "k" || e.key === "K") {
+                newIdx = Math.max(0, newIdx - 1);
+            } else if (e.key === "ArrowRight") {
+                newIdx = Math.min(count - 1, newIdx + 1);
+            } else if (e.key === "ArrowLeft") {
+                newIdx = Math.max(0, newIdx - 1);
+            } else if (e.key === "ArrowDown") {
+                newIdx = Math.min(count - 1, newIdx + cols);
+            } else if (e.key === "ArrowUp") {
+                newIdx = Math.max(0, newIdx - cols);
+            }
+
+            setLibraryFocus(newIdx);
+            e.preventDefault();
+            return;
+        }
     }
 
     function renderLibraryTagPills() {
@@ -3432,16 +3686,18 @@
         libraryGrid.classList.remove("hidden");
 
         const fragment = document.createDocumentFragment();
-        for (const map of maps) {
-            fragment.appendChild(renderCuratedCard(map));
-        }
+        maps.forEach((map, idx) => {
+            fragment.appendChild(renderCuratedCard(map, idx));
+        });
 
         libraryGrid.appendChild(fragment);
     }
 
-    function renderCuratedCard(map) {
+    function renderCuratedCard(map, index) {
         const card = document.createElement("div");
-        card.className = "curated-card";
+        const isSelected = state.librarySelectedIds.has(map.id);
+        const isFocused = state.libraryFocusedIndex === index;
+        card.className = `curated-card${isSelected ? " selected" : ""}${isFocused ? " focused" : ""}`;
         card.dataset.id = map.id;
         const primaryTheme = (map.themes && map.themes.length > 0) ? map.themes[0] : (map.theme || "dungeon");
         card.dataset.theme = primaryTheme;
@@ -3482,6 +3738,9 @@
 
         card.innerHTML = `
             <div class="curated-thumb-box">
+                <div class="curated-select-wrapper" title="Toggle selection (X)">
+                    <input type="checkbox" class="curated-card-checkbox" ${isSelected ? "checked" : ""} aria-label="Select battlemap ${escapeHtml(map.id)}" />
+                </div>
                 <img class="curated-thumb-img" src="${thumbUrl}" alt="Map ${escapeHtml(map.id)}" loading="lazy">
                 <div class="curated-thumb-overlay">
                     <span class="curated-theme-badge">${escapeHtml(primaryTheme)}</span>
@@ -3501,6 +3760,20 @@
                 </div>
             </div>
         `;
+
+        const checkbox = card.querySelector(".curated-card-checkbox");
+        checkbox?.addEventListener("click", (e) => {
+            e.stopPropagation();
+        });
+        checkbox?.addEventListener("change", (e) => {
+            e.stopPropagation();
+            toggleCardSelection(map.id);
+        });
+
+        card.addEventListener("click", (e) => {
+            if (e.target.closest(".curated-select-wrapper")) return;
+            setLibraryFocus(index, false);
+        });
 
         return card;
     }
@@ -3570,6 +3843,34 @@
             state.librarySearchQuery = e.target.value;
             applyLibraryFilters();
         });
+
+        const facetButtons = document.querySelectorAll(".lib-facet-chip");
+        facetButtons.forEach((btn) => {
+            btn.addEventListener("click", () => {
+                const facet = btn.dataset.facet || "all";
+                setLibraryFacet(facet);
+            });
+        });
+
+        librarySortSelect?.addEventListener("change", (e) => {
+            state.librarySort = e.target.value;
+            applyLibraryFilters();
+        });
+
+        const densityButtons = document.querySelectorAll(".btn-density");
+        densityButtons.forEach((btn) => {
+            btn.addEventListener("click", () => {
+                const density = btn.dataset.density;
+                if (density) {
+                    setLibraryDensity(density);
+                }
+            });
+        });
+
+        setLibraryDensity(state.libraryDensity);
+        if (librarySortSelect) {
+            librarySortSelect.value = state.librarySort;
+        }
     }
 
     function setupDecisionModalControls() {
@@ -3885,11 +4186,19 @@
                 e.preventDefault();
                 return;
             }
+            if (state.currentView === "library") {
+                if (isInputFocused) {
+                    activeEl.blur();
+                } else if (state.libraryFocusedIndex !== -1) {
+                    setLibraryFocus(-1);
+                }
+                e.preventDefault();
+                return;
+            }
             rejectCurrentCandidate();
             e.preventDefault();
             return;
         }
-
         // Hotkeys inside Curate Decision Modal (Issue #102)
         if (state.decisionModalOpen) {
             handleDecisionModalKeydown(e);
@@ -3914,8 +4223,9 @@
             }
         }
 
-        // Suppress triage controls when in Library view
+        // Suppress triage controls when in Library view; delegate to library hotkeys
         if (state.currentView === "library") {
+            handleLibraryKeydown(e);
             return;
         }
 

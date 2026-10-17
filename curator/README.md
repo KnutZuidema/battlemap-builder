@@ -38,13 +38,17 @@ Curate Decision Modal (#curate-decision-modal)
     │     ├── [ArrowLeft / Reject]  ──► Skip theme tag
     │     └── [Backspace / Undo]    ──► Step back to previous card
     │
-    └── Step 2: Custom Tags & Autocomplete
-          ├── [Type text + Tab]     ──► Accept highlighted autocomplete pill
-          └── [Enter on empty input]──► Finalize curation (requires >= 1 accepted theme)
+    ├── Step 2: Custom Tags & Autocomplete
+    │     ├── [Type text + Tab]     ──► Accept highlighted autocomplete pill
+    │     └── [Enter on empty input]──► Proceed to description review
+    │
+    └── Step 3: Vision Description Generation (Gemini 3.5 Flash Lite)
+          ├── Online: POST /api/staging/:id/describe ──► Rich 40-90 word physical description
+          └── Offline: Deterministic fallback ──► CaptionGenerator synthesized description
     │
     ▼
 POST /api/curate
-    ├── Success: atomic move to data/curated/<id>/, update queue/counters, load next
+    ├── Success: atomic move to data/curated/<id>/, persist description & companions, load next
     └── Error: danger toast, candidate preserved in staging
 ```
 
@@ -78,18 +82,57 @@ The decision modal presents a streamlined two-step flow:
   - Pressing `Enter` when the input is empty completes curation if at least 1 theme tag has been accepted.
   - **Zero-Tag Guard**: Attempting to finish with 0 accepted themes triggers a shake animation and validation error.
 
-### 2.3. Keyboard Event Routing & Trapping
+### 2.3. AI Vision Description Generation Workflow (`POST /api/staging/:id/describe`)
+
+Curator features an automated vision description workflow powered by Google Gemini 3.5 Flash Lite (`google/gemini-3.5-flash-lite` via OpenRouter) to produce rich, evocative physical descriptions for every curated battlemap:
+
+1. **Endpoint**: `POST /api/staging/:id/describe` (also accessible via `GET` for headless inspection).
+   - **Request Payload**:
+     ```json
+     {
+       "themes": ["dungeon", "crypt"],
+       "tags": ["stone", "sarcophagus", "torches"]
+     }
+     ```
+   - **Response**:
+     ```json
+     {
+       "id": "candidate_123",
+       "description": "An ancient subterranean crypt carved from damp bedrock features crumbling stone sarcophagi resting against masonry walls..."
+     }
+     ```
+2. **Model Selection & Configuration**:
+   - Default model: `google/gemini-3.5-flash-lite`.
+   - Configurable via the `CURATOR_DESCRIPTION_MODEL` environment variable (falling back to `CURATOR_VISION_MODEL` or the default).
+3. **Prompt Structure (DungeonForge Cartographer Prompts)**:
+   - **System Instruction (`SYSTEM_INSTRUCTION_GENERATE_DESCRIPTION`)**: Formulated specifically for tabletop RPG cartography. Directs the vision model to analyze the image and describe tangible physical features:
+     - Room architecture, masonry, stonework, woodwork, pillars, doors, and furnishings.
+     - Environmental hazards, terrain obstacles, water, elevation differences, and tactical cover.
+     - Visible lighting sources (braziers, torches, glowing moss, luminescence) and atmospheric textures.
+   - **Strict Negative Constraints**:
+     - **NO camera angles or perspective directives**: Strictly forbids terms like `"top-down"`, `"2D flat view"`, `"orthographic"`, or `"poché"` — camera and perspective are strictly owned by the renderer.
+     - **NO art style meta-prompts**: Strictly forbids phrases like `"digital art"`, `"hand-painted"`, `"photorealistic"`.
+     - **NO game mechanics**: Strictly forbids statistics, grid square counts, or rule system references.
+   - **Output Format**: Dense, evocative 40–90 word description in plain text only (no markdown, no bullets, no commentary).
+   - **User Prompt (`build_description_user_prompt`)**: Combines accepted themes and tags with strict instructions to guide the model's focus onto the identified architectural features.
+4. **Offline Resilience & Fallback Guarantees**:
+   - If OpenRouter is offline, the API key is missing or invalid, or an upstream timeout occurs, `POST /api/staging/:id/describe` falls back deterministically to `CaptionGenerator::generate_with_theme_str(primary_theme, &tags, candidate.title)`.
+   - The endpoint **never returns a 500 Internal Server Error** due to offline AI services; it returns `200 OK` with a valid, deterministic description.
+   - During curation (`POST /api/curate`), if no explicit description is supplied while offline, Curator automatically generates and persists the deterministic fallback description into `manifest.json`.
+
+### 2.4. Keyboard Event Routing & Trapping
 
 While `#curate-decision-modal` is active:
 - Background candidate navigation (`ArrowLeft` / `ArrowRight`, `j` / `k`) is strictly disabled to prevent accidental queue shifting.
 - Global triage shortcuts (`1-6` role assignment, `g` grid toggle, `f` fit screen) are suppressed.
 - `Escape` dismisses and closes the modal cleanly.
 
-### 2.4. Submission & State Handling
+### 2.5. Submission & State Handling
 
 Upon completion, `submitDecisionCuration()` dispatches `POST /api/curate`:
-- **Payload**: `{ id: candidate.id, themes: acceptedThemes, layers: candidate.layers }`.
+- **Payload**: `{ id: candidate.id, themes: acceptedThemes, tags: candidate.tags, description: generatedDescription, layers: candidate.layers }`.
 - **On Success**:
+  - Persists `description` to `manifest.json`, primary layer caption, and `<id>_lora1024.txt`.
   - Removes the candidate from staging queue and local memory image cache.
   - Updates staging and curated count indicators via `/api/status`.
   - Loads the next candidate in sequence.
@@ -97,7 +140,6 @@ Upon completion, `submitDecisionCuration()` dispatches `POST /api/curate`:
 - **On Error**:
   - Displays a danger notification toast.
   - Preserves the candidate in the staging queue without data loss.
-
 ---
 
 ## 3. Dynamic Themes & Star Rating Removal
@@ -125,25 +167,48 @@ data/
 │       └── 1.png
 ├── curated/
 │   └── <candidate_id>/
-│       ├── manifest.json
-│       ├── 0_ground.png
+│       ├── manifest.json            # Contains themes, tags, dimensions, layers, and description
+│       ├── 0_ground.png             # Deterministically named layer file
 │       ├── 1_upper_1.png
 │       ├── <candidate_id>.png       # Primary display image
-│       └── <candidate_id>.txt       # Companion LoRA training caption
+│       ├── <candidate_id>_lora1024.png # Normalized 1024x1024 training image (SIMD Lanczos3)
+│       └── <candidate_id>_lora1024.txt # Companion LoRA training caption with description
 └── rejections.jsonl
 ```
 
 ### Key Storage Guarantees
 
 - **Flat `<id>/` Bundles**: Stored directly at `data/curated/<candidate_id>/manifest.json`, eliminating redundant nested theme directories (`data/curated/<theme>/<id>`) and enabling clean multi-theme labeling.
+- **Description Persistence**:
+  - **Manifest**: The `description` string is persisted directly in `data/curated/<id>/manifest.json`.
+  - **Primary Layer Caption**: The primary layer (Ground role) `caption` field matches and retains the curated description.
+  - **LoRA Companion Files**: Automatically generates paired `<id>_lora1024.png` and `<id>_lora1024.txt` companion files. The `.txt` file incorporates prompt triggers, themes, tags, and the curated description.
+  - **Backward Compatibility & Legacy Deserialization**: Legacy `manifest.json` files lacking the `"description"` field deserialize cleanly (with `description: None`), and `GET /api/curated` automatically ensures caption compatibility without errors.
+- **Reference Provider Prompt Keyword Scoring (`ReferenceProvider`)**:
+  - Curated map descriptions are directly leveraged in the benchmark and generation pipeline for few-shot orthographic perspective conditioning.
+  - `ReferenceProvider::score_curated_map_for_prompt` scores keyword overlap between generation prompts and curated maps:
+    - **Theme match**: +2 points per matching theme.
+    - **Tag match**: +1 point per matching tag.
+    - **Description match**: +1 point per matching word in `description`.
+  - The highest scoring curated map is selected as a reference image, enabling fine-grained conditioning based on architectural details (e.g., "sarcophagus", "throne", "stalagmites").
 - **Deterministic Layer Filenames**: Layers are saved with standardized names: `<index>_<role>[_<elevation>].<ext>` (e.g. `0_ground.png`, `1_upper_1.png`, `2_basement_-1.png`).
 - **Atomic Operations**: Files are written and moved atomically (`atomic_write`, `atomic_move`), ensuring crash-safe state updates.
-- **LoRA Companion Assets**: Automatically generates paired `.png` and `.txt` caption files formatted with prompt triggers and architectural descriptors for model fine-tuning.
 - **Backward Compatibility**: API routes serve curated images by both direct ID (`/api/image/curated/<id>`) and legacy theme routes (`/api/image/curated/<theme>/<id>`).
 
 ---
 
-## 5. Development & Testing Commands
+## 5. Configuration & Environment Variables
+
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `OPENROUTER_API_KEY` | *(None)* | OpenRouter authentication key for vision models and image benchmarking |
+| `CURATOR_DESCRIPTION_MODEL` | `google/gemini-3.5-flash-lite` | Model ID for AI vision battlemap description generation (`POST /api/staging/:id/describe`) |
+| `CURATOR_VISION_MODEL` | `google/gemini-3.5-flash-lite` | Fallback vision model ID for theme suggestions and descriptions |
+| `PORT` | `3002` | Curator Axum HTTP server port |
+
+---
+
+## 6. Development & Testing Commands
 
 All commands are run from within the repository root or the `curator/` directory:
 

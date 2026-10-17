@@ -13,7 +13,7 @@ use curator::api::{create_router, AppState, DescribeResponse, SuggestThemesRespo
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use curator::ports::cost_tracker::{CostTracker, GenerationCostRecord};
 use curator::domain::{
-    Candidate, CandidateLayer, HarvestedMedia, LayerRole, ParsedTags, RedditHarvestQuery,
+    Candidate, CandidateLayer, CuratedMap, HarvestedMedia, LayerRole, ParsedTags, RedditHarvestQuery,
     RedditPost, Source, Theme,
 };
 use curator::ports::harvester::{HarvesterError, RedditHarvester};
@@ -1965,10 +1965,14 @@ async fn test_describe_candidate_with_mock_openrouter() {
     let mock_desc = "Ancient sunken temple with moss-covered stone carvings and glowing runes.";
     let mock_desc_clone = mock_desc.to_string();
 
+    let recorded_request = Arc::new(std::sync::Mutex::new(None));
+    let recorded_req_clone = recorded_request.clone();
+
     let mock_app = axum::Router::new().route(
         "/chat/completions",
-        post(move |_body: axum::Json<Value>| {
+        post(move |axum::Json(body): axum::Json<Value>| {
             let desc = mock_desc_clone.clone();
+            *recorded_req_clone.lock().unwrap() = Some(body.clone());
             async move {
                 axum::Json(json!({
                     "id": "gen-desc-1",
@@ -1992,7 +1996,7 @@ async fn test_describe_candidate_with_mock_openrouter() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let cand = Candidate::with_now("cand_mock_ai", Source::Manual, "cand_mock_ai.png", (1024, 1024));
-    storage.save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-bytes").unwrap();
+    storage.save_staging(&cand, &create_test_png()).unwrap();
 
     let adapter = Arc::new(OpenRouterAdapter::with_config(
         "sk-test-key",
@@ -2006,7 +2010,13 @@ async fn test_describe_candidate_with_mock_openrouter() {
         .uri("/api/staging/cand_mock_ai/describe")
         .method("POST")
         .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(json!({ "themes": ["temple"] }).to_string()))
+        .body(Body::from(
+            json!({
+                "themes": ["temple", "ruins"],
+                "tags": ["moss", "runes", "sunken"]
+            })
+            .to_string(),
+        ))
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
@@ -2016,7 +2026,86 @@ async fn test_describe_candidate_with_mock_openrouter() {
     assert_eq!(json.id, "cand_mock_ai");
     assert_eq!(json.description, mock_desc);
 
+    // Verify request payload to OpenRouter used Gemini 3.5 Flash Lite and incorporated themes/tags
+    let recorded = recorded_request.lock().unwrap();
+    let req_body = recorded.as_ref().expect("Mock OpenRouter should have received a request");
+    assert_eq!(req_body["model"].as_str(), Some("google/gemini-3.5-flash-lite"));
+
     server_task.abort();
+}
+
+#[tokio::test]
+async fn test_describe_candidate_offline_fallback() {
+    let cand = Candidate::with_now(
+        "cand_offline_desc",
+        Source::Reddit,
+        "cand_offline_desc.png",
+        (1024, 1024),
+    )
+    .with_title("Flooded Stone Dungeon Crypt [50x50]");
+
+    let payload = json!({
+        "themes": ["dungeon"],
+        "tags": ["crypt", "stone", "water"]
+    });
+
+    // 1. With no API key: OpenRouter configured with empty key
+    let dir1 = tempdir().unwrap();
+    let storage1 = Arc::new(FilesystemStorage::new(dir1.path()));
+    storage1
+        .save_staging(&cand, &create_test_png())
+        .unwrap();
+    let adapter_no_key = Arc::new(OpenRouterAdapter::with_config(
+        "",
+        "http://127.0.0.1:1".to_string(),
+        1,
+    ));
+    let state1 = AppState::new(storage1).with_openrouter(adapter_no_key);
+    let app1 = create_router(state1);
+
+    let req1 = Request::builder()
+        .uri("/api/staging/cand_offline_desc/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    let resp1 = app1.oneshot(req1).await.unwrap();
+    assert_eq!(resp1.status(), StatusCode::OK); // Assert 200 OK (no 500 error)
+    let body1 = to_bytes(resp1.into_body(), usize::MAX).await.unwrap();
+    let json1: DescribeResponse = serde_json::from_slice(&body1).unwrap();
+    assert_eq!(json1.id, "cand_offline_desc");
+    assert!(!json1.description.is_empty());
+    assert!(json1.description.contains("dungeon"));
+
+    // 2. Offline / unreachable OpenRouter endpoint (server offline, no 500 error)
+    let dir2 = tempdir().unwrap();
+    let storage2 = Arc::new(FilesystemStorage::new(dir2.path()));
+    storage2
+        .save_staging(&cand, &create_test_png())
+        .unwrap();
+    let adapter_offline = Arc::new(OpenRouterAdapter::with_config(
+        "sk-test-key",
+        "http://127.0.0.1:1".to_string(),
+        1,
+    ));
+    let state2 = AppState::new(storage2).with_openrouter(adapter_offline);
+    let app2 = create_router(state2);
+
+    let req2 = Request::builder()
+        .uri("/api/staging/cand_offline_desc/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    let resp2 = app2.oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK); // Assert 200 OK with deterministic fallback
+    let body2 = to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
+    let json2: DescribeResponse = serde_json::from_slice(&body2).unwrap();
+    assert_eq!(json2.id, "cand_offline_desc");
+    assert!(!json2.description.is_empty());
+    assert!(json2.description.contains("dungeon"));
 }
 
 #[tokio::test]
@@ -2045,15 +2134,22 @@ async fn test_describe_candidate_error_handling() {
 }
 
 #[tokio::test]
-async fn test_curate_with_description_persistence() {
+async fn test_curate_candidate_with_explicit_description_persistence() {
     let (app, storage, dir) = setup_test_app();
 
-    let cand = Candidate::with_now("cand_curate_desc", Source::Reddit, "cand_curate_desc.png", (1024, 1024));
-    storage.save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-curated-bytes").unwrap();
+    let cand = Candidate::with_now(
+        "cand_curate_explicit_desc",
+        Source::Reddit,
+        "cand_curate_explicit_desc.png",
+        (1024, 1024),
+    );
+    storage
+        .save_staging(&cand, &create_test_png())
+        .unwrap();
 
     let custom_desc = "Grand limestone throne room with ornate stone pillars, banners, and obsidian dais.";
     let curate_payload = json!({
-        "id": "cand_curate_desc",
+        "id": "cand_curate_explicit_desc",
         "themes": ["dungeon"],
         "tags": ["throne-room", "pillars"],
         "description": custom_desc
@@ -2071,38 +2167,68 @@ async fn test_curate_with_description_persistence() {
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "ok");
+
+    // 1. Response has curated.description == Some(...)
     assert_eq!(json["curated"]["description"].as_str(), Some(custom_desc));
 
-    // Verify storage has description preserved on manifest.json
-    let manifest_path = dir.path().join("curated").join("cand_curate_desc").join("manifest.json");
+    // 2. data/curated/<id>/manifest.json contains "description"
+    let manifest_path = dir
+        .path()
+        .join("curated")
+        .join("cand_curate_explicit_desc")
+        .join("manifest.json");
+    assert!(manifest_path.is_file());
     let manifest_str = std::fs::read_to_string(&manifest_path).unwrap();
+    assert!(manifest_str.contains("\"description\""));
     assert!(manifest_str.contains("obsidian dais"));
 
-    // Verify lora companion incorporates description
-    let lora_path = dir.path().join("curated").join("cand_curate_desc").join("cand_curate_desc_lora1024.txt");
-    assert!(lora_path.is_file());
-    let lora_str = std::fs::read_to_string(&lora_path).unwrap();
-    assert!(lora_str.contains("obsidian"));
-
-    // Verify list_curated has description
+    // 3. Primary layer caption matches description
     let curated_list = storage.list_curated(None).unwrap();
     assert_eq!(curated_list.len(), 1);
     assert_eq!(curated_list[0].description.as_deref(), Some(custom_desc));
-    let ground_layer = curated_list[0].layers.iter().find(|l| l.role == LayerRole::Ground).unwrap();
+    let ground_layer = curated_list[0]
+        .layers
+        .iter()
+        .find(|l| l.role == LayerRole::Ground)
+        .expect("Ground layer must be present");
     assert_eq!(ground_layer.caption.as_deref(), Some(custom_desc));
+
+    // 4. <id>_lora1024.txt companion file exists and contains the description
+    let lora_path = dir
+        .path()
+        .join("curated")
+        .join("cand_curate_explicit_desc")
+        .join("cand_curate_explicit_desc_lora1024.txt");
+    assert!(lora_path.is_file());
+    let lora_str = std::fs::read_to_string(&lora_path).unwrap();
+    assert!(lora_str.contains("obsidian dais"));
 }
 
 #[tokio::test]
-async fn test_curate_without_description_graceful() {
-    let (app, storage, dir) = setup_test_app();
-
-    let cand = Candidate::with_now("cand_curate_no_desc", Source::Reddit, "cand_curate_no_desc.png", (1024, 1024));
-    storage.save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-curated-bytes").unwrap();
+async fn test_curate_candidate_auto_description_fallback_offline() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let adapter = Arc::new(OpenRouterAdapter::with_config(
+        "sk-test-key",
+        "http://127.0.0.1:1".to_string(),
+        1,
+    ));
+    let state = AppState::new(storage.clone()).with_openrouter(adapter);
+    let app = create_router(state);
+    let cand = Candidate::with_now(
+        "cand_curate_auto_offline",
+        Source::Reddit,
+        "cand_curate_auto_offline.png",
+        (1024, 1024),
+    );
+    storage
+        .save_staging(&cand, &create_test_png())
+        .unwrap();
 
     let curate_payload = json!({
-        "id": "cand_curate_no_desc",
+        "id": "cand_curate_auto_offline",
         "themes": ["dungeon"],
-        "tags": ["hallway"]
+        "tags": ["hallway", "torches"]
     });
 
     let req = Request::builder()
@@ -2113,6 +2239,7 @@ async fn test_curate_without_description_graceful() {
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
+    // Verify status is 200 OK
     assert_eq!(resp.status(), StatusCode::OK);
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
@@ -2120,20 +2247,95 @@ async fn test_curate_without_description_graceful() {
 
     // Staging removed
     assert_eq!(storage.list_staging().unwrap().len(), 0);
-    // Curated directory created
-    assert!(dir.path().join("curated").join("cand_curate_no_desc").join("manifest.json").is_file());
 
-    // Verify fallback description was populated on response, manifest.json, and storage
-    let desc = json["curated"]["description"].as_str().unwrap();
-    assert!(desc.contains("dungeon"));
-    assert!(desc.contains("hallway"));
-
-    let manifest_path = dir.path().join("curated").join("cand_curate_no_desc").join("manifest.json");
+    // Verify manifest.json receives fallback description and status is 200 OK
+    let manifest_path = dir
+        .path()
+        .join("curated")
+        .join("cand_curate_auto_offline")
+        .join("manifest.json");
+    assert!(manifest_path.is_file());
     let manifest_str = std::fs::read_to_string(&manifest_path).unwrap();
+    assert!(manifest_str.contains("\"description\""));
     assert!(manifest_str.contains("dungeon"));
-    assert!(manifest_str.contains("hallway"));
+
+    let desc = json["curated"]["description"].as_str().unwrap();
+    assert!(!desc.is_empty());
+    assert!(desc.contains("dungeon"));
 
     let curated_list = storage.list_curated(None).unwrap();
     assert_eq!(curated_list.len(), 1);
     assert_eq!(curated_list[0].description.as_deref(), Some(desc));
+
+    // Verify companion <id>_lora1024.txt companion file exists and contains fallback description
+    let lora_path = dir
+        .path()
+        .join("curated")
+        .join("cand_curate_auto_offline")
+        .join("cand_curate_auto_offline_lora1024.txt");
+    assert!(lora_path.is_file());
+    let lora_str = std::fs::read_to_string(&lora_path).unwrap();
+    assert!(lora_str.contains("dungeon"));
+}
+
+#[tokio::test]
+async fn test_legacy_manifest_without_description_deserialization() {
+    let (app, _storage, dir) = setup_test_app();
+
+    // Create a legacy curated bundle directly on disk without a "description" field in manifest.json
+    let legacy_id = "legacy_cand_no_desc";
+    let bundle_dir = dir.path().join("curated").join(legacy_id);
+    std::fs::create_dir_all(&bundle_dir).unwrap();
+
+    let legacy_manifest_json = json!({
+        "id": legacy_id,
+        "themes": ["dungeon"],
+        "tags": ["corridor", "torches"],
+        "dimensions": [1024, 1024],
+        "curated_at": "2026-01-01T00:00:00Z",
+        "layers": [
+            {
+                "index": 0,
+                "filename": "0_ground.png",
+                "role": "ground",
+                "elevation": 0,
+                "dimensions": [1024, 1024]
+            }
+        ]
+    });
+
+    let manifest_path = bundle_dir.join("manifest.json");
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&legacy_manifest_json).unwrap()).unwrap();
+
+    // Verify direct deserialization succeeds cleanly without error
+    let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
+    assert!(!manifest_content.contains("\"description\""));
+    let deserialized: Result<CuratedMap, _> = serde_json::from_str(&manifest_content);
+    assert!(deserialized.is_ok(), "Legacy manifest without description field must deserialize cleanly");
+    let map = deserialized.unwrap();
+    assert_eq!(map.id, legacy_id);
+    assert_eq!(map.description, None);
+
+    // Write dummy image files
+    let dummy_image = create_test_png();
+    std::fs::write(bundle_dir.join("0_ground.png"), &dummy_image).unwrap();
+    std::fs::write(bundle_dir.join(format!("{legacy_id}.png")), &dummy_image).unwrap();
+
+    // Call GET /api/curated
+    let req = Request::builder()
+        .uri("/api/curated")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let curated_list: Vec<CuratedMap> = serde_json::from_slice(&body).unwrap();
+
+    let legacy_item = curated_list.iter().find(|m| m.id == legacy_id);
+    assert!(legacy_item.is_some(), "Legacy curated item must be returned by GET /api/curated");
+    let legacy_item = legacy_item.unwrap();
+    assert_eq!(legacy_item.id, legacy_id);
+    assert_eq!(legacy_item.themes, vec!["dungeon"]);
 }

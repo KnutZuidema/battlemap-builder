@@ -158,10 +158,16 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
   - **Custom Tags & Autocomplete**: Reviewers can type custom tags or accept taxonomy autocomplete pills via `Tab`. Pressing `Enter` on an empty field submits curation (requiring >= 1 accepted theme). Gracefully falls back to offline mode when the vision API is unavailable.
   - **Keyboard Event Routing & Trapping**: While the decision modal is active, background canvas navigation (`ArrowLeft` / `ArrowRight`, `j` / `k`) and global triage shortcuts (`1-6`, `g`, `f`) are strictly trapped and suppressed.
 - **Dynamic Theme Labeling & Star Rating Removal**: Replaces legacy 1–5 star ratings and single fixed themes with rich multi-label dynamic themes (e.g. `["dungeon", "crypt", "boss-arena"]`). Curation is binary (curated into dataset or rejected with structured reasons to `rejections.jsonl`).
-- **Flat Curated Storage Structure**:
-  - Assets are stored under `data/curated/<id>/manifest.json` with deterministically named layer files (`0_ground.png`, `1_upper_1.png`), paired LoRA caption companions (`<id>.txt`), and primary display image (`<id>.png`).
+- **Vision Description Generation Workflow (`POST /api/staging/:id/describe`)**:
+  - Generates rich, evocative physical descriptions using Google Gemini 3.5 Flash Lite (`google/gemini-3.5-flash-lite`), configurable via the `CURATOR_DESCRIPTION_MODEL` environment variable (falling back to `CURATOR_VISION_MODEL`).
+  - **Prompt Structure (DungeonForge Wiki Prompts)**: System instruction focuses strictly on tangible physical features: room architecture, masonry, stonework, woodwork, pillars, doors, furnishings, terrain hazards, water, elevation differences, visible lighting sources (braziers, torches, glowing moss, luminescence), and atmospheric textures.
+  - **Strict Negative Constraints**: Absolutely NO camera angles or perspective directives (never use "top-down", "2D flat view", "orthographic", or "poché") — perspective is strictly renderer-owned. Absolutely NO art style meta-prompts ("digital art", "photorealistic") and NO game mechanics or grid counts. Dense, evocative 40–90 word plain text description.
+  - **Offline Fallback Resilience**: When OpenRouter is offline, unauthenticated, or unreachable, calls to `POST /api/staging/:id/describe` and `POST /api/curate` deterministically fall back to `CaptionGenerator::generate_with_theme_str(...)` without returning 500 errors (guaranteed 200 OK).
+- **Flat Curated Storage Structure & Reference Provider Scoring**:
+  - Assets are stored under `data/curated/<id>/manifest.json` with deterministically named layer files (`0_ground.png`, `1_upper_1.png`), normalized LoRA training assets (`<id>_lora1024.png`, `<id>_lora1024.txt`), and primary display image (`<id>.png`).
+  - **Description Persistence**: `description` is saved in `manifest.json`, the primary Ground layer's `caption` matches the description, and `<id>_lora1024.txt` incorporates the description alongside prompt triggers and tags. Legacy manifests lacking `"description"` deserialize cleanly with `None`.
+  - **Reference Provider Prompt Keyword Scoring**: `ReferenceProvider::score_curated_map_for_prompt` scores prompt keyword overlap against curated maps (+2 points for themes, +1 point for tags, +1 point per matching word in description) to select the optimal curated few-shot orthographic perspective conditioning image for benchmark runs and map generation.
   - Eliminates redundant nested theme directories (`data/curated/<theme>/<id>/`), enabling zero-copy atomic file migrations and multi-theme associations.
-
 ---
 
 ## 7. Guidelines for AI Agents Modifying Code

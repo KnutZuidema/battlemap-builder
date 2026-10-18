@@ -662,7 +662,7 @@ pub async fn post_curate(
 
     tracing::info!(
         id = %payload.id,
-        themes = ?curated_result.themes,
+        tags = ?curated_result.tags,
         "Curated candidate image"
     );
     Ok(Json(CurateResponse {
@@ -1024,7 +1024,7 @@ pub async fn post_curated_describe(
     let mut themes = req.themes.unwrap_or_default();
     if themes.is_empty() {
         if let Some(m) = &curated_map {
-            themes = m.themes.clone();
+            themes = m.tags.clone();
         }
     }
     if themes.is_empty() {

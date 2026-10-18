@@ -259,6 +259,11 @@ impl LayerRole {
     pub fn is_included(&self) -> bool {
         !self.is_excluded()
     }
+
+    /// True if this layer is the ground layer.
+    pub fn is_ground(&self) -> bool {
+        matches!(self, Self::Ground)
+    }
 }
 
 impl std::fmt::Display for LayerRole {
@@ -284,9 +289,10 @@ impl std::str::FromStr for LayerRole {
     }
 }
 
-/// Metadata for a single candidate layer in a staged map bundle.
+/// An individual image within a Candidate or Curated Map representing a single vertical
+/// level or visual variation of the same encounter space.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CandidateLayer {
+pub struct Layer {
     pub index: usize,
     pub filename: String,
     pub role: LayerRole,
@@ -300,7 +306,13 @@ pub struct CandidateLayer {
     pub dimensions: (u32, u32),
 }
 
-impl CandidateLayer {
+/// Backwards-compatible type alias for `Layer`.
+pub type CandidateLayer = Layer;
+
+/// Backwards-compatible type alias for `Layer`.
+pub type CuratedLayer = Layer;
+
+impl Layer {
     pub fn new(
         index: usize,
         filename: impl Into<String>,
@@ -326,44 +338,6 @@ impl CandidateLayer {
 
     pub fn with_source_url(mut self, source_url: impl Into<String>) -> Self {
         self.source_url = Some(source_url.into());
-        self
-    }
-}
-
-/// Persisted metadata per approved layer in a curated map bundle.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CuratedLayer {
-    pub index: usize,
-    pub filename: String,
-    pub role: LayerRole,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elevation: Option<i8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub caption: Option<String>,
-    #[serde(default)]
-    pub dimensions: (u32, u32),
-}
-
-impl CuratedLayer {
-    pub fn new(
-        index: usize,
-        filename: impl Into<String>,
-        role: LayerRole,
-        elevation: Option<i8>,
-        dimensions: (u32, u32),
-    ) -> Self {
-        Self {
-            index,
-            filename: filename.into(),
-            role,
-            elevation,
-            caption: None,
-            dimensions,
-        }
-    }
-
-    pub fn with_caption(mut self, caption: impl Into<String>) -> Self {
-        self.caption = Some(caption.into());
         self
     }
 
@@ -701,19 +675,18 @@ impl IntoThemes for &Theme {
     }
 }
 
-/// An approved battlemap filed into curated storage with dynamic theme labels and metadata.
+/// An approved battlemap filed into curated storage with dynamic tags and metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CuratedMap {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<Source>,
-    pub themes: Vec<String>,
     #[serde(default)]
     pub tags: Vec<String>,
     pub dimensions: (u32, u32),
     pub curated_at: DateTime<Utc>,
     #[serde(default)]
-    pub layers: Vec<CuratedLayer>,
+    pub layers: Vec<Layer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
@@ -734,7 +707,7 @@ struct CuratedMapHelper {
     dimensions: (u32, u32),
     curated_at: DateTime<Utc>,
     #[serde(default)]
-    layers: Vec<CuratedLayer>,
+    layers: Vec<Layer>,
     #[serde(default)]
     description: Option<String>,
 }
@@ -745,20 +718,33 @@ impl<'de> Deserialize<'de> for CuratedMap {
         D: serde::Deserializer<'de>,
     {
         let helper = CuratedMapHelper::deserialize(deserializer)?;
-        let mut themes = helper.themes;
-        if themes.is_empty() {
-            if let Some(t) = helper.theme {
-                if !t.trim().is_empty() {
-                    themes.push(t);
-                }
+        let mut tags = Vec::new();
+
+        // Fold legacy themes into tags without duplicates (themes first to preserve primary theme)
+        for t in helper.themes {
+            let trimmed = t.trim().to_string();
+            if !trimmed.is_empty() && !tags.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&trimmed)) {
+                tags.push(trimmed);
+            }
+        }
+        if let Some(t) = helper.theme {
+            let trimmed = t.trim().to_string();
+            if !trimmed.is_empty() && !tags.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&trimmed)) {
+                tags.push(trimmed);
+            }
+        }
+        for t in helper.tags {
+            let trimmed = t.trim().to_string();
+            if !trimmed.is_empty() && !tags.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&trimmed)) {
+                tags.push(trimmed);
             }
         }
         let _ = helper.rating;
+
         Ok(CuratedMap {
             id: helper.id,
             source: helper.source,
-            themes,
-            tags: helper.tags,
+            tags,
             dimensions: helper.dimensions,
             curated_at: helper.curated_at,
             layers: helper.layers,
@@ -775,11 +761,23 @@ impl CuratedMap {
         dimensions: (u32, u32),
         curated_at: DateTime<Utc>,
     ) -> Self {
+        let mut merged_tags = Vec::new();
+        for t in themes.into_themes() {
+            let trimmed = t.trim().to_string();
+            if !trimmed.is_empty() && !merged_tags.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&trimmed)) {
+                merged_tags.push(trimmed);
+            }
+        }
+        for t in tags {
+            let trimmed = t.trim().to_string();
+            if !trimmed.is_empty() && !merged_tags.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&trimmed)) {
+                merged_tags.push(trimmed);
+            }
+        }
         Self {
             id: id.into(),
             source: None,
-            themes: themes.into_themes(),
-            tags,
+            tags: merged_tags,
             dimensions,
             curated_at,
             layers: Vec::new(),
@@ -796,7 +794,7 @@ impl CuratedMap {
         Self::new(id, themes, tags, dimensions, Utc::now())
     }
 
-    pub fn with_layers(mut self, layers: Vec<CuratedLayer>) -> Self {
+    pub fn with_layers(mut self, layers: Vec<Layer>) -> Self {
         self.layers = layers;
         self
     }
@@ -817,19 +815,24 @@ impl CuratedMap {
         self
     }
 
-    /// Primary (first) theme string, defaulting to "dungeon" if themes is empty.
+    /// Primary (first) theme string, defaulting to "dungeon" if tags is empty.
     pub fn primary_theme(&self) -> &str {
-        self.themes.first().map(|s| s.as_str()).unwrap_or("dungeon")
+        self.tags.first().map(|s| s.as_str()).unwrap_or("dungeon")
     }
 
-    /// First theme parsed into `Theme` enum if it matches one of the canonical variants.
+    /// First tag parsed into `Theme` enum if it matches one of the canonical variants.
     pub fn theme(&self) -> Option<Theme> {
-        self.themes.iter().find_map(|t| t.parse::<Theme>().ok())
+        self.tags.iter().find_map(|t| t.parse::<Theme>().ok())
+    }
+
+    /// Backwards-compatible getter for theme labels. Returns `tags`.
+    pub fn themes(&self) -> &[String] {
+        &self.tags
     }
 
     /// Validates that the map has at least one theme label.
     pub fn validate_themes(&self) -> Result<(), String> {
-        if self.themes.is_empty() || self.themes.iter().all(|t| t.trim().is_empty()) {
+        if self.tags.is_empty() || self.tags.iter().all(|t| t.trim().is_empty()) {
             return Err("CuratedMap requires at least 1 theme label".into());
         }
         Ok(())
@@ -1772,16 +1775,18 @@ mod tests {
         );
         assert!(empty_themes.validate_themes().is_err());
 
-        // New format serialization & deserialization
+        // New format serialization & deserialization (themes folded into tags, "themes" omitted from json)
         let json = serde_json::to_string(&curated).unwrap();
         assert!(!json.contains("\"rating\""));
-        assert!(json.contains("\"themes\":[\"cave\",\"underdark\"]"));
+        assert!(!json.contains("\"themes\""));
+        assert!(json.contains("\"tags\":[\"cave\",\"underdark\",\"water\",\"stalagmites\"]"));
         let parsed: CuratedMap = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, "map_456");
-        assert_eq!(parsed.themes, vec!["cave", "underdark"]);
-        assert_eq!(parsed.tags, vec!["water", "stalagmites"]);
+        assert_eq!(parsed.tags, vec!["cave", "underdark", "water", "stalagmites"]);
+        assert_eq!(parsed.primary_theme(), "cave");
+        assert_eq!(parsed.theme(), Some(Theme::Cave));
 
-        // Legacy format deserialization (single "theme", "rating" present)
+        // Legacy format deserialization (single "theme", "rating" present) merges into tags
         let legacy_json = r#"{
             "id": "legacy_map_1",
             "theme": "dungeon",
@@ -1792,10 +1797,10 @@ mod tests {
         }"#;
         let legacy_parsed: CuratedMap = serde_json::from_str(legacy_json).unwrap();
         assert_eq!(legacy_parsed.id, "legacy_map_1");
-        assert_eq!(legacy_parsed.themes, vec!["dungeon"]);
+        assert_eq!(legacy_parsed.tags, vec!["dungeon", "crypt", "stone"]);
         assert_eq!(legacy_parsed.theme(), Some(Theme::Dungeon));
         assert_eq!(legacy_parsed.primary_theme(), "dungeon");
-        assert_eq!(legacy_parsed.tags, vec!["crypt", "stone"]);
+        assert_eq!(legacy_parsed.themes(), &["dungeon", "crypt", "stone"]);
     }
 
     #[test]
@@ -1844,6 +1849,121 @@ mod tests {
         // Empty or whitespace description via with_description sets None
         let map_empty_desc = map_without_desc.clone().with_description("   \t  ");
         assert_eq!(map_empty_desc.description, None);
+    }
+
+    #[test]
+    fn test_canonical_layer_methods_and_aliases() {
+        let layer = Layer::new(0, "0_ground.png", LayerRole::Ground, Some(0), (2048, 2048))
+            .with_caption("Main stone hall with central brazier")
+            .with_source_url("https://example.com/layer0.png");
+
+        assert_eq!(layer.index, 0);
+        assert_eq!(layer.filename, "0_ground.png");
+        assert_eq!(layer.role, LayerRole::Ground);
+        assert_eq!(layer.elevation, Some(0));
+        assert_eq!(layer.caption.as_deref(), Some("Main stone hall with central brazier"));
+        assert_eq!(layer.source_url.as_deref(), Some("https://example.com/layer0.png"));
+        assert_eq!(layer.dimensions, (2048, 2048));
+
+        // Format filename helper
+        assert_eq!(
+            Layer::format_filename(0, LayerRole::Ground, Some(0), "png"),
+            "0_ground.png"
+        );
+        assert_eq!(
+            Layer::format_filename(1, LayerRole::UpperFloor, Some(2), "webp"),
+            "1_upper_2.webp"
+        );
+        assert_eq!(
+            Layer::format_filename(2, LayerRole::Basement, Some(-1), ".jpg"),
+            "2_basement_1.jpg"
+        );
+        assert_eq!(
+            Layer::format_filename(3, LayerRole::Roof, None, "png"),
+            "3_roof.png"
+        );
+        assert_eq!(
+            Layer::format_filename(4, LayerRole::Variant, None, "png"),
+            "4_variant.png"
+        );
+
+        // Backwards compatibility via type aliases CandidateLayer and CuratedLayer
+        let cand: CandidateLayer = CandidateLayer::new(0, "c.png", LayerRole::Ground, None, (100, 100))
+            .with_source_url("https://source.url");
+        assert_eq!(cand.source_url.as_deref(), Some("https://source.url"));
+
+        let curated: CuratedLayer = CuratedLayer::new(1, "1_upper_1.png", LayerRole::UpperFloor, Some(1), (100, 100))
+            .with_caption("Upper mezzanine");
+        assert_eq!(
+            CuratedLayer::format_filename(1, LayerRole::UpperFloor, Some(1), "png"),
+            "1_upper_1.png"
+        );
+        assert_eq!(curated.caption.as_deref(), Some("Upper mezzanine"));
+    }
+
+    #[test]
+    fn test_canonical_layer_serde_omits_none_fields() {
+        let minimal_layer = Layer::new(0, "0_ground.png", LayerRole::Ground, None, (1024, 1024));
+        let json = serde_json::to_string(&minimal_layer).unwrap();
+        assert!(!json.contains("elevation"));
+        assert!(!json.contains("caption"));
+        assert!(!json.contains("source_url"));
+
+        let deserialized: Layer = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, minimal_layer);
+
+        // Deserializing with missing dimensions defaults to (0, 0)
+        let partial_json = r#"{"index":1,"filename":"1.png","role":"ground"}"#;
+        let parsed: Layer = serde_json::from_str(partial_json).unwrap();
+        assert_eq!(parsed.index, 1);
+        assert_eq!(parsed.dimensions, (0, 0));
+        assert_eq!(parsed.elevation, None);
+        assert_eq!(parsed.caption, None);
+        assert_eq!(parsed.source_url, None);
+    }
+
+    #[test]
+    fn test_curated_map_serde_omits_themes_and_deserializes_legacy_themes() {
+        let map = CuratedMap::with_now(
+            "modern_map_1",
+            Vec::<String>::new(),
+            vec!["dungeon".into(), "crypt".into(), "stone".into()],
+            (2048, 2048),
+        );
+
+        // Serializer must output "tags" and NEVER output "themes" or "theme"
+        let json = serde_json::to_string(&map).unwrap();
+        assert!(json.contains("\"tags\":[\"dungeon\",\"crypt\",\"stone\"]"));
+        assert!(!json.contains("\"themes\""));
+        assert!(!json.contains("\"theme\""));
+
+        // Round-trip deserialization preserves tags
+        let roundtrip: CuratedMap = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.id, "modern_map_1");
+        assert_eq!(roundtrip.tags, vec!["dungeon", "crypt", "stone"]);
+        assert_eq!(roundtrip.primary_theme(), "dungeon");
+        assert_eq!(roundtrip.theme(), Some(Theme::Dungeon));
+
+        // Legacy JSON with "themes" and "theme" merges into "tags" without duplicates
+        let legacy_json = r#"{
+            "id": "legacy_map_multitheme",
+            "themes": ["cave", "underdark"],
+            "theme": "cave",
+            "rating": 5,
+            "tags": ["water", "stalagmites"],
+            "dimensions": [4096, 4096],
+            "curated_at": "2026-10-18T10:00:00Z"
+        }"#;
+        let legacy_map: CuratedMap = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(legacy_map.id, "legacy_map_multitheme");
+        assert_eq!(legacy_map.primary_theme(), "cave");
+        assert_eq!(legacy_map.theme(), Some(Theme::Cave));
+        // Tags must contain cave, underdark, water, stalagmites with no duplicates
+        assert!(legacy_map.tags.contains(&"cave".to_string()));
+        assert!(legacy_map.tags.contains(&"underdark".to_string()));
+        assert!(legacy_map.tags.contains(&"water".to_string()));
+        assert!(legacy_map.tags.contains(&"stalagmites".to_string()));
+        assert_eq!(legacy_map.tags.len(), 4);
     }
 
     #[test]

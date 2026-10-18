@@ -190,9 +190,9 @@
     // Dataset Library View DOM Elements (Issue #31)
     let tabNavTriage, tabNavLibrary;
     let triageViewport, libraryViewport;
-    let librarySearchInput, libraryTagPills, libraryGrid, libraryEmpty, libraryCountBadge;
+    let librarySearchInput, libraryTagPills, libraryGrid, libraryEmpty, libraryFilterEmpty, libraryCountBadge;
     let librarySortSelect, libraryDensityGroup, libraryFacetFilters;
-    let btnExportLora, btnExportLabel, btnRefreshLibrary, btnSwitchToTriage;
+    let btnExportLora, btnExportLabel, btnRefreshLibrary, btnSwitchToTriage, btnClearLibraryFilters;
 
     // Curate Decision Modal DOM Elements (Issue #102)
     let curateDecisionModal;
@@ -381,6 +381,7 @@
         libraryTagPills = document.getElementById("library-tag-pills");
         libraryGrid = document.getElementById("library-grid");
         libraryEmpty = document.getElementById("library-empty");
+        libraryFilterEmpty = document.getElementById("library-filter-empty");
         libraryCountBadge = document.getElementById("library-count-badge");
         librarySortSelect = document.getElementById("library-sort-select");
         libraryDensityGroup = document.getElementById("library-density-group");
@@ -389,6 +390,7 @@
         btnExportLabel = document.getElementById("btn-export-label");
         btnRefreshLibrary = document.getElementById("btn-refresh-library");
         btnSwitchToTriage = document.getElementById("btn-switch-to-triage");
+        btnClearLibraryFilters = document.getElementById("btn-clear-library-filters");
 
         // Curate Decision Modal Elements (Issue #102)
         curateDecisionModal = document.getElementById("curate-decision-modal");
@@ -3638,6 +3640,15 @@
         applyLibraryFilters();
     }
 
+    function clearLibraryFilters() {
+        state.librarySearchQuery = "";
+        if (librarySearchInput) {
+            librarySearchInput.value = "";
+        }
+        state.libraryActiveTag = null;
+        setLibraryFacet("all");
+    }
+
     function toggleCardSelection(id) {
         if (!id) return;
         if (state.librarySelectedIds.has(id)) {
@@ -3960,13 +3971,25 @@
         if (!libraryGrid || !libraryEmpty) return;
         libraryGrid.innerHTML = "";
 
-        if (!maps || maps.length === 0) {
+        const hasAnyCuratedMaps = state.curatedMaps && state.curatedMaps.length > 0;
+        const hasMatchingMaps = maps && maps.length > 0;
+
+        if (!hasAnyCuratedMaps) {
             libraryEmpty.classList.remove("hidden");
+            if (libraryFilterEmpty) libraryFilterEmpty.classList.add("hidden");
+            libraryGrid.classList.add("hidden");
+            return;
+        }
+
+        if (!hasMatchingMaps) {
+            libraryEmpty.classList.add("hidden");
+            if (libraryFilterEmpty) libraryFilterEmpty.classList.remove("hidden");
             libraryGrid.classList.add("hidden");
             return;
         }
 
         libraryEmpty.classList.add("hidden");
+        if (libraryFilterEmpty) libraryFilterEmpty.classList.add("hidden");
         libraryGrid.classList.remove("hidden");
 
         const fragment = document.createDocumentFragment();
@@ -5103,6 +5126,7 @@
         btnSwitchToTriage?.addEventListener("click", () => switchView("triage"));
         btnRefreshLibrary?.addEventListener("click", () => fetchLibraryMaps());
         btnExportLora?.addEventListener("click", () => exportLoraDataset());
+        btnClearLibraryFilters?.addEventListener("click", () => clearLibraryFilters());
 
         librarySearchInput?.addEventListener("input", (e) => {
             state.librarySearchQuery = e.target.value;

@@ -5,14 +5,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 
-use crate::adapters::SimdImageProcessor;
+use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
+
 use crate::domain::{
     infer_bundle_layer_roles, validate_layers_for_curation, BenchmarkMetadata, Candidate,
     CandidateLayer, CaptionGenerator, CuratedLayer, CuratedMap, CuratedMapUpdate, DirectoryStats,
-    LayerRole, MapSection, PurgeStagingResult, RedditSidecarMetadata, RejectionReason,
+    GridConfig, LayerRole, MapSection, PurgeStagingResult, RedditSidecarMetadata, RejectionReason,
     RejectionRecord, Source, StorageStats, Theme, ThemeStorageStats,
 };
-use crate::ports::image_processor::{ImageProcessor, ResizeStrategy};
 use crate::ports::storage::{StorageError, StorageRepository};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -179,31 +179,105 @@ impl FilesystemStorage {
             }
         }
     }
-    /// Helper to process primary image bytes and write LoRA 1024x1024 PNG and companion .txt caption in bundle dir.
-    fn write_lora_companions(
-        &self,
-        id: &str,
-        primary_image_bytes: &[u8],
-        caption_text: &str,
-        bundle_dir: &Path,
-    ) {
-        let _ = std::fs::create_dir_all(bundle_dir);
+    /// Dynamically crop a 16x16 map section and Lanczos3 resample to exact 1024x1024 PNG bytes without letterbox padding bars.
+    fn crop_and_resample_section(
+        dynamic_img: &image::DynamicImage,
+        grid: &GridConfig,
+        col: u32,
+        row: u32,
+    ) -> Result<Vec<u8>, StorageError> {
+        let cell_size = if grid.cell_size_px > 0 {
+            grid.cell_size_px
+        } else {
+            64
+        };
+        let sec_w = 16 * cell_size;
+        let sec_h = 16 * cell_size;
+        let start_x = grid.offset_x + col * cell_size;
+        let start_y = grid.offset_y + row * cell_size;
 
-        // Always write caption text (.txt)
-        let bundle_txt = bundle_dir.join(format!("{id}_lora1024.txt"));
-        let _ = Self::atomic_write(&bundle_txt, caption_text.as_bytes());
+        let img_w = dynamic_img.width();
+        let img_h = dynamic_img.height();
+        if img_w == 0 || img_h == 0 {
+            return Err(StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Image dimensions are 0",
+            )));
+        }
 
-        // Try normalizing to 1024x1024 PNG using SIMD Lanczos3 resizer
-        let processor = SimdImageProcessor::new();
-        match processor.normalize_lora(primary_image_bytes, ResizeStrategy::FitWithPadding) {
-            Ok(lora_png) => {
-                let bundle_png = bundle_dir.join(format!("{id}_lora1024.png"));
-                let _ = Self::atomic_write(&bundle_png, &lora_png);
-            }
-            Err(e) => {
-                tracing::debug!("Skipping LoRA 1024x1024 image normalization for '{id}': {e}");
+        let (crop_x, crop_y, crop_w, crop_h) = if start_x + sec_w <= img_w && start_y + sec_h <= img_h {
+            (start_x, start_y, sec_w, sec_h)
+        } else {
+            let actual_x = start_x.min(img_w.saturating_sub(1));
+            let actual_y = start_y.min(img_h.saturating_sub(1));
+            let actual_w = sec_w.min(img_w.saturating_sub(actual_x)).max(1);
+            let actual_h = sec_h.min(img_h.saturating_sub(actual_y)).max(1);
+            (actual_x, actual_y, actual_w, actual_h)
+        };
+
+        let cropped = dynamic_img.crop_imm(crop_x, crop_y, crop_w, crop_h);
+        let cropped_rgba = cropped.to_rgba8();
+
+        let mut resizer = Resizer::new();
+        let mut scaled_rgba = image::RgbaImage::new(1024, 1024);
+        let resize_options = ResizeOptions::new()
+            .resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3));
+
+        resizer
+            .resize(&cropped_rgba, &mut scaled_rgba, &resize_options)
+            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+
+        let mut png_bytes = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut png_bytes);
+        scaled_rgba
+            .write_to(&mut cursor, image::ImageFormat::Png)
+            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+
+        Ok(png_bytes)
+    }
+
+    /// Retrieve Ground layer image bytes for a curated map, checking bundle dir and legacy paths.
+    fn get_curated_ground_image_bytes(&self, map: &CuratedMap) -> Result<Vec<u8>, StorageError> {
+        let ground_idx = map
+            .layers
+            .iter()
+            .find(|l| l.role == LayerRole::Ground)
+            .map(|l| l.index)
+            .or_else(|| map.layers.first().map(|l| l.index))
+            .unwrap_or(0);
+
+        if let Ok(bytes) = self.get_curated_layer_image_by_id(&map.id, ground_idx) {
+            return Ok(bytes);
+        }
+
+        let primary_theme = map.theme().unwrap_or(Theme::Dungeon);
+        if let Ok(bytes) = self.get_curated_layer_image(&primary_theme, &map.id, ground_idx) {
+            return Ok(bytes);
+        }
+
+        self.get_curated_image(&primary_theme, &map.id)
+    }
+
+    /// Locate and deserialize a CuratedMap by its ID.
+    fn find_curated_map_by_id(&self, id: &str) -> Option<CuratedMap> {
+        if let Some(bundle_dir) = self.find_curated_bundle_dir(id) {
+            let manifest_path = bundle_dir.join("manifest.json");
+            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+                if let Ok(map) = serde_json::from_str::<CuratedMap>(&content) {
+                    return Some(map);
+                }
             }
         }
+        for theme in Theme::ALL {
+            let theme_dir = self.curated_theme_dir(theme);
+            let manifest_path = theme_dir.join(id).join("manifest.json");
+            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+                if let Ok(map) = serde_json::from_str::<CuratedMap>(&content) {
+                    return Some(map);
+                }
+            }
+        }
+        None
     }
 
     /// Parse a JSON string as a `Candidate` (falling back to `BenchmarkMetadata`).
@@ -606,7 +680,7 @@ impl FilesystemStorage {
         None
     }
 
-    /// Package a collection of curated maps' LoRA 1024x1024 PNG and companion .txt captions into a ZIP archive.
+    /// Package a collection of curated maps' 16x16 sections into a LoRA training ZIP archive.
     fn create_lora_zip(&self, curated_maps: &[CuratedMap]) -> Result<Vec<u8>, StorageError> {
         let mut buffer = std::io::Cursor::new(Vec::new());
         {
@@ -616,35 +690,91 @@ impl FilesystemStorage {
 
             for map in curated_maps {
                 let theme_str = map.primary_theme();
-                let primary_theme = map.theme().unwrap_or(Theme::Dungeon);
 
-                let image_bytes = match self.get_curated_lora_image(&primary_theme, &map.id) {
+                let ground_bytes = match self.get_curated_ground_image_bytes(map) {
                     Ok(bytes) => bytes,
-                    Err(_) => {
-                        if let Ok(primary) = self.get_curated_image(&primary_theme, &map.id) {
-                            let processor = SimdImageProcessor::new();
-                            match processor.normalize_lora(&primary, ResizeStrategy::FitWithPadding) {
-                                Ok(normalized) => normalized,
-                                Err(_) => primary,
-                            }
-                        } else {
-                            continue;
-                        }
+                    Err(e) => {
+                        tracing::warn!("Skipping '{}' in LoRA ZIP export: {e}", map.id);
+                        continue;
                     }
                 };
 
-                let caption_text = match self.get_curated_lora_caption(&primary_theme, &map.id) {
-                    Ok(c) => c,
-                    Err(_) => CaptionGenerator::generate_for_curated(map, None),
+                let dynamic_img = match image::load_from_memory(&ground_bytes) {
+                    Ok(img) => img,
+                    Err(e) => {
+                        tracing::warn!("Failed to decode ground image for '{}': {e}", map.id);
+                        continue;
+                    }
                 };
 
-                let img_filename = format!("{theme_str}/{}_lora1024.png", map.id);
-                zip.start_file(&img_filename, options)?;
-                zip.write_all(&image_bytes)?;
+                let effective_sections: Vec<MapSection> = if !map.sections.is_empty() {
+                    map.sections.clone()
+                } else {
+                    let origins = map.grid.section_origins(dynamic_img.width(), dynamic_img.height());
+                    if origins.len() <= 1 {
+                        let desc = map.description.clone().unwrap_or_else(|| {
+                            CaptionGenerator::generate_with_theme_str(theme_str, &map.tags, None)
+                        });
+                        vec![MapSection::new(0, 0, desc)]
+                    } else {
+                        origins
+                            .into_iter()
+                            .map(|(col, row)| {
+                                let desc = CaptionGenerator::generate_with_theme_str(
+                                    theme_str,
+                                    &map.tags,
+                                    map.description.as_deref(),
+                                );
+                                MapSection::new(col, row, desc)
+                            })
+                            .collect()
+                    }
+                };
 
-                let txt_filename = format!("{theme_str}/{}_lora1024.txt", map.id);
-                zip.start_file(&txt_filename, options)?;
-                zip.write_all(caption_text.as_bytes())?;
+                for section in effective_sections {
+                    let image_bytes = match Self::crop_and_resample_section(
+                        &dynamic_img,
+                        &map.grid,
+                        section.col,
+                        section.row,
+                    ) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to crop/resample section ({}, {}) for '{}': {e}",
+                                section.col,
+                                section.row,
+                                map.id
+                            );
+                            continue;
+                        }
+                    };
+
+                    let desc_opt = if !section.description.trim().is_empty() {
+                        Some(section.description.as_str())
+                    } else {
+                        map.description.as_deref().filter(|s| !s.trim().is_empty())
+                    };
+                    let caption_text = CaptionGenerator::generate_with_theme_str(
+                        theme_str,
+                        &map.tags,
+                        desc_opt,
+                    );
+
+                    let img_filename = format!(
+                        "{theme_str}/{}_c{}_r{}_lora1024.png",
+                        map.id, section.col, section.row
+                    );
+                    zip.start_file(&img_filename, options)?;
+                    zip.write_all(&image_bytes)?;
+
+                    let txt_filename = format!(
+                        "{theme_str}/{}_c{}_r{}_lora1024.txt",
+                        map.id, section.col, section.row
+                    );
+                    zip.start_file(&txt_filename, options)?;
+                    zip.write_all(caption_text.as_bytes())?;
+                }
             }
 
             zip.finish()?;
@@ -1222,10 +1352,7 @@ impl FilesystemStorage {
     fn ensure_curated_caption(&self, map: &mut CuratedMap) {
         let has_caption = map.layers.first().and_then(|l| l.caption.as_ref()).is_some();
         if !has_caption {
-            let primary_theme = map.theme().unwrap_or(Theme::Dungeon);
-            let cap = self
-                .get_curated_lora_caption(&primary_theme, &map.id)
-                .unwrap_or_else(|_| CaptionGenerator::generate_for_curated(map, None));
+            let cap = CaptionGenerator::generate_for_curated(map, None);
             if let Some(first) = map.layers.first_mut() {
                 first.caption = Some(cap);
             } else {
@@ -1566,8 +1693,6 @@ impl StorageRepository for FilesystemStorage {
         let manifest_json = serde_json::to_string_pretty(&stored_map)?;
         Self::atomic_write(&bundle_dir.join("manifest.json"), manifest_json.as_bytes())?;
 
-        let caption = CaptionGenerator::generate_for_curated(&stored_map, None);
-        self.write_lora_companions(&map.id, data, &caption, &bundle_dir);
         Ok(())
     }
 
@@ -1608,9 +1733,21 @@ impl StorageRepository for FilesystemStorage {
         if theme_png.is_file() {
             return std::fs::read(theme_png).map_err(StorageError::Io);
         }
-        Err(StorageError::NotFound(format!(
-            "Curated LoRA image for candidate '{id}' not found"
-        )))
+
+        let map = self.find_curated_map_by_id(id).ok_or_else(|| {
+            StorageError::NotFound(format!("Curated map '{id}' not found"))
+        })?;
+        let ground_bytes = self.get_curated_ground_image_bytes(&map)?;
+        let dynamic_img = image::load_from_memory(&ground_bytes)
+            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())))?;
+
+        let (col, row) = map
+            .sections
+            .first()
+            .map(|s| (s.col, s.row))
+            .unwrap_or((0, 0));
+
+        Self::crop_and_resample_section(&dynamic_img, &map.grid, col, row)
     }
 
     fn get_curated_lora_caption(&self, theme: &Theme, id: &str) -> Result<String, StorageError> {
@@ -1629,9 +1766,20 @@ impl StorageRepository for FilesystemStorage {
         if theme_txt.is_file() {
             return std::fs::read_to_string(theme_txt).map_err(StorageError::Io);
         }
-        Err(StorageError::NotFound(format!(
-            "Curated LoRA caption for candidate '{id}' not found"
-        )))
+
+        let map = self.find_curated_map_by_id(id).ok_or_else(|| {
+            StorageError::NotFound(format!("Curated map '{id}' not found"))
+        })?;
+        let desc_opt = map
+            .sections
+            .first()
+            .map(|s| s.description.as_str())
+            .or(map.description.as_deref());
+        Ok(CaptionGenerator::generate_with_theme_str(
+            theme.as_str(),
+            &map.tags,
+            desc_opt,
+        ))
     }
 
     fn is_lora_normalized(&self, theme: &Theme, id: &str) -> Result<bool, StorageError> {
@@ -1644,7 +1792,11 @@ impl StorageRepository for FilesystemStorage {
         let theme_dir = self.curated_theme_dir(theme);
         let bundle_png = theme_dir.join(id).join(format!("{id}_lora1024.png"));
         let theme_png = theme_dir.join(format!("{id}_lora1024.png"));
-        Ok(bundle_png.is_file() || theme_png.is_file())
+        if bundle_png.is_file() || theme_png.is_file() {
+            return Ok(true);
+        }
+
+        self.is_curated(id)
     }
 
     fn list_curated(&self, theme: Option<&Theme>) -> Result<Vec<CuratedMap>, StorageError> {
@@ -1831,19 +1983,7 @@ impl StorageRepository for FilesystemStorage {
         let content = std::fs::read_to_string(&manifest_path)?;
         let mut map: CuratedMap = serde_json::from_str(&content)?;
 
-        let old_ground = map
-            .layers
-            .iter()
-            .find(|l| l.role == LayerRole::Ground)
-            .or_else(|| map.layers.first())
-            .cloned();
-        let old_ground_bytes = old_ground
-            .as_ref()
-            .and_then(|l| std::fs::read(bundle_dir.join(&l.filename)).ok());
         let old_description = map.description.clone();
-        let themes_updated = update.themes.is_some();
-        let tags_updated = update.tags.is_some();
-
         if let Some(themes) = update.themes {
             map.themes = themes;
             map.validate_themes().map_err(StorageError::InvalidData)?;
@@ -2081,55 +2221,22 @@ impl StorageRepository for FilesystemStorage {
             }
         }
 
-        // Check if ground layer or description changed
-        let new_ground = map
-            .layers
-            .iter()
-            .find(|l| l.role == LayerRole::Ground)
-            .or_else(|| map.layers.first())
-            .cloned();
-        let new_ground_bytes = new_ground
-            .as_ref()
-            .and_then(|l| std::fs::read(bundle_dir.join(&l.filename)).ok());
-
-        let ground_layer_image_changed = old_ground_bytes != new_ground_bytes;
-        let ground_layer_changed = ground_layer_image_changed
-            || (old_ground.as_ref().map(|l| (&l.role, l.elevation))
-                != new_ground.as_ref().map(|l| (&l.role, l.elevation)));
         let description_changed = old_description != map.description;
-
-        if ground_layer_changed || description_changed {
-            let caption = CaptionGenerator::generate_for_curated(&map, None);
-            if ground_layer_image_changed {
-                if let Some(primary_bytes) = &new_ground_bytes {
-                    self.write_lora_companions(&map.id, primary_bytes, &caption, &bundle_dir);
-                }
-            } else {
-                let bundle_txt = bundle_dir.join(format!("{}_lora1024.txt", map.id));
-                let _ = Self::atomic_write(&bundle_txt, caption.as_bytes());
+        if description_changed {
+            let primary_idx = map
+                .layers
+                .iter()
+                .position(|l| l.role == LayerRole::Ground)
+                .unwrap_or(0);
+            if let Some(first) = map.layers.get_mut(primary_idx) {
+                first.caption = map.description.clone();
             }
-
-            if description_changed {
-                let primary_idx = map
-                    .layers
-                    .iter()
-                    .position(|l| l.role == LayerRole::Ground)
-                    .unwrap_or(0);
-                if let Some(first) = map.layers.get_mut(primary_idx) {
-                    first.caption = map.description.clone();
-                }
-                if map.sections.len() == 1 {
-                    if let Some(d) = &map.description {
-                        map.sections[0].description = d.clone();
-                    }
+            if map.sections.len() == 1 {
+                if let Some(d) = &map.description {
+                    map.sections[0].description = d.clone();
                 }
             }
-        } else if themes_updated || tags_updated {
-            let caption = CaptionGenerator::generate_for_curated(&map, None);
-            let bundle_txt = bundle_dir.join(format!("{}_lora1024.txt", map.id));
-            let _ = Self::atomic_write(&bundle_txt, caption.as_bytes());
         }
-
         self.ensure_curated_caption(&mut map);
 
         let curated_json = serde_json::to_string_pretty(&map)?;
@@ -2336,6 +2443,13 @@ impl StorageRepository for FilesystemStorage {
                     .unwrap_or(candidate.dimensions);
             }
             stored_map.grid = candidate.grid;
+            if stored_map.description.is_none() {
+                if let Some(cand_title) = &candidate.title {
+                    if !cand_title.trim().is_empty() {
+                        stored_map.description = Some(cand_title.clone());
+                    }
+                }
+            }
             if let Some(desc) = &stored_map.description {
                 let primary_idx = curated_layers
                     .iter()
@@ -2377,27 +2491,6 @@ impl StorageRepository for FilesystemStorage {
                 &curated_bundle_dir.join("manifest.json"),
                 curated_json.as_bytes(),
             )?;
-            let primary_layer = stored_map
-                .layers
-                .iter()
-                .find(|l| l.role == LayerRole::Ground)
-                .or_else(|| stored_map.layers.first());
-
-            if let Some(layer) = primary_layer {
-                let primary_path = curated_bundle_dir.join(&layer.filename);
-                if let Ok(primary_bytes) = std::fs::read(&primary_path) {
-                    let caption = CaptionGenerator::generate_for_curated(
-                        &stored_map,
-                        Some(&candidate),
-                    );
-                    self.write_lora_companions(
-                        &map.id,
-                        &primary_bytes,
-                        &caption,
-                        &curated_bundle_dir,
-                    );
-                }
-            }
 
             let _ = std::fs::remove_dir_all(&bundle_dir);
             return Ok(());
@@ -2453,6 +2546,15 @@ impl StorageRepository for FilesystemStorage {
         if let Some(cand) = &candidate {
             stored_map.grid = cand.grid;
         }
+        if stored_map.description.is_none() {
+            if let Some(cand) = &candidate {
+                if let Some(cand_title) = &cand.title {
+                    if !cand_title.trim().is_empty() {
+                        stored_map.description = Some(cand_title.clone());
+                    }
+                }
+            }
+        }
         if stored_map.sections.is_empty() {
             let (gw, gh) = stored_map.dimensions;
             let origins = stored_map.grid.section_origins(gw, gh);
@@ -2500,18 +2602,6 @@ impl StorageRepository for FilesystemStorage {
         }
         let curated_json = serde_json::to_string_pretty(&stored_map)?;
         Self::atomic_write(&target_manifest, curated_json.as_bytes())?;
-        if let Ok(primary_bytes) = std::fs::read(&target_image) {
-            let caption = CaptionGenerator::generate_for_curated(
-                &stored_map,
-                candidate.as_ref(),
-            );
-            self.write_lora_companions(
-                &map.id,
-                &primary_bytes,
-                &caption,
-                &curated_bundle_dir,
-            );
-        }
 
         if let Some(sc) = &staging_sidecar {
             if sc.is_file() {
@@ -3039,10 +3129,12 @@ mod tests {
         let manifest_str = std::fs::read_to_string(&manifest_path).unwrap();
         assert!(manifest_str.contains(desc_text));
 
-        // Verify <id>_lora1024.txt companion exists and incorporates description
+        // Verify <id>_lora1024 companion files do NOT exist on disk and dynamic caption incorporates description
         let lora_txt_path = dir.path().join("curated").join("map_desc_1").join("map_desc_1_lora1024.txt");
-        assert!(lora_txt_path.is_file());
-        let lora_txt = std::fs::read_to_string(&lora_txt_path).unwrap();
+        assert!(!lora_txt_path.exists());
+        let lora_png_path = dir.path().join("curated").join("map_desc_1").join("map_desc_1_lora1024.png");
+        assert!(!lora_png_path.exists());
+        let lora_txt = storage.get_curated_lora_caption(&Theme::Dungeon, "map_desc_1").unwrap();
         assert!(lora_txt.contains("limestone"));
         assert!(lora_txt.contains("sarcophagus"));
 
@@ -3958,13 +4050,15 @@ mod tests {
             Some("Luminescent fungal cavern with damp stone floors.")
         );
 
-        // Verify LoRA .txt companion is updated with new description
+        // Verify LoRA companion files are NOT on disk, and dynamic caption is updated with new description
         let bundle_dir = storage.find_curated_bundle_dir("map_upd_meta").unwrap();
-        let lora_txt =
-            std::fs::read_to_string(bundle_dir.join("map_upd_meta_lora1024.txt")).unwrap();
+        assert!(!bundle_dir.join("map_upd_meta_lora1024.txt").exists());
+        assert!(!bundle_dir.join("map_upd_meta_lora1024.png").exists());
+        let lora_txt = storage
+            .get_curated_lora_caption(&Theme::Cave, "map_upd_meta")
+            .unwrap();
         assert!(lora_txt.contains("luminescent"));
         assert!(lora_txt.contains("fungal cavern"));
-
         // Validation error on empty themes
         let invalid_update = CuratedMapUpdate::default().with_themes(vec![]);
         let err = storage
@@ -4166,11 +4260,10 @@ mod tests {
         }
 
         // Contains map 1 and 3 files
-        assert!(file_names.iter().any(|n| n.contains("map_export_1_lora1024.png")));
-        assert!(file_names.iter().any(|n| n.contains("map_export_1_lora1024.txt")));
-        assert!(file_names.iter().any(|n| n.contains("map_export_3_lora1024.png")));
-        assert!(file_names.iter().any(|n| n.contains("map_export_3_lora1024.txt")));
-
+        assert!(file_names.iter().any(|n| n.contains("map_export_1_c0_r0_lora1024.png")));
+        assert!(file_names.iter().any(|n| n.contains("map_export_1_c0_r0_lora1024.txt")));
+        assert!(file_names.iter().any(|n| n.contains("map_export_3_c0_r0_lora1024.png")));
+        assert!(file_names.iter().any(|n| n.contains("map_export_3_c0_r0_lora1024.txt")));
         // Does NOT contain map 2 files
         assert!(!file_names.iter().any(|n| n.contains("map_export_2")));
 

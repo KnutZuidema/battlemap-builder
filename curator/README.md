@@ -132,7 +132,7 @@ While `#curate-decision-modal` is active:
 Upon completion, `submitDecisionCuration()` dispatches `POST /api/curate`:
 - **Payload**: `{ id: candidate.id, themes: acceptedThemes, tags: candidate.tags, description: generatedDescription, layers: candidate.layers }`.
 - **On Success**:
-  - Persists `description` to `manifest.json`, primary layer caption, and `<id>_lora1024.txt`.
+  - Persists `description` to `manifest.json` and primary layer caption.
   - Removes the candidate from staging queue and local memory image cache.
   - Updates staging and curated count indicators via `/api/status`.
   - Loads the next candidate in sequence.
@@ -167,12 +167,9 @@ data/
 │       └── 1.png
 ├── curated/
 │   └── <candidate_id>/
-│       ├── manifest.json            # Contains themes, tags, dimensions, layers, and description
+│       ├── manifest.json            # Contains themes, tags, dimensions, grid, sections, and description
 │       ├── 0_ground.png             # Deterministically named layer file
-│       ├── 1_upper_1.png
-│       ├── <candidate_id>.png       # Primary display image
-│       ├── <candidate_id>_lora1024.png # Normalized 1024x1024 training image (SIMD Lanczos3)
-│       └── <candidate_id>_lora1024.txt # Companion LoRA training caption with description
+│       └── 1_upper_1.png
 └── rejections.jsonl
 ```
 
@@ -182,7 +179,7 @@ data/
 - **Description Persistence**:
   - **Manifest**: The `description` string is persisted directly in `data/curated/<id>/manifest.json`.
   - **Primary Layer Caption**: The primary layer (Ground role) `caption` field matches and retains the curated description.
-  - **LoRA Companion Files**: Automatically generates paired `<id>_lora1024.png` and `<id>_lora1024.txt` companion files. The `.txt` file incorporates prompt triggers, themes, tags, and the curated description.
+  - **Dynamic LoRA Dataset Export**: LoRA dataset export dynamically crops and Lanczos3-resamples each 16×16 MapSection on demand from the Ground layer into `{theme}/{id}_c{col}_r{row}_lora1024.png` (exact 1024×1024, zero padding bars) and `{theme}/{id}_c{col}_r{row}_lora1024.txt` companion captions with per-section physical descriptions.
   - **Backward Compatibility & Legacy Deserialization**: Legacy `manifest.json` files lacking the `"description"` field deserialize cleanly (with `description: None`), and `GET /api/curated` automatically ensures caption compatibility without errors.
 - **Reference Provider Prompt Keyword Scoring (`ReferenceProvider`)**:
   - Curated map descriptions are directly leveraged in the benchmark and generation pipeline for few-shot orthographic perspective conditioning.

@@ -2208,14 +2208,22 @@ async fn test_curate_candidate_with_explicit_description_persistence() {
         .expect("Ground layer must be present");
     assert_eq!(ground_layer.caption.as_deref(), Some(custom_desc));
 
-    // 4. <id>_lora1024.txt companion file exists and contains the description
-    let lora_path = dir
+    // 4. <id>_lora1024 companion files do NOT exist on disk, and storage dynamically returns caption with description
+    let lora_txt_path = dir
         .path()
         .join("curated")
         .join("cand_curate_explicit_desc")
         .join("cand_curate_explicit_desc_lora1024.txt");
-    assert!(lora_path.is_file());
-    let lora_str = std::fs::read_to_string(&lora_path).unwrap();
+    assert!(!lora_txt_path.exists());
+    let lora_png_path = dir
+        .path()
+        .join("curated")
+        .join("cand_curate_explicit_desc")
+        .join("cand_curate_explicit_desc_lora1024.png");
+    assert!(!lora_png_path.exists());
+    let lora_str = storage
+        .get_curated_lora_caption(&Theme::Dungeon, "cand_curate_explicit_desc")
+        .unwrap();
     assert!(lora_str.contains("obsidian dais"));
 }
 
@@ -2282,14 +2290,22 @@ async fn test_curate_candidate_auto_description_fallback_offline() {
     assert_eq!(curated_list.len(), 1);
     assert_eq!(curated_list[0].description.as_deref(), Some(desc));
 
-    // Verify companion <id>_lora1024.txt companion file exists and contains fallback description
-    let lora_path = dir
+    // Verify companion <id>_lora1024 companion files do NOT exist on disk and storage dynamically returns caption with fallback description
+    let lora_txt_path = dir
         .path()
         .join("curated")
         .join("cand_curate_auto_offline")
         .join("cand_curate_auto_offline_lora1024.txt");
-    assert!(lora_path.is_file());
-    let lora_str = std::fs::read_to_string(&lora_path).unwrap();
+    assert!(!lora_txt_path.exists());
+    let lora_png_path = dir
+        .path()
+        .join("curated")
+        .join("cand_curate_auto_offline")
+        .join("cand_curate_auto_offline_lora1024.png");
+    assert!(!lora_png_path.exists());
+    let lora_str = storage
+        .get_curated_lora_caption(&Theme::Dungeon, "cand_curate_auto_offline")
+        .unwrap();
     assert!(lora_str.contains("dungeon"));
 }
 

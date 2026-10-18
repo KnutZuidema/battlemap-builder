@@ -225,13 +225,13 @@ impl FilesystemStorage {
 
         resizer
             .resize(&cropped_rgba, &mut scaled_rgba, &resize_options)
-            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
 
         let mut png_bytes = Vec::new();
         let mut cursor = std::io::Cursor::new(&mut png_bytes);
         scaled_rgba
             .write_to(&mut cursor, image::ImageFormat::Png)
-            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
 
         Ok(png_bytes)
     }

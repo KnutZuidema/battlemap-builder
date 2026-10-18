@@ -80,6 +80,26 @@
         isExporting: false,
         // Interactive Decision Modal (Issue #102)
         decisionModalOpen: false,
+        // Fullscreen Stage Overlay state (Issue #134)
+        libraryFullscreenActive: false,
+        libraryFullscreenMap: null,
+        libraryFullscreenIndex: -1,
+        libraryFullscreenLayerIndex: 0,
+        libraryFullscreenPan: { x: 0, y: 0 },
+        libraryFullscreenZoom: 1.0,
+        libraryFullscreenIsPanning: false,
+        libraryFullscreenPanStart: { x: 0, y: 0 },
+        libraryFullscreenGridVisible: true,
+        libraryFullscreenGridSize: 64,
+        libraryFullscreenGridOffset: { x: 0, y: 0 },
+        libraryFullscreenGridPanelOpen: false,
+        libraryFullscreenGridAlignMode: false,
+        libraryFullscreenIsDraggingGrid: false,
+        libraryFullscreenGridDragStart: { x: 0, y: 0 },
+        libraryFullscreenGridOffsetStart: { x: 0, y: 0 },
+        libraryFullscreenOnionSkinActive: false,
+        libraryFullscreenCurrentImage: null,
+        libraryFullscreenImageCache: new Map(),
     };
 
     // Curate Decision Modal Flow State
@@ -184,6 +204,21 @@
     let decisionAutocompleteList, decisionValidationError;
     let decisionAcceptedTags;
     let btnCloseDecisionModal, btnCancelDecision, btnFinishDecision;
+
+    // Fullscreen Stage Overlay DOM Elements (Issue #134)
+    let libraryFullscreenOverlay, libraryFullscreenCanvas, libraryFullscreenCtx;
+    let libraryFullscreenHud;
+    let fsMapIdBadge, fsMapDimensions, fsMapCounter;
+    let btnFsGridToggle, btnFsGridAdjust, btnFsFit;
+    let btnFsZoomOut, btnFsZoomIn, fsZoomReadout;
+    let btnFsOnionSkin;
+    let btnFsPrevMap, btnFsNextMap, btnFsClose;
+    let libraryFullscreenGridPanel, btnFsCloseGridPanel;
+    let btnFsGridSizeDec, btnFsGridSizeInc, fsGridSizeInput, fsGridSizeSlider;
+    let fsGridOffsetXVal, fsGridOffsetYVal;
+    let btnFsGridNudgeUp, btnFsGridNudgeDown, btnFsGridNudgeLeft, btnFsGridNudgeRight;
+    let btnFsGridAlignDrag, btnFsGridReset, btnFsGridDone;
+    let libraryFullscreenLayerDeck, fsLayerFilmstripStrip, fsLayerDeckCount;
 
     // ==========================================================================
     // Initialization & Bootstrap
@@ -379,6 +414,43 @@
         btnCloseDecisionModal = document.getElementById("btn-close-decision-modal");
         btnCancelDecision = document.getElementById("btn-cancel-decision");
         btnFinishDecision = document.getElementById("btn-finish-decision");
+
+        // Fullscreen Stage Overlay Elements (Issue #134)
+        libraryFullscreenOverlay = document.getElementById("library-fullscreen-overlay");
+        libraryFullscreenCanvas = document.getElementById("library-fullscreen-canvas");
+        libraryFullscreenCtx = libraryFullscreenCanvas ? libraryFullscreenCanvas.getContext("2d") : null;
+        libraryFullscreenHud = document.getElementById("library-fullscreen-hud");
+        fsMapIdBadge = document.getElementById("fs-map-id-badge");
+        fsMapDimensions = document.getElementById("fs-map-dimensions");
+        fsMapCounter = document.getElementById("fs-map-counter");
+        btnFsGridToggle = document.getElementById("btn-fs-grid-toggle");
+        btnFsGridAdjust = document.getElementById("btn-fs-grid-adjust");
+        btnFsFit = document.getElementById("btn-fs-fit");
+        btnFsZoomOut = document.getElementById("btn-fs-zoom-out");
+        btnFsZoomIn = document.getElementById("btn-fs-zoom-in");
+        fsZoomReadout = document.getElementById("fs-zoom-readout");
+        btnFsOnionSkin = document.getElementById("btn-fs-onion-skin");
+        btnFsPrevMap = document.getElementById("btn-fs-prev-map");
+        btnFsNextMap = document.getElementById("btn-fs-next-map");
+        btnFsClose = document.getElementById("btn-fs-close");
+        libraryFullscreenGridPanel = document.getElementById("library-fullscreen-grid-panel");
+        btnFsCloseGridPanel = document.getElementById("btn-fs-close-grid-panel");
+        btnFsGridSizeDec = document.getElementById("btn-fs-grid-size-dec");
+        btnFsGridSizeInc = document.getElementById("btn-fs-grid-size-inc");
+        fsGridSizeInput = document.getElementById("fs-grid-size-input");
+        fsGridSizeSlider = document.getElementById("fs-grid-size-slider");
+        fsGridOffsetXVal = document.getElementById("fs-grid-offset-x-val");
+        fsGridOffsetYVal = document.getElementById("fs-grid-offset-y-val");
+        btnFsGridNudgeUp = document.getElementById("btn-fs-grid-nudge-up");
+        btnFsGridNudgeDown = document.getElementById("btn-fs-grid-nudge-down");
+        btnFsGridNudgeLeft = document.getElementById("btn-fs-grid-nudge-left");
+        btnFsGridNudgeRight = document.getElementById("btn-fs-grid-nudge-right");
+        btnFsGridAlignDrag = document.getElementById("btn-fs-grid-align-drag");
+        btnFsGridReset = document.getElementById("btn-fs-grid-reset");
+        btnFsGridDone = document.getElementById("btn-fs-grid-done");
+        libraryFullscreenLayerDeck = document.getElementById("library-fullscreen-layer-deck");
+        fsLayerFilmstripStrip = document.getElementById("fs-layer-filmstrip-strip");
+        fsLayerDeckCount = document.getElementById("fs-layer-deck-count");
     }
 
     // ==========================================================================
@@ -390,6 +462,10 @@
         window.addEventListener("resize", () => {
             resizeCanvas();
             requestRender();
+            if (state.libraryFullscreenActive) {
+                resizeFullscreenCanvas();
+                requestFullscreenRender();
+            }
         });
     }
 
@@ -3377,6 +3453,9 @@
     }
 
     function switchView(view) {
+        if (state.libraryFullscreenActive && view !== "library") {
+            closeLibraryFullscreen();
+        }
         state.currentView = view;
         if (view === "triage") {
             tabNavTriage?.classList.add("active");
@@ -3627,7 +3706,133 @@
     }
 
     function handleLibraryKeydown(e) {
+        if (state.libraryFullscreenActive) {
+            // Escape: close grid panel if open, otherwise exit fullscreen
+            if (e.key === "Escape") {
+                if (state.libraryFullscreenGridPanelOpen) {
+                    toggleFullscreenGridPanel(false);
+                } else {
+                    closeLibraryFullscreen();
+                }
+                e.preventDefault();
+                return;
+            }
+
+            // WASD: Pan continuous loop
+            const keyLower = e.key.toLowerCase();
+            if (["w", "a", "s", "d"].includes(keyLower) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                activeFsPanKeys[keyLower] = true;
+                startFsPanLoop();
+                e.preventDefault();
+                return;
+            }
+
+            // Zoom in / out: [ and ] or - and + / =
+            if (e.key === "]" || e.code === "BracketRight") {
+                activeFsZoomKeys.in = true;
+                startFsZoomLoop();
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "[" || e.code === "BracketLeft") {
+                activeFsZoomKeys.out = true;
+                startFsZoomLoop();
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "=" || e.key === "+") {
+                fullscreenZoomStep(1.2);
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "-" || e.key === "_") {
+                fullscreenZoomStep(1 / 1.2);
+                e.preventDefault();
+                return;
+            }
+
+            // Fit to screen: F or 0
+            if ((e.key === "f" || e.key === "F" || e.key === "0") && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                fullscreenFitToScreen();
+                e.preventDefault();
+                return;
+            }
+
+            // Number keys 1-6 switch displayed layer (or 1 sets 100% zoom if single-layer)
+            if (["1", "2", "3", "4", "5", "6"].includes(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+                const targetIdx = parseInt(e.key, 10) - 1;
+                const layers = (state.libraryFullscreenMap && state.libraryFullscreenMap.layers) ? state.libraryFullscreenMap.layers : [];
+                if (layers.length > 1) {
+                    if (targetIdx < layers.length) {
+                        switchFullscreenLayer(targetIdx);
+                    }
+                } else {
+                    if (e.key === "1") {
+                        setFullscreenZoom100();
+                    }
+                }
+                e.preventDefault();
+                return;
+            }
+
+            // Toggle grid: G
+            if ((e.key === "g" || e.key === "G") && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                state.libraryFullscreenGridVisible = !state.libraryFullscreenGridVisible;
+                if (btnFsGridToggle) btnFsGridToggle.classList.toggle("active", state.libraryFullscreenGridVisible);
+                requestFullscreenRender();
+                e.preventDefault();
+                return;
+            }
+
+            // Toggle grid calibration panel: Shift+G
+            if ((e.key === "g" || e.key === "G") && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                toggleFullscreenGridPanel();
+                e.preventDefault();
+                return;
+            }
+
+            // Toggle onion-skin overlay: O
+            if ((e.key === "o" || e.key === "O") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                state.libraryFullscreenOnionSkinActive = !state.libraryFullscreenOnionSkinActive;
+                if (btnFsOnionSkin) btnFsOnionSkin.classList.toggle("active", state.libraryFullscreenOnionSkinActive);
+                requestFullscreenRender();
+                e.preventDefault();
+                return;
+            }
+
+            // Navigate maps: J / Right (Next), K / Left (Prev)
+            if (e.key === "j" || e.key === "J" || e.key === "ArrowRight") {
+                if (state.libraryFilteredMaps && state.libraryFullscreenIndex < state.libraryFilteredMaps.length - 1) {
+                    loadFullscreenMap(state.libraryFullscreenIndex + 1, 0);
+                    setLibraryFocus(state.libraryFullscreenIndex, true);
+                }
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "k" || e.key === "K" || e.key === "ArrowLeft") {
+                if (state.libraryFilteredMaps && state.libraryFullscreenIndex > 0) {
+                    loadFullscreenMap(state.libraryFullscreenIndex - 1, 0);
+                    setLibraryFocus(state.libraryFullscreenIndex, true);
+                }
+                e.preventDefault();
+                return;
+            }
+
+            return;
+        }
+
+        // --- Standard Library View Hotkeys (when fullscreen is NOT active) ---
         if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+        // Open fullscreen with F on focused card:
+        if ((e.key === "f" || e.key === "F") && !e.shiftKey) {
+            if (state.libraryFilteredMaps && state.libraryFilteredMaps.length > 0) {
+                const targetIdx = state.libraryFocusedIndex >= 0 ? state.libraryFocusedIndex : 0;
+                openLibraryFullscreen(targetIdx);
+            }
+            e.preventDefault();
+            return;
+        }
 
         // Density hotkeys: 1, 2, 3
         if (e.key === "1") {
@@ -3931,6 +4136,15 @@
             <div class="curated-card-body">
                 <div class="curated-header-row">
                     <span class="curated-card-id mono" title="${escapeHtml(map.id)}">${escapeHtml(map.id)}</span>
+                    <button type="button" class="btn-card-fullscreen" title="Inspect Fullscreen (Hotkey: F)" aria-label="Inspect Fullscreen">
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="15 3 21 3 21 9"/>
+                            <polyline points="9 21 3 21 3 15"/>
+                            <line x1="21" y1="3" x2="14" y2="10"/>
+                            <line x1="3" y1="21" x2="10" y2="14"/>
+                        </svg>
+                        <span>Inspect</span>
+                    </button>
                 </div>
                 <div class="curated-tags-row">
                     ${tagsHtml}
@@ -4016,6 +4230,20 @@
             setLibraryFocus(index, false);
         });
 
+        const btnInspect = card.querySelector(".btn-card-fullscreen");
+        btnInspect?.addEventListener("click", (e) => {
+            e.stopPropagation();
+            openLibraryFullscreen(index);
+        });
+
+        const thumbBox = card.querySelector(".curated-thumb-box");
+        thumbBox?.addEventListener("dblclick", (e) => {
+            if (e.target.closest(".curated-select-wrapper")) return;
+            if (e.target.closest(".curated-layer-scrubber")) return;
+            e.stopPropagation();
+            openLibraryFullscreen(index);
+        });
+
         return card;
     }
 
@@ -4071,6 +4299,802 @@
             if (btnExportLora) btnExportLora.disabled = false;
             if (btnExportLabel) btnExportLabel.textContent = "Export LoRA Dataset";
         }
+    }
+
+    // ==========================================================================
+    // Fullscreen Stage Overlay with Reused 2D Canvas & HUD Controls (Issue #134)
+    // ==========================================================================
+
+    function resizeFullscreenCanvas() {
+        if (!libraryFullscreenCanvas || !libraryFullscreenCanvas.parentElement) return;
+        const container = libraryFullscreenCanvas.parentElement;
+        const width = container.clientWidth;
+        const height = container.clientHeight;
+        const dpr = window.devicePixelRatio || 1;
+
+        if (libraryFullscreenCanvas.width !== width * dpr || libraryFullscreenCanvas.height !== height * dpr) {
+            libraryFullscreenCanvas.width = width * dpr;
+            libraryFullscreenCanvas.height = height * dpr;
+            libraryFullscreenCanvas.style.width = `${width}px`;
+            libraryFullscreenCanvas.style.height = `${height}px`;
+        }
+    }
+
+    let fsRenderPending = false;
+    function requestFullscreenRender() {
+        if (!fsRenderPending) {
+            fsRenderPending = true;
+            requestAnimationFrame(() => {
+                fsRenderPending = false;
+                renderFullscreenCanvas();
+            });
+        }
+    }
+
+    /**
+     * High-performance 60fps Canvas 2D render loop for the Fullscreen Stage Overlay.
+     * Applies devicePixelRatio scaling, pan/zoom transformation matrix,
+     * renders crisp pixel examination for zoom > 200%,
+     * onion-skin overlay (50% Ground layer), and single-draw-call 64px VTT grid overlay.
+     */
+    function renderFullscreenCanvas() {
+        if (!libraryFullscreenCtx || !libraryFullscreenCanvas) return;
+        const c = libraryFullscreenCtx;
+        const dpr = window.devicePixelRatio || 1;
+
+        c.save();
+        c.clearRect(0, 0, libraryFullscreenCanvas.width, libraryFullscreenCanvas.height);
+
+        // Fill background
+        c.fillStyle = "#070a10";
+        c.fillRect(0, 0, libraryFullscreenCanvas.width, libraryFullscreenCanvas.height);
+
+        // Normalize devicePixelRatio coordinates
+        c.scale(dpr, dpr);
+
+        if (state.libraryFullscreenCurrentImage && state.libraryFullscreenCurrentImage.complete && state.libraryFullscreenCurrentImage.naturalWidth > 0) {
+            const img = state.libraryFullscreenCurrentImage;
+            const imgW = img.naturalWidth || img.width;
+            const imgH = img.naturalHeight || img.height;
+
+            c.save();
+            // Apply pan and zoom transformation
+            c.translate(state.libraryFullscreenPan.x, state.libraryFullscreenPan.y);
+            c.scale(state.libraryFullscreenZoom, state.libraryFullscreenZoom);
+
+            // Crisp rendering: disable smoothing when zoomed in past 200% for pixel examination
+            c.imageSmoothingEnabled = state.libraryFullscreenZoom < 2.0;
+            c.imageSmoothingQuality = "high";
+
+            // Onion-skin overlay: draw base Ground layer image with 50% opacity
+            if (state.libraryFullscreenOnionSkinActive && state.libraryFullscreenMap) {
+                const map = state.libraryFullscreenMap;
+                const layers = map.layers || [];
+                let groundIdx = layers.findIndex(l => (l.role || "").toLowerCase().replace(/[-_]/g, "") === "ground");
+                if (groundIdx < 0 && layers.length > 0) groundIdx = 0;
+
+                if (groundIdx >= 0 && groundIdx !== state.libraryFullscreenLayerIndex) {
+                    const gLayer = layers[groundIdx];
+                    const gActualIdx = (gLayer && gLayer.index !== undefined) ? gLayer.index : groundIdx;
+                    const groundKey = `${map.id}_layer_${gActualIdx}`;
+                    const groundImg = state.libraryFullscreenImageCache.get(groundKey);
+                    if (groundImg && groundImg.complete && groundImg.naturalWidth > 0) {
+                        const gW = groundImg.naturalWidth || groundImg.width;
+                        const gH = groundImg.naturalHeight || groundImg.height;
+                        c.save();
+                        c.globalAlpha = 0.5;
+                        c.drawImage(groundImg, 0, 0, gW, gH);
+                        c.restore();
+                    }
+                }
+            }
+
+            // Draw active layer battlemap at origin (0, 0)
+            c.globalAlpha = 1.0;
+            c.drawImage(img, 0, 0, imgW, imgH);
+
+            // Draw crisp 64px VTT grid overlay in image space
+            if (state.libraryFullscreenGridVisible) {
+                drawFullscreenVttGrid(c, imgW, imgH);
+            }
+
+            // Draw image bounding border
+            c.beginPath();
+            c.rect(0, 0, imgW, imgH);
+            c.lineWidth = Math.max(1.0, 1.5 / state.libraryFullscreenZoom);
+            c.strokeStyle = "rgba(56, 189, 248, 0.75)";
+            c.stroke();
+
+            c.restore();
+        }
+
+        c.restore();
+    }
+
+    /**
+     * Single-draw-call crisp 64px VTT grid overlay for Fullscreen Stage.
+     */
+    function drawFullscreenVttGrid(c, width, height) {
+        c.save();
+        c.beginPath();
+        c.rect(0, 0, width, height);
+        c.clip();
+
+        const size = state.libraryFullscreenGridSize || VTT_GRID_SIZE;
+        const startX = ((Math.round(state.libraryFullscreenGridOffset.x) % size) + size) % size;
+        const startY = ((Math.round(state.libraryFullscreenGridOffset.y) % size) + size) % size;
+
+        c.beginPath();
+
+        // Vertical grid lines
+        for (let x = startX; x <= width; x += size) {
+            c.moveTo(x, 0);
+            c.lineTo(x, height);
+        }
+
+        // Horizontal grid lines
+        for (let y = startY; y <= height; y += size) {
+            c.moveTo(0, y);
+            c.lineTo(width, y);
+        }
+
+        c.lineWidth = Math.max(0.5, 1.0 / state.libraryFullscreenZoom);
+        c.strokeStyle = "rgba(56, 189, 248, 0.4)";
+        c.stroke();
+        c.restore();
+    }
+
+    function fullscreenFitToScreen() {
+        if (!state.libraryFullscreenCurrentImage || !libraryFullscreenCanvas) return;
+        const img = state.libraryFullscreenCurrentImage;
+        const imgW = img.naturalWidth || img.width;
+        const imgH = img.naturalHeight || img.height;
+        const viewW = libraryFullscreenCanvas.clientWidth;
+        const viewH = libraryFullscreenCanvas.clientHeight;
+
+        if (!imgW || !imgH || !viewW || !viewH) return;
+
+        const padding = 40;
+        const availW = Math.max(20, viewW - padding * 2);
+        const availH = Math.max(20, viewH - padding * 2);
+
+        const fitScale = Math.min(availW / imgW, availH / imgH, 1.0);
+        state.libraryFullscreenZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, fitScale));
+
+        state.libraryFullscreenPan.x = Math.round((viewW - imgW * state.libraryFullscreenZoom) / 2);
+        state.libraryFullscreenPan.y = Math.round((viewH - imgH * state.libraryFullscreenZoom) / 2);
+
+        updateFullscreenHud();
+        requestFullscreenRender();
+    }
+
+    function fullscreenZoomStep(factor, clientPoint = null) {
+        if (!state.libraryFullscreenCurrentImage || !libraryFullscreenCanvas) return;
+        const prevZoom = state.libraryFullscreenZoom;
+        let newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, prevZoom * factor));
+        newZoom = Math.round(newZoom * 1000) / 1000;
+
+        if (newZoom === prevZoom) return;
+
+        const viewW = libraryFullscreenCanvas.clientWidth;
+        const viewH = libraryFullscreenCanvas.clientHeight;
+        const focusX = clientPoint ? clientPoint.x : viewW / 2;
+        const focusY = clientPoint ? clientPoint.y : viewH / 2;
+
+        state.libraryFullscreenPan.x = focusX - (focusX - state.libraryFullscreenPan.x) * (newZoom / prevZoom);
+        state.libraryFullscreenPan.y = focusY - (focusY - state.libraryFullscreenPan.y) * (newZoom / prevZoom);
+        state.libraryFullscreenZoom = newZoom;
+
+        updateFullscreenHud();
+        requestFullscreenRender();
+    }
+
+    function setFullscreenZoom100() {
+        if (!state.libraryFullscreenCurrentImage || !libraryFullscreenCanvas) return;
+        const prevZoom = state.libraryFullscreenZoom;
+        const newZoom = 1.0;
+        if (newZoom === prevZoom) return;
+
+        const viewW = libraryFullscreenCanvas.clientWidth;
+        const viewH = libraryFullscreenCanvas.clientHeight;
+        const focusX = viewW / 2;
+        const focusY = viewH / 2;
+
+        state.libraryFullscreenPan.x = focusX - (focusX - state.libraryFullscreenPan.x) * (newZoom / prevZoom);
+        state.libraryFullscreenPan.y = focusY - (focusY - state.libraryFullscreenPan.y) * (newZoom / prevZoom);
+        state.libraryFullscreenZoom = newZoom;
+
+        updateFullscreenHud();
+        requestFullscreenRender();
+    }
+
+    // --- Fullscreen Continuous Smooth WASD Pan Loop ---
+    const activeFsPanKeys = { w: false, a: false, s: false, d: false };
+    let fsPanAnimationId = null;
+    let lastFsPanTimestamp = 0;
+
+    function fsPanLoop(timestamp) {
+        if (!lastFsPanTimestamp) lastFsPanTimestamp = timestamp;
+        const dt = Math.min((timestamp - lastFsPanTimestamp) / 1000, 0.1);
+        lastFsPanTimestamp = timestamp;
+
+        let moveX = 0;
+        let moveY = 0;
+        if (activeFsPanKeys.w) moveY += 1;
+        if (activeFsPanKeys.s) moveY -= 1;
+        if (activeFsPanKeys.a) moveX += 1;
+        if (activeFsPanKeys.d) moveX -= 1;
+
+        if (moveX !== 0 || moveY !== 0) {
+            if (moveX !== 0 && moveY !== 0) {
+                const invSqrt2 = 0.70710678;
+                moveX *= invSqrt2;
+                moveY *= invSqrt2;
+            }
+            if (state.libraryFullscreenCurrentImage) {
+                state.libraryFullscreenPan.x += moveX * PAN_SPEED * dt;
+                state.libraryFullscreenPan.y += moveY * PAN_SPEED * dt;
+                requestFullscreenRender();
+            }
+            fsPanAnimationId = requestAnimationFrame(fsPanLoop);
+        } else {
+            fsPanAnimationId = null;
+            lastFsPanTimestamp = 0;
+        }
+    }
+
+    function startFsPanLoop() {
+        if (!fsPanAnimationId) {
+            lastFsPanTimestamp = performance.now();
+            fsPanAnimationId = requestAnimationFrame(fsPanLoop);
+        }
+    }
+
+    function stopFsPanLoop() {
+        if (fsPanAnimationId) {
+            cancelAnimationFrame(fsPanAnimationId);
+            fsPanAnimationId = null;
+        }
+        lastFsPanTimestamp = 0;
+        activeFsPanKeys.w = false;
+        activeFsPanKeys.a = false;
+        activeFsPanKeys.s = false;
+        activeFsPanKeys.d = false;
+    }
+
+    // --- Fullscreen Continuous Smooth Zoom Loop ---
+    const activeFsZoomKeys = { in: false, out: false };
+    let fsZoomAnimationId = null;
+    let lastFsZoomTimestamp = 0;
+
+    function fsZoomLoop(timestamp) {
+        if (!lastFsZoomTimestamp) lastFsZoomTimestamp = timestamp;
+        const dt = Math.min((timestamp - lastFsZoomTimestamp) / 1000, 0.1);
+        lastFsZoomTimestamp = timestamp;
+
+        if (activeFsZoomKeys.in || activeFsZoomKeys.out) {
+            let factor = 1.0;
+            if (activeFsZoomKeys.in && !activeFsZoomKeys.out) {
+                factor = Math.pow(ZOOM_SPEED, dt);
+            } else if (activeFsZoomKeys.out && !activeFsZoomKeys.in) {
+                factor = Math.pow(1 / ZOOM_SPEED, dt);
+            }
+
+            if (factor !== 1.0 && state.libraryFullscreenCurrentImage) {
+                fullscreenZoomStep(factor);
+            }
+            fsZoomAnimationId = requestAnimationFrame(fsZoomLoop);
+        } else {
+            fsZoomAnimationId = null;
+            lastFsZoomTimestamp = 0;
+        }
+    }
+
+    function startFsZoomLoop() {
+        if (!fsZoomAnimationId) {
+            lastFsZoomTimestamp = performance.now();
+            fsZoomAnimationId = requestAnimationFrame(fsZoomLoop);
+        }
+    }
+
+    function stopFsZoomLoop() {
+        if (fsZoomAnimationId) {
+            cancelAnimationFrame(fsZoomAnimationId);
+            fsZoomAnimationId = null;
+        }
+        lastFsZoomTimestamp = 0;
+        activeFsZoomKeys.in = false;
+        activeFsZoomKeys.out = false;
+    }
+
+    // --- Fullscreen Map & Layer Loading ---
+    function loadFullscreenMap(index, layerIndex = 0) {
+        if (!state.libraryFilteredMaps || state.libraryFilteredMaps.length === 0) return;
+        const clampedIndex = Math.max(0, Math.min(index, state.libraryFilteredMaps.length - 1));
+        const map = state.libraryFilteredMaps[clampedIndex];
+        if (!map) return;
+
+        state.libraryFullscreenIndex = clampedIndex;
+        state.libraryFullscreenMap = map;
+
+        // Restore or initialize grid settings for this curated map
+        const gridKey = `curated_${map.id}`;
+        if (candidateGridSettings.has(gridKey)) {
+            const saved = candidateGridSettings.get(gridKey);
+            state.libraryFullscreenGridSize = saved.size;
+            state.libraryFullscreenGridOffset = { ...saved.offset };
+        } else {
+            state.libraryFullscreenGridSize = 64;
+            state.libraryFullscreenGridOffset = { x: 0, y: 0 };
+        }
+        updateFullscreenGridPanel();
+
+        const layers = map.layers && map.layers.length > 0 ? map.layers : [{ index: 0, role: "ground" }];
+        const validLayerIndex = Math.max(0, Math.min(layerIndex, layers.length - 1));
+        state.libraryFullscreenLayerIndex = validLayerIndex;
+
+        const layerObj = layers[validLayerIndex];
+        const actualLayerIdx = (layerObj && layerObj.index !== undefined) ? layerObj.index : validLayerIndex;
+        const cacheKey = `${map.id}_layer_${actualLayerIdx}`;
+
+        const primaryTheme = (map.themes && map.themes.length > 0) ? map.themes[0] : (map.theme || "dungeon");
+        let themeParam = "dungeon";
+        if (primaryTheme && CANONICAL_THEMES.includes(primaryTheme.toLowerCase())) {
+            themeParam = primaryTheme.toLowerCase();
+        }
+
+        const directUrl = `/api/image/curated/${encodeURIComponent(map.id)}/${actualLayerIdx}`;
+        const fallbackUrl = `/api/image/curated/${encodeURIComponent(themeParam)}/${encodeURIComponent(map.id)}/${actualLayerIdx}`;
+
+        let img = state.libraryFullscreenImageCache.get(cacheKey);
+        if (img && img.complete && img.naturalWidth > 0) {
+            state.libraryFullscreenCurrentImage = img;
+            fullscreenFitToScreen();
+            renderFullscreenLayerDeck();
+            updateFullscreenHud();
+        } else {
+            if (!img) {
+                img = new Image();
+                img.src = directUrl;
+                img.onerror = () => {
+                    if (img.src !== fallbackUrl && !img.src.endsWith(fallbackUrl)) {
+                        img.src = fallbackUrl;
+                    }
+                };
+                state.libraryFullscreenImageCache.set(cacheKey, img);
+            }
+            img.onload = () => {
+                if (state.libraryFullscreenMap && state.libraryFullscreenMap.id === map.id && state.libraryFullscreenLayerIndex === validLayerIndex) {
+                    state.libraryFullscreenCurrentImage = img;
+                    fullscreenFitToScreen();
+                    renderFullscreenLayerDeck();
+                    updateFullscreenHud();
+                }
+            };
+            if (img.complete && img.naturalWidth > 0) {
+                state.libraryFullscreenCurrentImage = img;
+                fullscreenFitToScreen();
+                renderFullscreenLayerDeck();
+                updateFullscreenHud();
+            }
+        }
+
+        // Prefetch ground layer for onion-skin
+        let groundIdx = layers.findIndex(l => (l.role || "").toLowerCase().replace(/[-_]/g, "") === "ground");
+        if (groundIdx < 0 && layers.length > 0) groundIdx = 0;
+        if (groundIdx >= 0 && groundIdx !== validLayerIndex) {
+            const gLayer = layers[groundIdx];
+            const gActualIdx = (gLayer && gLayer.index !== undefined) ? gLayer.index : groundIdx;
+            const gKey = `${map.id}_layer_${gActualIdx}`;
+            if (!state.libraryFullscreenImageCache.get(gKey)) {
+                const gImg = new Image();
+                gImg.src = `/api/image/curated/${encodeURIComponent(map.id)}/${gActualIdx}`;
+                state.libraryFullscreenImageCache.set(gKey, gImg);
+            }
+        }
+
+        // Prefetch other layers of this map
+        layers.forEach((l, idx) => {
+            const lIdx = l.index !== undefined ? l.index : idx;
+            const k = `${map.id}_layer_${lIdx}`;
+            if (!state.libraryFullscreenImageCache.get(k)) {
+                const pImg = new Image();
+                pImg.src = `/api/image/curated/${encodeURIComponent(map.id)}/${lIdx}`;
+                state.libraryFullscreenImageCache.set(k, pImg);
+            }
+        });
+
+        // Prefetch adjacent maps
+        [-1, 1, 2].forEach(offset => {
+            const targetIdx = clampedIndex + offset;
+            if (targetIdx >= 0 && targetIdx < state.libraryFilteredMaps.length) {
+                const adjMap = state.libraryFilteredMaps[targetIdx];
+                const adjKey = `${adjMap.id}_layer_0`;
+                if (!state.libraryFullscreenImageCache.get(adjKey)) {
+                    const adjImg = new Image();
+                    adjImg.src = `/api/image/curated/${encodeURIComponent(adjMap.id)}/0`;
+                    state.libraryFullscreenImageCache.set(adjKey, adjImg);
+                }
+            }
+        });
+
+        updateFullscreenHud();
+        renderFullscreenLayerDeck();
+    }
+
+    function updateFullscreenHud() {
+        if (!state.libraryFullscreenActive || !state.libraryFullscreenMap) return;
+        const map = state.libraryFullscreenMap;
+
+        if (fsMapIdBadge) {
+            fsMapIdBadge.textContent = map.id;
+            fsMapIdBadge.title = `Curated Map ID: ${map.id}`;
+        }
+
+        if (fsMapDimensions) {
+            let dimText = "";
+            if (state.libraryFullscreenCurrentImage && state.libraryFullscreenCurrentImage.naturalWidth > 0) {
+                dimText = `${state.libraryFullscreenCurrentImage.naturalWidth} × ${state.libraryFullscreenCurrentImage.naturalHeight}`;
+            } else if (map.dimensions && map.dimensions.width && map.dimensions.height) {
+                dimText = `${map.dimensions.width} × ${map.dimensions.height}`;
+            } else {
+                dimText = "2048 × 2048";
+            }
+            fsMapDimensions.textContent = dimText;
+        }
+
+        if (fsMapCounter) {
+            const total = state.libraryFilteredMaps ? state.libraryFilteredMaps.length : 1;
+            const current = (state.libraryFullscreenIndex >= 0 ? state.libraryFullscreenIndex : 0) + 1;
+            fsMapCounter.textContent = `Map ${current} of ${total}`;
+        }
+
+        if (fsZoomReadout) {
+            const pct = Math.round((state.libraryFullscreenZoom || 1.0) * 100);
+            fsZoomReadout.textContent = `${pct}%`;
+        }
+
+        if (btnFsGridToggle) {
+            btnFsGridToggle.classList.toggle("active", state.libraryFullscreenGridVisible);
+        }
+
+        if (btnFsGridAdjust) {
+            btnFsGridAdjust.classList.toggle("active", state.libraryFullscreenGridPanelOpen);
+        }
+
+        if (btnFsOnionSkin) {
+            btnFsOnionSkin.classList.toggle("active", state.libraryFullscreenOnionSkinActive);
+        }
+
+        if (btnFsPrevMap) {
+            btnFsPrevMap.disabled = state.libraryFullscreenIndex <= 0;
+        }
+        if (btnFsNextMap) {
+            btnFsNextMap.disabled = !state.libraryFilteredMaps || state.libraryFullscreenIndex >= state.libraryFilteredMaps.length - 1;
+        }
+    }
+
+    function renderFullscreenLayerDeck() {
+        if (!libraryFullscreenLayerDeck || !fsLayerFilmstripStrip) return;
+        const map = state.libraryFullscreenMap;
+
+        if (!map || !map.layers || map.layers.length <= 1) {
+            libraryFullscreenLayerDeck.classList.add("hidden");
+            return;
+        }
+
+        libraryFullscreenLayerDeck.classList.remove("hidden");
+        const total = map.layers.length;
+        if (fsLayerDeckCount) {
+            fsLayerDeckCount.textContent = `(${state.libraryFullscreenLayerIndex + 1} / ${total})`;
+        }
+
+        fsLayerFilmstripStrip.innerHTML = "";
+        const fragment = document.createDocumentFragment();
+
+        const primaryTheme = (map.themes && map.themes.length > 0) ? map.themes[0] : (map.theme || "dungeon");
+        let themeParam = "dungeon";
+        if (primaryTheme && CANONICAL_THEMES.includes(primaryTheme.toLowerCase())) {
+            themeParam = primaryTheme.toLowerCase();
+        }
+
+        map.layers.forEach((layer, idx) => {
+            const card = document.createElement("div");
+            const isActive = idx === state.libraryFullscreenLayerIndex;
+            card.className = `fs-layer-card${isActive ? " active" : ""}`;
+            card.dataset.index = idx;
+
+            const layerIdx = layer.index !== undefined ? layer.index : idx;
+            const thumbUrl = `/api/image/curated/${encodeURIComponent(map.id)}/${layerIdx}`;
+            const fallbackUrl = `/api/image/curated/${encodeURIComponent(themeParam)}/${encodeURIComponent(map.id)}/${layerIdx}`;
+
+            const role = (layer.role || "ground").toLowerCase().replace(/[-_]/g, "");
+            let roleClass = "fs-role-ground";
+            let roleName = "Ground";
+            if (role === "upperfloor" || role === "upper") {
+                roleClass = "fs-role-upper";
+                roleName = "Upper";
+            } else if (role === "basement" || role === "lower" || role === "cellar") {
+                roleClass = "fs-role-basement";
+                roleName = "Basement";
+            } else if (role === "roof") {
+                roleClass = "fs-role-roof";
+                roleName = "Roof";
+            } else if (role === "variant") {
+                roleClass = "fs-role-variant";
+                roleName = "Variant";
+            }
+
+            const elevText = typeof layer.elevation === "number"
+                ? (layer.elevation > 0 ? `+${layer.elevation}` : `${layer.elevation}`)
+                : (role === "ground" ? "0" : (role === "upperfloor" || role === "upper" ? "+1" : (role === "basement" ? "-1" : "0")));
+
+            const hotkeyKbd = idx < 6 ? `<div class="fs-layer-card-key"><kbd>${idx + 1}</kbd></div>` : "";
+
+            card.innerHTML = `
+                <div class="fs-layer-card-thumb-wrap">
+                    ${hotkeyKbd}
+                    <img class="fs-layer-card-img" src="${thumbUrl}" alt="Layer ${idx + 1}" loading="lazy">
+                </div>
+                <div class="fs-layer-card-meta">
+                    <span class="fs-role-chip ${roleClass}">${escapeHtml(roleName)}</span>
+                    <span class="fs-elevation-badge mono">${escapeHtml(elevText)}</span>
+                </div>
+            `;
+
+            const imgEl = card.querySelector(".fs-layer-card-img");
+            if (imgEl) {
+                imgEl.onerror = () => {
+                    if (imgEl.src !== fallbackUrl && !imgEl.src.endsWith(fallbackUrl)) {
+                        imgEl.src = fallbackUrl;
+                    }
+                };
+            }
+
+            card.addEventListener("click", () => {
+                switchFullscreenLayer(idx);
+            });
+
+            fragment.appendChild(card);
+        });
+
+        fsLayerFilmstripStrip.appendChild(fragment);
+    }
+
+    function switchFullscreenLayer(layerIndex) {
+        if (!state.libraryFullscreenMap) return;
+        const layers = state.libraryFullscreenMap.layers || [];
+        if (layerIndex < 0 || layerIndex >= layers.length) return;
+
+        state.libraryFullscreenLayerIndex = layerIndex;
+        loadFullscreenMap(state.libraryFullscreenIndex, layerIndex);
+    }
+
+    // --- Fullscreen Grid Calibration Controls ---
+    function toggleFullscreenGridPanel(force) {
+        state.libraryFullscreenGridPanelOpen = typeof force === "boolean" ? force : !state.libraryFullscreenGridPanelOpen;
+        if (libraryFullscreenGridPanel) {
+            libraryFullscreenGridPanel.classList.toggle("hidden", !state.libraryFullscreenGridPanelOpen);
+        }
+        if (btnFsGridAdjust) {
+            btnFsGridAdjust.classList.toggle("active", state.libraryFullscreenGridPanelOpen);
+        }
+    }
+
+    function updateFullscreenGridPanel() {
+        if (!fsGridSizeInput || !fsGridSizeSlider) return;
+        const size = state.libraryFullscreenGridSize || 64;
+        fsGridSizeInput.value = size;
+        fsGridSizeSlider.value = Math.min(256, Math.max(16, size));
+
+        if (fsGridOffsetXVal) fsGridOffsetXVal.textContent = Math.round(state.libraryFullscreenGridOffset.x);
+        if (fsGridOffsetYVal) fsGridOffsetYVal.textContent = Math.round(state.libraryFullscreenGridOffset.y);
+
+        const chips = document.querySelectorAll("#fs-grid-preset-chips .preset-chip");
+        chips.forEach(chip => {
+            const chipSize = parseInt(chip.dataset.size, 10);
+            chip.classList.toggle("active", chipSize === size);
+        });
+    }
+
+    function saveFullscreenMapGrid() {
+        if (state.libraryFullscreenMap && state.libraryFullscreenMap.id) {
+            candidateGridSettings.set(`curated_${state.libraryFullscreenMap.id}`, {
+                size: state.libraryFullscreenGridSize,
+                offset: { ...state.libraryFullscreenGridOffset },
+            });
+        }
+    }
+
+    function setFullscreenGridSize(size) {
+        const num = Number.isFinite(size) ? size : parseInt(size, 10);
+        if (isNaN(num)) return;
+        const clamped = Math.max(MIN_GRID_SIZE, Math.min(MAX_GRID_SIZE, Math.round(num)));
+        state.libraryFullscreenGridSize = clamped;
+        saveFullscreenMapGrid();
+        updateFullscreenGridPanel();
+        requestFullscreenRender();
+    }
+
+    function nudgeFullscreenGridOffset(dx, dy) {
+        state.libraryFullscreenGridOffset.x = Math.round(state.libraryFullscreenGridOffset.x + dx);
+        state.libraryFullscreenGridOffset.y = Math.round(state.libraryFullscreenGridOffset.y + dy);
+        saveFullscreenMapGrid();
+        updateFullscreenGridPanel();
+        requestFullscreenRender();
+    }
+
+    function resetFullscreenGrid() {
+        state.libraryFullscreenGridSize = 64;
+        state.libraryFullscreenGridOffset = { x: 0, y: 0 };
+        saveFullscreenMapGrid();
+        updateFullscreenGridPanel();
+        requestFullscreenRender();
+    }
+
+    function toggleFullscreenGridAlignMode(force) {
+        state.libraryFullscreenGridAlignMode = typeof force === "boolean" ? force : !state.libraryFullscreenGridAlignMode;
+        if (btnFsGridAlignDrag) {
+            btnFsGridAlignDrag.classList.toggle("active", state.libraryFullscreenGridAlignMode);
+        }
+        if (libraryFullscreenCanvas && libraryFullscreenCanvas.parentElement) {
+            libraryFullscreenCanvas.parentElement.classList.toggle("grid-aligning", state.libraryFullscreenGridAlignMode);
+        }
+    }
+
+    // --- Fullscreen Open & Close Lifecycle ---
+    function openLibraryFullscreen(index) {
+        if (!state.libraryFilteredMaps || state.libraryFilteredMaps.length === 0) return;
+        const clampedIndex = Math.max(0, Math.min(index, state.libraryFilteredMaps.length - 1));
+
+        state.libraryFullscreenActive = true;
+        if (libraryFullscreenOverlay) {
+            libraryFullscreenOverlay.classList.remove("hidden");
+        }
+
+        setLibraryFocus(clampedIndex, false);
+        resizeFullscreenCanvas();
+        loadFullscreenMap(clampedIndex, 0);
+
+        if (libraryFullscreenCanvas) {
+            libraryFullscreenCanvas.focus();
+        }
+    }
+
+    function closeLibraryFullscreen() {
+        if (!state.libraryFullscreenActive) return;
+
+        stopFsPanLoop();
+        stopFsZoomLoop();
+
+        state.libraryFullscreenActive = false;
+        if (libraryFullscreenOverlay) {
+            libraryFullscreenOverlay.classList.add("hidden");
+        }
+
+        toggleFullscreenGridPanel(false);
+        toggleFullscreenGridAlignMode(false);
+
+        // Restore focus on card in library view and scroll into view smoothly
+        if (state.libraryFullscreenIndex >= 0) {
+            setLibraryFocus(state.libraryFullscreenIndex, true);
+        }
+    }
+
+    function setupFullscreenControls() {
+        if (!libraryFullscreenCanvas) return;
+
+        // Canvas Mouse Pan Dragging & Dynamic Grid Align Drag
+        libraryFullscreenCanvas.addEventListener("mousedown", (e) => {
+            if (e.button === 0 && (e.shiftKey || state.libraryFullscreenGridAlignMode)) {
+                state.libraryFullscreenIsDraggingGrid = true;
+                state.libraryFullscreenGridDragStart = { x: e.clientX, y: e.clientY };
+                state.libraryFullscreenGridOffsetStart = { x: state.libraryFullscreenGridOffset.x, y: state.libraryFullscreenGridOffset.y };
+                libraryFullscreenCanvas.parentElement?.classList.add("grid-dragging");
+                e.preventDefault();
+                return;
+            }
+
+            if (e.button === 0 || e.button === 1) {
+                state.libraryFullscreenIsPanning = true;
+                state.libraryFullscreenPanStart = {
+                    x: e.clientX - state.libraryFullscreenPan.x,
+                    y: e.clientY - state.libraryFullscreenPan.y,
+                };
+                libraryFullscreenCanvas.parentElement?.classList.add("panning");
+                e.preventDefault();
+            }
+        });
+
+        // Wheel Zoom
+        libraryFullscreenCanvas.addEventListener("wheel", (e) => {
+            e.preventDefault();
+            if (!state.libraryFullscreenCurrentImage) return;
+
+            const rect = libraryFullscreenCanvas.getBoundingClientRect();
+            const point = {
+                x: e.clientX - rect.left,
+                y: e.clientY - rect.top,
+            };
+
+            const factor = e.deltaY < 0 ? 1.15 : (1 / 1.15);
+            fullscreenZoomStep(factor, point);
+        }, { passive: false });
+
+        // HUD Buttons
+        btnFsGridToggle?.addEventListener("click", () => {
+            state.libraryFullscreenGridVisible = !state.libraryFullscreenGridVisible;
+            if (btnFsGridToggle) btnFsGridToggle.classList.toggle("active", state.libraryFullscreenGridVisible);
+            requestFullscreenRender();
+        });
+
+        btnFsGridAdjust?.addEventListener("click", () => toggleFullscreenGridPanel());
+        btnFsFit?.addEventListener("click", () => fullscreenFitToScreen());
+        btnFsZoomOut?.addEventListener("click", () => fullscreenZoomStep(1 / 1.2));
+        btnFsZoomIn?.addEventListener("click", () => fullscreenZoomStep(1.2));
+
+        btnFsOnionSkin?.addEventListener("click", () => {
+            state.libraryFullscreenOnionSkinActive = !state.libraryFullscreenOnionSkinActive;
+            if (btnFsOnionSkin) btnFsOnionSkin.classList.toggle("active", state.libraryFullscreenOnionSkinActive);
+            requestFullscreenRender();
+        });
+
+        btnFsPrevMap?.addEventListener("click", () => {
+            if (state.libraryFullscreenIndex > 0) {
+                loadFullscreenMap(state.libraryFullscreenIndex - 1, 0);
+                setLibraryFocus(state.libraryFullscreenIndex, true);
+            }
+        });
+
+        btnFsNextMap?.addEventListener("click", () => {
+            if (state.libraryFilteredMaps && state.libraryFullscreenIndex < state.libraryFilteredMaps.length - 1) {
+                loadFullscreenMap(state.libraryFullscreenIndex + 1, 0);
+                setLibraryFocus(state.libraryFullscreenIndex, true);
+            }
+        });
+
+        btnFsClose?.addEventListener("click", () => closeLibraryFullscreen());
+
+        // Fullscreen Grid Panel Controls
+        btnFsCloseGridPanel?.addEventListener("click", () => toggleFullscreenGridPanel(false));
+        btnFsGridDone?.addEventListener("click", () => toggleFullscreenGridPanel(false));
+        btnFsGridReset?.addEventListener("click", () => resetFullscreenGrid());
+
+        btnFsGridSizeDec?.addEventListener("click", () => setFullscreenGridSize(state.libraryFullscreenGridSize - 1));
+        btnFsGridSizeInc?.addEventListener("click", () => setFullscreenGridSize(state.libraryFullscreenGridSize + 1));
+
+        if (fsGridSizeInput) {
+            fsGridSizeInput.addEventListener("input", (e) => {
+                const val = parseInt(e.target.value, 10);
+                if (!isNaN(val)) setFullscreenGridSize(val);
+            });
+            fsGridSizeInput.addEventListener("change", (e) => {
+                const val = parseInt(e.target.value, 10);
+                if (!isNaN(val)) setFullscreenGridSize(val);
+            });
+        }
+
+        if (fsGridSizeSlider) {
+            fsGridSizeSlider.addEventListener("input", (e) => {
+                const val = parseInt(e.target.value, 10);
+                if (!isNaN(val)) setFullscreenGridSize(val);
+            });
+        }
+
+        const fsPresets = document.querySelectorAll("#fs-grid-preset-chips .preset-chip");
+        fsPresets.forEach(chip => {
+            chip.addEventListener("click", () => {
+                const size = parseInt(chip.dataset.size, 10);
+                if (!isNaN(size)) setFullscreenGridSize(size);
+            });
+        });
+
+        btnFsGridNudgeUp?.addEventListener("click", () => nudgeFullscreenGridOffset(0, -1));
+        btnFsGridNudgeDown?.addEventListener("click", () => nudgeFullscreenGridOffset(0, 1));
+        btnFsGridNudgeLeft?.addEventListener("click", () => nudgeFullscreenGridOffset(-1, 0));
+        btnFsGridNudgeRight?.addEventListener("click", () => nudgeFullscreenGridOffset(1, 0));
+
+        btnFsGridAlignDrag?.addEventListener("click", () => toggleFullscreenGridAlignMode());
     }
 
     function setupLibraryControls() {
@@ -4194,6 +5218,29 @@
             if (canvas && !state.isDraggingGrid) {
                 canvas.classList.toggle("grid-aligning", e.shiftKey || state.gridAlignMode);
             }
+            if (libraryFullscreenCanvas?.parentElement && !state.libraryFullscreenIsDraggingGrid) {
+                libraryFullscreenCanvas.parentElement.classList.toggle("grid-aligning", e.shiftKey || state.libraryFullscreenGridAlignMode);
+            }
+
+            if (state.libraryFullscreenActive) {
+                if (state.libraryFullscreenIsDraggingGrid) {
+                    const imgDx = (e.clientX - state.libraryFullscreenGridDragStart.x) / state.libraryFullscreenZoom;
+                    const imgDy = (e.clientY - state.libraryFullscreenGridDragStart.y) / state.libraryFullscreenZoom;
+                    state.libraryFullscreenGridOffset.x = Math.round(state.libraryFullscreenGridOffsetStart.x + imgDx);
+                    state.libraryFullscreenGridOffset.y = Math.round(state.libraryFullscreenGridOffsetStart.y + imgDy);
+                    saveFullscreenMapGrid();
+                    updateFullscreenGridPanel();
+                    requestFullscreenRender();
+                    return;
+                }
+
+                if (state.libraryFullscreenIsPanning) {
+                    state.libraryFullscreenPan.x = e.clientX - state.libraryFullscreenPanStart.x;
+                    state.libraryFullscreenPan.y = e.clientY - state.libraryFullscreenPanStart.y;
+                    requestFullscreenRender();
+                    return;
+                }
+            }
 
             if (state.isDraggingGrid) {
                 const imgDx = (e.clientX - state.gridDragStart.x) / state.zoom;
@@ -4217,6 +5264,15 @@
         });
 
         window.addEventListener("mouseup", (e) => {
+            if (state.libraryFullscreenIsDraggingGrid) {
+                state.libraryFullscreenIsDraggingGrid = false;
+                saveFullscreenMapGrid();
+                libraryFullscreenCanvas?.parentElement?.classList.remove("grid-dragging");
+            }
+            if (state.libraryFullscreenIsPanning) {
+                state.libraryFullscreenIsPanning = false;
+                libraryFullscreenCanvas?.parentElement?.classList.remove("panning");
+            }
             if (state.isDraggingGrid) {
                 state.isDraggingGrid = false;
                 canvas.classList.remove("grid-dragging");
@@ -4349,8 +5405,8 @@
         setupDrawerControls();
         setupStorageControls();
         setupLibraryControls();
+        setupFullscreenControls();
         setupDecisionModalControls();
-
 
         // --- Keyboard Hotkey Dispatcher ---
         window.addEventListener("keydown", handleKeydown);
@@ -4358,6 +5414,8 @@
         window.addEventListener("blur", () => {
             stopPanLoop();
             stopZoomLoop();
+            stopFsPanLoop();
+            stopFsZoomLoop();
             if (state.isDraggingGrid) {
                 state.isDraggingGrid = false;
                 canvas.classList.remove("grid-dragging");
@@ -4365,12 +5423,25 @@
             if (canvas) {
                 canvas.classList.toggle("grid-aligning", state.gridAlignMode);
             }
+            if (state.libraryFullscreenIsDraggingGrid) {
+                state.libraryFullscreenIsDraggingGrid = false;
+                libraryFullscreenCanvas?.parentElement?.classList.remove("grid-dragging");
+            }
+            if (state.libraryFullscreenIsPanning) {
+                state.libraryFullscreenIsPanning = false;
+                libraryFullscreenCanvas?.parentElement?.classList.remove("panning");
+            }
+            if (libraryFullscreenCanvas?.parentElement) {
+                libraryFullscreenCanvas.parentElement.classList.toggle("grid-aligning", state.libraryFullscreenGridAlignMode);
+            }
         });
         window.addEventListener("focusin", (e) => {
             const tag = e.target?.tagName?.toLowerCase();
             if (tag === "input" || tag === "textarea" || tag === "select") {
                 stopPanLoop();
                 stopZoomLoop();
+                stopFsPanLoop();
+                stopFsZoomLoop();
             }
         });
     }
@@ -4431,6 +5502,15 @@
                 return;
             }
             if (state.currentView === "library") {
+                if (state.libraryFullscreenActive) {
+                    if (state.libraryFullscreenGridPanelOpen) {
+                        toggleFullscreenGridPanel(false);
+                    } else {
+                        closeLibraryFullscreen();
+                    }
+                    e.preventDefault();
+                    return;
+                }
                 if (isInputFocused) {
                     activeEl.blur();
                 } else if (state.libraryFocusedIndex !== -1) {
@@ -4713,23 +5793,38 @@
         if (canvas) {
             canvas.classList.toggle("grid-aligning", e.shiftKey || state.gridAlignMode);
         }
+        if (libraryFullscreenCanvas?.parentElement) {
+            libraryFullscreenCanvas.parentElement.classList.toggle("grid-aligning", e.shiftKey || state.libraryFullscreenGridAlignMode);
+        }
         const key = e.key.toLowerCase();
         if (key === "w" || key === "a" || key === "s" || key === "d") {
             activePanKeys[key] = false;
+            activeFsPanKeys[key] = false;
             if (!activePanKeys.w && !activePanKeys.a && !activePanKeys.s && !activePanKeys.d) {
                 stopPanLoop();
+            }
+            if (!activeFsPanKeys.w && !activeFsPanKeys.a && !activeFsPanKeys.s && !activeFsPanKeys.d) {
+                stopFsPanLoop();
             }
         }
         if (e.key === "]" || e.code === "BracketRight") {
             activeZoomKeys.in = false;
+            activeFsZoomKeys.in = false;
             if (!activeZoomKeys.in && !activeZoomKeys.out) {
                 stopZoomLoop();
+            }
+            if (!activeFsZoomKeys.in && !activeFsZoomKeys.out) {
+                stopFsZoomLoop();
             }
         }
         if (e.key === "[" || e.code === "BracketLeft") {
             activeZoomKeys.out = false;
+            activeFsZoomKeys.out = false;
             if (!activeZoomKeys.in && !activeZoomKeys.out) {
                 stopZoomLoop();
+            }
+            if (!activeFsZoomKeys.in && !activeFsZoomKeys.out) {
+                stopFsZoomLoop();
             }
         }
     }

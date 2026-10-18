@@ -433,6 +433,220 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Fullscreen Stage Overlay with Reused 2D Canvas & HUD Controls -->
+            <div id="library-fullscreen-overlay" class="fullscreen-overlay hidden" role="dialog" aria-modal="true" aria-label="Fullscreen Map Stage Overlay">
+                <div class="fullscreen-canvas-container" id="library-fullscreen-canvas-container">
+                    <canvas id="library-fullscreen-canvas" tabindex="0"></canvas>
+                </div>
+
+                <!-- Floating HUD overlay bar (glassmorphic) -->
+                <div id="library-fullscreen-hud" class="fullscreen-hud-bar" role="toolbar" aria-label="Fullscreen Controls">
+                    <!-- Map ID badge + dimensions + Counter badge (e.g. Map 3 of 12) -->
+                    <div class="hud-group hud-group-meta">
+                        <span id="fs-map-id-badge" class="hud-badge hud-badge-id mono" title="Curated Map ID">map-id</span>
+                        <span id="fs-map-dimensions" class="hud-badge hud-badge-dim mono" title="Map Dimensions">2048 × 2048</span>
+                        <span id="fs-map-counter" class="hud-badge hud-badge-counter mono" title="Curated Gallery Counter">Map 1 of 1</span>
+                    </div>
+
+                    <div class="hud-divider"></div>
+
+                    <!-- View & Inspection Controls -->
+                    <div class="hud-group hud-group-view">
+                        <!-- Grid toggle button (hotkey G) -->
+                        <button type="button" id="btn-fs-grid-toggle" class="btn-hud active" title="Toggle 64px VTT Grid Overlay (Hotkey: G)" aria-label="Toggle VTT Grid">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                                <line x1="3" y1="9" x2="21" y2="9"/>
+                                <line x1="3" y1="15" x2="21" y2="15"/>
+                                <line x1="9" y1="3" x2="9" y2="21"/>
+                                <line x1="15" y1="3" x2="15" y2="21"/>
+                            </svg>
+                            <span>Grid</span>
+                            <kbd>G</kbd>
+                        </button>
+
+                        <!-- Grid adjust toggle button (hotkey Shift+G) -->
+                        <button type="button" id="btn-fs-grid-adjust" class="btn-hud" title="Adjust Grid Calibration (Hotkey: Shift+G)" aria-label="Adjust Grid Calibration">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="3"/>
+                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                            </svg>
+                            <span>Calibrate</span>
+                            <kbd>⇧G</kbd>
+                        </button>
+
+                        <!-- Fit-to-screen button (hotkey F) -->
+                        <button type="button" id="btn-fs-fit" class="btn-hud" title="Fit to Screen (Hotkey: F or 0)" aria-label="Fit to Screen">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="15 3 21 3 21 9"/>
+                                <polyline points="9 21 3 21 3 15"/>
+                                <line x1="21" y1="3" x2="14" y2="10"/>
+                                <line x1="3" y1="21" x2="10" y2="14"/>
+                            </svg>
+                            <span>Fit</span>
+                            <kbd>F</kbd>
+                        </button>
+
+                        <!-- Zoom in/out buttons and zoom percentage readout ([ / ] or - / +) -->
+                        <div class="hud-zoom-controls">
+                            <button type="button" id="btn-fs-zoom-out" class="btn-hud btn-hud-icon" title="Zoom Out (Hotkey: [ or -)" aria-label="Zoom Out">
+                                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="5" y1="12" x2="19" y2="12"/>
+                                </svg>
+                            </button>
+                            <span id="fs-zoom-readout" class="hud-zoom-readout mono" title="Current Zoom Percentage (Hotkey: 1 for 100%, 0 for fit)">100%</span>
+                            <button type="button" id="btn-fs-zoom-in" class="btn-hud btn-hud-icon" title="Zoom In (Hotkey: ] or +)" aria-label="Zoom In">
+                                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="12" y1="5" x2="12" y2="19"/>
+                                    <line x1="5" y1="12" x2="19" y2="12"/>
+                                </svg>
+                            </button>
+                        </div>
+
+                        <!-- Onion-skin toggle button (hotkey O) -->
+                        <button type="button" id="btn-fs-onion-skin" class="btn-hud" title="Toggle Onion-Skin Ground Layer Overlay (Hotkey: O)" aria-label="Toggle Onion Skin">
+                            <span class="onion-dot"></span>
+                            <span>Onion</span>
+                            <kbd>O</kbd>
+                        </button>
+                    </div>
+
+                    <div class="hud-divider"></div>
+
+                    <!-- Gallery Navigation & Close Controls -->
+                    <div class="hud-group hud-group-nav">
+                        <!-- Prev / Next map buttons (hotkeys K / J or Left / Right) -->
+                        <button type="button" id="btn-fs-prev-map" class="btn-hud" title="Previous Curated Map (Hotkey: K or Left)" aria-label="Previous Map">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="15 18 9 12 15 6"/>
+                            </svg>
+                            <kbd>K</kbd>
+                        </button>
+                        <button type="button" id="btn-fs-next-map" class="btn-hud" title="Next Curated Map (Hotkey: J or Right)" aria-label="Next Map">
+                            <kbd>J</kbd>
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="9 18 15 12 9 6"/>
+                            </svg>
+                        </button>
+
+                        <!-- Close button (hotkey Esc) -->
+                        <button type="button" id="btn-fs-close" class="btn-hud btn-hud-close" title="Exit Fullscreen Stage (Hotkey: Esc)" aria-label="Close Fullscreen Stage">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="18" y1="6" x2="6" y2="18"/>
+                                <line x1="6" y1="6" x2="18" y2="18"/>
+                            </svg>
+                            <span>Close</span>
+                            <kbd>Esc</kbd>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Floating Grid Calibration Panel inside Fullscreen -->
+                <div id="library-fullscreen-grid-panel" class="grid-adjust-panel fullscreen-grid-panel hidden" role="dialog" aria-label="Fullscreen Grid Calibration Panel">
+                    <div class="grid-panel-header">
+                        <div class="grid-panel-title">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                                <line x1="3" y1="9" x2="21" y2="9"/>
+                                <line x1="3" y1="15" x2="21" y2="15"/>
+                                <line x1="9" y1="3" x2="9" y2="21"/>
+                                <line x1="15" y1="3" x2="15" y2="21"/>
+                            </svg>
+                            <span>Grid Calibration</span>
+                        </div>
+                        <button type="button" id="btn-fs-close-grid-panel" class="btn-panel-close" title="Close Panel (Esc)" aria-label="Close">✕</button>
+                    </div>
+
+                    <div class="grid-panel-section">
+                        <div class="grid-panel-row">
+                            <label for="fs-grid-size-input" class="grid-panel-label">Square Size</label>
+                            <div class="grid-size-controls">
+                                <button type="button" id="btn-fs-grid-size-dec" class="btn btn-icon btn-sm" title="Decrease Size (−1px)">−</button>
+                                <input type="number" id="fs-grid-size-input" class="grid-size-input mono" min="16" max="300" step="1" value="64">
+                                <span class="grid-unit mono">px</span>
+                                <button type="button" id="btn-fs-grid-size-inc" class="btn btn-icon btn-sm" title="Increase Size (+1px)">+</button>
+                            </div>
+                        </div>
+                        <input type="range" id="fs-grid-size-slider" class="grid-slider" min="16" max="256" step="1" value="64">
+
+                        <div class="grid-presets">
+                            <span class="presets-label">Presets:</span>
+                            <div class="preset-chips" id="fs-grid-preset-chips">
+                                <button type="button" class="preset-chip" data-size="32">32px</button>
+                                <button type="button" class="preset-chip" data-size="50">50px</button>
+                                <button type="button" class="preset-chip active" data-size="64">64px</button>
+                                <button type="button" class="preset-chip" data-size="70">70px</button>
+                                <button type="button" class="preset-chip" data-size="100">100px</button>
+                                <button type="button" class="preset-chip" data-size="128">128px</button>
+                                <button type="button" class="preset-chip" data-size="140">140px</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid-panel-section">
+                        <div class="grid-panel-row">
+                            <span class="grid-panel-label">Grid Offset</span>
+                            <div class="grid-offset-readout mono">
+                                <span>X: <span id="fs-grid-offset-x-val">0</span>px</span>
+                                <span>Y: <span id="fs-grid-offset-y-val">0</span>px</span>
+                            </div>
+                        </div>
+
+                        <div class="grid-alignment-controls">
+                            <div class="grid-nudge-pad">
+                                <button type="button" id="btn-fs-grid-nudge-up" class="btn btn-icon btn-sm nudge-btn" title="Nudge Up (Shift+↑)">▲</button>
+                                <div class="nudge-mid-row">
+                                    <button type="button" id="btn-fs-grid-nudge-left" class="btn btn-icon btn-sm nudge-btn" title="Nudge Left (Shift+←)">◀</button>
+                                    <button type="button" id="btn-fs-grid-align-drag" class="btn btn-tool btn-sm btn-align-mode" title="Toggle Drag-to-Align mode on canvas">
+                                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="5 9 2 12 5 15"/>
+                                            <polyline points="9 5 12 2 15 5"/>
+                                            <polyline points="15 19 12 22 9 19"/>
+                                            <polyline points="19 9 22 12 19 15"/>
+                                            <line x1="2" y1="12" x2="22" y2="12"/>
+                                            <line x1="12" y1="2" x2="12" y2="22"/>
+                                        </svg>
+                                        <span>Align</span>
+                                    </button>
+                                    <button type="button" id="btn-fs-grid-nudge-right" class="btn btn-icon btn-sm nudge-btn" title="Nudge Right (Shift+→)">▶</button>
+                                </div>
+                                <button type="button" id="btn-fs-grid-nudge-down" class="btn btn-icon btn-sm nudge-btn" title="Nudge Down (Shift+↓)">▼</button>
+                            </div>
+
+                            <div class="grid-drag-hint">
+                                <span>Tip: Hold <kbd>Shift</kbd> + drag on map to align grid</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid-panel-footer">
+                        <button type="button" id="btn-fs-grid-reset" class="btn btn-secondary btn-sm" title="Reset to 64px, (0, 0)">Reset</button>
+                        <button type="button" id="btn-fs-grid-done" class="btn btn-primary btn-sm">Done</button>
+                    </div>
+                </div>
+
+                <!-- Bottom layer deck filmstrip #library-fullscreen-layer-deck -->
+                <div id="library-fullscreen-layer-deck" class="fullscreen-layer-deck hidden" aria-label="Map Layer Deck">
+                    <div class="fs-layer-deck-header">
+                        <div class="fs-layer-deck-title">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+                                <polyline points="2 17 12 22 22 17"/>
+                                <polyline points="2 12 12 17 22 12"/>
+                            </svg>
+                            <span>Bundle Layers</span>
+                            <span id="fs-layer-deck-count" class="mono text-muted">(1 / 1)</span>
+                        </div>
+                        <div class="fs-layer-deck-hint">
+                            <span>Press <kbd>1</kbd>–<kbd>6</kbd> to switch layer</span>
+                        </div>
+                    </div>
+                    <div id="fs-layer-filmstrip-strip" class="fs-layer-filmstrip-strip" role="tablist" aria-label="Bundle Layers Filmstrip">
+                        <!-- Populated dynamically by app.js -->
+                    </div>
+                </div>
+            </div>
         </section>
 
 

@@ -580,6 +580,23 @@ pub async fn post_curate(
         return Err(ApiError::bad_request("At least 1 layer must be included"));
     }
 
+    // Validate 16x16 full grid cell curation gate on Ground layer
+    let (ground_w, ground_h) = layers_to_check
+        .iter()
+        .find(|l| l.role == LayerRole::Ground)
+        .or_else(|| layers_to_check.iter().find(|l| l.index == 0))
+        .map(|l| l.dimensions)
+        .filter(|&(w, h)| w > 0 && h > 0)
+        .unwrap_or(dimensions);
+
+    if !candidate.grid.is_curation_eligible(ground_w, ground_h) {
+        let (cols, rows) = candidate.grid.lattice_dimensions(ground_w, ground_h);
+        return Err(ApiError::bad_request(format!(
+            "Candidate Ground layer yields fewer than 16×16 full Grid Cells ({}×{} cells); minimum 16×16 required for curation",
+            cols, rows
+        )));
+    }
+
     // If request provided layers, update them in staging before curation
     if let Some(layers) = payload.layers {
         state.storage.update_staging_layers(&payload.id, layers)?;

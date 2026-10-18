@@ -156,12 +156,13 @@
     let canvas, ctx;
     let statusIndicator, statusText;
     let candidateMetaBox, queueCounter, candidateId, candidateDimensions, candidateSource;
-    let zoomLevelDisplay, hudPanZoom, hudGridStatus, hudResolution, hudPrefetchStatus;
+    let zoomLevelDisplay, hudPanZoom, hudGridStatus, hudLatticeStatus, hudResolution, hudPrefetchStatus;
     let btnGridToggle, btnFitScreen, btnPrev, btnNext, btnReject, btnCurate;
     // Grid Adjustment DOM Elements
     let btnGridAdjust, gridAdjustPanel, btnCloseGridPanel;
     let btnGridSizeDec, btnGridSizeInc, gridSizeInput, gridSizeSlider;
     let gridOffsetXVal, gridOffsetYVal;
+    let gridLatticeCells, gridLatticeSections;
     let btnGridNudgeUp, btnGridNudgeDown, btnGridNudgeLeft, btnGridNudgeRight;
     let btnGridAlignDrag, btnGridReset, btnGridDone;
     let emptyState, loadingOverlay, loadingText;
@@ -217,7 +218,7 @@
     // Fullscreen Stage Overlay DOM Elements (Issue #134)
     let libraryFullscreenOverlay, libraryFullscreenCanvas, libraryFullscreenCtx;
     let libraryFullscreenHud;
-    let fsMapIdBadge, fsMapDimensions, fsMapCounter;
+    let fsMapIdBadge, fsMapDimensions, fsGridStatusBadge, fsMapCounter;
     let btnFsGridToggle, btnFsGridAdjust, btnFsFit;
     let btnFsZoomOut, btnFsZoomIn, fsZoomReadout;
     let btnFsOnionSkin;
@@ -225,6 +226,7 @@
     let libraryFullscreenGridPanel, btnFsCloseGridPanel;
     let btnFsGridSizeDec, btnFsGridSizeInc, fsGridSizeInput, fsGridSizeSlider;
     let fsGridOffsetXVal, fsGridOffsetYVal;
+    let fsGridLatticeCells, fsGridLatticeSections;
     let btnFsGridNudgeUp, btnFsGridNudgeDown, btnFsGridNudgeLeft, btnFsGridNudgeRight;
     let btnFsGridAlignDrag, btnFsGridReset, btnFsGridDone;
     let libraryFullscreenLayerDeck, fsLayerFilmstripStrip, fsLayerDeckCount;
@@ -277,6 +279,7 @@
         zoomLevelDisplay = document.getElementById("zoom-level");
         hudPanZoom = document.getElementById("hud-pan-zoom");
         hudGridStatus = document.getElementById("hud-grid-status");
+        hudLatticeStatus = document.getElementById("hud-lattice-status");
         hudResolution = document.getElementById("hud-resolution");
         hudPrefetchStatus = document.getElementById("hud-prefetch-status");
 
@@ -290,6 +293,8 @@
         gridSizeSlider = document.getElementById("grid-size-slider");
         gridOffsetXVal = document.getElementById("grid-offset-x-val");
         gridOffsetYVal = document.getElementById("grid-offset-y-val");
+        gridLatticeCells = document.getElementById("grid-lattice-cells");
+        gridLatticeSections = document.getElementById("grid-lattice-sections");
         btnGridNudgeUp = document.getElementById("btn-grid-nudge-up");
         btnGridNudgeDown = document.getElementById("btn-grid-nudge-down");
         btnGridNudgeLeft = document.getElementById("btn-grid-nudge-left");
@@ -451,6 +456,7 @@
         libraryFullscreenHud = document.getElementById("library-fullscreen-hud");
         fsMapIdBadge = document.getElementById("fs-map-id-badge");
         fsMapDimensions = document.getElementById("fs-map-dimensions");
+        fsGridStatusBadge = document.getElementById("fs-grid-status-badge");
         fsMapCounter = document.getElementById("fs-map-counter");
         btnFsGridToggle = document.getElementById("btn-fs-grid-toggle");
         btnFsGridAdjust = document.getElementById("btn-fs-grid-adjust");
@@ -470,6 +476,8 @@
         fsGridSizeSlider = document.getElementById("fs-grid-size-slider");
         fsGridOffsetXVal = document.getElementById("fs-grid-offset-x-val");
         fsGridOffsetYVal = document.getElementById("fs-grid-offset-y-val");
+        fsGridLatticeCells = document.getElementById("fs-grid-lattice-cells");
+        fsGridLatticeSections = document.getElementById("fs-grid-lattice-sections");
         btnFsGridNudgeUp = document.getElementById("btn-fs-grid-nudge-up");
         btnFsGridNudgeDown = document.getElementById("btn-fs-grid-nudge-down");
         btnFsGridNudgeLeft = document.getElementById("btn-fs-grid-nudge-left");
@@ -568,6 +576,104 @@
     }
 
     /**
+     * Calculates the full-grid lattice dimensions, section counts, and eligibility.
+     */
+    function calculateLatticeInfo(width, height, cellSize, offsetX, offsetY) {
+        const size = Math.max(16, cellSize || 64);
+        const ox = ((Math.round(offsetX || 0) % size) + size) % size;
+        const oy = ((Math.round(offsetY || 0) % size) + size) % size;
+        const cols = Math.floor(Math.max(0, (width || 0) - ox) / size);
+        const rows = Math.floor(Math.max(0, (height || 0) - oy) / size);
+        const isEligible = cols >= 16 && rows >= 16;
+        const kx = isEligible ? Math.ceil(cols / 16) : null;
+        const ky = isEligible ? Math.ceil(rows / 16) : null;
+        return {
+            size,
+            ox,
+            oy,
+            cols,
+            rows,
+            isEligible,
+            kx,
+            ky,
+            fullW: cols * size,
+            fullH: rows * size,
+        };
+    }
+
+    /**
+     * Retrieves Ground layer dimensions for the current triage candidate.
+     */
+    function getCurrentGroundDimensions() {
+        const cand = state.candidates && state.candidates[state.currentIndex];
+        if (cand) {
+            const layers = getCandidateLayers(cand);
+            const ground = layers.find(l => {
+                const r = (l.role || "").toLowerCase().replace(/[-_]/g, "");
+                return r === "ground";
+            });
+            if (ground && ground.dimensions && ground.dimensions[0] > 0 && ground.dimensions[1] > 0) {
+                return { width: ground.dimensions[0], height: ground.dimensions[1] };
+            }
+            const l0 = layers.find(l => l.index === 0);
+            if (l0 && l0.dimensions && l0.dimensions[0] > 0 && l0.dimensions[1] > 0) {
+                return { width: l0.dimensions[0], height: l0.dimensions[1] };
+            }
+            if (layers.length > 0 && layers[0].dimensions && layers[0].dimensions[0] > 0 && layers[0].dimensions[1] > 0) {
+                return { width: layers[0].dimensions[0], height: layers[0].dimensions[1] };
+            }
+            if (cand.dimensions && Array.isArray(cand.dimensions) && cand.dimensions[0] > 0 && cand.dimensions[1] > 0) {
+                return { width: cand.dimensions[0], height: cand.dimensions[1] };
+            }
+            if (cand.dimensions && cand.dimensions.width && cand.dimensions.height) {
+                return { width: cand.dimensions.width, height: cand.dimensions.height };
+            }
+        }
+        if (state.currentImage && state.currentImage.naturalWidth > 0) {
+            return { width: state.currentImage.naturalWidth, height: state.currentImage.naturalHeight };
+        }
+        return { width: 2048, height: 2048 };
+    }
+
+    /**
+     * Retrieves Ground layer dimensions for the current fullscreen map.
+     */
+    function getLibraryFullscreenDimensions() {
+        if (state.libraryFullscreenMap) {
+            const map = state.libraryFullscreenMap;
+            if (map.layers && Array.isArray(map.layers) && map.layers.length > 0) {
+                const ground = map.layers.find(l => {
+                    const r = (l.role || "").toLowerCase().replace(/[-_]/g, "");
+                    return r === "ground";
+                });
+                if (ground && ground.dimensions && ground.dimensions[0] > 0 && ground.dimensions[1] > 0) {
+                    return { width: ground.dimensions[0], height: ground.dimensions[1] };
+                }
+                const l0 = map.layers.find(l => l.index === 0);
+                if (l0 && l0.dimensions && l0.dimensions[0] > 0 && l0.dimensions[1] > 0) {
+                    return { width: l0.dimensions[0], height: l0.dimensions[1] };
+                }
+                if (map.layers[0].dimensions && map.layers[0].dimensions[0] > 0 && map.layers[0].dimensions[1] > 0) {
+                    return { width: map.layers[0].dimensions[0], height: map.layers[0].dimensions[1] };
+                }
+            }
+            if (map.dimensions && Array.isArray(map.dimensions) && map.dimensions[0] > 0 && map.dimensions[1] > 0) {
+                return { width: map.dimensions[0], height: map.dimensions[1] };
+            }
+            if (map.dimensions && map.dimensions.width && map.dimensions.height) {
+                return { width: map.dimensions.width, height: map.dimensions.height };
+            }
+        }
+        if (state.libraryFullscreenCurrentImage && state.libraryFullscreenCurrentImage.naturalWidth > 0) {
+            return {
+                width: state.libraryFullscreenCurrentImage.naturalWidth,
+                height: state.libraryFullscreenCurrentImage.naturalHeight,
+            };
+        }
+        return { width: 2048, height: 2048 };
+    }
+
+    /**
      * High-performance 60fps Canvas 2D render loop.
      * Applies devicePixelRatio scaling, pan/zoom transformation matrix,
      * draws the battlemap, and renders the single-draw-call 64px VTT grid overlay.
@@ -622,9 +728,10 @@
             // Draw active layer battlemap at origin (0, 0)
             ctx.globalAlpha = 1.0;
             ctx.drawImage(img, 0, 0, imgW, imgH);
+            const isCalibrationActive = Boolean(state.gridPanelOpen || state.gridAlignMode || state.isDraggingGrid);
             // Draw crisp 64px VTT grid overlay in image space
-            if (state.gridVisible) {
-                drawVttGrid(ctx, imgW, imgH);
+            if (state.gridVisible || isCalibrationActive) {
+                drawVttGrid(ctx, imgW, imgH, isCalibrationActive);
             }
 
             // Draw image bounding border
@@ -644,26 +751,42 @@
      * Single-draw-call crisp 64px VTT grid overlay.
      * Evaluates 5ft D&D tactical scale, door alignment, and poché wall consistency.
      */
-    function drawVttGrid(c, width, height) {
+    function drawVttGrid(c, width, height, isCalibrationActive = false) {
         c.save();
         c.beginPath();
         c.rect(0, 0, width, height);
         c.clip();
 
         const size = state.gridSize || VTT_GRID_SIZE;
-        const startX = ((Math.round(state.gridOffset.x) % size) + size) % size;
-        const startY = ((Math.round(state.gridOffset.y) % size) + size) % size;
+        const ox = ((Math.round(state.gridOffset.x) % size) + size) % size;
+        const oy = ((Math.round(state.gridOffset.y) % size) + size) % size;
+        const cols = Math.floor(Math.max(0, width - ox) / size);
+        const rows = Math.floor(Math.max(0, height - oy) / size);
+        const fullW = cols * size;
+        const fullH = rows * size;
+
+        // When calibration panel or align mode is active:
+        // Shade/dim discarded partial edge strips outside the active full-grid lattice [ox, oy, fullW, fullH]
+        if (isCalibrationActive && (cols > 0 || rows > 0)) {
+            c.save();
+            c.beginPath();
+            c.rect(0, 0, width, height);
+            c.rect(ox, oy, fullW, fullH);
+            c.fillStyle = "rgba(10, 15, 30, 0.65)";
+            c.fill("evenodd");
+            c.restore();
+        }
 
         c.beginPath();
 
         // Vertical grid lines
-        for (let x = startX; x <= width; x += size) {
+        for (let x = ox; x <= width; x += size) {
             c.moveTo(x, 0);
             c.lineTo(x, height);
         }
 
         // Horizontal grid lines
-        for (let y = startY; y <= height; y += size) {
+        for (let y = oy; y <= height; y += size) {
             c.moveTo(0, y);
             c.lineTo(width, y);
         }
@@ -672,6 +795,19 @@
         c.lineWidth = Math.max(0.5, 1.0 / state.zoom);
         c.strokeStyle = "rgba(56, 189, 248, 0.4)";
         c.stroke();
+
+        // Draw boundary border around active full grid
+        if (isCalibrationActive && cols > 0 && rows > 0) {
+            c.save();
+            c.beginPath();
+            c.rect(ox, oy, fullW, fullH);
+            c.lineWidth = Math.max(1.5, 2.5 / state.zoom);
+            const isEligible = cols >= 16 && rows >= 16;
+            c.strokeStyle = isEligible ? "rgba(56, 189, 248, 0.95)" : "rgba(244, 63, 94, 0.95)";
+            c.stroke();
+            c.restore();
+        }
+
         c.restore();
     }
 
@@ -1814,6 +1950,15 @@
         if (!validateCandidateLayers(candidate)) {
             return;
         }
+
+        // 16×16 Full-Grid Lattice Curation Gate
+        const dims = getCurrentGroundDimensions();
+        const lattice = calculateLatticeInfo(dims.width, dims.height, state.gridSize, state.gridOffset.x, state.gridOffset.y);
+        if (!lattice.isEligible) {
+            showToast(`Map has only ${lattice.cols}×${lattice.rows} full Grid Cells; at least 16×16 required for curation`, "danger");
+            toggleGridPanel(true);
+            return;
+        }
         // If suggestions are still being fetched, wait for them
         if (candidate._fetchPromise || (candidate._themeSuggestions === undefined && !candidate._suggestionsOffline)) {
             await fetchThemeSuggestions(candidate);
@@ -2299,6 +2444,15 @@
         // Curate Validation Gate: validate layers upfront before opening decision modal
         const candidate = state.candidates[state.currentIndex];
         if (!validateCandidateLayers(candidate)) {
+            return;
+        }
+
+        // 16×16 Full-Grid Lattice Curation Gate
+        const dims = getCurrentGroundDimensions();
+        const lattice = calculateLatticeInfo(dims.width, dims.height, state.gridSize, state.gridOffset.x, state.gridOffset.y);
+        if (!lattice.isEligible) {
+            showToast(`Map has only ${lattice.cols}×${lattice.rows} full Grid Cells; at least 16×16 required for curation`, "danger");
+            toggleGridPanel(true);
             return;
         }
 
@@ -4876,9 +5030,14 @@
             c.globalAlpha = 1.0;
             c.drawImage(img, 0, 0, imgW, imgH);
 
+            const isFsCalibrationActive = Boolean(
+                state.libraryFullscreenGridPanelOpen ||
+                state.libraryFullscreenGridAlignMode ||
+                state.libraryFullscreenIsDraggingGrid
+            );
             // Draw crisp 64px VTT grid overlay in image space
-            if (state.libraryFullscreenGridVisible) {
-                drawFullscreenVttGrid(c, imgW, imgH);
+            if (state.libraryFullscreenGridVisible || isFsCalibrationActive) {
+                drawFullscreenVttGrid(c, imgW, imgH, isFsCalibrationActive);
             }
 
             // Draw image bounding border
@@ -4897,26 +5056,42 @@
     /**
      * Single-draw-call crisp 64px VTT grid overlay for Fullscreen Stage.
      */
-    function drawFullscreenVttGrid(c, width, height) {
+    function drawFullscreenVttGrid(c, width, height, isCalibrationActive = false) {
         c.save();
         c.beginPath();
         c.rect(0, 0, width, height);
         c.clip();
 
         const size = state.libraryFullscreenGridSize || VTT_GRID_SIZE;
-        const startX = ((Math.round(state.libraryFullscreenGridOffset.x) % size) + size) % size;
-        const startY = ((Math.round(state.libraryFullscreenGridOffset.y) % size) + size) % size;
+        const ox = ((Math.round(state.libraryFullscreenGridOffset.x) % size) + size) % size;
+        const oy = ((Math.round(state.libraryFullscreenGridOffset.y) % size) + size) % size;
+        const cols = Math.floor(Math.max(0, width - ox) / size);
+        const rows = Math.floor(Math.max(0, height - oy) / size);
+        const fullW = cols * size;
+        const fullH = rows * size;
+
+        // When calibration panel or align mode is active:
+        // Shade/dim discarded partial edge strips outside the active full-grid lattice [ox, oy, fullW, fullH]
+        if (isCalibrationActive && (cols > 0 || rows > 0)) {
+            c.save();
+            c.beginPath();
+            c.rect(0, 0, width, height);
+            c.rect(ox, oy, fullW, fullH);
+            c.fillStyle = "rgba(10, 15, 30, 0.65)";
+            c.fill("evenodd");
+            c.restore();
+        }
 
         c.beginPath();
 
         // Vertical grid lines
-        for (let x = startX; x <= width; x += size) {
+        for (let x = ox; x <= width; x += size) {
             c.moveTo(x, 0);
             c.lineTo(x, height);
         }
 
         // Horizontal grid lines
-        for (let y = startY; y <= height; y += size) {
+        for (let y = oy; y <= height; y += size) {
             c.moveTo(0, y);
             c.lineTo(width, y);
         }
@@ -4924,6 +5099,19 @@
         c.lineWidth = Math.max(0.5, 1.0 / state.libraryFullscreenZoom);
         c.strokeStyle = "rgba(56, 189, 248, 0.4)";
         c.stroke();
+
+        // Draw boundary border around active full grid
+        if (isCalibrationActive && cols > 0 && rows > 0) {
+            c.save();
+            c.beginPath();
+            c.rect(ox, oy, fullW, fullH);
+            c.lineWidth = Math.max(1.5, 2.5 / state.libraryFullscreenZoom);
+            const isEligible = cols >= 16 && rows >= 16;
+            c.strokeStyle = isEligible ? "rgba(56, 189, 248, 0.95)" : "rgba(244, 63, 94, 0.95)";
+            c.stroke();
+            c.restore();
+        }
+
         c.restore();
     }
 
@@ -5261,6 +5449,23 @@
         if (btnFsNextMap) {
             btnFsNextMap.disabled = !state.libraryFilteredMaps || state.libraryFullscreenIndex >= state.libraryFilteredMaps.length - 1;
         }
+        if (fsGridStatusBadge) {
+            const fsDims = getLibraryFullscreenDimensions();
+            const fsLattice = calculateLatticeInfo(
+                fsDims.width,
+                fsDims.height,
+                state.libraryFullscreenGridSize,
+                state.libraryFullscreenGridOffset.x,
+                state.libraryFullscreenGridOffset.y
+            );
+            if (fsLattice.isEligible) {
+                fsGridStatusBadge.textContent = `${fsLattice.cols} × ${fsLattice.rows} cells (${fsLattice.kx} × ${fsLattice.ky} sections)`;
+                fsGridStatusBadge.classList.remove("hud-badge-warning");
+            } else {
+                fsGridStatusBadge.textContent = `${fsLattice.cols} × ${fsLattice.rows} cells (< 16×16 cells)`;
+                fsGridStatusBadge.classList.add("hud-badge-warning");
+            }
+        }
     }
 
     function renderFullscreenLayerDeck() {
@@ -5368,6 +5573,10 @@
         if (btnFsGridAdjust) {
             btnFsGridAdjust.classList.toggle("active", state.libraryFullscreenGridPanelOpen);
         }
+        if (state.libraryFullscreenGridPanelOpen) {
+            updateFullscreenGridPanel();
+        }
+        requestFullscreenRender();
     }
 
     function updateFullscreenGridPanel() {
@@ -5384,6 +5593,27 @@
             const chipSize = parseInt(chip.dataset.size, 10);
             chip.classList.toggle("active", chipSize === size);
         });
+
+        const fsDims = getLibraryFullscreenDimensions();
+        const fsLattice = calculateLatticeInfo(
+            fsDims.width,
+            fsDims.height,
+            state.libraryFullscreenGridSize,
+            state.libraryFullscreenGridOffset.x,
+            state.libraryFullscreenGridOffset.y
+        );
+        if (fsGridLatticeCells) {
+            fsGridLatticeCells.textContent = `${fsLattice.cols} × ${fsLattice.rows} cells`;
+        }
+        if (fsGridLatticeSections) {
+            if (fsLattice.isEligible) {
+                fsGridLatticeSections.textContent = `${fsLattice.kx} × ${fsLattice.ky} sections`;
+                fsGridLatticeSections.className = "grid-lattice-sections-val mono badge-sections badge-sections-valid";
+            } else {
+                fsGridLatticeSections.textContent = "< 16×16 cells";
+                fsGridLatticeSections.className = "grid-lattice-sections-val mono badge-sections badge-sections-warning";
+            }
+        }
     }
 
     let saveFullscreenGridTimeout = null;
@@ -5425,6 +5655,7 @@
         state.libraryFullscreenGridSize = clamped;
         saveFullscreenMapGrid();
         updateFullscreenGridPanel();
+        updateFullscreenHud();
         requestFullscreenRender();
     }
 
@@ -5433,6 +5664,7 @@
         state.libraryFullscreenGridOffset.y = Math.round(state.libraryFullscreenGridOffset.y + dy);
         saveFullscreenMapGrid();
         updateFullscreenGridPanel();
+        updateFullscreenHud();
         requestFullscreenRender();
     }
 
@@ -5441,6 +5673,7 @@
         state.libraryFullscreenGridOffset = { x: 0, y: 0 };
         saveFullscreenMapGrid();
         updateFullscreenGridPanel();
+        updateFullscreenHud();
         requestFullscreenRender();
     }
 
@@ -5452,6 +5685,7 @@
         if (libraryFullscreenCanvas && libraryFullscreenCanvas.parentElement) {
             libraryFullscreenCanvas.parentElement.classList.toggle("grid-aligning", state.libraryFullscreenGridAlignMode);
         }
+        requestFullscreenRender();
     }
 
     // --- Fullscreen Open & Close Lifecycle ---
@@ -7195,6 +7429,7 @@
         if (state.gridPanelOpen) {
             updateGridPanel();
         }
+        requestRender();
     }
 
     function toggleGridAlignMode(force) {
@@ -7205,6 +7440,7 @@
         if (canvas) {
             canvas.classList.toggle("grid-aligning", state.gridAlignMode);
         }
+        requestRender();
     }
 
     function updateGridPanel() {
@@ -7227,6 +7463,21 @@
             const sz = parseInt(chip.getAttribute("data-size"), 10);
             chip.classList.toggle("active", sz === state.gridSize);
         });
+
+        const dims = getCurrentGroundDimensions();
+        const lattice = calculateLatticeInfo(dims.width, dims.height, state.gridSize, state.gridOffset.x, state.gridOffset.y);
+        if (gridLatticeCells) {
+            gridLatticeCells.textContent = `${lattice.cols} × ${lattice.rows} cells`;
+        }
+        if (gridLatticeSections) {
+            if (lattice.isEligible) {
+                gridLatticeSections.textContent = `${lattice.kx} × ${lattice.ky} sections`;
+                gridLatticeSections.className = "grid-lattice-sections-val mono badge-sections badge-sections-valid";
+            } else {
+                gridLatticeSections.textContent = "< 16×16 cells";
+                gridLatticeSections.className = "grid-lattice-sections-val mono badge-sections badge-sections-warning";
+            }
+        }
     }
 
     function toggleGrid() {
@@ -7297,6 +7548,18 @@
             hudGridStatus.textContent = `Grid: ${size}px (${signX}, ${signY}) [${state.gridVisible ? "ON" : "OFF"}]`;
         } else {
             hudGridStatus.textContent = `Grid: ${size}px [${state.gridVisible ? "ON" : "OFF"}]`;
+        }
+
+        if (hudLatticeStatus) {
+            const dims = getCurrentGroundDimensions();
+            const lattice = calculateLatticeInfo(dims.width, dims.height, state.gridSize, state.gridOffset.x, state.gridOffset.y);
+            if (lattice.isEligible) {
+                hudLatticeStatus.textContent = `${lattice.cols} × ${lattice.rows} cells (${lattice.kx} × ${lattice.ky} sections)`;
+                hudLatticeStatus.classList.remove("hud-warning");
+            } else {
+                hudLatticeStatus.textContent = `${lattice.cols} × ${lattice.rows} cells (< 16×16 cells)`;
+                hudLatticeStatus.classList.add("hud-warning");
+            }
         }
 
         if (state.currentImage && state.currentImage.complete) {

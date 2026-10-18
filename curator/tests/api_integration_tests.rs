@@ -13,8 +13,8 @@ use curator::api::{create_router, AppState, DescribeResponse, SuggestThemesRespo
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use curator::ports::cost_tracker::{CostTracker, GenerationCostRecord};
 use curator::domain::{
-    Candidate, CandidateLayer, CuratedMap, HarvestedMedia, LayerRole, ParsedTags, RedditHarvestQuery,
-    RedditPost, Source, Theme,
+    Candidate, CandidateLayer, CuratedMap, GridConfig, HarvestedMedia, LayerRole, ParsedTags,
+    RedditHarvestQuery, RedditPost, Source, Theme,
 };
 use curator::ports::harvester::{HarvesterError, RedditHarvester};
 use curator::ports::storage::StorageRepository;
@@ -1319,10 +1319,10 @@ async fn test_api_layer_image_retrieval() {
     let img0 = b"\x89PNG\r\n\x1a\nlayer0_bytes_staging";
     let img1 = b"\x89PNG\r\n\x1a\nlayer1_bytes_staging";
 
-    let mut cand = Candidate::with_now("bundle_img_test", Source::Reddit, "0.png", (1000, 1000));
+    let mut cand = Candidate::with_now("bundle_img_test", Source::Reddit, "0.png", (1024, 1024));
     cand.layers = vec![
-        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1000, 1000)),
-        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1000, 1000)),
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1024, 1024)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1024, 1024)),
     ];
     storage
         .save_staging_bundle(None, &cand, &[img0.to_vec(), img1.to_vec()])
@@ -1438,10 +1438,10 @@ async fn test_api_curate_bundle_validation_and_success() {
 
     // Case A: Bundle in staging with Unassigned layer is rejected with 400
     let mut cand_unassigned =
-        Candidate::with_now("cand_unassigned", Source::Reddit, "0.png", (800, 600));
+        Candidate::with_now("cand_unassigned", Source::Reddit, "0.png", (1024, 1024));
     cand_unassigned.layers = vec![
-        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (800, 600)),
-        CandidateLayer::new(1, "1.png", LayerRole::Unassigned, None, (800, 600)),
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1024, 1024)),
+        CandidateLayer::new(1, "1.png", LayerRole::Unassigned, None, (1024, 1024)),
     ];
     storage
         .save_staging_bundle(None, &cand_unassigned, &[img0.to_vec(), img1.to_vec()])
@@ -1472,10 +1472,10 @@ async fn test_api_curate_bundle_validation_and_success() {
 
     // Case B: Bundle in staging with all Exclude layers is rejected with 400
     let mut cand_excluded =
-        Candidate::with_now("cand_excluded", Source::Reddit, "0.png", (800, 600));
+        Candidate::with_now("cand_excluded", Source::Reddit, "0.png", (1024, 1024));
     cand_excluded.layers = vec![
-        CandidateLayer::new(0, "0.png", LayerRole::Exclude, None, (800, 600)),
-        CandidateLayer::new(1, "1.png", LayerRole::Exclude, None, (800, 600)),
+        CandidateLayer::new(0, "0.png", LayerRole::Exclude, None, (1024, 1024)),
+        CandidateLayer::new(1, "1.png", LayerRole::Exclude, None, (1024, 1024)),
     ];
     storage
         .save_staging_bundle(None, &cand_excluded, &[img0.to_vec(), img1.to_vec()])
@@ -1521,14 +1521,14 @@ async fn test_api_curate_bundle_validation_and_success() {
                         "filename": "0.png",
                         "role": "ground",
                         "elevation": 0,
-                        "dimensions": [800, 600]
+                        "dimensions": [1024, 1024]
                     },
                     {
                         "index": 1,
                         "filename": "1.png",
                         "role": "upper_floor",
                         "elevation": 1,
-                        "dimensions": [800, 600]
+                        "dimensions": [1024, 1024]
                     }
                 ]
             })
@@ -2360,7 +2360,7 @@ async fn test_staging_grid_patch_and_curation_persistence() {
     let (app, storage, _dir) = setup_test_app();
 
     // Stage candidate with default grid (64, 0, 0)
-    let cand = Candidate::with_now("cand_grid_test", Source::Reddit, "cand_grid_test.png", (1024, 1024));
+    let cand = Candidate::with_now("cand_grid_test", Source::Reddit, "cand_grid_test.png", (2560, 2560));
     let dummy_image = create_test_png();
     storage.save_staging(&cand, &dummy_image).unwrap();
 
@@ -2448,4 +2448,187 @@ async fn test_staging_grid_patch_and_curation_persistence() {
     assert_eq!(persisted_curated.grid.cell_size_px, 70);
     assert_eq!(persisted_curated.grid.offset_x, 5);
     assert_eq!(persisted_curated.grid.offset_y, 15);
+}
+
+#[tokio::test]
+async fn test_api_curate_gate_rejects_undersized_grid() {
+    let (app, storage, _dir) = setup_test_app();
+
+    // 1. Single-image candidate with < 16 full cells (e.g. 800x600 px with 64px grid -> 12x9 cells)
+    let small_cand = Candidate::with_now("small_map", Source::Reddit, "small.png", (800, 600));
+    storage.save_staging(&small_cand, b"\x89PNG\r\n\x1a\nsmall").unwrap();
+
+    let curate_req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "small_map",
+                "theme": "dungeon"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.clone().oneshot(curate_req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json_err: Value = serde_json::from_slice(&body).unwrap();
+    let err_msg = json_err["error"].as_str().unwrap();
+    assert!(
+        err_msg.contains("Candidate Ground layer yields fewer than 16×16 full Grid Cells"),
+        "Unexpected error message: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("12×9 cells"),
+        "Unexpected error message: {}",
+        err_msg
+    );
+
+    // 2. Candidate with Ground layer having offset that pushes full cells below 16
+    // 1024x1024 with 64px is normally 16x16, but offset_x = 10 -> (1024-10)/64 = 15 cols
+    let mut offset_cand = Candidate::with_now("offset_map", Source::Reddit, "offset.png", (1024, 1024));
+    offset_cand.grid = GridConfig::new(64, 10, 0);
+    storage.save_staging(&offset_cand, b"\x89PNG\r\n\x1a\noffset").unwrap();
+
+    let offset_req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "offset_map",
+                "theme": "cave"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp_offset = app.clone().oneshot(offset_req).await.unwrap();
+    assert_eq!(resp_offset.status(), StatusCode::BAD_REQUEST);
+    let body_offset = to_bytes(resp_offset.into_body(), usize::MAX).await.unwrap();
+    let json_err_offset: Value = serde_json::from_slice(&body_offset).unwrap();
+    assert!(
+        json_err_offset["error"].as_str().unwrap().contains("15×16 cells"),
+        "Unexpected error: {:?}",
+        json_err_offset
+    );
+}
+
+#[tokio::test]
+async fn test_api_curate_gate_respects_payload_layer_role_updates() {
+    let (app, storage, _dir) = setup_test_app();
+
+    let img_large = b"\x89PNG\r\n\x1a\nlarge_layer";
+    let img_small = b"\x89PNG\r\n\x1a\nsmall_layer";
+
+    // Candidate initially has:
+    // Layer 0: Ground, 1024x1024 (16x16 with 64px) -> eligible
+    // Layer 1: UpperFloor, 800x600 (12x9 with 64px) -> ineligible
+    let mut cand = Candidate::with_now("role_update_cand", Source::Reddit, "0.png", (1024, 1024));
+    cand.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1024, 1024)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (800, 600)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand, &[img_large.to_vec(), img_small.to_vec()])
+        .unwrap();
+
+    // 1. Curate payload swaps roles: Layer 1 becomes Ground (800x600), Layer 0 becomes UpperFloor.
+    // The gate MUST check the updated payload.layers and reject because Ground is 12x9 (<16x16).
+    let curate_reject_req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "role_update_cand",
+                "theme": "dungeon",
+                "layers": [
+                    {
+                        "index": 0,
+                        "filename": "0.png",
+                        "role": "upper_floor",
+                        "elevation": 1,
+                        "dimensions": [1024, 1024]
+                    },
+                    {
+                        "index": 1,
+                        "filename": "1.png",
+                        "role": "ground",
+                        "elevation": 0,
+                        "dimensions": [800, 600]
+                    }
+                ]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp_reject = app.clone().oneshot(curate_reject_req).await.unwrap();
+    assert_eq!(resp_reject.status(), StatusCode::BAD_REQUEST);
+    let body_reject = to_bytes(resp_reject.into_body(), usize::MAX).await.unwrap();
+    let json_reject: Value = serde_json::from_slice(&body_reject).unwrap();
+    let err_msg = json_reject["error"].as_str().unwrap();
+    assert!(
+        err_msg.contains("Candidate Ground layer yields fewer than 16×16 full Grid Cells"),
+        "Unexpected error message: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("12×9 cells"),
+        "Expected 12×9 cells in error message, got: {}",
+        err_msg
+    );
+
+    // 2. Candidate where staging initially has undersized layer as Ground (800x600)
+    // and large layer as UpperFloor (1024x1024).
+    let mut cand2 = Candidate::with_now("role_update_cand2", Source::Reddit, "0.png", (800, 600));
+    cand2.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (800, 600)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1024, 1024)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand2, &[img_small.to_vec(), img_large.to_vec()])
+        .unwrap();
+
+    // Curate payload promotes Layer 1 (1024x1024) to Ground, and demotes Layer 0 to UpperFloor.
+    // The gate MUST check payload.layers, see Ground is 1024x1024 (16x16 cells), and accept.
+    let curate_accept_req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "role_update_cand2",
+                "theme": "dungeon",
+                "layers": [
+                    {
+                        "index": 0,
+                        "filename": "0.png",
+                        "role": "upper_floor",
+                        "elevation": 1,
+                        "dimensions": [800, 600]
+                    },
+                    {
+                        "index": 1,
+                        "filename": "1.png",
+                        "role": "ground",
+                        "elevation": 0,
+                        "dimensions": [1024, 1024]
+                    }
+                ]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp_accept = app.oneshot(curate_accept_req).await.unwrap();
+    assert_eq!(resp_accept.status(), StatusCode::OK);
+    let body_accept = to_bytes(resp_accept.into_body(), usize::MAX).await.unwrap();
+    let json_accept: Value = serde_json::from_slice(&body_accept).unwrap();
+    assert_eq!(json_accept["status"], "ok");
+    assert_eq!(json_accept["curated"]["id"], "role_update_cand2");
 }

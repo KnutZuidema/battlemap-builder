@@ -34,14 +34,6 @@ impl ApiError {
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
     }
-
-    pub fn bad_gateway(msg: impl Into<String>) -> Self {
-        Self::BadGateway(msg.into())
-    }
-
-    pub fn service_unavailable(msg: impl Into<String>) -> Self {
-        Self::ServiceUnavailable(msg.into())
-    }
 }
 
 impl From<StorageError> for ApiError {

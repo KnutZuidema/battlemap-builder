@@ -103,7 +103,7 @@
         // Slide-Over Inspector Drawer & Curated Map Metadata Editing (Issue #135 & Issue #136)
         libraryDrawerActive: false,
         libraryDrawerMap: null,
-        libraryDraft: { themes: [], tags: [], description: "", layers: [] },
+        libraryDraft: { tags: [], description: "", layers: [] },
         libraryDraftDirty: false,
         libraryAiLoading: { suggest: false, describe: false, combo: false },
         // Deletion Safeguard Modal & Bulk Ops (Issue #137)
@@ -1682,10 +1682,9 @@
         currentDescribeAbortController = controller;
 
         const payload = {
-            themes: decisionState.acceptedTags && decisionState.acceptedTags.length > 0
+            tags: decisionState.acceptedTags && decisionState.acceptedTags.length > 0
                 ? decisionState.acceptedTags
-                : (candidate.themes || (candidate.theme ? [candidate.theme] : [])),
-            tags: candidate.tags || [],
+                : (candidate.tags || []),
         };
 
         try {
@@ -1991,13 +1990,7 @@
 
         if (state.curatedMaps && Array.isArray(state.curatedMaps)) {
             for (const map of state.curatedMaps) {
-                const themes = (map.themes && map.themes.length > 0)
-                    ? map.themes
-                    : (map.theme ? [map.theme] : []);
                 const tags = map.tags || [];
-                for (const t of themes) {
-                    if (t && t.trim()) tagMap.set(t.trim().toLowerCase(), t.trim());
-                }
                 for (const t of tags) {
                     if (t && t.trim()) tagMap.set(t.trim().toLowerCase(), t.trim());
                 }
@@ -2006,13 +1999,7 @@
 
         if (state.candidates && Array.isArray(state.candidates)) {
             for (const c of state.candidates) {
-                const themes = (c.themes && c.themes.length > 0)
-                    ? c.themes
-                    : (c.theme ? [c.theme] : []);
                 const tags = c.tags || [];
-                for (const t of themes) {
-                    if (t && t.trim()) tagMap.set(t.trim().toLowerCase(), t.trim());
-                }
                 for (const t of tags) {
                     if (t && t.trim()) tagMap.set(t.trim().toLowerCase(), t.trim());
                 }
@@ -2253,7 +2240,6 @@
         try {
             const payload = {
                 id: candidate.id,
-                themes: acceptedTags,
                 tags: acceptedTags,
                 layers: candidate.layers && candidate.layers.length > 0 ? candidate.layers : undefined,
                 description: descriptionValue || undefined,
@@ -3589,9 +3575,6 @@
         const facet = state.libraryFacet || "all";
 
         const filtered = state.curatedMaps.filter((map) => {
-            const themes = (map.themes && map.themes.length > 0)
-                ? map.themes
-                : (map.theme ? [map.theme] : []);
             const tags = map.tags || [];
             const layerCount = (map.layers && map.layers.length > 0) ? map.layers.length : 1;
             const hasDesc = Boolean(map.description && map.description.trim());
@@ -3612,9 +3595,8 @@
 
             // 2. Active tag filter
             if (activeTag && activeTag !== "all") {
-                const matchesTheme = themes.some(t => t.toLowerCase() === activeTag);
                 const matchesTag = tags.some(t => t.toLowerCase() === activeTag);
-                if (!matchesTheme && !matchesTag) {
+                if (!matchesTag) {
                     return false;
                 }
             }
@@ -3622,10 +3604,9 @@
             // 3. Search query filter
             if (query) {
                 const matchesId = (map.id || "").toLowerCase().includes(query);
-                const matchesTheme = themes.some(t => t.toLowerCase().includes(query));
                 const matchesTag = tags.some(t => t.toLowerCase().includes(query));
                 const matchesDesc = (map.description || "").toLowerCase().includes(query);
-                if (!matchesId && !matchesTheme && !matchesTag && !matchesDesc) {
+                if (!matchesId && !matchesTag && !matchesDesc) {
                     return false;
                 }
             }
@@ -4112,17 +4093,10 @@
         if (!libraryTagPills) return;
         libraryTagPills.innerHTML = "";
 
-        // Dynamically calculate unique tags/themes across all curated maps
+        // Dynamically calculate unique tags across all curated maps
         const tagMap = new Map();
         for (const map of state.curatedMaps) {
-            const themes = (map.themes && map.themes.length > 0)
-                ? map.themes
-                : (map.theme ? [map.theme] : []);
             const tags = map.tags || [];
-
-            for (const t of themes) {
-                if (t && t.trim()) tagMap.set(t.trim().toLowerCase(), t.trim());
-            }
             for (const t of tags) {
                 if (t && t.trim()) tagMap.set(t.trim().toLowerCase(), t.trim());
             }
@@ -4263,14 +4237,15 @@
         const isFocused = state.libraryFocusedIndex === index;
         card.className = `curated-card${isSelected ? " selected" : ""}${isFocused ? " focused" : ""}`;
         card.dataset.id = map.id;
-        const primaryTheme = (map.themes && map.themes.length > 0) ? map.themes[0] : (map.theme || "dungeon");
+        const tags = map.tags || [];
+        const primaryTheme = tags[0] || "dungeon";
         card.dataset.theme = primaryTheme;
 
         let themeParam = "dungeon";
         if (primaryTheme && CANONICAL_THEMES.includes(primaryTheme.toLowerCase())) {
             themeParam = primaryTheme.toLowerCase();
-        } else if (map.themes && Array.isArray(map.themes)) {
-            const found = map.themes.find(t => CANONICAL_THEMES.includes((t || "").toLowerCase()));
+        } else {
+            const found = tags.find(t => CANONICAL_THEMES.includes((t || "").toLowerCase()));
             if (found) {
                 themeParam = found.toLowerCase();
             }
@@ -4312,15 +4287,9 @@
             scrubberHtml = `<div class="curated-layer-scrubber">${pillsHtml}</div>`;
         }
 
-        const themesList = (map.themes && map.themes.length > 0)
-            ? map.themes
-            : (map.theme ? [map.theme] : []);
-        const tagsList = map.tags || [];
-
-        const pills = [
-            ...themesList.map(t => `<span class="curated-tag-pill curated-theme-pill">${escapeHtml(t)}</span>`),
-            ...tagsList.map(t => `<span class="curated-tag-pill">${escapeHtml(t)}</span>`),
-        ];
+        const pills = tags.map(
+            t => `<span class="curated-tag-pill">${escapeHtml(t)}</span>`
+        );
 
         const tagsHtml = pills.length > 0
             ? pills.join("")
@@ -5126,7 +5095,7 @@
         const actualLayerIdx = (layerObj && layerObj.index !== undefined) ? layerObj.index : validLayerIndex;
         const cacheKey = `${map.id}_layer_${actualLayerIdx}`;
 
-        const primaryTheme = (map.themes && map.themes.length > 0) ? map.themes[0] : (map.theme || "dungeon");
+        const primaryTheme = (map.tags && map.tags.length > 0) ? map.tags[0] : "dungeon";
         let themeParam = "dungeon";
         if (primaryTheme && CANONICAL_THEMES.includes(primaryTheme.toLowerCase())) {
             themeParam = primaryTheme.toLowerCase();
@@ -5281,7 +5250,7 @@
         fsLayerFilmstripStrip.innerHTML = "";
         const fragment = document.createDocumentFragment();
 
-        const primaryTheme = (map.themes && map.themes.length > 0) ? map.themes[0] : (map.theme || "dungeon");
+        const primaryTheme = (map.tags && map.tags.length > 0) ? map.tags[0] : "dungeon";
         let themeParam = "dungeon";
         if (primaryTheme && CANONICAL_THEMES.includes(primaryTheme.toLowerCase())) {
             themeParam = primaryTheme.toLowerCase();
@@ -5596,9 +5565,6 @@
         state.libraryDrawerMap = map;
 
         // Populates draft state from selected map (deep copy)
-        const themesList = (map.themes && map.themes.length > 0)
-            ? [...map.themes]
-            : (map.theme ? [map.theme] : []);
         const tagsList = map.tags ? [...map.tags] : [];
         const descriptionText = map.description || "";
         const layersList = (map.layers && map.layers.length > 0)
@@ -5613,7 +5579,6 @@
             }];
 
         state.libraryDraft = {
-            themes: themesList,
             tags: tagsList,
             description: descriptionText,
             layers: layersList,
@@ -5690,9 +5655,9 @@
         }
 
         const map = state.libraryDrawerMap;
-        const primaryTheme = (state.libraryDraft.themes && state.libraryDraft.themes.length > 0)
-            ? state.libraryDraft.themes[0]
-            : (map.theme || "dungeon");
+        const primaryTheme = (state.libraryDraft.tags && state.libraryDraft.tags.length > 0)
+            ? state.libraryDraft.tags[0]
+            : "dungeon";
 
         const fragment = document.createDocumentFragment();
 
@@ -5824,11 +5789,15 @@
         return "ground";
     }
 
+    function isCanonicalThemeTag(tag) {
+        return CANONICAL_THEMES.includes((tag || "").trim().toLowerCase());
+    }
+
     function renderInspectorThemeChips() {
         if (!inspectorThemeChips) return;
         inspectorThemeChips.innerHTML = "";
 
-        const themes = state.libraryDraft.themes || [];
+        const themes = (state.libraryDraft.tags || []).filter(isCanonicalThemeTag);
         themes.forEach((theme) => {
             const chip = document.createElement("span");
             chip.className = "chip chip-theme";
@@ -5849,14 +5818,15 @@
         const normalized = themeStr.trim().toLowerCase();
         if (!normalized) return;
 
-        if (!state.libraryDraft.themes) {
-            state.libraryDraft.themes = [];
+        if (!state.libraryDraft.tags) {
+            state.libraryDraft.tags = [];
         }
 
-        if (!state.libraryDraft.themes.some(t => t.toLowerCase() === normalized)) {
-            state.libraryDraft.themes.push(normalized);
+        if (!state.libraryDraft.tags.some(t => t.toLowerCase() === normalized)) {
+            state.libraryDraft.tags.push(normalized);
             markLibraryDraftDirty();
             renderInspectorThemeChips();
+            renderInspectorTagChips();
         }
 
         if (inspectorThemeInput) {
@@ -5865,20 +5835,14 @@
     }
 
     function removeInspectorTheme(themeStr) {
-        if (!state.libraryDraft.themes) return;
-        const idx = state.libraryDraft.themes.findIndex(t => t.toLowerCase() === themeStr.toLowerCase());
-        if (idx !== -1) {
-            state.libraryDraft.themes.splice(idx, 1);
-            markLibraryDraftDirty();
-            renderInspectorThemeChips();
-        }
+        removeInspectorTag(themeStr);
     }
 
     function renderInspectorTagChips() {
         if (!inspectorTagChips) return;
         inspectorTagChips.innerHTML = "";
 
-        const tags = state.libraryDraft.tags || [];
+        const tags = (state.libraryDraft.tags || []).filter(t => !isCanonicalThemeTag(t));
         tags.forEach((tag) => {
             const chip = document.createElement("span");
             chip.className = "chip chip-tag";
@@ -5906,6 +5870,7 @@
         if (!state.libraryDraft.tags.some(t => t.toLowerCase() === normalized)) {
             state.libraryDraft.tags.push(normalized);
             markLibraryDraftDirty();
+            renderInspectorThemeChips();
             renderInspectorTagChips();
         }
 
@@ -5920,6 +5885,7 @@
         if (idx !== -1) {
             state.libraryDraft.tags.splice(idx, 1);
             markLibraryDraftDirty();
+            renderInspectorThemeChips();
             renderInspectorTagChips();
         }
     }
@@ -5953,7 +5919,6 @@
 
         try {
             const payload = {
-                themes: state.libraryDraft.themes,
                 tags: state.libraryDraft.tags,
                 description: state.libraryDraft.description,
                 layers: state.libraryDraft.layers.map((l, idx) => ({
@@ -5991,7 +5956,6 @@
 
             state.libraryDrawerMap = updatedMap;
             state.libraryDraft = {
-                themes: [...(updatedMap.themes || [])],
                 tags: [...(updatedMap.tags || [])],
                 description: updatedMap.description || "",
                 layers: updatedMap.layers ? updatedMap.layers.map(l => ({ ...l })) : [...state.libraryDraft.layers],
@@ -6014,9 +5978,6 @@
         if (!state.libraryDrawerMap) return;
 
         const map = state.libraryDrawerMap;
-        const themesList = (map.themes && map.themes.length > 0)
-            ? [...map.themes]
-            : (map.theme ? [map.theme] : []);
         const tagsList = map.tags ? [...map.tags] : [];
         const descriptionText = map.description || "";
         const layersList = (map.layers && map.layers.length > 0)
@@ -6031,7 +5992,6 @@
             }];
 
         state.libraryDraft = {
-            themes: themesList,
             tags: tagsList,
             description: descriptionText,
             layers: layersList,
@@ -6142,7 +6102,6 @@
 
         try {
             const payload = {
-                themes: state.libraryDraft.themes,
                 tags: state.libraryDraft.tags,
             };
 
@@ -6206,9 +6165,8 @@
                 });
             }
 
-            // Step 2: Generate description using updated draft themes & tags
+            // Step 2: Generate description using updated draft tags
             const describePayload = {
-                themes: state.libraryDraft.themes,
                 tags: state.libraryDraft.tags,
             };
             const descRes = await fetch(`/api/curated/${encodeURIComponent(mapId)}/describe`, {
@@ -6272,8 +6230,8 @@
                 e.preventDefault();
                 addInspectorTheme(inspectorThemeInput.value);
             } else if (e.key === "Backspace" && !inspectorThemeInput.value) {
-                if (state.libraryDraft.themes && state.libraryDraft.themes.length > 0) {
-                    removeInspectorTheme(state.libraryDraft.themes[state.libraryDraft.themes.length - 1]);
+                if (state.libraryDraft.tags && state.libraryDraft.tags.length > 0) {
+                    removeInspectorTheme(state.libraryDraft.tags[state.libraryDraft.tags.length - 1]);
                 }
             }
         });

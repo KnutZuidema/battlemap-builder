@@ -17,7 +17,7 @@ use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{
     BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
-    CuratedMap, CuratedMapUpdate, CustomPrompt, LayerRole, PurgeStagingResult,
+    normalize_tags, CuratedMap, CuratedMapUpdate, CustomPrompt, LayerRole, PurgeStagingResult,
     RedditHarvestRequest, RejectionReason, StorageStats, Theme,
 };
 use crate::ports::cost_tracker::CostStats;
@@ -506,44 +506,22 @@ pub struct CurateRequest {
 
 impl CurateRequest {
     pub fn resolved_tags(&self) -> Vec<String> {
-        let mut list: Vec<String> = Vec::new();
+        let mut raw: Vec<String> = self.themes.clone().unwrap_or_default();
 
-        if let Some(themes) = &self.themes {
-            for t in themes {
-                let trimmed = t.trim();
-                if !trimmed.is_empty() && !list.iter().any(|existing| existing.eq_ignore_ascii_case(trimmed)) {
-                    list.push(trimmed.to_string());
-                }
-            }
-        }
-
-        if let Some(t) = &self.theme {
-            let trimmed = t.trim();
+        if let Some(theme) = &self.theme {
+            let trimmed = theme.trim();
             if !trimmed.is_empty() {
-                let normalized = trimmed
-                    .parse::<Theme>()
-                    .map(|th| th.as_str().to_string())
-                    .unwrap_or_else(|_| trimmed.to_string());
-                if !list.iter().any(|existing| existing.eq_ignore_ascii_case(&normalized)) {
-                    list.push(normalized);
-                }
+                raw.push(
+                    trimmed
+                        .parse::<Theme>()
+                        .map(|th| th.as_str().to_string())
+                        .unwrap_or_else(|_| trimmed.to_string()),
+                );
             }
         }
 
-        if let Some(tags) = &self.tags {
-            for t in tags {
-                let trimmed = t.trim();
-                if !trimmed.is_empty() && !list.iter().any(|existing| existing.eq_ignore_ascii_case(trimmed)) {
-                    list.push(trimmed.to_string());
-                }
-            }
-        }
-
-        list
-    }
-
-    pub fn resolved_themes(&self) -> Vec<String> {
-        self.resolved_tags()
+        raw.extend(self.tags.clone().unwrap_or_default());
+        normalize_tags(raw)
     }
 }
 

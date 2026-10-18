@@ -708,6 +708,23 @@ impl IntoThemes for &Theme {
     }
 }
 
+/// Normalizes a list of tag labels: trims whitespace, drops empty entries, and
+/// de-duplicates case-insensitively while preserving first-seen order and casing.
+pub fn normalize_tags(tags: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut normalized: Vec<String> = Vec::new();
+    for tag in tags {
+        let trimmed = tag.trim();
+        if !trimmed.is_empty()
+            && !normalized
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(trimmed))
+        {
+            normalized.push(trimmed.to_string());
+        }
+    }
+    normalized
+}
+
 /// An approved battlemap filed into curated storage with dynamic tags and metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CuratedMap {
@@ -751,27 +768,15 @@ impl<'de> Deserialize<'de> for CuratedMap {
         D: serde::Deserializer<'de>,
     {
         let helper = CuratedMapHelper::deserialize(deserializer)?;
-        let mut tags = Vec::new();
 
         // Fold legacy themes into tags without duplicates (themes first to preserve primary theme)
-        for t in helper.themes {
-            let trimmed = t.trim().to_string();
-            if !trimmed.is_empty() && !tags.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&trimmed)) {
-                tags.push(trimmed);
-            }
-        }
-        if let Some(t) = helper.theme {
-            let trimmed = t.trim().to_string();
-            if !trimmed.is_empty() && !tags.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&trimmed)) {
-                tags.push(trimmed);
-            }
-        }
-        for t in helper.tags {
-            let trimmed = t.trim().to_string();
-            if !trimmed.is_empty() && !tags.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&trimmed)) {
-                tags.push(trimmed);
-            }
-        }
+        let tags = normalize_tags(
+            helper
+                .themes
+                .into_iter()
+                .chain(helper.theme)
+                .chain(helper.tags),
+        );
         let _ = helper.rating;
 
         Ok(CuratedMap {
@@ -794,19 +799,7 @@ impl CuratedMap {
         dimensions: (u32, u32),
         curated_at: DateTime<Utc>,
     ) -> Self {
-        let mut merged_tags = Vec::new();
-        for t in themes.into_themes() {
-            let trimmed = t.trim().to_string();
-            if !trimmed.is_empty() && !merged_tags.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&trimmed)) {
-                merged_tags.push(trimmed);
-            }
-        }
-        for t in tags {
-            let trimmed = t.trim().to_string();
-            if !trimmed.is_empty() && !merged_tags.iter().any(|existing: &String| existing.eq_ignore_ascii_case(&trimmed)) {
-                merged_tags.push(trimmed);
-            }
-        }
+        let merged_tags = normalize_tags(themes.into_themes().into_iter().chain(tags));
         Self {
             id: id.into(),
             source: None,
@@ -858,15 +851,10 @@ impl CuratedMap {
         self.tags.iter().find_map(|t| t.parse::<Theme>().ok())
     }
 
-    /// Backwards-compatible getter for theme labels. Returns `tags`.
-    pub fn themes(&self) -> &[String] {
-        &self.tags
-    }
-
-    /// Validates that the map has at least one theme label.
-    pub fn validate_themes(&self) -> Result<(), String> {
+    /// Validates that the map has at least one tag label.
+    pub fn validate_tags(&self) -> Result<(), String> {
         if self.tags.is_empty() || self.tags.iter().all(|t| t.trim().is_empty()) {
-            return Err("CuratedMap requires at least 1 theme label".into());
+            return Err("CuratedMap requires at least 1 tag label".into());
         }
         Ok(())
     }
@@ -1800,7 +1788,7 @@ mod tests {
             vec!["water".into(), "stalagmites".into()],
             (4096, 4096),
         );
-        assert!(curated.validate_themes().is_ok());
+        assert!(curated.validate_tags().is_ok());
         assert_eq!(curated.primary_theme(), "cave");
         assert_eq!(curated.theme(), Some(Theme::Cave));
 
@@ -1810,7 +1798,7 @@ mod tests {
             vec![],
             (1024, 1024),
         );
-        assert!(empty_themes.validate_themes().is_err());
+        assert!(empty_themes.validate_tags().is_err());
 
         // New format serialization & deserialization (themes folded into tags, "themes" omitted from json)
         let json = serde_json::to_string(&curated).unwrap();
@@ -1837,7 +1825,6 @@ mod tests {
         assert_eq!(legacy_parsed.tags, vec!["dungeon", "crypt", "stone"]);
         assert_eq!(legacy_parsed.theme(), Some(Theme::Dungeon));
         assert_eq!(legacy_parsed.primary_theme(), "dungeon");
-        assert_eq!(legacy_parsed.themes(), &["dungeon", "crypt", "stone"]);
     }
 
     #[test]

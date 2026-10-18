@@ -274,6 +274,72 @@ async fn test_api_curate_accepts_unified_tags_without_legacy_themes() {
 }
 
 #[tokio::test]
+async fn test_curate_response_matches_curated_listing_including_provenance() {
+    let (app, storage, _dir) = setup_test_app();
+
+    let mut cand = Candidate::with_now("provenance_map", Source::Reddit, "0.png", (1920, 1080));
+    cand.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1920, 1080))
+            .with_source_url("https://i.redd.it/provenance_0.png"),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1920, 1080))
+            .with_source_url("https://i.redd.it/provenance_1.png"),
+    ];
+    storage
+        .save_staging_bundle(
+            None,
+            &cand,
+            &[
+                b"\x89PNG\r\n\x1a\nprovenance_ground".to_vec(),
+                b"\x89PNG\r\n\x1a\nprovenance_upper".to_vec(),
+            ],
+        )
+        .unwrap();
+
+    let curate_payload = json!({
+        "id": "provenance_map",
+        "tags": ["dungeon", "crypt"]
+    });
+    let req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let curate_json: Value = serde_json::from_slice(&body).unwrap();
+    let returned = curate_json["curated"].clone();
+
+    assert_eq!(
+        returned["layers"][0]["source_url"],
+        "https://i.redd.it/provenance_0.png"
+    );
+    assert_eq!(
+        returned["layers"][1]["source_url"],
+        "https://i.redd.it/provenance_1.png"
+    );
+
+    // GET /api/curated must report byte-for-byte what POST /api/curate returned.
+    let list_req = Request::builder()
+        .uri("/api/curated")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let list_resp = app.oneshot(list_req).await.unwrap();
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let list_body = to_bytes(list_resp.into_body(), usize::MAX).await.unwrap();
+    let listed: Vec<Value> = serde_json::from_slice(&list_body).unwrap();
+    let stored = listed
+        .iter()
+        .find(|m| m["id"] == "provenance_map")
+        .expect("curated map listed");
+
+    assert_eq!(&returned, stored, "curate response must equal stored manifest");
+}
+
+#[tokio::test]
 async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() {
     let (app, storage, dir) = setup_test_app();
 
@@ -1536,8 +1602,8 @@ async fn test_api_curate_bundle_validation_and_success() {
     let body = to_bytes(resp_unassigned.into_body(), usize::MAX).await.unwrap();
     let json_err: Value = serde_json::from_slice(&body).unwrap();
     assert!(
-        json_err["error"].as_str().unwrap().contains("Unassigned"),
-        "Expected error message mentioning Unassigned: {:?}",
+        json_err["error"].as_str().unwrap().contains("unassigned"),
+        "Expected error message mentioning unassigned: {:?}",
         json_err
     );
 

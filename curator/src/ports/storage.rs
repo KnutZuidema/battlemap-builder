@@ -218,8 +218,9 @@ pub trait StorageRepository: CurationStore + Send + Sync {
     /// Check if a candidate ID has been previously rejected.
     fn is_rejected(&self, id: &str) -> Result<bool, StorageError>;
 
-    /// Curate a candidate from staging: atomically moves the image to curated/<theme>/ and writes <id>.json metadata.
-    fn curate_staging(&self, map: &CuratedMap) -> Result<(), StorageError>;
+    /// Curate a candidate from staging: atomically moves the image to curated storage and
+    /// writes `manifest.json`, returning the map exactly as persisted.
+    fn curate_staging(&self, map: &CuratedMap) -> Result<CuratedMap, StorageError>;
 
     /// Reject a candidate from staging: deletes it from staging and logs rejection to rejections.json.
     fn reject_staging(
@@ -230,7 +231,7 @@ pub trait StorageRepository: CurationStore + Send + Sync {
     ) -> Result<(), StorageError>;
 
     /// Alias for `curate_staging`.
-    fn curate_candidate(&self, map: &CuratedMap) -> Result<(), StorageError> {
+    fn curate_candidate(&self, map: &CuratedMap) -> Result<CuratedMap, StorageError> {
         self.curate_staging(map)
     }
 
@@ -397,7 +398,7 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
         (**self).is_duplicate(id)
     }
 
-    fn curate_staging(&self, map: &CuratedMap) -> Result<(), StorageError> {
+    fn curate_staging(&self, map: &CuratedMap) -> Result<CuratedMap, StorageError> {
         (**self).curate_staging(map)
     }
     fn export_selected_lora_dataset(&self, ids: &[String]) -> Result<Vec<u8>, StorageError> {

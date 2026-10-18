@@ -71,24 +71,9 @@ pub const STATIC_REFERENCES: &[StaticReferenceDef] = &[
         filename: "battlemap-reference-4.jpeg",
         label: "Perspective Reference: 2D Stone Dungeon Plan View",
         keywords: &[
-            "dungeon",
-            "crypt",
-            "tomb",
-            "cave",
-            "cavern",
-            "cell",
-            "prison",
-            "stone",
-            "underground",
-            "vault",
-            "catacomb",
-            "temple",
-            "sewer",
-            "mine",
-            "labyrinth",
-            "shrine",
-            "altar",
-            "corridor",
+            "dungeon", "crypt", "tomb", "cave", "cavern", "cell", "prison",
+            "stone", "underground", "vault", "catacomb", "temple", "sewer",
+            "mine", "labyrinth", "shrine", "altar", "corridor",
         ],
         embedded_bytes: STATIC_BYTES_REF_4,
     },
@@ -97,25 +82,9 @@ pub const STATIC_REFERENCES: &[StaticReferenceDef] = &[
         filename: "battlemap-reference-3.png",
         label: "Perspective Reference: 2D Ruins & Courtyard Plan View",
         keywords: &[
-            "ruin",
-            "ruins",
-            "courtyard",
-            "river",
-            "bridge",
-            "stream",
-            "outdoor",
-            "forest",
-            "garden",
-            "trees",
-            "road",
-            "path",
-            "plaza",
-            "swamp",
-            "camp",
-            "nature",
-            "water",
-            "waterfall",
-            "cliff",
+            "ruin", "ruins", "courtyard", "river", "bridge", "stream", "outdoor",
+            "forest", "garden", "trees", "road", "path", "plaza", "swamp",
+            "camp", "nature", "water", "waterfall", "cliff",
         ],
         embedded_bytes: STATIC_BYTES_REF_3,
     },
@@ -124,21 +93,8 @@ pub const STATIC_REFERENCES: &[StaticReferenceDef] = &[
         filename: "battlemap-reference-1.jpeg",
         label: "Perspective Reference: 2D Tavern & Rooms Plan View",
         keywords: &[
-            "tavern",
-            "inn",
-            "bar",
-            "pub",
-            "bed",
-            "bedroom",
-            "room",
-            "house",
-            "timber",
-            "wood",
-            "furniture",
-            "kitchen",
-            "cabin",
-            "cottage",
-            "innkeeper",
+            "tavern", "inn", "bar", "pub", "bed", "bedroom", "room", "house",
+            "timber", "wood", "furniture", "kitchen", "cabin", "cottage", "innkeeper",
         ],
         embedded_bytes: STATIC_BYTES_REF_1,
     },
@@ -147,19 +103,8 @@ pub const STATIC_REFERENCES: &[StaticReferenceDef] = &[
         filename: "battlemap-reference-2.jpg",
         label: "Perspective Reference: 2D Grand Hall & Portal Plan View",
         keywords: &[
-            "portal",
-            "hall",
-            "great hall",
-            "market",
-            "shop",
-            "chasm",
-            "pit",
-            "arena",
-            "keep",
-            "fortress",
-            "mansion",
-            "castle",
-            "throne",
+            "portal", "hall", "great hall", "market", "shop", "chasm", "pit",
+            "arena", "keep", "fortress", "mansion", "castle", "throne",
         ],
         embedded_bytes: STATIC_BYTES_REF_2,
     },
@@ -171,7 +116,7 @@ pub fn static_reference_for_theme(theme: &Theme) -> &'static StaticReferenceDef 
         Theme::Dungeon | Theme::Cave => &STATIC_REFERENCES[0], // stone-dungeon
         Theme::Wilderness | Theme::Ruins => &STATIC_REFERENCES[1], // ruins-courtyard
         Theme::Tavern | Theme::Building => &STATIC_REFERENCES[2], // tavern-inn
-        Theme::Urban | Theme::SciFi => &STATIC_REFERENCES[3],  // grand-hall-portal
+        Theme::Urban | Theme::SciFi => &STATIC_REFERENCES[3], // grand-hall-portal
     }
 }
 
@@ -218,7 +163,8 @@ pub fn preprocess_reference_image(
 /// - `w = 16 * cell_size_px`
 /// - `h = 16 * cell_size_px`
 ///
-/// Bounds checking: clamps within available image dimensions or falls back to center-crop.
+/// Bounds checking: crops the exact `16 * cell_size_px` box when it fits inside the image;
+/// otherwise falls back to a centered square crop of the largest fitting size.
 pub fn crop_section_image(
     img: &image::DynamicImage,
     grid: &GridConfig,
@@ -239,20 +185,8 @@ pub fn crop_section_image(
         .offset_y
         .saturating_add(section.row.saturating_mul(cell_size));
 
-    if x < img_w && y < img_h {
-        let available_w = img_w - x;
-        let available_h = img_h - y;
-        let crop_w = target_w.min(available_w);
-        let crop_h = target_h.min(available_h);
-        if crop_w > 0 && crop_h > 0 {
-            let size = crop_w.min(crop_h);
-            img.crop_imm(x, y, size, size)
-        } else {
-            let size = img_w.min(img_h);
-            let cx = (img_w - size) / 2;
-            let cy = (img_h - size) / 2;
-            img.crop_imm(cx, cy, size, size)
-        }
+    if x < img_w && y < img_h && target_w <= img_w - x && target_h <= img_h - y {
+        img.crop_imm(x, y, target_w, target_h)
     } else {
         let size = img_w.min(img_h);
         let cx = (img_w - size) / 2;
@@ -295,9 +229,16 @@ pub fn select_center_most_section(map: &CuratedMap) -> MapSection {
         return MapSection::new(0, 0, map.description.clone().unwrap_or_default());
     }
 
+    let (ground_w, ground_h) = map
+        .layers
+        .iter()
+        .find(|l| l.role == LayerRole::Ground)
+        .map(|l| l.dimensions)
+        .filter(|&(w, h)| w > 0 && h > 0)
+        .unwrap_or(map.dimensions);
+
     let (cols, rows) = if map.grid.cell_size_px > 0 {
-        map.grid
-            .lattice_dimensions(map.dimensions.0, map.dimensions.1)
+        map.grid.lattice_dimensions(ground_w, ground_h)
     } else {
         (0, 0)
     };
@@ -325,127 +266,59 @@ pub fn detect_theme_for_prompt(prompt: &str) -> Option<Theme> {
         (
             Theme::Dungeon,
             &[
-                "dungeon",
-                "crypt",
-                "tomb",
-                "cell",
-                "prison",
-                "vault",
-                "catacomb",
-                "sewer",
-                "labyrinth",
-                "corridor",
-                "underground",
-                "masonry",
-                "sarcophagus",
-                "sluice",
+                "dungeon", "crypt", "tomb", "cell", "prison", "vault",
+                "catacomb", "sewer", "labyrinth", "corridor", "underground",
+                "masonry", "sarcophagus", "sluice",
             ],
         ),
         (
             Theme::Cave,
             &[
-                "cave",
-                "cavern",
-                "underdark",
-                "stalactite",
-                "stalagmite",
-                "subterranean",
-                "grotto",
-                "bioluminescent",
-                "rough natural stone",
+                "cave", "cavern", "underdark", "stalactite", "stalagmite",
+                "subterranean", "grotto", "bioluminescent", "rough natural stone",
             ],
         ),
         (
             Theme::Tavern,
             &[
-                "tavern",
-                "inn",
-                "bar",
-                "pub",
-                "bedroom",
-                "hearth",
-                "fireplace",
-                "timber",
-                "wood",
-                "innkeeper",
-                "counter",
+                "tavern", "inn", "bar", "pub", "bedroom", "hearth",
+                "fireplace", "timber", "wood", "innkeeper", "counter",
             ],
         ),
         (
             Theme::Wilderness,
             &[
-                "wilderness",
-                "river",
-                "bridge",
-                "crossing",
-                "stream",
-                "forest",
-                "garden",
-                "trees",
-                "road",
-                "path",
-                "swamp",
-                "camp",
-                "nature",
-                "waterfall",
-                "cliff",
-                "jungle",
-                "banks",
-                "footbridge",
+                "wilderness", "river", "bridge", "crossing", "stream", "forest",
+                "garden", "trees", "road", "path", "swamp", "camp", "nature",
+                "waterfall", "cliff", "jungle", "banks", "footbridge",
             ],
         ),
         (
             Theme::Ruins,
             &[
-                "ruin",
-                "ruins",
-                "courtyard",
-                "crumbling",
-                "pillars",
-                "sandstone",
-                "temple ruins",
-                "flagstones",
-                "ancient",
+                "ruin", "ruins", "courtyard", "crumbling", "pillars",
+                "sandstone", "temple ruins", "flagstones", "ancient",
             ],
         ),
         (
             Theme::Urban,
             &[
-                "urban", "city", "street", "alley", "market", "shop", "plaza", "dock", "harbor",
-                "town",
+                "urban", "city", "street", "alley", "market", "shop",
+                "plaza", "dock", "harbor", "town",
             ],
         ),
         (
             Theme::SciFi,
             &[
-                "scifi",
-                "sci-fi",
-                "space",
-                "station",
-                "starship",
-                "spaceship",
-                "cyberpunk",
-                "hangar",
-                "lab",
-                "laboratory",
-                "terminal",
-                "airlock",
+                "scifi", "sci-fi", "space", "station", "starship", "spaceship",
+                "cyberpunk", "hangar", "lab", "laboratory", "terminal", "airlock",
             ],
         ),
         (
             Theme::Building,
             &[
-                "building",
-                "mansion",
-                "castle",
-                "keep",
-                "fortress",
-                "palace",
-                "manor",
-                "estate",
-                "hall",
-                "great hall",
-                "throne",
+                "building", "mansion", "castle", "keep", "fortress", "palace",
+                "manor", "estate", "hall", "great hall", "throne",
             ],
         ),
     ];
@@ -483,7 +356,6 @@ pub fn score_curated_section_for_prompt(
     let prompt_lower = prompt.to_lowercase();
     let prompt_words: std::collections::HashSet<&str> = prompt_lower
         .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
-        .chain(prompt_lower.split(|c: char| !c.is_alphanumeric()))
         .map(|s| s.trim())
         .filter(|s| s.len() >= 2)
         .collect();
@@ -569,7 +441,7 @@ impl ReferenceProvider {
         // 3. If found, load bytes and preprocess center-most section
         if let Some(map) = top_curated {
             let section = select_center_most_section(&map);
-            match self.get_curated_ground_bytes(&map) {
+            match self.storage.get_curated_ground_image_bytes(&map) {
                 Ok(raw_bytes) => {
                     match preprocess_section_reference_image(
                         &raw_bytes,
@@ -668,7 +540,7 @@ impl ReferenceProvider {
 
         if let Some((_, map, section)) = top_match {
             let primary_theme = map.theme().unwrap_or(Theme::Dungeon);
-            match self.get_curated_ground_bytes(&map) {
+            match self.storage.get_curated_ground_image_bytes(&map) {
                 Ok(raw_bytes) => {
                     match preprocess_section_reference_image(
                         &raw_bytes,
@@ -733,40 +605,6 @@ impl ReferenceProvider {
         }
     }
 
-    /// Retrieves the ground layer image bytes for a curated map, checking bundle and flat storage.
-    fn get_curated_ground_bytes(
-        &self,
-        map: &CuratedMap,
-    ) -> Result<Vec<u8>, ReferenceProviderError> {
-        let ground_idx = map
-            .layers
-            .iter()
-            .find(|l| l.role == LayerRole::Ground)
-            .map(|l| l.index)
-            .unwrap_or(0);
-
-        if let Ok(bytes) = self
-            .storage
-            .get_curated_layer_image_by_id(&map.id, ground_idx)
-        {
-            return Ok(bytes);
-        }
-        if let Some(theme) = map.theme() {
-            if let Ok(bytes) = self
-                .storage
-                .get_curated_layer_image(&theme, &map.id, ground_idx)
-            {
-                return Ok(bytes);
-            }
-            if let Ok(bytes) = self.storage.get_curated_image(&theme, &map.id) {
-                return Ok(bytes);
-            }
-        }
-        self.storage
-            .get_curated_image_by_id(&map.id)
-            .map_err(ReferenceProviderError::Storage)
-    }
-
     /// Retrieves preprocessed bytes for a static reference definition with in-memory caching.
     fn get_static_reference_bytes(
         &self,
@@ -817,20 +655,18 @@ impl ReferenceProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::FilesystemStorage;
-    use crate::domain::CuratedMap;
     use chrono::Utc;
+    use crate::adapters::FilesystemStorage;
+    use crate::domain::{CuratedLayer, CuratedMap};
     use image::{ImageBuffer, Rgb};
     use tempfile::TempDir;
 
     fn create_test_image_bytes(width: u32, height: u32, color: [u8; 3]) -> Vec<u8> {
-        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_pixel(width, height, Rgb(color));
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(width, height, Rgb(color));
         let mut bytes = Vec::new();
-        img.write_to(
-            &mut std::io::Cursor::new(&mut bytes),
-            image::ImageFormat::Png,
-        )
-        .expect("image write succeeds");
+        img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .expect("image write succeeds");
         bytes
     }
 
@@ -880,10 +716,7 @@ mod tests {
             detect_theme_for_prompt("Grand castle keep with fortress throne hall"),
             Some(Theme::Building)
         );
-        assert_eq!(
-            detect_theme_for_prompt("completely unrelated text 12345"),
-            None
-        );
+        assert_eq!(detect_theme_for_prompt("completely unrelated text 12345"), None);
     }
 
     #[test]
@@ -987,10 +820,7 @@ mod tests {
         storage.save_curated(&map_b, &img_bytes).unwrap();
 
         let prompt = "Stone dungeon crypt with central sarcophagus and iron gate";
-        let res = provider
-            .resolve_reference_for_prompt(prompt)
-            .unwrap()
-            .unwrap();
+        let res = provider.resolve_reference_for_prompt(prompt).unwrap().unwrap();
         assert_eq!(
             res.provenance,
             ReferenceProvenance::Curated {
@@ -1080,17 +910,11 @@ mod tests {
             vec!["room".to_string()],
             (1024, 1024),
             Utc::now() - chrono::Duration::hours(5),
-        )
-        .with_description(
-            "Dark sacrificial chamber with obsidian altar, glowing runes, and twin iron braziers.",
-        );
+        ).with_description("Dark sacrificial chamber with obsidian altar, glowing runes, and twin iron braziers.");
         storage.save_curated(&map_b, &img_bytes).unwrap();
 
         let prompt = "Dark dungeon with obsidian altar and flaming braziers";
-        let res = provider
-            .resolve_reference_for_prompt(prompt)
-            .unwrap()
-            .unwrap();
+        let res = provider.resolve_reference_for_prompt(prompt).unwrap().unwrap();
         assert_eq!(
             res.provenance,
             ReferenceProvenance::Curated {
@@ -1458,5 +1282,59 @@ mod tests {
             "Expected blue < 50, got {}",
             center_pixel[2]
         );
+    }
+
+    #[test]
+    fn test_select_center_most_section_uses_ground_layer_dimensions() {
+        // `map.dimensions` (1024x1024 -> 16x16 lattice, centre target (0, 0)) disagrees with the
+        // Ground layer dimensions the sections were generated against (3072x3072 -> 48x48
+        // lattice, centre target (16, 16)). The Ground layer must win.
+        let ground_layer = CuratedLayer::new(1, "1.png", LayerRole::Ground, None, (3072, 3072));
+        let map = CuratedMap::new(
+            "ground-dims-map",
+            Theme::Dungeon,
+            vec!["dungeon".to_string()],
+            (1024, 1024),
+            Utc::now(),
+        )
+        .with_grid(GridConfig::new(64, 0, 0))
+        .with_layers(vec![ground_layer])
+        .with_sections(vec![
+            MapSection::new(0, 0, "Northwest corner"),
+            MapSection::new(16, 16, "Exact center chamber"),
+            MapSection::new(32, 32, "Southeast corner"),
+        ]);
+
+        let center_section = select_center_most_section(&map);
+        assert_eq!(center_section.col, 16);
+        assert_eq!(center_section.row, 16);
+        assert_eq!(center_section.description, "Exact center chamber");
+    }
+
+    #[test]
+    fn test_crop_section_image_out_of_bounds_falls_back_to_center_crop() {
+        // 512x300 image split down the middle: left half red, right half green.
+        let mut img = image::RgbImage::new(512, 300);
+        for y in 0..300 {
+            for x in 0..512 {
+                let color = if x < 256 { [255, 0, 0] } else { [0, 255, 0] };
+                img.put_pixel(x, y, Rgb(color));
+            }
+        }
+        let dyn_img = image::DynamicImage::ImageRgb8(img);
+        let grid = GridConfig::new(16, 0, 0); // 16 * 16 = 256px per section
+
+        // Section (0, 16) starts at y = 256; only 44px remain below, so the exact 256x256 box
+        // cannot fit. A magnified top-left corner square would be 44x44; the documented
+        // fallback is instead the centred 300x300 crop.
+        let section = MapSection::new(0, 16, "Overflowing section");
+        let cropped = crop_section_image(&dyn_img, &grid, &section);
+        assert_eq!(cropped.width(), 300);
+        assert_eq!(cropped.height(), 300);
+
+        // The fallback is centred on the image, not anchored at the section's top-left corner.
+        let rgb = cropped.to_rgb8();
+        assert_eq!(rgb.get_pixel(0, 150).0, [255, 0, 0]);
+        assert_eq!(rgb.get_pixel(299, 150).0, [0, 255, 0]);
     }
 }

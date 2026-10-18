@@ -179,6 +179,10 @@ pub trait StorageRepository: Send + Sync {
         self.get_curated_layer_image_by_id(id, 0)
     }
 
+    /// Retrieve the raw ground-layer image bytes for a curated map, resolving the `Ground` layer
+    /// (falling back to the first layer) across bundle and flat storage paths.
+    fn get_curated_ground_image_bytes(&self, map: &CuratedMap) -> Result<Vec<u8>, StorageError>;
+
     /// Delete an approved curated map bundle and log its rejection reason to rejection records.
     fn delete_curated(
         &self,
@@ -423,6 +427,10 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
 
     fn get_curated_image_by_id(&self, id: &str) -> Result<Vec<u8>, StorageError> {
         (**self).get_curated_image_by_id(id)
+    }
+
+    fn get_curated_ground_image_bytes(&self, map: &CuratedMap) -> Result<Vec<u8>, StorageError> {
+        (**self).get_curated_ground_image_bytes(map)
     }
 
     fn delete_curated(

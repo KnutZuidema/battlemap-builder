@@ -3974,24 +3974,15 @@
         const hasAnyCuratedMaps = state.curatedMaps && state.curatedMaps.length > 0;
         const hasMatchingMaps = maps && maps.length > 0;
 
-        if (!hasAnyCuratedMaps) {
-            libraryEmpty.classList.remove("hidden");
-            if (libraryFilterEmpty) libraryFilterEmpty.classList.add("hidden");
-            libraryGrid.classList.add("hidden");
-            return;
-        }
+        const showEmpty = !hasAnyCuratedMaps;
+        const showFilterEmpty = hasAnyCuratedMaps && !hasMatchingMaps;
+        const showGrid = hasAnyCuratedMaps && hasMatchingMaps;
 
-        if (!hasMatchingMaps) {
-            libraryEmpty.classList.add("hidden");
-            if (libraryFilterEmpty) libraryFilterEmpty.classList.remove("hidden");
-            libraryGrid.classList.add("hidden");
-            return;
-        }
+        libraryEmpty.classList.toggle("hidden", !showEmpty);
+        if (libraryFilterEmpty) libraryFilterEmpty.classList.toggle("hidden", !showFilterEmpty);
+        libraryGrid.classList.toggle("hidden", !showGrid);
 
-        libraryEmpty.classList.add("hidden");
-        if (libraryFilterEmpty) libraryFilterEmpty.classList.add("hidden");
-        libraryGrid.classList.remove("hidden");
-
+        if (!showGrid) return;
         const fragment = document.createDocumentFragment();
         maps.forEach((map, idx) => {
             fragment.appendChild(renderCuratedCard(map, idx));

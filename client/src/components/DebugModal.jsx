@@ -197,6 +197,25 @@ export default function DebugModal({ isOpen, onClose, debugLogs, onClearLogs }) 
                   </div>
                 )}
 
+                {/* Conditioning capability: which images the model's API accepted vs. dropped */}
+                {activeLog.conditioning && (
+                  <div className={`p-3 rounded-xl border text-xs shrink-0 space-y-1 ${activeLog.conditioning.adapted ? 'bg-amber-950/20 border-amber-900/40' : 'bg-slate-900/60 border-slate-800'}`}>
+                    <div className="font-bold text-amber-300 uppercase tracking-wider">
+                      Image conditioning ({activeLog.conditioning.apiType}, {activeLog.conditioning.mode})
+                    </div>
+                    <div className="font-mono text-slate-300 whitespace-pre-wrap break-words">{activeLog.conditioning.explanation}</div>
+                    <div className="font-mono text-[11px] text-slate-400">
+                      Accepted roles: {activeLog.conditioning.acceptedRoles.join(', ')}
+                    </div>
+                    <div className="font-mono text-[11px] text-slate-400">
+                      Sent: {activeLog.conditioning.selected.map((i) => `${i.role}${i.label ? ` (${i.label})` : ''}`).join(', ') || 'none'}
+                    </div>
+                    <div className="font-mono text-[11px] text-rose-300/90">
+                      Dropped: {activeLog.conditioning.dropped.map((i) => `${i.role}${i.label ? ` (${i.label})` : ''}`).join(', ') || 'none'}
+                    </div>
+                  </div>
+                )}
+
                 {/* Section 1: Defined System Prompt */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">

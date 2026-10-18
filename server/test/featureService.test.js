@@ -97,3 +97,81 @@ test('detectFeatures rejects missing OPENROUTER_API_KEY', async () => {
     if (oldKey) process.env.OPENROUTER_API_KEY = oldKey;
   }
 });
+
+test('forgeFeatureState rejects missing originalDataUrl or box with INVALID_PARAMETERS', async () => {
+  const { forgeFeatureState } = require('../services/featureService');
+
+  await assert.rejects(
+    () => forgeFeatureState({ box: { x: 0, y: 0, width: 64, height: 64 } }),
+    (err) => err.code === 'INVALID_PARAMETERS'
+  );
+  await assert.rejects(
+    () => forgeFeatureState({ originalDataUrl: 'data:image/png;base64,AAAA' }),
+    (err) => err.code === 'INVALID_PARAMETERS'
+  );
+});
+
+test('forgeFeatureState extracts the bounding box patch using the composite offset via an in-memory renderAdapter', async () => {
+  const sharp = require('sharp');
+  const { forgeFeatureState } = require('../services/featureService');
+  const { bufferToDataUrl, dataUrlToBuffer } = require('../services/canvasForge');
+
+  const mapBuffer = await sharp({
+    create: { width: 128, height: 128, channels: 3, background: { r: 50, g: 50, b: 50 } }
+  }).png().toBuffer();
+  const originalDataUrl = bufferToDataUrl(mapBuffer);
+  const box = { x: 32.4, y: 32.2, width: 63.6, height: 64 };
+  let adapterCalled = false;
+
+  const res = await forgeFeatureState({
+    originalDataUrl,
+    box,
+    prompt: 'Swing the door open',
+    renderAdapter: async ({ contextW, contextH }) => {
+      adapterCalled = true;
+      const imageBuffer = await sharp({
+        create: { width: contextW, height: contextH, channels: 3, background: { r: 200, g: 20, b: 20 } }
+      }).png().toBuffer();
+      return { imageBuffer, debug: { injected: true }, usage: { total_tokens: 7 }, cost: 0.001 };
+    }
+  });
+
+  assert.strictEqual(adapterCalled, true);
+  assert.ok(res.patchDataUrl.startsWith('data:image/png;base64,'));
+  assert.deepStrictEqual(res.offset, { dx: 0, dy: 0 });
+  assert.deepStrictEqual(res.debug, { injected: true });
+  assert.strictEqual(res.usage.total_tokens, 7);
+  assert.strictEqual(res.cost, 0.001);
+
+  const patchMeta = await sharp(dataUrlToBuffer(res.patchDataUrl)).metadata();
+  assert.strictEqual(patchMeta.width, 64);
+  assert.strictEqual(patchMeta.height, 64);
+  const { data, info } = await sharp(dataUrlToBuffer(res.patchDataUrl)).raw().toBuffer({ resolveWithObject: true });
+  const center = (32 * info.width + 32) * info.channels;
+  assert.ok(data[center] > 150 && data[center + 1] < 80, 'patch centre carries the forged (red) pixels');
+});
+
+test('forgeFeatureState shifts the patch by the composite offset when expanding west/north', async () => {
+  const sharp = require('sharp');
+  const { forgeFeatureState } = require('../services/featureService');
+  const { bufferToDataUrl, dataUrlToBuffer } = require('../services/canvasForge');
+
+  const mapBuffer = await sharp({
+    create: { width: 128, height: 128, channels: 3, background: { r: 50, g: 50, b: 50 } }
+  }).png().toBuffer();
+
+  const res = await forgeFeatureState({
+    originalDataUrl: bufferToDataUrl(mapBuffer),
+    box: { x: -64, y: 0, width: 64, height: 64 },
+    renderAdapter: async ({ contextW, contextH }) => ({
+      imageBuffer: await sharp({
+        create: { width: contextW, height: contextH, channels: 3, background: { r: 10, g: 200, b: 10 } }
+      }).png().toBuffer()
+    })
+  });
+
+  assert.deepStrictEqual(res.offset, { dx: 64, dy: 0 });
+  const patchMeta = await sharp(dataUrlToBuffer(res.patchDataUrl)).metadata();
+  assert.strictEqual(patchMeta.width, 64);
+  assert.strictEqual(patchMeta.height, 64);
+});

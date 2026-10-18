@@ -2,9 +2,9 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const dotenv = require('dotenv');
-const { generateBattlemap, forgeRegion, forgeFeatureState } = require('./services/battlemapService');
+const { generateBattlemap, forgeRegion } = require('./services/battlemapService');
 const { deleteRegion } = require('./services/canvasForge');
-const { detectFeatures } = require('./services/featureService');
+const { detectFeatures, forgeFeatureState } = require('./services/featureService');
 const { isProviderConfigured, MODEL_CATALOG, DEFAULT_MODEL_ID } = require('./services/modelCatalog');
 const { getWikiTree, getWikiArticle } = require('./services/wikiService');
 const { suggestBattlemaps, generateCustomBattlemapPrompt, suggestRegionForging } = require('./services/wikiPrompter');
@@ -199,7 +199,7 @@ function sendGenerationError(res, err) {
 
   const status = code === 'NO_API_KEY'
     ? 503
-    : (code === 'UNKNOWN_PROVIDER' || code === 'MODEL_NOT_VISION_CAPABLE' ? 400 : 502);
+    : (code === 'UNKNOWN_PROVIDER' || code === 'MODEL_NOT_VISION_CAPABLE' || code === 'MODEL_CAPABILITY_UNSUPPORTED' ? 400 : 502);
 
   res.status(status).json({
     error: err.message,
@@ -306,15 +306,17 @@ app.post('/api/features/detect', async (req, res) => {
 });
 
 /**
- * Forges an alternate state for an interactive feature and returns the overlay patch
+ * Forges an alternate state for an interactive feature and returns the overlay patch. Served on
+ * both the bare route and the feature-scoped route; the feature id only labels the log line.
  */
-app.post('/api/features/forge-state', async (req, res) => {
+async function handleForgeFeatureState(req, res) {
   try {
     const { originalDataUrl, box, prompt, model, forgeImageMode } = req.body;
     if (!originalDataUrl || !box) {
       return res.status(400).json({ error: 'originalDataUrl and box are required', code: 'INVALID_PARAMETERS' });
     }
-    console.log(`[API /features/forge-state] Forging feature state (${box.width}x${box.height} at ${box.x},${box.y}): prompt="${prompt}" model="${model || 'default'}" mode="${forgeImageMode || 'highlighted-only'}"`);
+    const featureLabel = req.params.id ? ` feature=${req.params.id}` : '';
+    console.log(`[API /features/forge-state]${featureLabel} Forging feature state (${box.width}x${box.height} at ${box.x},${box.y}): prompt="${prompt}" model="${model || 'default'}" mode="${forgeImageMode || 'highlighted-only'}"`);
     const result = await forgeFeatureState({
       originalDataUrl,
       box,
@@ -326,7 +328,10 @@ app.post('/api/features/forge-state', async (req, res) => {
   } catch (err) {
     sendGenerationError(res, err);
   }
-});
+}
+
+app.post('/api/features/forge-state', handleForgeFeatureState);
+app.post('/api/features/:id/forge-state', handleForgeFeatureState);
 
 // ============================================================================
 // Persistent Map Storage Endpoints

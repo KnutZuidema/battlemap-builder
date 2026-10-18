@@ -43,6 +43,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/staging/{id}/layers",
             patch(patch_staging_layers).post(patch_staging_layers),
         )
+        .route("/api/staging/{id}/grid", patch(patch_staging_grid))
         .route("/api/staging/{id}/split", post(post_split_staging))
         .route("/api/staging/{parent_id}/regroup", post(post_regroup_staging))
         .route(

@@ -374,6 +374,7 @@ impl BenchmarkMetadata {
             author: Some(self.model.clone()),
             parsed_gridless: Some(true),
             parsed_dimensions: Some((1024, 1024)),
+            grid: Default::default(),
             layers: Vec::new(),
             parent_group_id: None,
         }

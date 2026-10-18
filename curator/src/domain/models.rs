@@ -447,6 +447,110 @@ impl RejectionRecord {
 }
 
 /// An uncurated map candidate residing in the staging area.
+/// Configuration for battlemap grid alignment and cell dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct GridConfig {
+    pub cell_size_px: u32,
+    pub offset_x: u32,
+    pub offset_y: u32,
+}
+
+impl Default for GridConfig {
+    fn default() -> Self {
+        Self {
+            cell_size_px: 64,
+            offset_x: 0,
+            offset_y: 0,
+        }
+    }
+}
+
+impl GridConfig {
+    pub const MIN_CELL_SIZE: u32 = 16;
+    pub const MAX_CELL_SIZE: u32 = 300;
+    pub const DEFAULT_CELL_SIZE: u32 = 64;
+
+    pub fn new(cell_size_px: u32, offset_x: u32, offset_y: u32) -> Self {
+        let clamped_size = cell_size_px.clamp(Self::MIN_CELL_SIZE, Self::MAX_CELL_SIZE);
+        let ox = offset_x % clamped_size;
+        let oy = offset_y % clamped_size;
+        Self {
+            cell_size_px: clamped_size,
+            offset_x: ox,
+            offset_y: oy,
+        }
+    }
+
+    pub fn with_signed_offsets(cell_size_px: u32, offset_x: i64, offset_y: i64) -> Self {
+        let clamped_size = cell_size_px.clamp(Self::MIN_CELL_SIZE, Self::MAX_CELL_SIZE);
+        let size_i64 = clamped_size as i64;
+        let ox = offset_x.rem_euclid(size_i64) as u32;
+        let oy = offset_y.rem_euclid(size_i64) as u32;
+        Self {
+            cell_size_px: clamped_size,
+            offset_x: ox,
+            offset_y: oy,
+        }
+    }
+
+    pub fn auto_seed(parsed_dims: (u32, u32), image_dims: (u32, u32)) -> Self {
+        let (cols, rows) = parsed_dims;
+        let (width, height) = image_dims;
+        if cols == 0 || rows == 0 || width == 0 || height == 0 {
+            return Self::default();
+        }
+
+        let img_ratio = width as f64 / height as f64;
+        let grid_ratio_normal = cols as f64 / rows as f64;
+        let grid_ratio_swapped = rows as f64 / cols as f64;
+
+        let matches_normal = (img_ratio - grid_ratio_normal).abs() / img_ratio <= 0.05;
+        let matches_swapped = (img_ratio - grid_ratio_swapped).abs() / img_ratio <= 0.05;
+
+        if matches_normal {
+            let cell_w = width as f64 / cols as f64;
+            let cell_h = height as f64 / rows as f64;
+            let avg_cell = ((cell_w + cell_h) / 2.0).round() as u32;
+            Self::new(avg_cell, 0, 0)
+        } else if matches_swapped {
+            let cell_w = width as f64 / rows as f64;
+            let cell_h = height as f64 / cols as f64;
+            let avg_cell = ((cell_w + cell_h) / 2.0).round() as u32;
+            Self::new(avg_cell, 0, 0)
+        } else {
+            Self::default()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct GridConfigHelper {
+    #[serde(default = "default_cell_size_px")]
+    cell_size_px: u32,
+    #[serde(default)]
+    offset_x: i64,
+    #[serde(default)]
+    offset_y: i64,
+}
+
+fn default_cell_size_px() -> u32 {
+    64
+}
+
+impl<'de> Deserialize<'de> for GridConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let helper = GridConfigHelper::deserialize(deserializer)?;
+        Ok(GridConfig::with_signed_offsets(
+            helper.cell_size_px,
+            helper.offset_x,
+            helper.offset_y,
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     pub id: String,
@@ -466,6 +570,8 @@ pub struct Candidate {
     pub parsed_gridless: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parsed_dimensions: Option<(u32, u32)>,
+    #[serde(default)]
+    pub grid: GridConfig,
     #[serde(default)]
     pub layers: Vec<CandidateLayer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -491,6 +597,7 @@ impl Candidate {
             author: None,
             parsed_gridless: None,
             parsed_dimensions: None,
+            grid: GridConfig::default(),
             layers: Vec::new(),
             parent_group_id: None,
         }
@@ -529,6 +636,11 @@ impl Candidate {
         self.parsed_dimensions = Some(dimensions);
         self
     }
+    pub fn with_grid(mut self, grid: GridConfig) -> Self {
+        self.grid = grid;
+        self
+    }
+
 
     pub fn with_layers(mut self, layers: Vec<CandidateLayer>) -> Self {
         self.layers = layers;
@@ -625,6 +737,7 @@ impl From<RedditSidecarMetadata> for Candidate {
             author: Some(meta.author),
             parsed_gridless: Some(meta.parsed_gridless),
             parsed_dimensions: meta.parsed_dimensions,
+            grid: GridConfig::default(),
             layers: Vec::new(),
             parent_group_id: None,
         }
@@ -713,6 +826,8 @@ pub struct CuratedMap {
     pub dimensions: (u32, u32),
     pub curated_at: DateTime<Utc>,
     #[serde(default)]
+    pub grid: GridConfig,
+    #[serde(default)]
     pub layers: Vec<CuratedLayer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -733,6 +848,8 @@ struct CuratedMapHelper {
     tags: Vec<String>,
     dimensions: (u32, u32),
     curated_at: DateTime<Utc>,
+    #[serde(default)]
+    grid: Option<GridConfig>,
     #[serde(default)]
     layers: Vec<CuratedLayer>,
     #[serde(default)]
@@ -761,6 +878,7 @@ impl<'de> Deserialize<'de> for CuratedMap {
             tags: helper.tags,
             dimensions: helper.dimensions,
             curated_at: helper.curated_at,
+            grid: helper.grid.unwrap_or_default(),
             layers: helper.layers,
             description: helper.description,
         })
@@ -782,6 +900,7 @@ impl CuratedMap {
             tags,
             dimensions,
             curated_at,
+            grid: GridConfig::default(),
             layers: Vec::new(),
             description: None,
         }
@@ -800,6 +919,11 @@ impl CuratedMap {
         self.layers = layers;
         self
     }
+    pub fn with_grid(mut self, grid: GridConfig) -> Self {
+        self.grid = grid;
+        self
+    }
+
 
     pub fn with_source(mut self, source: Source) -> Self {
         self.source = Some(source);
@@ -867,6 +991,8 @@ pub struct CuratedMapUpdate {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layers: Option<Vec<CuratedLayer>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<GridConfig>,
 }
 
 impl CuratedMapUpdate {
@@ -893,6 +1019,11 @@ impl CuratedMapUpdate {
         self.layers = Some(layers);
         self
     }
+    pub fn with_grid(mut self, grid: GridConfig) -> Self {
+        self.grid = Some(grid);
+        self
+    }
+
 }
 
 static LAYER_EXCLUDE_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -2372,5 +2503,59 @@ mod tests {
         assert!(empty.tags.is_none());
         assert!(empty.description.is_none());
         assert!(empty.layers.is_none());
+    }
+    #[test]
+    fn test_grid_config_normalization_and_serde() {
+        let default_grid = GridConfig::default();
+        assert_eq!(default_grid.cell_size_px, 64);
+        assert_eq!(default_grid.offset_x, 0);
+        assert_eq!(default_grid.offset_y, 0);
+
+        // Clamping & modulo
+        let small = GridConfig::new(10, 100, 200);
+        assert_eq!(small.cell_size_px, 16);
+        assert_eq!(small.offset_x, 100 % 16);
+        assert_eq!(small.offset_y, 200 % 16);
+
+        let big = GridConfig::new(500, 350, 400);
+        assert_eq!(big.cell_size_px, 300);
+        assert_eq!(big.offset_x, 350 % 300);
+        assert_eq!(big.offset_y, 400 % 300);
+
+        // Signed offset normalization with Euclidean modulo
+        let signed = GridConfig::with_signed_offsets(64, -5, -70);
+        assert_eq!(signed.cell_size_px, 64);
+        assert_eq!(signed.offset_x, 59); // -5 mod 64 = 59
+        assert_eq!(signed.offset_y, 58); // -70 mod 64 = 58
+
+        // Deserialization with legacy / missing fields
+        let legacy_json = "{}";
+        let parsed_legacy: GridConfig = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed_legacy, GridConfig::default());
+
+        // Deserialization with signed negative offsets in JSON
+        let json = r#"{"cell_size_px": 50, "offset_x": -10, "offset_y": 60}"#;
+        let parsed: GridConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.cell_size_px, 50);
+        assert_eq!(parsed.offset_x, 40);
+        assert_eq!(parsed.offset_y, 10);
+    }
+
+    #[test]
+    fn test_grid_config_auto_seed() {
+        // Matching normal aspect ratio within 5%
+        // 2000x1500 image, 40x30 grid -> cell size 50px
+        let seeded = GridConfig::auto_seed((40, 30), (2000, 1500));
+        assert_eq!(seeded.cell_size_px, 50);
+        assert_eq!(seeded.offset_x, 0);
+        assert_eq!(seeded.offset_y, 0);
+
+        // Matching swapped aspect ratio (image 1500x2000, parsed 40x30)
+        let seeded_swapped = GridConfig::auto_seed((40, 30), (1500, 2000));
+        assert_eq!(seeded_swapped.cell_size_px, 50);
+
+        // Mismatched aspect ratio -> defaults to 64px
+        let mismatched = GridConfig::auto_seed((50, 10), (2000, 1500));
+        assert_eq!(mismatched.cell_size_px, 64);
     }
 }

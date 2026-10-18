@@ -907,6 +907,12 @@
             const saved = candidateGridSettings.get(candidate.id);
             state.gridSize = saved.size;
             state.gridOffset = { ...saved.offset };
+        } else if (candidate.grid) {
+            state.gridSize = candidate.grid.cell_size_px ?? 64;
+            state.gridOffset = {
+                x: candidate.grid.offset_x ?? 0,
+                y: candidate.grid.offset_y ?? 0,
+            };
         } else {
             state.gridSize = 64;
             state.gridOffset = { x: 0, y: 0 };
@@ -5100,6 +5106,12 @@
             const saved = candidateGridSettings.get(gridKey);
             state.libraryFullscreenGridSize = saved.size;
             state.libraryFullscreenGridOffset = { ...saved.offset };
+        } else if (map.grid) {
+            state.libraryFullscreenGridSize = map.grid.cell_size_px ?? 64;
+            state.libraryFullscreenGridOffset = {
+                x: map.grid.offset_x ?? 0,
+                y: map.grid.offset_y ?? 0,
+            };
         } else {
             state.libraryFullscreenGridSize = 64;
             state.libraryFullscreenGridOffset = { x: 0, y: 0 };
@@ -5374,12 +5386,35 @@
         });
     }
 
+    let saveFullscreenGridTimeout = null;
     function saveFullscreenMapGrid() {
         if (state.libraryFullscreenMap && state.libraryFullscreenMap.id) {
-            candidateGridSettings.set(`curated_${state.libraryFullscreenMap.id}`, {
+            const map = state.libraryFullscreenMap;
+            const payload = {
+                grid: {
+                    cell_size_px: state.libraryFullscreenGridSize,
+                    offset_x: state.libraryFullscreenGridOffset.x,
+                    offset_y: state.libraryFullscreenGridOffset.y,
+                },
+            };
+            map.grid = { ...payload.grid };
+            candidateGridSettings.set(`curated_${map.id}`, {
                 size: state.libraryFullscreenGridSize,
                 offset: { ...state.libraryFullscreenGridOffset },
             });
+
+            clearTimeout(saveFullscreenGridTimeout);
+            saveFullscreenGridTimeout = setTimeout(async () => {
+                try {
+                    await fetch(`/api/curated/${encodeURIComponent(map.id)}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(payload),
+                    });
+                } catch (err) {
+                    console.error("Failed to save curated grid config:", err);
+                }
+            }, 300);
         }
     }
 
@@ -7078,14 +7113,34 @@
         }
     }
 
+    let saveCandidateGridTimeout = null;
     function saveCurrentCandidateGrid() {
         if (state.currentIndex >= 0 && state.currentIndex < state.candidates.length) {
             const cand = state.candidates[state.currentIndex];
             if (cand && cand.id) {
+                const payload = {
+                    cell_size_px: state.gridSize,
+                    offset_x: state.gridOffset.x,
+                    offset_y: state.gridOffset.y,
+                };
+                cand.grid = { ...payload };
                 candidateGridSettings.set(cand.id, {
                     size: state.gridSize,
                     offset: { ...state.gridOffset },
                 });
+
+                clearTimeout(saveCandidateGridTimeout);
+                saveCandidateGridTimeout = setTimeout(async () => {
+                    try {
+                        await fetch(`/api/staging/${encodeURIComponent(cand.id)}/grid`, {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(payload),
+                        });
+                    } catch (err) {
+                        console.error("Failed to save staging candidate grid config:", err);
+                    }
+                }, 300);
             }
         }
     }

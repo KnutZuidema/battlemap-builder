@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 
 use crate::adapters::SimdImageProcessor;
 use crate::domain::{
-    infer_bundle_layer_roles, validate_layers_for_curation, BenchmarkMetadata, Candidate,
+    infer_bundle_layer_roles, normalize_tags, validate_layers_for_curation, BenchmarkMetadata, Candidate,
     CaptionGenerator, CuratedMap, CuratedMapUpdate, DirectoryStats,
     Layer, LayerRole, PurgeStagingResult, RedditSidecarMetadata, RejectionReason, RejectionRecord,
     Source, StorageStats, Theme, ThemeStorageStats,
@@ -1279,27 +1279,6 @@ impl FilesystemStorage {
         )))
     }
 
-    /// Retrieve layer image bytes from staging for a specific candidate and layer index.
-    pub fn get_staging_layer_bytes(&self, id: &str, layer_index: usize) -> Result<Vec<u8>, StorageError> {
-        self.get_staging_layer_image(id, layer_index)
-    }
-
-    /// Atomically commit an approved candidate into curated storage:
-    /// performs atomic moves, writes `<id>/manifest.json`, writes LoRA companion files
-    /// (`<id>_lora1024.png` / `<id>_lora1024.txt`), and cleans up staging bundle.
-    pub fn commit_curation(&self, map: &CuratedMap) -> Result<(), StorageError> {
-        self.curate_staging(map)
-    }
-
-    /// Reject candidate: purges staging bundle and records rejection log.
-    pub fn reject_candidate(
-        &self,
-        id: &str,
-        reason: RejectionReason,
-        notes: Option<&str>,
-    ) -> Result<(), StorageError> {
-        self.reject_staging(id, reason, notes)
-    }
 }
 
 impl StorageRepository for FilesystemStorage {
@@ -1586,7 +1565,7 @@ impl StorageRepository for FilesystemStorage {
     }
 
     fn save_curated(&self, map: &CuratedMap, data: &[u8]) -> Result<(), StorageError> {
-        map.validate_themes().map_err(StorageError::InvalidData)?;
+        map.validate_tags().map_err(StorageError::InvalidData)?;
         map.validate_layers().map_err(StorageError::InvalidData)?;
 
         let bundle_dir = self.curated_dir().join(&map.id);
@@ -1882,24 +1861,25 @@ impl StorageRepository for FilesystemStorage {
             .as_ref()
             .and_then(|l| std::fs::read(bundle_dir.join(&l.filename)).ok());
         let old_description = map.description.clone();
-        let themes_updated = update.themes.is_some();
-        let tags_updated = update.tags.is_some();
+        let mut tags_updated = false;
 
         if let Some(tags) = update.tags {
-            map.tags = tags;
+            map.tags = normalize_tags(tags);
+            tags_updated = true;
         }
 
+        // Legacy `themes` payloads fold into the single `tags` list. An empty or
+        // whitespace-only array is a no-op so tags-only clients can still PATCH.
         if let Some(themes) = update.themes {
-            if themes.is_empty() || themes.iter().all(|t| t.trim().is_empty()) {
-                return Err(StorageError::InvalidData("CuratedMap requires at least 1 theme label".into()));
+            let legacy_tags = normalize_tags(themes);
+            if !legacy_tags.is_empty() {
+                map.tags = normalize_tags(map.tags.into_iter().chain(legacy_tags));
+                tags_updated = true;
             }
-            for t in themes {
-                let trimmed = t.trim().to_string();
-                if !trimmed.is_empty() && !map.tags.iter().any(|existing| existing.eq_ignore_ascii_case(&trimmed)) {
-                    map.tags.push(trimmed);
-                }
-            }
-            map.validate_themes().map_err(StorageError::InvalidData)?;
+        }
+
+        if tags_updated {
+            map.validate_tags().map_err(StorageError::InvalidData)?;
         }
 
         if let Some(description) = update.description {
@@ -2100,7 +2080,7 @@ impl StorageRepository for FilesystemStorage {
                     first.caption = map.description.clone();
                 }
             }
-        } else if themes_updated || tags_updated {
+        } else if tags_updated {
             let caption = CaptionGenerator::generate_for_curated(&map, None);
             let bundle_txt = bundle_dir.join(format!("{}_lora1024.txt", map.id));
             let _ = Self::atomic_write(&bundle_txt, caption.as_bytes());
@@ -2204,8 +2184,8 @@ impl StorageRepository for FilesystemStorage {
         Ok(false)
     }
 
-    fn curate_staging(&self, map: &CuratedMap) -> Result<(), StorageError> {
-        map.validate_themes().map_err(StorageError::InvalidData)?;
+    fn curate_staging(&self, map: &CuratedMap) -> Result<CuratedMap, StorageError> {
+        map.validate_tags().map_err(StorageError::InvalidData)?;
 
         if let Some(bundle_dir) = self.find_staging_bundle_dir(&map.id) {
             let manifest_path = bundle_dir.join("manifest.json");
@@ -2246,7 +2226,10 @@ impl StorageRepository for FilesystemStorage {
                             role: cl.role,
                             elevation: cl.elevation,
                             caption,
-                            source_url: src_layer.and_then(|l| l.source_url.clone()),
+                            source_url: cl
+                                .source_url
+                                .clone()
+                                .or_else(|| src_layer.and_then(|l| l.source_url.clone())),
                             dimensions: dims,
                         }
                     })
@@ -2297,6 +2280,9 @@ impl StorageRepository for FilesystemStorage {
                 );
                 if let Some(c) = &src_layer.caption {
                     layer = layer.with_caption(c.clone());
+                }
+                if let Some(source_url) = &src_layer.source_url {
+                    layer = layer.with_source_url(source_url.clone());
                 }
                 curated_layers.push(layer);
             }
@@ -2351,7 +2337,7 @@ impl StorageRepository for FilesystemStorage {
             }
 
             let _ = std::fs::remove_dir_all(&bundle_dir);
-            return Ok(());
+            return Ok(stored_map);
         }
 
         // Fallback for raw drop-in image or unmigrated flat file in staging
@@ -2446,7 +2432,7 @@ impl StorageRepository for FilesystemStorage {
             }
         }
 
-        Ok(())
+        Ok(stored_map)
     }
 
     fn reject_staging(
@@ -2837,7 +2823,7 @@ impl CurationStore for FilesystemStorage {
         self.get_staging_layer_image(id, layer_index)
     }
 
-    fn commit_curation(&self, map: &CuratedMap) -> Result<(), StorageError> {
+    fn commit_curation(&self, map: &CuratedMap) -> Result<CuratedMap, StorageError> {
         self.curate_staging(map)
     }
 
@@ -3166,7 +3152,7 @@ mod tests {
         );
         let err = storage.save_curated(&invalid_map_empty, b"test").unwrap_err();
         match err {
-            StorageError::InvalidData(msg) => assert!(msg.contains("1 theme label")),
+            StorageError::InvalidData(msg) => assert!(msg.contains("1 tag label")),
             other => panic!("Expected InvalidData error, got {other:?}"),
         }
     }
@@ -3497,6 +3483,63 @@ mod tests {
         assert!(storage.is_rejected("post_xyz_1").unwrap());
         assert!(storage.is_duplicate("post_xyz").unwrap());
         assert!(storage.is_duplicate("post_xyz_0").unwrap());
+    }
+
+    #[test]
+    fn test_commit_curation_preserves_layer_source_url_provenance() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+
+        let mut candidate = Candidate::with_now(
+            "provenance_bundle",
+            Source::Reddit,
+            "provenance_bundle/0.png",
+            (1024, 1024),
+        );
+        candidate.layers = vec![
+            Layer::new(0, "0.png", LayerRole::Ground, Some(0), (1024, 1024))
+                .with_source_url("https://i.redd.it/ground.png"),
+            Layer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1024, 1024))
+                .with_source_url("https://i.redd.it/upper.png"),
+        ];
+        storage
+            .save_staging_bundle(
+                None,
+                &candidate,
+                &[b"ground-bytes".to_vec(), b"upper-bytes".to_vec()],
+            )
+            .unwrap();
+
+        let curated = CuratedMap::with_now(
+            "provenance_bundle",
+            Theme::Dungeon,
+            vec!["provenance".into()],
+            (1024, 1024),
+        )
+        .with_description("Provenance-preserving dungeon");
+
+        let stored = storage.commit_curation(&curated).unwrap();
+        assert_eq!(
+            stored.layers[0].source_url.as_deref(),
+            Some("https://i.redd.it/ground.png")
+        );
+        assert_eq!(
+            stored.layers[1].source_url.as_deref(),
+            Some("https://i.redd.it/upper.png")
+        );
+
+        let manifest_path = dir
+            .path()
+            .join("curated")
+            .join("provenance_bundle")
+            .join("manifest.json");
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.contains("https://i.redd.it/ground.png"));
+        assert!(manifest.contains("https://i.redd.it/upper.png"));
+
+        let listed = storage.list_curated(None).unwrap();
+        let persisted = listed.iter().find(|m| m.id == "provenance_bundle").unwrap();
+        assert_eq!(persisted.layers, stored.layers);
     }
 
     #[test]
@@ -4014,12 +4057,14 @@ mod tests {
         assert!(lora_txt.contains("luminescent"));
         assert!(lora_txt.contains("fungal cavern"));
 
-        // Validation error on empty themes
-        let invalid_update = CuratedMapUpdate::default().with_themes(vec![]);
-        let err = storage
-            .update_curated("map_upd_meta", invalid_update)
-            .unwrap_err();
-        assert!(matches!(err, StorageError::InvalidData(_)));
+        // Empty legacy themes is a no-op
+        let unchanged = storage
+            .update_curated("map_upd_meta", CuratedMapUpdate::default().with_themes(vec![]))
+            .unwrap();
+        assert_eq!(
+            unchanged.tags,
+            vec!["stalactites", "bioluminescence", "cave", "underdark"]
+        );
 
         // Updating non-existent curated map returns NotFound
         let err_nf = storage

@@ -181,16 +181,6 @@ impl AppState {
         self
     }
 
-    /// Obtains reference to existing curation workflow.
-    pub fn curation_service(&self) -> Arc<dyn CurationWorkflow> {
-        self.curation_service.clone()
-    }
-
-    /// Obtains reference to existing description service.
-    pub fn description_service(&self) -> Arc<DescriptionService> {
-        self.description_service.clone()
-    }
-
     /// Obtains reference to existing OpenRouter adapter or attempts on-demand resolution.
     pub fn openrouter_client(&self) -> Option<Arc<OpenRouterAdapter>> {
         if let Some(adapter) = &self.openrouter {

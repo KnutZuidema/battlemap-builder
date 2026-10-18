@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    validate_layers_for_curation, CuratedMap, Layer, LayerRole, RejectionReason,
+    normalize_tags, validate_layers_for_curation, CuratedMap, Layer, LayerRole, RejectionReason,
 };
 use crate::ports::curation_store::CurationStore;
 use crate::ports::storage::StorageError;
@@ -74,13 +74,6 @@ impl CurationService {
         }
     }
 
-    pub fn store(&self) -> &Arc<dyn CurationStore> {
-        &self.store
-    }
-
-    pub fn description_service(&self) -> &Arc<DescriptionService> {
-        &self.description_service
-    }
 }
 
 #[async_trait]
@@ -103,57 +96,32 @@ impl CurationWorkflow for CurationService {
         let candidate = self.store.get_staging_candidate(trimmed_id)?;
 
         // Validate tags
-        let clean_tags: Vec<String> = tags
-            .into_iter()
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect();
+        let clean_tags = normalize_tags(tags);
         if clean_tags.is_empty() {
             return Err(CurationWorkflowError::ValidationFailed(
                 "At least 1 tag/theme is required to curate a candidate".to_string(),
             ));
         }
 
-        // 2. Layer resolution & validation
+        // 2. Layer resolution & validation (unassigned/ground rules live in the domain validator)
         let raw_layers = layers.unwrap_or_else(|| candidate.resolved_layers());
-
-        // Zero unassigned layers check (all layers must be assigned a role)
-        if let Some(unassigned) = raw_layers.iter().find(|l| l.role.is_unassigned()) {
-            return Err(CurationWorkflowError::ValidationFailed(format!(
-                "Cannot curate candidate: layer {} is Unassigned",
-                unassigned.index
-            )));
-        }
-
         validate_layers_for_curation(&raw_layers)
             .map_err(CurationWorkflowError::ValidationFailed)?;
 
-        let included_layers: Vec<&Layer> = raw_layers
+        let ground_layer = raw_layers
             .iter()
-            .filter(|l| l.role.is_included())
-            .collect();
-
-        let ground_layers: Vec<&Layer> = included_layers
-            .iter()
-            .filter(|l| l.role.is_ground())
-            .copied()
-            .collect();
-
-        if ground_layers.len() != 1 {
-            return Err(CurationWorkflowError::ValidationFailed(format!(
-                "Strictly one Ground layer is required to curate a candidate (found {})",
-                ground_layers.len()
-            )));
-        }
-
-        let ground_layer = ground_layers[0];
-        let ground_layer_idx = ground_layer.index;
+            .find(|l| l.role.is_ground())
+            .ok_or_else(|| {
+                CurationWorkflowError::ValidationFailed(
+                    "Strictly one Ground layer is required to curate a candidate".to_string(),
+                )
+            })?;
 
         // 3. Physical description resolution via DescriptionService (STRICT: no procedural caption fallback)
         let final_description = if let Some(desc) = description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
             desc.to_string()
         } else {
-            let ground_bytes = self.store.get_staging_layer_bytes(trimmed_id, ground_layer_idx)?;
+            let ground_bytes = self.store.get_staging_layer_bytes(trimmed_id, ground_layer.index)?;
             self.description_service
                 .describe(
                     &ground_bytes,
@@ -165,7 +133,7 @@ impl CurationWorkflow for CurationService {
         };
 
         // 4. Update ground layer caption with resolved description
-        let mut layers_for_commit = raw_layers.clone();
+        let mut layers_for_commit = raw_layers;
         for layer in &mut layers_for_commit {
             if layer.role == LayerRole::Ground {
                 layer.caption = Some(final_description.clone());
@@ -176,66 +144,16 @@ impl CurationWorkflow for CurationService {
         let map_to_commit = CuratedMap::with_now(
             trimmed_id,
             Vec::<String>::new(),
-            clean_tags.clone(),
-            candidate.dimensions,
-        )
-        .with_source(candidate.source)
-        .with_layers(layers_for_commit)
-        .with_description(final_description.clone());
-
-        // 6. Atomic commit
-        self.store.commit_curation(&map_to_commit)?;
-
-        // 7. Finalized CuratedMap assembled directly in memory (O(1) latency, zero subsequent store scans)
-        let mut final_curated_layers = Vec::with_capacity(included_layers.len());
-        for (curated_idx, src_layer) in raw_layers
-            .iter()
-            .filter(|l| l.role.is_included())
-            .enumerate()
-        {
-            let ext = std::path::Path::new(&src_layer.filename)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("png");
-            let dest_filename = Layer::format_filename(
-                curated_idx,
-                src_layer.role,
-                src_layer.elevation,
-                ext,
-            );
-            let mut layer = Layer::new(
-                curated_idx,
-                dest_filename,
-                src_layer.role,
-                src_layer.elevation,
-                if src_layer.dimensions != (0, 0) {
-                    src_layer.dimensions
-                } else {
-                    candidate.dimensions
-                },
-            );
-            if src_layer.role == LayerRole::Ground {
-                layer = layer.with_caption(final_description.clone());
-            } else if let Some(caption) = &src_layer.caption {
-                layer = layer.with_caption(caption.clone());
-            }
-            if let Some(source_url) = &src_layer.source_url {
-                layer = layer.with_source_url(source_url.clone());
-            }
-            final_curated_layers.push(layer);
-        }
-
-        let finalized_map = CuratedMap::with_now(
-            trimmed_id,
-            Vec::<String>::new(),
             clean_tags,
             candidate.dimensions,
         )
         .with_source(candidate.source)
-        .with_layers(final_curated_layers)
+        .with_layers(layers_for_commit)
         .with_description(final_description);
 
-        Ok(finalized_map)
+        // 6. Atomic commit, returning the map exactly as written to disk
+        let stored_map = self.store.commit_curation(&map_to_commit)?;
+        Ok(stored_map)
     }
 
     async fn reject(
@@ -353,10 +271,42 @@ mod tests {
             })
         }
 
-        fn commit_curation(&self, map: &CuratedMap) -> Result<(), StorageError> {
+        fn commit_curation(&self, map: &CuratedMap) -> Result<CuratedMap, StorageError> {
             self.commit_curation_calls.fetch_add(1, Ordering::SeqCst);
-            *self.committed.lock().unwrap() = Some(map.clone());
-            Ok(())
+
+            // Mirror the filesystem adapter's persisted form: included layers only,
+            // deterministic filenames, and provenance/captions preserved.
+            let mut stored = map.clone();
+            let mut layers = Vec::new();
+            for (curated_idx, src_layer) in map.layers.iter().filter(|l| l.role.is_included()).enumerate() {
+                let ext = std::path::Path::new(&src_layer.filename)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("png");
+                let dest_filename =
+                    Layer::format_filename(curated_idx, src_layer.role, src_layer.elevation, ext);
+                let mut layer = Layer::new(
+                    curated_idx,
+                    dest_filename,
+                    src_layer.role,
+                    src_layer.elevation,
+                    if src_layer.dimensions != (0, 0) {
+                        src_layer.dimensions
+                    } else {
+                        map.dimensions
+                    },
+                );
+                if let Some(caption) = &src_layer.caption {
+                    layer = layer.with_caption(caption.clone());
+                }
+                if let Some(source_url) = &src_layer.source_url {
+                    layer = layer.with_source_url(source_url.clone());
+                }
+                layers.push(layer);
+            }
+            stored.layers = layers;
+            *self.committed.lock().unwrap() = Some(stored.clone());
+            Ok(stored)
         }
 
         fn reject_candidate(
@@ -598,7 +548,7 @@ mod tests {
 
         match err {
             CurationWorkflowError::ValidationFailed(msg) => {
-                assert!(msg.contains("Unassigned"), "Got: {msg}");
+                assert!(msg.contains("unassigned"), "Got: {msg}");
             }
             other => panic!("Expected ValidationFailed, got {other:?}"),
         }

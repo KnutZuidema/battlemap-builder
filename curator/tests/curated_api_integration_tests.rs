@@ -181,6 +181,45 @@ async fn test_patch_curated_layers() {
 }
 
 #[tokio::test]
+async fn test_patch_curated_tags_only_payload_without_themes() {
+    let (app, storage, _dir) = setup_test_app();
+    curate_test_bundle(&storage, "tags_only_patch", Theme::Dungeon, vec!["tower".into()]);
+
+    // The library inspector sends tags, description, and layers — never `themes`.
+    let payload = json!({
+        "tags": ["tower", "crypt"],
+        "description": "A fortified tower with a flooded crypt below",
+        "layers": [
+            { "index": 0, "filename": "0.png", "role": "ground", "elevation": 0, "dimensions": [300, 300] },
+            { "index": 1, "filename": "1.png", "role": "upper_floor", "elevation": 1, "dimensions": [300, 300] }
+        ]
+    });
+
+    let req = Request::builder()
+        .uri("/api/curated/tags_only_patch")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let updated: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(updated["tags"], json!(["tower", "crypt"]));
+    assert_eq!(
+        updated["description"],
+        "A fortified tower with a flooded crypt below"
+    );
+    assert!(updated.get("themes").is_none());
+
+    let listed = storage.list_curated(None).unwrap();
+    let stored = listed.iter().find(|m| m.id == "tags_only_patch").unwrap();
+    assert_eq!(stored.tags, vec!["tower", "crypt"]);
+}
+
+#[tokio::test]
 async fn test_patch_curated_not_found_and_validation() {
     let (app, storage, _dir) = setup_test_app();
     curate_test_map(&storage, "map_val_1", Theme::Cave, vec![], None);
@@ -195,7 +234,7 @@ async fn test_patch_curated_not_found_and_validation() {
     let resp_404 = app.clone().oneshot(req_404).await.unwrap();
     assert_eq!(resp_404.status(), StatusCode::NOT_FOUND);
 
-    // 400 for empty themes
+    // Empty legacy themes is a no-op, not a validation failure
     let req_empty_themes = Request::builder()
         .uri("/api/curated/map_val_1")
         .method("PATCH")
@@ -203,7 +242,10 @@ async fn test_patch_curated_not_found_and_validation() {
         .body(Body::from(json!({ "themes": [] }).to_string()))
         .unwrap();
     let resp_empty_themes = app.clone().oneshot(req_empty_themes).await.unwrap();
-    assert_eq!(resp_empty_themes.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp_empty_themes.status(), StatusCode::OK);
+    let empty_body = to_bytes(resp_empty_themes.into_body(), usize::MAX).await.unwrap();
+    let unchanged: CuratedMap = serde_json::from_slice(&empty_body).unwrap();
+    assert_eq!(unchanged.tags, vec!["cave".to_string()]);
 
     // 400 for whitespace/empty ID
     let req_empty_id = Request::builder()

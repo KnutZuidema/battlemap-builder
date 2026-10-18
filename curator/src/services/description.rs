@@ -29,16 +29,6 @@ pub trait DescriptionGenerator: Send + Sync {
         tags: &[String],
         title: Option<&str>,
     ) -> Result<String, DescriptionError>;
-
-    /// Convenience helper omitting optional filename and title.
-    async fn generate_description_simple(
-        &self,
-        image_bytes: &[u8],
-        tags: &[String],
-    ) -> Result<String, DescriptionError> {
-        self.generate_description(image_bytes, None, tags, None).await
-    }
-
 }
 
 /// Domain service orchestrating physical description generation without silent fallbacks.
@@ -88,16 +78,6 @@ impl DescriptionService {
         }
 
         Ok(trimmed)
-    }
-
-    /// Generates physical description without extra title/context.
-    pub async fn describe_image(
-        &self,
-        image_bytes: &[u8],
-        filename: Option<&str>,
-        tags: &[String],
-    ) -> Result<String, DescriptionError> {
-        self.describe(image_bytes, filename, tags, None).await
     }
 }
 

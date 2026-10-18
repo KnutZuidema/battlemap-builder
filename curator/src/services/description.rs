@@ -43,11 +43,6 @@ impl DescriptionService {
         Self { generator }
     }
 
-    /// Returns `true` if a description generator is configured.
-    pub fn is_configured(&self) -> bool {
-        self.generator.is_some()
-    }
-
     /// Generates physical description from image bytes, optional filename, tags, and optional title.
     pub async fn describe(
         &self,
@@ -81,34 +76,44 @@ impl DescriptionService {
     }
 }
 
+/// Inspects raw magic bytes and an optional filename to determine an image MIME type.
+/// Defaults to `image/png` when neither source identifies the format.
+pub fn detect_image_mime(bytes: &[u8], filename: Option<&str>) -> &'static str {
+    if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
+        return "image/png";
+    }
+    if bytes.len() >= 3 && &bytes[0..3] == b"\xFF\xD8\xFF" {
+        return "image/jpeg";
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return "image/webp";
+    }
+    if bytes.len() >= 6 && (&bytes[0..6] == b"GIF87a" || &bytes[0..6] == b"GIF89a") {
+        return "image/gif";
+    }
+
+    if let Some(name) = filename {
+        if let Some(ext) = std::path::Path::new(name).extension().and_then(|e| e.to_str()) {
+            match ext.to_ascii_lowercase().as_str() {
+                "jpg" | "jpeg" => return "image/jpeg",
+                "png" => return "image/png",
+                "webp" => return "image/webp",
+                "gif" => return "image/gif",
+                _ => {}
+            }
+        }
+    }
+
+    "image/png"
+}
+
 /// Resolves an image MIME type given a MIME string, filename, or raw magic bytes.
 pub fn resolve_mime_type(mime_or_filename: &str, bytes: &[u8]) -> String {
     let trimmed = mime_or_filename.trim();
     if trimmed.contains('/') {
         return trimmed.to_string();
     }
-    if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
-        return "image/png".to_string();
-    }
-    if bytes.len() >= 3 && &bytes[0..3] == b"\xFF\xD8\xFF" {
-        return "image/jpeg".to_string();
-    }
-    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return "image/webp".to_string();
-    }
-    if bytes.len() >= 6 && (&bytes[0..6] == b"GIF87a" || &bytes[0..6] == b"GIF89a") {
-        return "image/gif".to_string();
-    }
-    if let Some(ext) = trimmed.rsplit('.').next() {
-        match ext.to_ascii_lowercase().as_str() {
-            "jpg" | "jpeg" => return "image/jpeg".to_string(),
-            "png" => return "image/png".to_string(),
-            "webp" => return "image/webp".to_string(),
-            "gif" => return "image/gif".to_string(),
-            _ => {}
-        }
-    }
-    "image/png".to_string()
+    detect_image_mime(bytes, Some(trimmed)).to_string()
 }
 
 #[cfg(test)]
@@ -138,7 +143,6 @@ mod tests {
     #[tokio::test]
     async fn test_service_unconfigured() {
         let svc = DescriptionService::new(None);
-        assert!(!svc.is_configured());
 
         let res = svc.describe(b"fake-bytes", Some("image/png"), &[], None).await;
         assert!(matches!(res, Err(DescriptionError::NotConfigured(_))));
@@ -163,7 +167,6 @@ mod tests {
             invoked: AtomicBool::new(false),
         });
         let svc = DescriptionService::new(Some(gen.clone()));
-        assert!(svc.is_configured());
 
         let res = svc
             .describe(b"fake-image", Some("map.png"), &["cave".into()], Some("underground"))

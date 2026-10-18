@@ -23,35 +23,7 @@ use crate::domain::{
 use crate::ports::cost_tracker::CostStats;
 use crate::services::{IngestionSummary, RedditIngestionService};
 use crate::adapters::clean_tags;
-/// Inspects bytes and optional filename to determine image MIME type.
-pub fn detect_image_mime(bytes: &[u8], filename: Option<&str>) -> &'static str {
-    if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
-        return "image/png";
-    }
-    if bytes.len() >= 3 && &bytes[0..3] == b"\xFF\xD8\xFF" {
-        return "image/jpeg";
-    }
-    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return "image/webp";
-    }
-    if bytes.len() >= 6 && (&bytes[0..6] == b"GIF87a" || &bytes[0..6] == b"GIF89a") {
-        return "image/gif";
-    }
-
-    if let Some(name) = filename {
-        if let Some(ext) = std::path::Path::new(name).extension().and_then(|e| e.to_str()) {
-            match ext.to_lowercase().as_str() {
-                "jpg" | "jpeg" => return "image/jpeg",
-                "webp" => return "image/webp",
-                "gif" => return "image/gif",
-                "png" => return "image/png",
-                _ => {}
-            }
-        }
-    }
-
-    "image/png"
-}
+pub use crate::services::description::detect_image_mime;
 
 /// System status response payload.
 #[derive(Debug, Serialize, Deserialize)]

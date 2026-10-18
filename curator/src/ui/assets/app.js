@@ -5927,6 +5927,7 @@
                     role: l.role || "ground",
                     elevation: typeof l.elevation === "number" ? l.elevation : (l.role === "ground" ? 0 : 1),
                     caption: l.caption || null,
+                    source_url: l.source_url || null,
                     dimensions: (l.dimensions && Array.isArray(l.dimensions) && l.dimensions.length >= 2) ? l.dimensions : (state.libraryDrawerMap.dimensions || [1024, 1024]),
                 })),
             };
@@ -6230,8 +6231,9 @@
                 e.preventDefault();
                 addInspectorTheme(inspectorThemeInput.value);
             } else if (e.key === "Backspace" && !inspectorThemeInput.value) {
-                if (state.libraryDraft.tags && state.libraryDraft.tags.length > 0) {
-                    removeInspectorTheme(state.libraryDraft.tags[state.libraryDraft.tags.length - 1]);
+                const themeTags = (state.libraryDraft.tags || []).filter(isCanonicalThemeTag);
+                if (themeTags.length > 0) {
+                    removeInspectorTheme(themeTags[themeTags.length - 1]);
                 }
             }
         });

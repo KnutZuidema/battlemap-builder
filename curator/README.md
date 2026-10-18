@@ -114,11 +114,10 @@ Curator features an automated vision description workflow powered by Google Gemi
      - **NO art style meta-prompts**: Strictly forbids phrases like `"digital art"`, `"hand-painted"`, `"photorealistic"`.
      - **NO game mechanics**: Strictly forbids statistics, grid square counts, or rule system references.
    - **Output Format**: Dense, evocative 40–90 word description in plain text only (no markdown, no bullets, no commentary).
-   - **User Prompt (`build_description_user_prompt`)**: Combines accepted themes and tags with strict instructions to guide the model's focus onto the identified architectural features.
-4. **Offline Resilience & Fallback Guarantees**:
-   - If OpenRouter is offline, the API key is missing or invalid, or an upstream timeout occurs, `POST /api/staging/:id/describe` falls back deterministically to `CaptionGenerator::generate_with_theme_str(primary_theme, &tags, candidate.title)`.
-   - The endpoint **never returns a 500 Internal Server Error** due to offline AI services; it returns `200 OK` with a valid, deterministic description.
-   - During curation (`POST /api/curate`), if no explicit description is supplied while offline, Curator automatically generates and persists the deterministic fallback description into `manifest.json`.
+   - **User Prompt (`build_description_user_prompt`)**: Combines the candidate `title` (when present) and its `tags` with strict instructions to guide the model's focus onto the identified architectural features.
+4. **Strict Failure Propagation (ADR-0005)**:
+   - There is no deterministic caption fallback. `POST /api/staging/:id/describe` propagates vision failures as HTTP errors: `503 Service Unavailable` when the vision engine is unconfigured (missing/invalid `OPENROUTER_API_KEY` or disabled) and `502 Bad Gateway` when the upstream provider fails or returns an empty description.
+   - During curation (`POST /api/curate`), an omitted description is generated through the same strict path; if vision is unavailable, curation fails with the propagated error instead of persisting a synthesized description.
 
 ### 2.4. Keyboard Event Routing & Trapping
 
@@ -183,12 +182,11 @@ data/
   - **Manifest**: The `description` string is persisted directly in `data/curated/<id>/manifest.json`.
   - **Primary Layer Caption**: The primary layer (Ground role) `caption` field matches and retains the curated description.
   - **LoRA Companion Files**: Automatically generates paired `<id>_lora1024.png` and `<id>_lora1024.txt` companion files. The `.txt` file incorporates prompt triggers, themes, tags, and the curated description.
-  - **Backward Compatibility & Legacy Deserialization**: Legacy `manifest.json` files lacking the `"description"` field deserialize cleanly (with `description: None`), and `GET /api/curated` automatically ensures caption compatibility without errors.
+  - **Backward Compatibility & Legacy Deserialization**: Legacy `manifest.json` files lacking the `"description"` field deserialize cleanly (with `description: None`). Curated reads (`GET /api/curated`, `GET /api/curated/:id`) are pure: they return the persisted manifest as-is and never synthesize or rewrite captions.
 - **Reference Provider Prompt Keyword Scoring (`ReferenceProvider`)**:
   - Curated map descriptions are directly leveraged in the benchmark and generation pipeline for few-shot orthographic perspective conditioning.
   - `ReferenceProvider::score_curated_map_for_prompt` scores keyword overlap between generation prompts and curated maps:
-    - **Theme match**: +2 points per matching theme.
-    - **Tag match**: +1 point per matching tag.
+    - **Tag match**: +2 points per tag found in the prompt (canonical themes are stored as tags).
     - **Description match**: +1 point per matching word in `description`.
   - The highest scoring curated map is selected as a reference image, enabling fine-grained conditioning based on architectural details (e.g., "sarcophagus", "throne", "stalagmites").
 - **Deterministic Layer Filenames**: Layers are saved with standardized names: `<index>_<role>[_<elevation>].<ext>` (e.g. `0_ground.png`, `1_upper_1.png`, `2_basement_-1.png`).

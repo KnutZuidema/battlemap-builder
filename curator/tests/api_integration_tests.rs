@@ -2354,3 +2354,98 @@ async fn test_legacy_manifest_without_description_deserialization() {
     assert_eq!(legacy_item.id, legacy_id);
     assert_eq!(legacy_item.themes, vec!["dungeon"]);
 }
+
+#[tokio::test]
+async fn test_staging_grid_patch_and_curation_persistence() {
+    let (app, storage, _dir) = setup_test_app();
+
+    // Stage candidate with default grid (64, 0, 0)
+    let cand = Candidate::with_now("cand_grid_test", Source::Reddit, "cand_grid_test.png", (1024, 1024));
+    let dummy_image = create_test_png();
+    storage.save_staging(&cand, &dummy_image).unwrap();
+
+    // Verify initial candidate grid in storage
+    let staging_list = storage.list_staging().unwrap();
+    let initial_cand = staging_list.iter().find(|c| c.id == "cand_grid_test").unwrap();
+    assert_eq!(initial_cand.grid.cell_size_px, 64);
+    assert_eq!(initial_cand.grid.offset_x, 0);
+    assert_eq!(initial_cand.grid.offset_y, 0);
+    // 1. PATCH /api/staging/{id}/grid updates staging candidate grid
+    let grid_payload = json!({
+        "cell_size_px": 128,
+        "offset_x": 10,
+        "offset_y": 20
+    });
+    let req = Request::builder()
+        .uri("/api/staging/cand_grid_test/grid")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(grid_payload.to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let updated_cand: Candidate = serde_json::from_slice(&body).unwrap();
+    assert_eq!(updated_cand.grid.cell_size_px, 128);
+    assert_eq!(updated_cand.grid.offset_x, 10);
+    assert_eq!(updated_cand.grid.offset_y, 20);
+
+    // Verify persisted on disk for staging candidate
+    let staging_list = storage.list_staging().unwrap();
+    let persisted_staging = staging_list.iter().find(|c| c.id == "cand_grid_test").unwrap();
+    assert_eq!(persisted_staging.grid.cell_size_px, 128);
+    assert_eq!(persisted_staging.grid.offset_x, 10);
+    assert_eq!(persisted_staging.grid.offset_y, 20);
+    // 2. Curation carries candidate grid to curated map
+    let curate_payload = json!({
+        "id": "cand_grid_test",
+        "themes": ["dungeon"],
+        "tags": ["crypt", "stone"]
+    });
+    let req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let curated_list = storage.list_curated(None).unwrap();
+    let curated_map = curated_list.iter().find(|m| m.id == "cand_grid_test").unwrap();
+    assert_eq!(curated_map.grid.cell_size_px, 128);
+    assert_eq!(curated_map.grid.offset_x, 10);
+    assert_eq!(curated_map.grid.offset_y, 20);
+
+    // 3. PATCH /api/curated/{id} updates curated map grid
+    let patch_curated_payload = json!({
+        "grid": {
+            "cell_size_px": 70,
+            "offset_x": 5,
+            "offset_y": 15
+        }
+    });
+    let req = Request::builder()
+        .uri("/api/curated/cand_grid_test")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(patch_curated_payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let updated_curated: CuratedMap = serde_json::from_slice(&body).unwrap();
+    assert_eq!(updated_curated.grid.cell_size_px, 70);
+    assert_eq!(updated_curated.grid.offset_x, 5);
+    assert_eq!(updated_curated.grid.offset_y, 15);
+
+    // Verify persisted on disk for curated map
+    let curated_list = storage.list_curated(None).unwrap();
+    let persisted_curated = curated_list.iter().find(|m| m.id == "cand_grid_test").unwrap();
+    assert_eq!(persisted_curated.grid.cell_size_px, 70);
+    assert_eq!(persisted_curated.grid.offset_x, 5);
+    assert_eq!(persisted_curated.grid.offset_y, 15);
+}

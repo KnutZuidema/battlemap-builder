@@ -925,9 +925,9 @@ impl FilesystemStorage {
 
                 let mut dims = cand.dimensions;
                 if dims == (0, 0) {
-                    dims = cand
-                        .parsed_dimensions
-                        .or_else(|| image::image_dimensions(&target_img).ok())
+                    dims = image::image_dimensions(&target_img)
+                        .ok()
+                        .or(cand.parsed_dimensions)
                         .unwrap_or((0, 0));
                 }
 
@@ -964,6 +964,7 @@ impl FilesystemStorage {
                 author: first_cand.author.clone(),
                 parsed_gridless: first_cand.parsed_gridless,
                 parsed_dimensions: first_cand.parsed_dimensions,
+                grid: first_cand.grid,
                 layers,
                 parent_group_id: None,
             };
@@ -990,9 +991,9 @@ impl FilesystemStorage {
             let _ = std::fs::remove_file(&json_path);
 
             if cand.dimensions == (0, 0) {
-                cand.dimensions = cand
-                    .parsed_dimensions
-                    .or_else(|| image::image_dimensions(&target_img).ok())
+                cand.dimensions = image::image_dimensions(&target_img)
+                    .ok()
+                    .or(cand.parsed_dimensions)
                     .unwrap_or((0, 0));
             }
             cand.id = stem.clone();
@@ -1127,11 +1128,7 @@ impl FilesystemStorage {
         std::fs::create_dir_all(&bundle_dir)?;
 
         let mut stored_candidate = candidate.clone();
-        if stored_candidate.dimensions == (0, 0) {
-            if let Some(dims) = stored_candidate.parsed_dimensions {
-                stored_candidate.dimensions = dims;
-            }
-        }
+        // Do not overwrite pixel dimensions with parsed grid dimensions.
 
         if stored_candidate.layers.is_empty() {
             let default_ext = Self::extract_extension(&stored_candidate.filename);
@@ -1198,6 +1195,13 @@ impl FilesystemStorage {
         if stored_candidate.dimensions == (0, 0) {
             if let Some(first) = stored_candidate.layers.first() {
                 stored_candidate.dimensions = first.dimensions;
+            }
+        }
+        if stored_candidate.grid == crate::domain::GridConfig::default() {
+            if let Some(parsed) = stored_candidate.parsed_dimensions {
+                if stored_candidate.dimensions != (0, 0) {
+                    stored_candidate.grid = crate::domain::GridConfig::auto_seed(parsed, stored_candidate.dimensions);
+                }
             }
         }
         if stored_candidate.filename.trim().is_empty() {
@@ -1386,11 +1390,7 @@ impl StorageRepository for FilesystemStorage {
                         if candidate.id.is_empty() {
                             candidate.id = dir_name.to_string();
                         }
-                        if candidate.dimensions == (0, 0) {
-                            if let Some(dims) = candidate.parsed_dimensions {
-                                candidate.dimensions = dims;
-                            }
-                        }
+                        // Do not overwrite pixel dimensions with parsed grid dimensions.
                         if candidate.layers.is_empty() {
                             candidate.layers = candidate.resolved_layers();
                         }
@@ -1401,6 +1401,13 @@ impl StorageRepository for FilesystemStorage {
                                 .map(|l| l.filename.as_str())
                                 .unwrap_or("0.png");
                             candidate.filename = format!("{}/{first_file}", candidate.id);
+                        }
+                        if candidate.grid == crate::domain::GridConfig::default() {
+                            if let Some(parsed) = candidate.parsed_dimensions {
+                                if candidate.dimensions != (0, 0) {
+                                    candidate.grid = crate::domain::GridConfig::auto_seed(parsed, candidate.dimensions);
+                                }
+                            }
                         }
                         known_ids.insert(candidate.id.clone());
                         candidates.push(candidate);
@@ -1854,6 +1861,9 @@ impl StorageRepository for FilesystemStorage {
                 Some(trimmed.to_string())
             };
         }
+        if let Some(grid) = update.grid {
+            map.grid = grid;
+        }
 
         if let Some(new_layers) = update.layers {
             let role_elevation_pairs: Vec<(LayerRole, Option<i8>)> = new_layers
@@ -2259,6 +2269,7 @@ impl StorageRepository for FilesystemStorage {
                     .map(|l| l.dimensions)
                     .unwrap_or(candidate.dimensions);
             }
+            stored_map.grid = candidate.grid;
             if let Some(desc) = &stored_map.description {
                 let primary_idx = curated_layers
                     .iter()
@@ -2349,6 +2360,9 @@ impl StorageRepository for FilesystemStorage {
         Self::atomic_move(&staging_image, &target_image)?;
 
         let mut stored_map = map.clone();
+        if let Some(cand) = &candidate {
+            stored_map.grid = cand.grid;
+        }
         if stored_map.layers.is_empty() {
             stored_map.layers = vec![CuratedLayer {
                 index: 0,
@@ -2431,6 +2445,26 @@ impl StorageRepository for FilesystemStorage {
 
         Ok(candidate)
     }
+    fn update_staging_grid(
+        &self,
+        id: &str,
+        grid: crate::domain::GridConfig,
+    ) -> Result<Candidate, StorageError> {
+        let bundle_dir = self.find_staging_bundle_dir(id).ok_or_else(|| {
+            StorageError::NotFound(format!("Candidate bundle '{id}' not found in staging"))
+        })?;
+        let manifest_path = bundle_dir.join("manifest.json");
+        let content = std::fs::read_to_string(&manifest_path)?;
+        let mut candidate = Self::parse_candidate_json(&content).ok_or_else(|| {
+            StorageError::InvalidData(format!("Invalid manifest.json for '{id}'"))
+        })?;
+
+        candidate.grid = grid;
+        let manifest_json = serde_json::to_string_pretty(&candidate)?;
+        Self::atomic_write(&manifest_path, manifest_json.as_bytes())?;
+
+        Ok(candidate)
+    }
 
     fn split_staging_bundle(&self, id: &str) -> Result<Vec<Candidate>, StorageError> {
         let bundle_dir = self.find_staging_bundle_dir(id).ok_or_else(|| {
@@ -2505,6 +2539,7 @@ impl StorageRepository for FilesystemStorage {
                 author: candidate.author.clone(),
                 parsed_gridless: candidate.parsed_gridless,
                 parsed_dimensions: candidate.parsed_dimensions,
+                grid: candidate.grid,
                 layers: vec![child_layer],
                 parent_group_id: Some(id.to_string()),
             };
@@ -2622,6 +2657,7 @@ impl StorageRepository for FilesystemStorage {
             author: first_cand.author.clone(),
             parsed_gridless: first_cand.parsed_gridless,
             parsed_dimensions: first_cand.parsed_dimensions,
+            grid: first_cand.grid,
             layers: regrouped_layers,
             parent_group_id: None,
         };
@@ -3460,6 +3496,7 @@ mod tests {
             author: Some("Cartographer".to_string()),
             parsed_gridless: Some(true),
             parsed_dimensions: Some((1000, 1000)),
+            grid: Default::default(),
             layers: vec![CandidateLayer {
                 index: 0,
                 filename: "legacy_post_0.png".to_string(),
@@ -3482,6 +3519,7 @@ mod tests {
             author: Some("Cartographer".to_string()),
             parsed_gridless: Some(true),
             parsed_dimensions: Some((1000, 1000)),
+            grid: Default::default(),
             layers: vec![CandidateLayer {
                 index: 0,
                 filename: "legacy_post_1.png".to_string(),

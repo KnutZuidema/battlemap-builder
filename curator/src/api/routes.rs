@@ -685,6 +685,20 @@ pub async fn patch_staging_layers(
 
     Ok(Json(updated_candidate))
 }
+/// PATCH /api/staging/{id}/grid - Update candidate grid configuration in staging manifest.
+pub async fn patch_staging_grid(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<crate::domain::GridConfig>,
+) -> Result<Json<Candidate>, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Candidate ID cannot be empty"));
+    }
+
+    let updated_candidate = state.storage.update_staging_grid(&id, payload)?;
+
+    Ok(Json(updated_candidate))
+}
 
 /// POST /api/staging/{id}/split - Decompose a multi-layer bundle into standalone candidates.
 pub async fn post_split_staging(

@@ -25,6 +25,7 @@ use crate::domain::{
     SYSTEM_INSTRUCTION_SUGGEST_THEMES, USER_PROMPT_SUGGEST_THEMES,
 };
 use crate::ports::model_engine::{ModelEngine, ModelEngineError};
+use crate::services::description::{DescriptionError, DescriptionGenerator};
 
 /// Default OpenRouter API endpoint base URL.
 pub const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -401,6 +402,51 @@ impl OpenRouterAdapter {
         Ok(description)
     }
 }
+#[async_trait]
+impl DescriptionGenerator for OpenRouterAdapter {
+    async fn generate_description(
+        &self,
+        image_bytes: &[u8],
+        mime_type: &str,
+        tags: &[String],
+        context: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        if self.inner.api_key.trim().is_empty() {
+            return Err(DescriptionError::NotConfigured(
+                "OpenRouter API key is empty".to_string(),
+            ));
+        }
+
+        let mut themes: Vec<String> = Vec::new();
+        if let Some(ctx) = context {
+            let trimmed = ctx.trim();
+            if !trimmed.is_empty() {
+                for part in trimmed.split(',') {
+                    let clean = part.trim();
+                    if !clean.is_empty() && !themes.iter().any(|t| t.eq_ignore_ascii_case(clean)) {
+                        themes.push(clean.to_string());
+                    }
+                }
+            }
+        }
+
+        let desc = self
+            .generate_battlemap_description(image_bytes, mime_type, &themes, tags)
+            .await
+            .map_err(|e| match e {
+                ModelEngineError::Auth(msg) => DescriptionError::NotConfigured(msg),
+                other => DescriptionError::GenerationFailed(other.to_string()),
+            })?;
+
+        let trimmed = desc.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(DescriptionError::EmptyDescription);
+        }
+
+        Ok(trimmed)
+    }
+}
+
 
 /// Resolves `OPENROUTER_API_KEY` by checking `server/.env`, `.env`, and environment variables.
 pub fn resolve_api_key() -> Result<String, ModelEngineError> {

@@ -1,6 +1,8 @@
+pub mod description;
 pub mod benchmark;
 pub mod ingestion;
 pub mod reference_provider;
+pub use description::*;
 
 pub use benchmark::*;
 pub use ingestion::{

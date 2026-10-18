@@ -14,6 +14,8 @@ pub enum ApiError {
     BadRequest(String),
     Conflict(String),
     Internal(String),
+    BadGateway(String),
+    ServiceUnavailable(String),
 }
 
 impl ApiError {
@@ -31,6 +33,14 @@ impl ApiError {
 
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
+    }
+
+    pub fn bad_gateway(msg: impl Into<String>) -> Self {
+        Self::BadGateway(msg.into())
+    }
+
+    pub fn service_unavailable(msg: impl Into<String>) -> Self {
+        Self::ServiceUnavailable(msg.into())
     }
 }
 
@@ -67,6 +77,21 @@ impl From<crate::services::IngestionError> for ApiError {
     }
 }
 
+impl From<crate::services::description::DescriptionError> for ApiError {
+    fn from(err: crate::services::description::DescriptionError) -> Self {
+        use crate::services::description::DescriptionError;
+        match err {
+            DescriptionError::NotConfigured(msg) => ApiError::ServiceUnavailable(msg),
+            DescriptionError::ImageUnavailable(msg) => ApiError::NotFound(msg),
+            DescriptionError::GenerationFailed(msg) => ApiError::BadGateway(msg),
+            DescriptionError::EmptyDescription => {
+                ApiError::BadGateway("Empty description received from generator".into())
+            }
+            DescriptionError::NotFound(msg) => ApiError::NotFound(msg),
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
@@ -74,6 +99,8 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
+            ApiError::BadGateway(msg) => (StatusCode::BAD_GATEWAY, msg),
+            ApiError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
         };
 
         (status, Json(json!({ "error": message }))).into_response()

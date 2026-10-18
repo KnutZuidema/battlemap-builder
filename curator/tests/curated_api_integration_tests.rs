@@ -14,6 +14,23 @@ use curator::domain::{
     RejectionReason, Source, Theme,
 };
 use curator::ports::storage::StorageRepository;
+use async_trait::async_trait;
+use curator::services::description::{DescriptionError, DescriptionGenerator, DescriptionService};
+
+struct MockCuratedGen(Result<String, DescriptionError>);
+
+#[async_trait]
+impl DescriptionGenerator for MockCuratedGen {
+    async fn generate_description(
+        &self,
+        _image_bytes: &[u8],
+        _mime_type: &str,
+        _tags: &[String],
+        _context: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        self.0.clone()
+    }
+}
 
 fn create_test_png(width: u32, height: u32) -> Vec<u8> {
     let img = image::RgbaImage::new(width, height);
@@ -344,7 +361,7 @@ async fn test_curated_suggest_themes_and_caching() {
 }
 
 #[tokio::test]
-async fn test_curated_describe_deterministic_fallback() {
+async fn test_curated_describe_strictly_fails_when_unconfigured() {
     let (app, storage, _dir) = setup_test_app();
     curate_test_map(
         &storage,
@@ -354,7 +371,7 @@ async fn test_curated_describe_deterministic_fallback() {
         Some("A cozy roadside tavern"),
     );
 
-    // Call describe with empty body (offline fallback)
+    // Call describe with empty body while unconfigured -> must return 503 SERVICE_UNAVAILABLE (no silent fallback)
     let req = Request::builder()
         .uri("/api/curated/describe_map_test/describe")
         .method("POST")
@@ -362,35 +379,7 @@ async fn test_curated_describe_deterministic_fallback() {
         .unwrap();
 
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    let res: DescribeResponse = serde_json::from_slice(&body).unwrap();
-    assert_eq!(res.id, "describe_map_test");
-    assert!(res.description.contains("ttrpg battlemap"));
-    assert!(res.description.contains("tavern"));
-
-    // Call describe with explicit override themes & tags
-    let override_req = Request::builder()
-        .uri("/api/curated/describe_map_test/describe")
-        .method("POST")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            json!({
-                "themes": ["coastal"],
-                "tags": ["beach", "lighthouse"]
-            })
-            .to_string(),
-        ))
-        .unwrap();
-
-    let override_resp = app.clone().oneshot(override_req).await.unwrap();
-    assert_eq!(override_resp.status(), StatusCode::OK);
-
-    let override_body = to_bytes(override_resp.into_body(), usize::MAX).await.unwrap();
-    let override_res: DescribeResponse = serde_json::from_slice(&override_body).unwrap();
-    assert!(override_res.description.contains("coastal"));
-    assert!(override_res.description.contains("beach"));
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     // Non-existent map returns 404
     let req_404 = Request::builder()
@@ -400,6 +389,38 @@ async fn test_curated_describe_deterministic_fallback() {
         .unwrap();
     let resp_404 = app.oneshot(req_404).await.unwrap();
     assert_eq!(resp_404.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_curated_describe_success_with_service() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let mock_desc = "Rustic wooden tavern with roaring fireplace and sturdy oak tables.";
+    let mock_gen = Arc::new(MockCuratedGen(Ok(mock_desc.to_string())));
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(mock_gen))));
+    let app = create_router(state);
+
+    curate_test_map(
+        &storage,
+        "describe_map_success",
+        Theme::Tavern,
+        vec!["wooden".into(), "fireplace".into()],
+        Some("A cozy roadside tavern"),
+    );
+
+    let req = Request::builder()
+        .uri("/api/curated/describe_map_success/describe")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let res: DescribeResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(res.id, "describe_map_success");
+    assert_eq!(res.description, mock_desc);
 }
 
 #[tokio::test]

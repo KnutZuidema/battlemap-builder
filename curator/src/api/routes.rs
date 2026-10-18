@@ -922,54 +922,18 @@ pub async fn post_describe_candidate(
             themes = cached.clone();
         }
     }
-    let primary_theme = themes
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("dungeon");
-
     let tags = req.tags.unwrap_or_default();
 
-    // 4. Invoke OpenRouter vision model if available, falling back gracefully to CaptionGenerator
-    let description = match state.openrouter_client() {
-        Some(adapter) => {
-            match adapter
-                .generate_battlemap_description(&bytes, mime, &themes, &tags)
-                .await
-            {
-                Ok(desc) if !desc.trim().is_empty() => desc,
-                Ok(_) => {
-                    CaptionGenerator::generate_with_theme_str(
-                        primary_theme,
-                        &tags,
-                        candidate.title.as_deref(),
-                    )
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        candidate_id = %id,
-                        error = %err,
-                        "OpenRouter description generation failed; falling back to caption generator"
-                    );
-                    CaptionGenerator::generate_with_theme_str(
-                        primary_theme,
-                        &tags,
-                        candidate.title.as_deref(),
-                    )
-                }
-            }
-        }
-        None => {
-            tracing::info!(
-                candidate_id = %id,
-                "OpenRouter client not configured; falling back to caption generator"
-            );
-            CaptionGenerator::generate_with_theme_str(
-                primary_theme,
-                &tags,
-                candidate.title.as_deref(),
-            )
-        }
+    let context = if !themes.is_empty() {
+        Some(themes.join(", "))
+    } else {
+        candidate.title.clone()
     };
+
+    let description = state
+        .description_service
+        .describe(&bytes, mime, &tags, context.as_deref())
+        .await?;
 
     Ok(Json(DescribeResponse { id, description }))
 }
@@ -1033,11 +997,6 @@ pub async fn post_curated_describe(
             themes = cached.clone();
         }
     }
-    let primary_theme = themes
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("dungeon");
-
     let mut tags = req.tags.unwrap_or_default();
     if tags.is_empty() {
         if let Some(m) = &curated_map {
@@ -1045,48 +1004,16 @@ pub async fn post_curated_describe(
         }
     }
 
-    let title = curated_map.as_ref().and_then(|m| m.description.clone());
-
-    let description = match state.openrouter_client() {
-        Some(adapter) => {
-            match adapter
-                .generate_battlemap_description(&bytes, mime, &themes, &tags)
-                .await
-            {
-                Ok(desc) if !desc.trim().is_empty() => desc,
-                Ok(_) => {
-                    CaptionGenerator::generate_with_theme_str(
-                        primary_theme,
-                        &tags,
-                        title.as_deref(),
-                    )
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        curated_id = %id,
-                        error = %err,
-                        "OpenRouter description generation failed; falling back to caption generator"
-                    );
-                    CaptionGenerator::generate_with_theme_str(
-                        primary_theme,
-                        &tags,
-                        title.as_deref(),
-                    )
-                }
-            }
-        }
-        None => {
-            tracing::info!(
-                curated_id = %id,
-                "OpenRouter client not configured; falling back to caption generator"
-            );
-            CaptionGenerator::generate_with_theme_str(
-                primary_theme,
-                &tags,
-                title.as_deref(),
-            )
-        }
+    let context = if !themes.is_empty() {
+        Some(themes.join(", "))
+    } else {
+        curated_map.as_ref().and_then(|m| m.description.clone())
     };
+
+    let description = state
+        .description_service
+        .describe(&bytes, mime, &tags, context.as_deref())
+        .await?;
 
     Ok(Json(DescribeResponse { id, description }))
 }

@@ -106,6 +106,9 @@
         libraryDraft: { themes: [], tags: [], description: "", layers: [] },
         libraryDraftDirty: false,
         libraryAiLoading: { suggest: false, describe: false, combo: false },
+        // Deletion Safeguard Modal & Bulk Ops (Issue #137)
+        deleteModalOpen: false,
+        deleteModalTarget: null,
     };
 
     // Curate Decision Modal Flow State
@@ -235,6 +238,14 @@
     let btnInspectorSuggestThemes, btnInspectorDescribe, btnInspectorRunAll;
     let inspectorAiSuggestionsBox, inspectorAiSuggestionsPills, btnAcceptAllSuggestions;
     let btnInspectorFullscreen, btnInspectorDiscard, btnInspectorSave;
+
+    // Delete Curated Modal & Bulk Action Bar DOM Elements (Issue #137)
+    let deleteCuratedModal, deleteCuratedTitle, deleteTargetPreview;
+    let deleteReasonSelect, deleteNotesInput, deleteNotesGroup;
+    let btnCancelDelete, btnConfirmDelete, btnConfirmDeleteText, btnCloseDeleteModal;
+    let libraryBulkBar, bulkSelectedCount;
+    let btnBulkDelete, btnBulkTag, btnBulkExport, btnBulkDeselect;
+    let btnInspectorDelete;
 
     // ==========================================================================
     // Initialization & Bootstrap
@@ -494,6 +505,25 @@
         btnInspectorFullscreen = document.getElementById("btn-inspector-fullscreen");
         btnInspectorDiscard = document.getElementById("btn-inspector-discard");
         btnInspectorSave = document.getElementById("btn-inspector-save");
+
+        // Delete Curated Modal & Bulk Action Bar Elements (Issue #137)
+        deleteCuratedModal = document.getElementById("delete-curated-modal");
+        deleteCuratedTitle = document.getElementById("delete-curated-title");
+        deleteTargetPreview = document.getElementById("delete-target-preview");
+        deleteReasonSelect = document.getElementById("delete-reason-select");
+        deleteNotesInput = document.getElementById("delete-notes-input");
+        deleteNotesGroup = document.getElementById("delete-notes-group");
+        btnCancelDelete = document.getElementById("btn-cancel-delete");
+        btnConfirmDelete = document.getElementById("btn-confirm-delete");
+        btnConfirmDeleteText = document.getElementById("btn-confirm-delete-text");
+        btnCloseDeleteModal = document.getElementById("btn-close-delete-modal");
+        libraryBulkBar = document.getElementById("library-bulk-bar");
+        bulkSelectedCount = document.getElementById("bulk-selected-count");
+        btnBulkDelete = document.getElementById("btn-bulk-delete");
+        btnBulkTag = document.getElementById("btn-bulk-tag");
+        btnBulkExport = document.getElementById("btn-bulk-export");
+        btnBulkDeselect = document.getElementById("btn-bulk-deselect");
+        btnInspectorDelete = document.getElementById("btn-inspector-delete");
     }
 
     // ==========================================================================
@@ -3701,8 +3731,35 @@
             state.librarySelectedIds.add(id);
         }
         updateCardSelectionVisual(id);
+        updateLibraryBulkBar();
     }
 
+    function updateLibraryBulkBar() {
+        const count = state.librarySelectedIds.size;
+        if (bulkSelectedCount) {
+            bulkSelectedCount.textContent = `${count} Selected`;
+        }
+        if (libraryBulkBar) {
+            if (count > 0) {
+                libraryBulkBar.classList.remove("hidden");
+            } else {
+                libraryBulkBar.classList.add("hidden");
+            }
+        }
+    }
+
+    function clearLibrarySelection() {
+        state.librarySelectedIds.clear();
+        if (libraryGrid) {
+            const cards = libraryGrid.querySelectorAll(".curated-card");
+            cards.forEach(card => {
+                card.classList.remove("selected");
+                const checkbox = card.querySelector(".curated-card-checkbox");
+                if (checkbox) checkbox.checked = false;
+            });
+        }
+        updateLibraryBulkBar();
+    }
     function updateCardSelectionVisual(id) {
         if (!libraryGrid) return;
         const cards = libraryGrid.querySelectorAll(".curated-card");
@@ -3881,6 +3938,29 @@
         const tag = activeEl ? activeEl.tagName.toLowerCase() : "";
         const isInputFocused = tag === "input" || tag === "textarea" || tag === "select";
 
+        // Deletion modal hotkeys
+        if (state.deleteModalOpen) {
+            if (e.key === "Escape") {
+                closeDeleteCuratedModal();
+                e.preventDefault();
+                return;
+            }
+            if (e.key === "Enter" && !isInputFocused) {
+                confirmDeleteCurated();
+                e.preventDefault();
+                return;
+            }
+            return;
+        }
+
+        // Deselect all on Escape if selection is active and drawer is not open
+        if (e.key === "Escape" && !state.libraryDrawerActive) {
+            if (state.librarySelectedIds.size > 0) {
+                clearLibrarySelection();
+                e.preventDefault();
+                return;
+            }
+        }
         // Inspector Drawer hotkeys
         if (state.libraryDrawerActive) {
             // Save Changes: Ctrl+S or Cmd+S
@@ -3910,6 +3990,23 @@
 
         if (e.ctrlKey || e.metaKey || e.altKey) return;
         if (isInputFocused) return;
+
+        // Single Delete & Reject hotkey: Delete or Backspace on focused card or active drawer
+        if (e.key === "Delete" || e.key === "Backspace") {
+            if (state.libraryDrawerActive && state.libraryDrawerMap) {
+                openDeleteCuratedModal(state.libraryDrawerMap.id);
+                e.preventDefault();
+                return;
+            }
+            if (state.libraryFilteredMaps && state.libraryFocusedIndex >= 0 && state.libraryFocusedIndex < state.libraryFilteredMaps.length) {
+                const map = state.libraryFilteredMaps[state.libraryFocusedIndex];
+                if (map) {
+                    openDeleteCuratedModal(map.id);
+                    e.preventDefault();
+                    return;
+                }
+            }
+        }
 
         // Toggle / Open drawer on focused card: E
         if (e.key === "e" || e.key === "E") {
@@ -4258,6 +4355,15 @@
                             </svg>
                             <span>Inspect</span>
                         </button>
+                        <button type="button" class="btn-card-delete" title="Delete &amp; Reject Map (Hotkey: Delete)" aria-label="Delete Map">
+                            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"/>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                <line x1="10" y1="11" x2="10" y2="17"/>
+                                <line x1="14" y1="11" x2="14" y2="17"/>
+                            </svg>
+                            <span>Delete</span>
+                        </button>
                     </div>
                 </div>
                 <div class="curated-tags-row">
@@ -4329,6 +4435,7 @@
             }
         }
 
+        const selectWrapper = card.querySelector(".curated-select-wrapper");
         const checkbox = card.querySelector(".curated-card-checkbox");
         checkbox?.addEventListener("click", (e) => {
             e.stopPropagation();
@@ -4337,10 +4444,20 @@
             e.stopPropagation();
             toggleCardSelection(map.id);
         });
+        selectWrapper?.addEventListener("click", (e) => {
+            if (e.target === checkbox) return;
+            e.stopPropagation();
+            toggleCardSelection(map.id);
+        });
 
         card.addEventListener("click", (e) => {
             if (e.target.closest(".curated-select-wrapper")) return;
             if (e.target.closest(".curated-layer-scrubber")) return;
+            if (e.target.closest(".curated-card-actions")) return;
+            if (e.shiftKey) {
+                toggleCardSelection(map.id);
+                return;
+            }
             setLibraryFocus(index, false);
         });
 
@@ -4357,6 +4474,11 @@
             openLibraryFullscreen(index);
         });
 
+        const btnDelete = card.querySelector(".btn-card-delete");
+        btnDelete?.addEventListener("click", (e) => {
+            e.stopPropagation();
+            openDeleteCuratedModal(map.id);
+        });
         const thumbBox = card.querySelector(".curated-thumb-box");
         thumbBox?.addEventListener("dblclick", (e) => {
             if (e.target.closest(".curated-select-wrapper")) return;
@@ -4419,6 +4541,240 @@
             state.isExporting = false;
             if (btnExportLora) btnExportLora.disabled = false;
             if (btnExportLabel) btnExportLabel.textContent = "Export LoRA Dataset";
+        }
+    }
+
+    // ==========================================================================
+    // Deletion Safeguard Modal & Multi-Select Bulk Operations (Issue #137)
+    // ==========================================================================
+
+    function openDeleteCuratedModal(mapId) {
+        if (!mapId) return;
+        state.deleteModalOpen = true;
+        state.deleteModalTarget = { type: "single", id: mapId };
+
+        if (deleteCuratedTitle) {
+            deleteCuratedTitle.textContent = "Delete & Reject Curated Map";
+        }
+        if (deleteTargetPreview) {
+            deleteTargetPreview.innerHTML = `<span class="delete-target-id mono">${escapeHtml(mapId)}</span>`;
+        }
+        if (deleteReasonSelect) {
+            deleteReasonSelect.value = "unspecified";
+        }
+        if (deleteNotesInput) {
+            deleteNotesInput.value = "";
+        }
+        if (deleteNotesGroup) {
+            deleteNotesGroup.style.display = "";
+        }
+        if (deleteCuratedModal) {
+            deleteCuratedModal.classList.remove("hidden");
+        }
+    }
+
+    function openBulkDeleteModal() {
+        if (!state.librarySelectedIds || state.librarySelectedIds.size === 0) return;
+        const ids = Array.from(state.librarySelectedIds);
+        state.deleteModalOpen = true;
+        state.deleteModalTarget = { type: "bulk", ids: ids };
+
+        if (deleteCuratedTitle) {
+            deleteCuratedTitle.textContent = "Delete & Reject Selected Maps";
+        }
+        if (deleteTargetPreview) {
+            deleteTargetPreview.innerHTML = `<span class="delete-target-count mono">${ids.length} Curated Map${ids.length === 1 ? "" : "s"} Selected for Permanent Deletion</span>`;
+        }
+        if (deleteReasonSelect) {
+            deleteReasonSelect.value = "unspecified";
+        }
+        if (deleteNotesInput) {
+            deleteNotesInput.value = "";
+        }
+        if (deleteNotesGroup) {
+            deleteNotesGroup.style.display = "none";
+        }
+        if (deleteCuratedModal) {
+            deleteCuratedModal.classList.remove("hidden");
+        }
+    }
+
+    function closeDeleteCuratedModal() {
+        state.deleteModalOpen = false;
+        state.deleteModalTarget = null;
+        if (deleteCuratedModal) {
+            deleteCuratedModal.classList.add("hidden");
+        }
+    }
+
+    async function confirmDeleteCurated() {
+        if (!state.deleteModalTarget) return;
+        if (btnConfirmDelete) btnConfirmDelete.disabled = true;
+
+        const reason = deleteReasonSelect ? deleteReasonSelect.value : "unspecified";
+        const notes = deleteNotesInput && deleteNotesInput.value.trim() ? deleteNotesInput.value.trim() : null;
+
+        try {
+            if (state.deleteModalTarget.type === "single") {
+                const id = state.deleteModalTarget.id;
+                const res = await fetch(`/api/curated/${encodeURIComponent(id)}`, {
+                    method: "DELETE",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        reason: reason,
+                        notes: notes,
+                    }),
+                });
+                if (!res.ok) {
+                    const errText = await res.text();
+                    throw new Error(`HTTP ${res.status}: ${errText || res.statusText}`);
+                }
+
+                // Remove map from state.curatedMaps
+                state.curatedMaps = state.curatedMaps.filter(m => m.id !== id);
+                if (state.librarySelectedIds.has(id)) {
+                    state.librarySelectedIds.delete(id);
+                    updateLibraryBulkBar();
+                }
+
+                // Close drawer if open for this map
+                if (state.libraryDrawerActive && state.libraryDrawerMap && state.libraryDrawerMap.id === id) {
+                    closeLibraryInspector();
+                }
+
+                const cardEl = libraryGrid ? libraryGrid.querySelector(`.curated-card[data-id="${id}"]`) : null;
+                if (cardEl) {
+                    cardEl.remove();
+                }
+
+                applyLibraryFilters();
+                closeDeleteCuratedModal();
+                showToast(`Deleted curated map ${id} and logged rejection`, "danger");
+            } else if (state.deleteModalTarget.type === "bulk") {
+                const ids = state.deleteModalTarget.ids;
+                const res = await fetch("/api/curated/bulk-delete", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        ids: ids,
+                        reason: reason,
+                    }),
+                });
+                if (!res.ok) {
+                    const errText = await res.text();
+                    throw new Error(`HTTP ${res.status}: ${errText || res.statusText}`);
+                }
+
+                const data = await res.json();
+                const deletedCount = data.deleted_count !== undefined ? data.deleted_count : ids.length;
+
+                const idSet = new Set(ids);
+                state.curatedMaps = state.curatedMaps.filter(m => !idSet.has(m.id));
+
+                if (state.libraryDrawerActive && state.libraryDrawerMap && idSet.has(state.libraryDrawerMap.id)) {
+                    closeLibraryInspector();
+                }
+
+                ids.forEach(id => {
+                    const cardEl = libraryGrid ? libraryGrid.querySelector(`.curated-card[data-id="${id}"]`) : null;
+                    if (cardEl) cardEl.remove();
+                });
+
+                clearLibrarySelection();
+                applyLibraryFilters();
+                closeDeleteCuratedModal();
+                showToast(`Deleted ${deletedCount} curated map${deletedCount === 1 ? "" : "s"} and logged rejection`, "danger");
+            }
+        } catch (err) {
+            showToast(`Deletion failed: ${err.message}`, "danger");
+        } finally {
+            if (btnConfirmDelete) btnConfirmDelete.disabled = false;
+        }
+    }
+
+    async function bulkTagSelectedMaps() {
+        if (!state.librarySelectedIds || state.librarySelectedIds.size === 0) return;
+        const ids = Array.from(state.librarySelectedIds);
+
+        const tagInput = window.prompt(`Enter tag to add to ${ids.length} selected map${ids.length === 1 ? "" : "s"}:`);
+        if (!tagInput) return;
+        const normalizedTag = tagInput.trim().toLowerCase().replace(/^#+/, "");
+        if (!normalizedTag) return;
+
+        if (btnBulkTag) btnBulkTag.disabled = true;
+
+        let successCount = 0;
+        try {
+            for (const id of ids) {
+                const map = state.curatedMaps.find(m => m.id === id);
+                const currentTags = map && Array.isArray(map.tags) ? [...map.tags] : [];
+                if (!currentTags.map(t => t.toLowerCase()).includes(normalizedTag)) {
+                    currentTags.push(normalizedTag);
+                }
+
+                const res = await fetch(`/api/curated/${encodeURIComponent(id)}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ tags: currentTags }),
+                });
+
+                if (res.ok) {
+                    const updated = await res.json();
+                    if (map) {
+                        map.tags = updated.tags;
+                    }
+                    successCount++;
+                }
+            }
+
+            applyLibraryFilters();
+            showToast(`Added tag "${normalizedTag}" to ${successCount} map${successCount === 1 ? "" : "s"}`, "success");
+        } catch (err) {
+            showToast(`Bulk tag error: ${err.message}`, "danger");
+        } finally {
+            if (btnBulkTag) btnBulkTag.disabled = false;
+        }
+    }
+
+    async function exportSelectedLoraDataset() {
+        if (!state.librarySelectedIds || state.librarySelectedIds.size === 0) return;
+        if (state.isExporting) return;
+        state.isExporting = true;
+        if (btnBulkExport) btnBulkExport.disabled = true;
+
+        const count = state.librarySelectedIds.size;
+        showToast(`Packaging ${count} selected maps into LoRA dataset ZIP...`, "info");
+
+        try {
+            const payload = { ids: Array.from(state.librarySelectedIds) };
+            const res = await fetch("/api/dataset/export-selected", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+                const errText = await res.text();
+                throw new Error(`Export failed (HTTP ${res.status}: ${errText || res.statusText}`);
+            }
+
+            const blob = await res.blob();
+            const filename = "lora-dataset.zip";
+
+            const downloadUrl = window.URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = downloadUrl;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(downloadUrl);
+
+            showToast(`Downloaded LoRA dataset (${formatBytes(blob.size)}) for ${count} map${count === 1 ? "" : "s"}!`, "success");
+        } catch (err) {
+            showToast(`Export error: ${err.message}`, "danger");
+        } finally {
+            state.isExporting = false;
+            if (btnBulkExport) btnBulkExport.disabled = false;
         }
     }
 
@@ -5943,6 +6299,12 @@
             }
             openLibraryFullscreen(targetIdx);
         });
+
+        btnInspectorDelete?.addEventListener("click", () => {
+            if (state.libraryDrawerMap) {
+                openDeleteCuratedModal(state.libraryDrawerMap.id);
+            }
+        });
     }
 
 
@@ -5986,8 +6348,22 @@
         if (librarySortSelect) {
             librarySortSelect.value = state.librarySort;
         }
-    }
 
+        // Delete Modal & Bulk Operations Controls (Issue #137)
+        btnCloseDeleteModal?.addEventListener("click", () => closeDeleteCuratedModal());
+        btnCancelDelete?.addEventListener("click", () => closeDeleteCuratedModal());
+        btnConfirmDelete?.addEventListener("click", () => confirmDeleteCurated());
+        deleteCuratedModal?.addEventListener("click", (e) => {
+            if (e.target === deleteCuratedModal) {
+                closeDeleteCuratedModal();
+            }
+        });
+
+        btnBulkDelete?.addEventListener("click", () => openBulkDeleteModal());
+        btnBulkTag?.addEventListener("click", () => bulkTagSelectedMaps());
+        btnBulkExport?.addEventListener("click", () => exportSelectedLoraDataset());
+        btnBulkDeselect?.addEventListener("click", () => clearLibrarySelection());
+    }
     function setupDecisionModalControls() {
         if (btnCloseDecisionModal) {
             btnCloseDecisionModal.addEventListener("click", () => closeCurateDecisionModal());
@@ -6353,6 +6729,11 @@
                 return;
             }
             if (state.currentView === "library") {
+                if (state.deleteModalOpen) {
+                    closeDeleteCuratedModal();
+                    e.preventDefault();
+                    return;
+                }
                 if (state.libraryFullscreenActive) {
                     if (state.libraryFullscreenGridPanelOpen) {
                         toggleFullscreenGridPanel(false);
@@ -6364,6 +6745,11 @@
                 }
                 if (state.libraryDrawerActive) {
                     closeLibraryInspector();
+                    e.preventDefault();
+                    return;
+                }
+                if (state.librarySelectedIds.size > 0) {
+                    clearLibrarySelection();
                     e.preventDefault();
                     return;
                 }

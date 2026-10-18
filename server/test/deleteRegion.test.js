@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const http = require('http');
 const sharp = require('sharp');
 const app = require('../index');
-const { deleteRegion: imageProcessorDeleteRegion, bufferToDataUrl } = require('../services/imageProcessor');
+const { deleteRegion: canvasForgeDeleteRegion, bufferToDataUrl } = require('../services/canvasForge');
 
 function startTestServer(serverApp) {
   return new Promise((resolve) => {
@@ -25,11 +25,11 @@ async function createTestImage(width = 128, height = 128, color = { r: 255, g: 1
   return bufferToDataUrl(buf);
 }
 
-test('imageProcessor deleteRegion sets selected region pixels to transparent', async () => {
+test('canvasForge deleteRegion sets selected region pixels to transparent', async () => {
   const dataUrl = await createTestImage(128, 128);
   const selection = { x: 32, y: 32, width: 64, height: 64 };
 
-  const resultDataUrl = await imageProcessorDeleteRegion(dataUrl, selection);
+  const resultDataUrl = await canvasForgeDeleteRegion(dataUrl, selection);
   assert.ok(resultDataUrl.startsWith('data:image/png;base64,'));
 
   const base64 = resultDataUrl.replace(/^data:image\/png;base64,/, '');
@@ -56,11 +56,11 @@ test('imageProcessor deleteRegion sets selected region pixels to transparent', a
   assert.strictEqual(data[insideCorner + 3], 0);
 });
 
-test('imageProcessor deleteRegion returns original image if selection has no intersection', async () => {
+test('canvasForge deleteRegion returns original image if selection has no intersection', async () => {
   const dataUrl = await createTestImage(64, 64);
   const selection = { x: 100, y: 100, width: 64, height: 64 };
 
-  const resultDataUrl = await imageProcessorDeleteRegion(dataUrl, selection);
+  const resultDataUrl = await canvasForgeDeleteRegion(dataUrl, selection);
   assert.strictEqual(resultDataUrl, dataUrl);
 });
 

@@ -1,105 +1,176 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const sharp = require('sharp');
+const { forgeCanvasRegion, bufferToDataUrl } = require('../services/canvasForge');
 const { forgeRegion } = require('../services/battlemapService');
-const openrouterProvider = require('../services/providers/openrouterProvider');
 
-test('forgeRegion sends only 1 highlighted image when forgeImageMode is highlighted-only (default)', async (t) => {
-  const originalRequestCanvas = openrouterProvider.requestCanvas;
-
-  // Create a minimal 128x128 PNG data URL for test
-  const mapBuffer = await sharp({
-    create: {
-      width: 128,
-      height: 128,
-      channels: 3,
-      background: { r: 50, g: 50, b: 50 }
-    }
+async function createTestImage(width = 128, height = 128, color = { r: 50, g: 50, b: 50 }) {
+  const buf = await sharp({
+    create: { width, height, channels: 3, background: color }
   }).png().toBuffer();
-  const originalDataUrl = `data:image/png;base64,${mapBuffer.toString('base64')}`;
+  return bufferToDataUrl(buf);
+}
 
-  let capturedArgs = null;
-  openrouterProvider.requestCanvas = async (args) => {
-    capturedArgs = args;
-    // Return a dummy 128x128 image
-    const outBuffer = await sharp({
-      create: {
-        width: args.width,
-        height: args.height,
-        channels: 3,
-        background: { r: 100, g: 100, b: 100 }
-      }
-    }).png().toBuffer();
+test('in-memory renderAdapter seam receives context buffers and dimensions without monkey-patching', async () => {
+  const originalDataUrl = await createTestImage(128, 128);
+  const selection = { x: 32, y: 32, width: 64, height: 64 };
+  let capturedPayload = null;
+
+  const mockAdapter = async (payload) => {
+    capturedPayload = payload;
     return {
-      imageBuffer: outBuffer,
-      debug: { usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } }
+      imageBuffer: payload.contextBuffer,
+      debug: { note: 'in-memory-adapter-test' },
+      usage: { total_tokens: 42, cost: 0.005 },
+      cost: 0.005
     };
   };
 
-  t.after(() => {
-    openrouterProvider.requestCanvas = originalRequestCanvas;
-  });
-
-  const res = await forgeRegion({
+  const res = await forgeCanvasRegion({
     originalDataUrl,
-    selection: { x: 32, y: 32, width: 64, height: 64 },
-    prompt: 'Add an ancient altar',
-    forgeImageMode: 'highlighted-only'
+    selection,
+    renderAdapter: mockAdapter
   });
 
-  assert.ok(res.imageDataUrl);
-  assert.ok(capturedArgs);
-  assert.strictEqual(capturedArgs.images.length, 1);
-  assert.match(capturedArgs.images[0].label, /highlighted/i);
-  assert.match(capturedArgs.systemInstruction, /ONE image/i);
+  assert.ok(res.imageDataUrl.startsWith('data:image/png;base64,'));
+  assert.strictEqual(res.dimensions, undefined, 'dimensions record must be encapsulated');
+  assert.deepStrictEqual(res.offset, { dx: 0, dy: 0 });
+  assert.deepStrictEqual(res.debug, { note: 'in-memory-adapter-test' });
+  assert.strictEqual(res.usage.total_tokens, 42);
+  assert.strictEqual(res.cost, 0.005);
+
+  assert.ok(capturedPayload);
+  assert.ok(Buffer.isBuffer(capturedPayload.contextBuffer));
+  assert.ok(Buffer.isBuffer(capturedPayload.guideBuffer));
+  assert.ok(Buffer.isBuffer(capturedPayload.maskBuffer));
+  assert.strictEqual(typeof capturedPayload.contextW, 'number');
+  assert.strictEqual(typeof capturedPayload.contextH, 'number');
+  assert.strictEqual(capturedPayload.selOnContext.width, 64);
+  assert.strictEqual(capturedPayload.selOnContext.height, 64);
 });
 
-test('forgeRegion sends all 3 images when forgeImageMode is all-three', async (t) => {
-  const originalRequestCanvas = openrouterProvider.requestCanvas;
+test('forgeCanvasRegion calculates offset { dx: 0, dy: 0 } for internal edit', async () => {
+  const originalDataUrl = await createTestImage(128, 128);
+  const selection = { x: 16, y: 16, width: 32, height: 32 };
 
-  const mapBuffer = await sharp({
-    create: {
-      width: 128,
-      height: 128,
-      channels: 3,
-      background: { r: 50, g: 50, b: 50 }
-    }
-  }).png().toBuffer();
-  const originalDataUrl = `data:image/png;base64,${mapBuffer.toString('base64')}`;
-
-  let capturedArgs = null;
-  openrouterProvider.requestCanvas = async (args) => {
-    capturedArgs = args;
-    const outBuffer = await sharp({
-      create: {
-        width: args.width,
-        height: args.height,
-        channels: 3,
-        background: { r: 100, g: 100, b: 100 }
-      }
-    }).png().toBuffer();
-    return {
-      imageBuffer: outBuffer,
-      debug: { usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } }
-    };
-  };
-
-  t.after(() => {
-    openrouterProvider.requestCanvas = originalRequestCanvas;
+  const res = await forgeCanvasRegion({
+    originalDataUrl,
+    selection,
+    renderAdapter: async ({ contextBuffer }) => ({ imageBuffer: contextBuffer })
   });
+
+  assert.deepStrictEqual(res.offset, { dx: 0, dy: 0 });
+  assert.strictEqual(res.dimensions, undefined);
+});
+
+test('forgeCanvasRegion calculates positive dx offset when expanding West into Void (selection.x < 0)', async () => {
+  const originalDataUrl = await createTestImage(128, 128);
+  const selection = { x: -64, y: 16, width: 64, height: 32 };
+
+  const res = await forgeCanvasRegion({
+    originalDataUrl,
+    selection,
+    renderAdapter: async ({ contextBuffer }) => ({ imageBuffer: contextBuffer })
+  });
+
+  assert.deepStrictEqual(res.offset, { dx: 64, dy: 0 });
+  assert.strictEqual(res.dimensions, undefined);
+});
+
+test('forgeCanvasRegion calculates positive dy offset when expanding North into Void (selection.y < 0)', async () => {
+  const originalDataUrl = await createTestImage(128, 128);
+  const selection = { x: 16, y: -48, width: 32, height: 48 };
+
+  const res = await forgeCanvasRegion({
+    originalDataUrl,
+    selection,
+    renderAdapter: async ({ contextBuffer }) => ({ imageBuffer: contextBuffer })
+  });
+
+  assert.deepStrictEqual(res.offset, { dx: 0, dy: 48 });
+  assert.strictEqual(res.dimensions, undefined);
+});
+
+test('forgeCanvasRegion calculates positive dx and dy when expanding North and West into Void', async () => {
+  const originalDataUrl = await createTestImage(128, 128);
+  const selection = { x: -32, y: -64, width: 64, height: 64 };
+
+  const res = await forgeCanvasRegion({
+    originalDataUrl,
+    selection,
+    renderAdapter: async ({ contextBuffer }) => ({ imageBuffer: contextBuffer })
+  });
+
+  assert.deepStrictEqual(res.offset, { dx: 32, dy: 64 });
+  assert.strictEqual(res.dimensions, undefined);
+});
+
+test('forgeCanvasRegion calculates offset { dx: 0, dy: 0 } when expanding East and South into Void', async () => {
+  const originalDataUrl = await createTestImage(128, 128);
+  const selection = { x: 128, y: 128, width: 64, height: 64 };
+
+  const res = await forgeCanvasRegion({
+    originalDataUrl,
+    selection,
+    renderAdapter: async ({ contextBuffer }) => ({ imageBuffer: contextBuffer })
+  });
+
+  assert.deepStrictEqual(res.offset, { dx: 0, dy: 0 });
+  assert.strictEqual(res.dimensions, undefined);
+});
+
+test('forgeRegion in battlemapService delegates to forgeCanvasRegion with in-memory renderAdapter', async () => {
+  const originalDataUrl = await createTestImage(128, 128);
+  const selection = { x: -64, y: 32, width: 64, height: 64 };
+  let adapterCalled = false;
 
   const res = await forgeRegion({
     originalDataUrl,
-    selection: { x: 32, y: 32, width: 64, height: 64 },
-    prompt: 'Add an ancient altar',
-    forgeImageMode: 'all-three'
+    selection,
+    prompt: 'Expand the dungeon westwards',
+    renderAdapter: async (payload) => {
+      adapterCalled = true;
+      return {
+        imageBuffer: payload.contextBuffer,
+        debug: { delegated: true },
+        usage: { prompt_tokens: 15, completion_tokens: 25, total_tokens: 40, cost: 0.002 },
+        cost: 0.002
+      };
+    }
+  });
+
+  assert.strictEqual(adapterCalled, true);
+  assert.ok(res.imageDataUrl.startsWith('data:image/png;base64,'));
+  assert.deepStrictEqual(res.offset, { dx: 64, dy: 0 });
+  assert.strictEqual(res.dimensions, undefined, 'forgeRegion must not expose dimensions');
+  assert.deepStrictEqual(res.debug, { delegated: true });
+  assert.strictEqual(res.usage.total_tokens, 40);
+  assert.strictEqual(res.cost, 0.002);
+});
+
+test('forgeCanvasRegion accepts raw Buffer directly from renderAdapter', async () => {
+  const originalDataUrl = await createTestImage(128, 128);
+  const selection = { x: 0, y: 0, width: 64, height: 64 };
+
+  const res = await forgeCanvasRegion({
+    originalDataUrl,
+    selection,
+    renderAdapter: async ({ contextBuffer }) => contextBuffer
   });
 
   assert.ok(res.imageDataUrl);
-  assert.ok(capturedArgs);
-  assert.strictEqual(capturedArgs.images.length, 3);
-  assert.match(capturedArgs.images[0].label, /context window/i);
-  assert.match(capturedArgs.images[1].label, /cyan tint/i);
-  assert.match(capturedArgs.images[2].label, /binary mask/i);
-  assert.match(capturedArgs.systemInstruction, /three images/i);
+  assert.deepStrictEqual(res.offset, { dx: 0, dy: 0 });
+});
+
+test('forgeCanvasRegion defaults to in-memory pass-through when renderAdapter is omitted', async () => {
+  const originalDataUrl = await createTestImage(128, 128);
+  const selection = { x: 0, y: 0, width: 64, height: 64 };
+
+  const res = await forgeCanvasRegion({
+    originalDataUrl,
+    selection
+  });
+
+  assert.ok(res.imageDataUrl);
+  assert.deepStrictEqual(res.offset, { dx: 0, dy: 0 });
 });

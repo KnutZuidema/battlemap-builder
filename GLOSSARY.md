@@ -5,12 +5,16 @@ An AI-powered 2D tabletop RPG battlemap studio, interactive encounter canvas, an
 ## Spatial & Rendering
 
 **Battlemap**:
-A top-down, ungridded 2D orthographic tactical map representing an encounter space at a scale of 1 Grid Square = 5 tabletop feet.
+A top-down, ungridded 2D orthographic tactical map representing an encounter space at a scale of 1 Grid Cell = 5 tabletop feet.
 _Avoid_: Map image, board, floorplan, scene
 
-**Grid Square**:
+**Grid Cell**:
 The fundamental spatial unit representing a 5×5 foot tabletop square, governing Selection snapping, Interactive Feature bounds, and the tactical grid overlay.
-_Avoid_: Tile, cell, block
+_Avoid_: Tile, grid square, square, block
+
+**Grid Configuration**:
+The spatial calibration of a Battlemap's tactical grid, defined by the pixel dimension of a single Grid Cell and the `(x, y)` pixel offset of the grid origin.
+_Avoid_: Grid settings, grid calibration, grid params
 
 **Poché Wall**:
 An architectural wall rendered strictly as a flat horizontal cross-section sliced at eye level, showing solid interior fill and zero vertical side faces.
@@ -21,7 +25,7 @@ Unpainted space outside the current Battlemap bounds within a Context Window wai
 _Avoid_: Padding, empty canvas, background
 
 **Reference Image**:
-A curated battlemap attached to a generation request to condition the model on orthographic plan-view perspective and 5-foot prop proportions.
+A 16×16 Grid Cell Map Section extracted from a Curated Map and attached to a generation request to condition the model on orthographic plan-view perspective and 5-foot prop proportions.
 _Avoid_: Style image, seed image, template
 
 ## Canvas & Forging
@@ -97,7 +101,7 @@ An uncurated Battlemap bundle in the staging queue awaiting human triage.
 _Avoid_: Staging item, raw map, post, bundle
 
 **Curated Map**:
-A Battlemap that has passed triage with assigned Layer Roles, Tags, and a Physical Description, stored in the curated dataset for reference conditioning and training.
+A Battlemap that has passed triage with a persisted Grid Configuration, assigned Layer Roles, Tags, a Physical Description, and 16×16 Map Sections, stored in the curated dataset for reference conditioning and training.
 _Avoid_: Approved map, dataset item, manifest
 
 **Layer**:
@@ -119,3 +123,7 @@ _Avoid_: Theme, category, genre, label, keyword
 **Physical Description**:
 A perspective-neutral prose description of a Battlemap's tangible architecture, materials, furnishings, hazards, and lighting, strictly free of camera angles or art-style directives.
 _Avoid_: Caption, alt text, lore summary, meta-prompt
+
+**Map Section**:
+A 16×16 Grid Cell sub-region of a Curated Map aligned to its Grid Configuration and paired with its own Physical Description for reference conditioning and LoRA dataset export.
+_Avoid_: Training crop, tile, slice, patch, chunk

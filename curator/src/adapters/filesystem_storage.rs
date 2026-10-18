@@ -1895,7 +1895,7 @@ impl StorageRepository for FilesystemStorage {
             validate_layers_for_curation(&new_layers)
                 .map_err(StorageError::InvalidData)?;
 
-            let effective_layers: Vec<Layer> = if new_layers.iter().any(|l| l.role.is_excluded()) {
+            let mut effective_layers: Vec<Layer> = if new_layers.iter().any(|l| l.role.is_excluded()) {
                 new_layers
                     .into_iter()
                     .filter(|l| l.role.is_included())
@@ -1903,6 +1903,23 @@ impl StorageRepository for FilesystemStorage {
             } else {
                 new_layers
             };
+
+            // PATCH payloads may omit provenance fields; carry them over from the
+            // existing layer at the same index (falling back to the same filename).
+            for layer in &mut effective_layers {
+                let existing = map
+                    .layers
+                    .iter()
+                    .find(|l| l.index == layer.index)
+                    .or_else(|| map.layers.iter().find(|l| l.filename == layer.filename));
+                let Some(existing) = existing else { continue };
+                if layer.source_url.is_none() {
+                    layer.source_url = existing.source_url.clone();
+                }
+                if layer.caption.is_none() {
+                    layer.caption = existing.caption.clone();
+                }
+            }
 
             let mut temp_map = map.clone();
             temp_map.layers = effective_layers.clone();
@@ -2386,31 +2403,35 @@ impl StorageRepository for FilesystemStorage {
 
         Self::atomic_move(&staging_image, &target_image)?;
 
+        // Only one image is physically moved for a flat/sidecar-only candidate, so the
+        // persisted manifest must describe exactly that file rather than the caller's
+        // (possibly multi-layer) assignment list.
         let mut stored_map = map.clone();
-        if stored_map.layers.is_empty() {
-            let mut layer = Layer::new(
-                0,
-                dest_filename,
-                LayerRole::Ground,
-                Some(0),
-                stored_map.dimensions,
-            );
-            if let Some(desc) = &stored_map.description {
-                layer = layer.with_caption(desc.clone());
-            }
-            stored_map.layers = vec![layer];
-        } else if let Some(desc) = &stored_map.description {
-            let primary_idx = stored_map
-                .layers
-                .iter()
-                .position(|l| l.role == LayerRole::Ground)
-                .unwrap_or(0);
-            if let Some(layer) = stored_map.layers.get_mut(primary_idx) {
-                if layer.caption.is_none() {
-                    layer.caption = Some(desc.clone());
-                }
-            }
+        let mut layer = stored_map
+            .layers
+            .iter()
+            .find(|l| l.role.is_ground())
+            .cloned()
+            .unwrap_or_else(|| {
+                Layer::new(
+                    0,
+                    &dest_filename,
+                    LayerRole::Ground,
+                    Some(0),
+                    stored_map.dimensions,
+                )
+            });
+        layer.index = 0;
+        layer.filename = dest_filename;
+        layer.role = LayerRole::Ground;
+        layer.elevation = Some(0);
+        if layer.dimensions == (0, 0) {
+            layer.dimensions = stored_map.dimensions;
         }
+        if layer.caption.is_none() {
+            layer.caption = stored_map.description.clone();
+        }
+        stored_map.layers = vec![layer];
         let curated_json = serde_json::to_string_pretty(&stored_map)?;
         Self::atomic_write(&target_manifest, curated_json.as_bytes())?;
         if let Ok(primary_bytes) = std::fs::read(&target_image) {
@@ -3308,6 +3329,159 @@ mod tests {
         assert_eq!(curated_maps[0].id, "raw_map");
         assert_eq!(curated_maps[0].tags, vec!["dungeon", "dungeon-crawl"]);
         assert_eq!(curated_maps[0].theme(), Some(Theme::Dungeon));
+    }
+
+    #[tokio::test]
+    async fn test_curate_flat_staging_image_via_service_rewrites_manifest_layer() {
+        use crate::services::{CurationService, CurationWorkflow, DescriptionService};
+        use std::sync::Arc;
+
+        let dir = tempdir().unwrap();
+        let storage = Arc::new(FilesystemStorage::new(dir.path()));
+        let staging = storage.staging_dir();
+        std::fs::create_dir_all(&staging).unwrap();
+
+        // Flat drop-in image: no bundle directory and no sidecar manifest.
+        let png_data = create_test_png(640, 480);
+        std::fs::write(staging.join("flat_cand.png"), &png_data).unwrap();
+        assert!(!staging.join("flat_cand.json").exists());
+        assert!(!staging.join("flat_cand").exists());
+
+        let service = CurationService::new(
+            storage.clone(),
+            Arc::new(DescriptionService::new(None)),
+        );
+
+        let stored = service
+            .curate(
+                "flat_cand",
+                vec!["crypt".into()],
+                None,
+                Some("Damp stone crypt beneath a ruined keep.".into()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(stored.layers.len(), 1);
+        let layer = &stored.layers[0];
+        assert_eq!(layer.index, 0);
+        assert_eq!(layer.filename, "0_ground.png");
+        assert_eq!(layer.role, LayerRole::Ground);
+        assert_eq!(layer.elevation, Some(0));
+        assert_eq!(layer.dimensions, (640, 480));
+        assert_eq!(
+            layer.caption.as_deref(),
+            Some("Damp stone crypt beneath a ruined keep.")
+        );
+
+        let bundle_dir = storage.find_curated_bundle_dir("flat_cand").unwrap();
+        assert!(bundle_dir.join("0_ground.png").is_file());
+        assert_eq!(
+            std::fs::read(bundle_dir.join("0_ground.png")).unwrap(),
+            png_data
+        );
+
+        let manifest: CuratedMap = serde_json::from_str(
+            &std::fs::read_to_string(bundle_dir.join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.layers.len(), 1);
+        assert_eq!(manifest.layers[0].filename, "0_ground.png");
+        assert_eq!(manifest.layers[0].role, LayerRole::Ground);
+        assert_eq!(manifest.layers[0].elevation, Some(0));
+        assert_eq!(manifest.layers[0].dimensions, (640, 480));
+    }
+
+    #[test]
+    fn test_update_curated_preserves_omitted_source_url_and_caption() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+
+        let png = create_test_png(512, 512);
+        let candidate = Candidate::with_now(
+            "map_upd_provenance",
+            Source::Reddit,
+            "0.png",
+            (512, 512),
+        )
+        .with_source_url("https://reddit.example/post/abc");
+        storage.save_staging(&candidate, &png).unwrap();
+
+        let curated = CuratedMap::with_now(
+            "map_upd_provenance",
+            Theme::Dungeon,
+            vec!["crypt".into()],
+            (512, 512),
+        )
+        .with_description("Flooded crypt with shattered sarcophagi.");
+        storage.curate_staging(&curated).unwrap();
+
+        let stored = storage.list_curated(None).unwrap();
+        let stored_map = stored
+            .iter()
+            .find(|m| m.id == "map_upd_provenance")
+            .unwrap();
+        assert_eq!(
+            stored_map.layers[0].source_url.as_deref(),
+            Some("https://reddit.example/post/abc")
+        );
+
+        // PATCH layer omits source_url and caption: both are carried over.
+        let update = CuratedMapUpdate::default().with_layers(vec![Layer::new(
+            0,
+            "0_ground.png",
+            LayerRole::Ground,
+            Some(0),
+            (512, 512),
+        )]);
+        let updated = storage
+            .update_curated("map_upd_provenance", update)
+            .unwrap();
+        assert_eq!(
+            updated.layers[0].source_url.as_deref(),
+            Some("https://reddit.example/post/abc")
+        );
+        assert_eq!(
+            updated.layers[0].caption.as_deref(),
+            Some("Flooded crypt with shattered sarcophagi.")
+        );
+
+        // Explicit source_url overrides the stored provenance.
+        let mut explicit = Layer::new(
+            0,
+            "0_ground.png",
+            LayerRole::Ground,
+            Some(0),
+            (512, 512),
+        )
+        .with_source_url("https://example.com/new-source");
+        explicit.caption = Some("Explicit caption.".into());
+        let updated = storage
+            .update_curated(
+                "map_upd_provenance",
+                CuratedMapUpdate::default().with_layers(vec![explicit]),
+            )
+            .unwrap();
+        assert_eq!(
+            updated.layers[0].source_url.as_deref(),
+            Some("https://example.com/new-source")
+        );
+        assert_eq!(updated.layers[0].caption.as_deref(), Some("Explicit caption."));
+
+        let manifest: CuratedMap = serde_json::from_str(
+            &std::fs::read_to_string(
+                storage
+                    .find_curated_bundle_dir("map_upd_provenance")
+                    .unwrap()
+                    .join("manifest.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.layers[0].source_url.as_deref(),
+            Some("https://example.com/new-source")
+        );
     }
 
     #[test]

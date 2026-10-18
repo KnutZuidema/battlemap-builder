@@ -455,6 +455,100 @@ mod tests {
         assert!(js.contains("btn-card-fullscreen"));
     }
 
+    #[test]
+    fn test_embedded_assets_contain_slide_over_inspector_drawer_and_ai_refinement() {
+        let index_file = Assets::get("index.html").expect("index.html must be embedded");
+        let html = std::str::from_utf8(index_file.data.as_ref()).expect("index.html must be valid utf8");
+
+        // Inspector Drawer Container
+        assert!(html.contains("id=\"library-inspector-drawer\""));
+        assert!(html.contains("library-drawer hidden"));
+
+        // Header elements
+        assert!(html.contains("Map Inspector &amp; Refinement") || html.contains("Map Inspector & Refinement"));
+        assert!(html.contains("id=\"inspector-map-id-badge\""));
+        assert!(html.contains("id=\"btn-close-inspector\""));
+        assert!(html.contains("id=\"inspector-unsaved-badge\""));
+
+        // Layer Bundle Visualizer elements
+        assert!(html.contains("Layer Bundle Visualizer"));
+        assert!(html.contains("id=\"inspector-layer-count-badge\""));
+        assert!(html.contains("id=\"inspector-layers-list\""));
+
+        // Themes & Tags Editor elements
+        assert!(html.contains("Themes &amp; Tags Editor") || html.contains("Themes & Tags Editor"));
+        assert!(html.contains("id=\"inspector-theme-chips\""));
+        assert!(html.contains("id=\"inspector-theme-input\""));
+        assert!(html.contains("id=\"btn-add-theme\""));
+        assert!(html.contains("id=\"inspector-tag-chips\""));
+        assert!(html.contains("id=\"inspector-tag-input\""));
+        assert!(html.contains("id=\"btn-add-tag\""));
+        assert!(html.contains("id=\"canonical-themes-datalist\""));
+
+        // Description Editor elements
+        assert!(html.contains("DungeonForge Physical Description"));
+        assert!(html.contains("id=\"inspector-desc-counter\""));
+        assert!(html.contains("id=\"inspector-description-input\""));
+
+        // AI Refinements (Issue #136)
+        assert!(html.contains("id=\"btn-inspector-suggest-themes\""));
+        assert!(html.contains("Suggest Themes &amp; Tags") || html.contains("Suggest Themes & Tags"));
+        assert!(html.contains("id=\"btn-inspector-describe\""));
+        assert!(html.contains("Generate Description"));
+        assert!(html.contains("id=\"btn-inspector-run-all\""));
+        assert!(html.contains("Run All AI Refinements"));
+        assert!(html.contains("id=\"inspector-ai-suggestions-box\""));
+        assert!(html.contains("id=\"inspector-ai-suggestions-pills\""));
+
+        // Footer Actions
+        assert!(html.contains("id=\"btn-inspector-fullscreen\""));
+        assert!(html.contains("id=\"btn-inspector-discard\""));
+        assert!(html.contains("id=\"btn-inspector-save\""));
+
+        // CSS styles
+        let css_file = Assets::get("style.css").expect("style.css must be embedded");
+        let css = std::str::from_utf8(css_file.data.as_ref()).expect("style.css must be valid utf8");
+
+        assert!(css.contains(".library-drawer"));
+        assert!(css.contains(".library-drawer-header"));
+        assert!(css.contains(".library-drawer-body"));
+        assert!(css.contains(".inspector-layer-card"));
+        assert!(css.contains(".inspector-role-badge"));
+        assert!(css.contains(".inspector-elev-badge"));
+        assert!(css.contains(".chip-theme"));
+        assert!(css.contains(".chip-tag"));
+        assert!(css.contains(".inspector-textarea"));
+        assert!(css.contains(".desc-counter"));
+        assert!(css.contains(".btn-ai-action"));
+        assert!(css.contains(".btn-ai-combo"));
+        assert!(css.contains(".ai-suggestion-pill"));
+        assert!(css.contains(".btn-card-edit"));
+        assert!(css.contains(".btn-save-changes"));
+
+        // JavaScript functions & state
+        let js_file = Assets::get("app.js").expect("app.js must be embedded");
+        let js = std::str::from_utf8(js_file.data.as_ref()).expect("app.js must be valid utf8");
+
+        assert!(js.contains("libraryDrawerActive"));
+        assert!(js.contains("libraryDrawerMap"));
+        assert!(js.contains("libraryDraft"));
+        assert!(js.contains("libraryDraftDirty"));
+        assert!(js.contains("openLibraryInspector"));
+        assert!(js.contains("closeLibraryInspector"));
+        assert!(js.contains("toggleLibraryInspector"));
+        assert!(js.contains("renderInspectorLayers"));
+        assert!(js.contains("renderInspectorThemeChips"));
+        assert!(js.contains("renderInspectorTagChips"));
+        assert!(js.contains("updateInspectorDescriptionCounter"));
+        assert!(js.contains("saveLibraryInspectorChanges"));
+        assert!(js.contains("discardLibraryInspectorChanges"));
+        assert!(js.contains("suggestInspectorThemes"));
+        assert!(js.contains("describeInspectorMap"));
+        assert!(js.contains("runAllInspectorAiRefinements"));
+        assert!(js.contains("setupInspectorDrawerControls"));
+        assert!(js.contains("btn-card-edit"));
+    }
+
 
     #[tokio::test]
     async fn test_static_handler_index() {

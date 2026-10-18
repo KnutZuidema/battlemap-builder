@@ -43,9 +43,9 @@ impl DescriptionGenerator for MockDescriptionGenerator {
     async fn generate_description(
         &self,
         _image_bytes: &[u8],
-        _mime_type: &str,
+        _filename: Option<&str>,
         _tags: &[String],
-        _context: Option<&str>,
+        _title: Option<&str>,
     ) -> Result<String, DescriptionError> {
         self.invoked.store(true, Ordering::SeqCst);
         self.result.clone()
@@ -76,7 +76,7 @@ async fn test_description_service_success() {
     let image = create_test_png();
     let tags = vec!["crypt".to_string(), "tomb".to_string()];
     let desc = service
-        .describe(&image, "image/png", &tags, Some("dungeon"))
+        .describe(&image, Some("image/png"), &tags, Some("dungeon"))
         .await
         .expect("description generation should succeed");
 
@@ -94,7 +94,7 @@ async fn test_description_service_unconfigured_strictly_fails() {
     let image = create_test_png();
     let tags = vec!["dungeon".to_string()];
     let err = service
-        .describe(&image, "image/png", &tags, None)
+        .describe(&image, Some("image/png"), &tags, None)
         .await
         .expect_err("unconfigured generator must return DescriptionError::NotConfigured");
 
@@ -114,7 +114,7 @@ async fn test_description_service_generation_failure_propagates() {
     let image = create_test_png();
     let tags = vec!["forest".to_string()];
     let err = service
-        .describe(&image, "image/png", &tags, None)
+        .describe(&image, Some("image/png"), &tags, None)
         .await
         .expect_err("generation failure must strictly propagate");
 
@@ -134,7 +134,7 @@ async fn test_description_service_empty_description_yields_error() {
     let image = create_test_png();
     let tags = vec!["cave".to_string()];
     let err = service
-        .describe(&image, "image/png", &tags, None)
+        .describe(&image, Some("image/png"), &tags, None)
         .await
         .expect_err("empty description text must fail with EmptyDescription");
 

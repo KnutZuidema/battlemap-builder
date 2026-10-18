@@ -7,7 +7,7 @@ use crate::domain::{
 };
 use crate::ports::curation_store::CurationStore;
 use crate::ports::storage::StorageError;
-use crate::services::description::{resolve_mime_type, DescriptionError, DescriptionService};
+use crate::services::description::{DescriptionError, DescriptionService};
 
 /// Errors arising during the curation and rejection workflow.
 #[derive(Debug, Error)]
@@ -120,16 +120,12 @@ impl CurationWorkflow for CurationService {
         // Zero unassigned layers check (all layers must be assigned a role)
         if let Some(unassigned) = raw_layers.iter().find(|l| l.role.is_unassigned()) {
             return Err(CurationWorkflowError::ValidationFailed(format!(
-                "Cannot curate bundle: layer {} is Unassigned",
+                "Cannot curate candidate: layer {} is Unassigned",
                 unassigned.index
             )));
         }
 
-        let role_elevation_pairs: Vec<(LayerRole, Option<i8>)> = raw_layers
-            .iter()
-            .map(|l| (l.role, l.elevation))
-            .collect();
-        validate_layers_for_curation(&role_elevation_pairs)
+        validate_layers_for_curation(&raw_layers)
             .map_err(CurationWorkflowError::ValidationFailed)?;
 
         let included_layers: Vec<&Layer> = raw_layers
@@ -158,9 +154,13 @@ impl CurationWorkflow for CurationService {
             desc.to_string()
         } else {
             let ground_bytes = self.store.get_staging_layer_bytes(trimmed_id, ground_layer_idx)?;
-            let mime = resolve_mime_type(&ground_layer.filename, &ground_bytes);
             self.description_service
-                .describe_image(&ground_bytes, &mime, &clean_tags)
+                .describe(
+                    &ground_bytes,
+                    Some(&ground_layer.filename),
+                    &clean_tags,
+                    candidate.title.as_deref(),
+                )
                 .await?
         };
 
@@ -291,9 +291,9 @@ mod tests {
         async fn generate_description(
             &self,
             _image_bytes: &[u8],
-            _mime_type: &str,
+            _filename: Option<&str>,
             _tags: &[String],
-            _context: Option<&str>,
+            _title: Option<&str>,
         ) -> Result<String, DescriptionError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.result.lock().unwrap().clone()

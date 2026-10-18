@@ -491,13 +491,13 @@ pub async fn get_curated_image_or_layer(
 pub struct CurateRequest {
     pub id: String,
     #[serde(default)]
-    pub themes: Vec<String>,
+    pub themes: Option<Vec<String>>,
     #[serde(default)]
     pub theme: Option<String>,
     #[serde(default)]
     pub rating: Option<u8>,
     #[serde(default)]
-    pub tags: Vec<String>,
+    pub tags: Option<Vec<String>>,
     #[serde(default)]
     pub layers: Option<Vec<CandidateLayer>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -505,20 +505,45 @@ pub struct CurateRequest {
 }
 
 impl CurateRequest {
-    pub fn resolved_themes(&self) -> Vec<String> {
-        let mut list = self.themes.clone();
-        if list.is_empty() {
-            if let Some(t) = &self.theme {
-                if !t.trim().is_empty() {
-                    let normalized = t
-                        .parse::<Theme>()
-                        .map(|th| th.as_str().to_string())
-                        .unwrap_or_else(|_| t.clone());
+    pub fn resolved_tags(&self) -> Vec<String> {
+        let mut list: Vec<String> = Vec::new();
+
+        if let Some(themes) = &self.themes {
+            for t in themes {
+                let trimmed = t.trim();
+                if !trimmed.is_empty() && !list.iter().any(|existing| existing.eq_ignore_ascii_case(trimmed)) {
+                    list.push(trimmed.to_string());
+                }
+            }
+        }
+
+        if let Some(t) = &self.theme {
+            let trimmed = t.trim();
+            if !trimmed.is_empty() {
+                let normalized = trimmed
+                    .parse::<Theme>()
+                    .map(|th| th.as_str().to_string())
+                    .unwrap_or_else(|_| trimmed.to_string());
+                if !list.iter().any(|existing| existing.eq_ignore_ascii_case(&normalized)) {
                     list.push(normalized);
                 }
             }
         }
+
+        if let Some(tags) = &self.tags {
+            for t in tags {
+                let trimmed = t.trim();
+                if !trimmed.is_empty() && !list.iter().any(|existing| existing.eq_ignore_ascii_case(trimmed)) {
+                    list.push(trimmed.to_string());
+                }
+            }
+        }
+
         list
+    }
+
+    pub fn resolved_themes(&self) -> Vec<String> {
+        self.resolved_tags()
     }
 }
 
@@ -544,24 +569,15 @@ pub async fn post_curate(
         return Err(ApiError::bad_request("Candidate ID cannot be empty"));
     }
 
-    let themes = payload.resolved_themes();
-    if themes.is_empty() || themes.iter().all(|t| t.trim().is_empty()) {
-        return Err(ApiError::bad_request("At least 1 theme label is required"));
+    let resolved_tags = payload.resolved_tags();
+    if resolved_tags.is_empty() {
+        return Err(ApiError::bad_request("At least 1 tag is required"));
     }
-
-    let mut tags = themes;
-    for t in payload.tags {
-        let trimmed = t.trim().to_string();
-        if !trimmed.is_empty() && !tags.iter().any(|existing| existing.eq_ignore_ascii_case(&trimmed)) {
-            tags.push(trimmed);
-        }
-    }
-
     let curated = state
         .curation_service
         .curate(
             &payload.id,
-            tags,
+            resolved_tags,
             payload.layers,
             payload.description,
         )
@@ -819,7 +835,6 @@ pub async fn post_describe_candidate(
     // 2. Read primary image bytes (from candidate layer 0 or candidate primary image)
     let bytes = state.storage.get_staging_image(&id)?;
     let filename = candidate.resolved_filename();
-    let mime = detect_image_mime(&bytes, Some(&filename));
 
     // 3. Resolve themes and tags (prefer payload themes/tags, fallback to candidate tags/title)
     let mut themes = req.themes.unwrap_or_default();
@@ -839,7 +854,7 @@ pub async fn post_describe_candidate(
 
     let description = state
         .description_service
-        .describe(&bytes, mime, &tags, context.as_deref())
+        .describe(&bytes, Some(&filename), &tags, context.as_deref())
         .await?;
 
     Ok(Json(DescribeResponse { id, description }))
@@ -890,7 +905,6 @@ pub async fn post_curated_describe(
             .find(|l| l.role == LayerRole::Ground || l.index == 0)
             .map(|l| l.filename.as_str())
     });
-    let mime = detect_image_mime(&bytes, filename);
 
     let mut themes = req.themes.unwrap_or_default();
     if themes.is_empty() {
@@ -919,7 +933,7 @@ pub async fn post_curated_describe(
 
     let description = state
         .description_service
-        .describe(&bytes, mime, &tags, context.as_deref())
+        .describe(&bytes, filename, &tags, context.as_deref())
         .await?;
 
     Ok(Json(DescribeResponse { id, description }))

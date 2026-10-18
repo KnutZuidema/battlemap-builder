@@ -24,9 +24,9 @@ impl DescriptionGenerator for MockCuratedGen {
     async fn generate_description(
         &self,
         _image_bytes: &[u8],
-        _mime_type: &str,
+        _filename: Option<&str>,
         _tags: &[String],
-        _context: Option<&str>,
+        _title: Option<&str>,
     ) -> Result<String, DescriptionError> {
         self.0.clone()
     }

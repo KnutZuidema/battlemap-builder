@@ -370,23 +370,22 @@ impl Layer {
     }
 }
 
-/// Validates that a slice of `(LayerRole, Option<i8>)` layer assignments is ready for curation:
+/// Validates that a slice of [`Layer`] assignments is ready for curation:
 /// - At least 1 layer must be included (`role != LayerRole::Exclude`).
 /// - 0 unassigned layers (`role != LayerRole::Unassigned`).
 /// - Strictly 1 `LayerRole::Ground` layer.
 /// - Valid elevation indices for UpperFloor (> 0), Basement (< 0), and Ground (0).
-pub fn validate_layers_for_curation(layers: &[(LayerRole, Option<i8>)]) -> Result<(), String> {
-    if layers.iter().any(|(r, _)| r.is_unassigned()) {
+pub fn validate_layers_for_curation(layers: &[Layer]) -> Result<(), String> {
+    if layers.iter().any(|l| l.role.is_unassigned()) {
         return Err(
             "All layers must have an assigned role before curation (none may remain unassigned)".into(),
         );
     }
-    let included: Vec<&(LayerRole, Option<i8>)> =
-        layers.iter().filter(|(r, _)| r.is_included()).collect();
+    let included: Vec<&Layer> = layers.iter().filter(|l| l.role.is_included()).collect();
     if included.is_empty() {
-        return Err("At least 1 layer must be included (not excluded) to curate a bundle".into());
+        return Err("At least 1 layer must be included (not excluded) to curate a candidate".into());
     }
-    let ground_count = included.iter().filter(|(r, _)| r.is_ground()).count();
+    let ground_count = included.iter().filter(|l| l.role.is_ground()).count();
     if ground_count == 0 {
         return Err("Strictly one Ground layer is required to curate a candidate (found none)".into());
     }
@@ -395,25 +394,25 @@ pub fn validate_layers_for_curation(layers: &[(LayerRole, Option<i8>)]) -> Resul
             "Strictly one Ground layer is required to curate a candidate (found {ground_count})"
         ));
     }
-    for (role, elev) in &included {
-        match role {
+    for layer in &included {
+        match layer.role {
             LayerRole::UpperFloor => {
-                if let Some(e) = elev {
-                    if *e <= 0 {
+                if let Some(e) = layer.elevation {
+                    if e <= 0 {
                         return Err(format!("Upper floor elevation must be positive, found {e}"));
                     }
                 }
             }
             LayerRole::Basement => {
-                if let Some(e) = elev {
-                    if *e >= 0 {
+                if let Some(e) = layer.elevation {
+                    if e >= 0 {
                         return Err(format!("Basement elevation must be negative, found {e}"));
                     }
                 }
             }
             LayerRole::Ground => {
-                if let Some(e) = elev {
-                    if *e != 0 {
+                if let Some(e) = layer.elevation {
+                    if e != 0 {
                         return Err(format!("Ground elevation must be 0, found {e}"));
                     }
                 }
@@ -584,10 +583,7 @@ impl Candidate {
 
     /// Validates that this candidate's layers are ready for curation.
     pub fn validate_for_curation(&self) -> Result<(), String> {
-        let resolved = self.resolved_layers();
-        let pairs: Vec<(LayerRole, Option<i8>)> =
-            resolved.iter().map(|l| (l.role, l.elevation)).collect();
-        validate_layers_for_curation(&pairs)
+        validate_layers_for_curation(&self.resolved_layers())
     }
 }
 
@@ -1618,6 +1614,10 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
+    fn layer(index: usize, role: LayerRole, elevation: Option<i8>) -> Layer {
+        Layer::new(index, format!("{index}.png"), role, elevation, (1024, 1024))
+    }
+
     #[test]
     fn test_theme_string_conversions() {
         assert_eq!(Theme::Dungeon.as_str(), "dungeon");
@@ -2428,59 +2428,57 @@ mod tests {
     fn test_bundle_curation_validation() {
         // Fails when all layers are Excluded
         let all_excluded = vec![
-            (LayerRole::Exclude, None),
-            (LayerRole::Exclude, None),
+            layer(0, LayerRole::Exclude, None),
+            layer(1, LayerRole::Exclude, None),
         ];
         assert!(validate_layers_for_curation(&all_excluded).is_err());
 
         // Fails when any included layer is Unassigned
         let with_unassigned = vec![
-            (LayerRole::Ground, Some(0)),
-            (LayerRole::Unassigned, None),
-            (LayerRole::Exclude, None),
+            layer(0, LayerRole::Ground, Some(0)),
+            layer(1, LayerRole::Unassigned, None),
+            layer(2, LayerRole::Exclude, None),
         ];
         assert!(validate_layers_for_curation(&with_unassigned).is_err());
 
         // Passes with valid mix of Ground, UpperFloor, Roof, Exclude
         let valid_mix = vec![
-            (LayerRole::Ground, Some(0)),
-            (LayerRole::UpperFloor, Some(1)),
-            (LayerRole::Roof, None),
-            (LayerRole::Exclude, None),
+            layer(0, LayerRole::Ground, Some(0)),
+            layer(1, LayerRole::UpperFloor, Some(1)),
+            layer(2, LayerRole::Roof, None),
+            layer(3, LayerRole::Exclude, None),
         ];
         assert!(validate_layers_for_curation(&valid_mix).is_ok());
         // Fails when missing Ground layer
         let missing_ground = vec![
-            (LayerRole::UpperFloor, Some(1)),
-            (LayerRole::Roof, None),
+            layer(0, LayerRole::UpperFloor, Some(1)),
+            layer(1, LayerRole::Roof, None),
         ];
         assert!(validate_layers_for_curation(&missing_ground).is_err());
 
         // Fails when multiple Ground layers
         let multiple_ground = vec![
-            (LayerRole::Ground, Some(0)),
-            (LayerRole::Ground, Some(0)),
+            layer(0, LayerRole::Ground, Some(0)),
+            layer(1, LayerRole::Ground, Some(0)),
         ];
         assert!(validate_layers_for_curation(&multiple_ground).is_err());
 
         // Fails when UpperFloor elevation is non-positive
         let invalid_upper = vec![
-            (LayerRole::Ground, Some(0)),
-            (LayerRole::UpperFloor, Some(0)),
+            layer(0, LayerRole::Ground, Some(0)),
+            layer(1, LayerRole::UpperFloor, Some(0)),
         ];
         assert!(validate_layers_for_curation(&invalid_upper).is_err());
 
         // Fails when Basement elevation is non-negative
         let invalid_basement = vec![
-            (LayerRole::Ground, Some(0)),
-            (LayerRole::Basement, Some(0)),
+            layer(0, LayerRole::Ground, Some(0)),
+            layer(1, LayerRole::Basement, Some(0)),
         ];
         assert!(validate_layers_for_curation(&invalid_basement).is_err());
 
         // Fails when Ground elevation is non-zero
-        let invalid_ground = vec![
-            (LayerRole::Ground, Some(1)),
-        ];
+        let invalid_ground = vec![layer(0, LayerRole::Ground, Some(1))];
         assert!(validate_layers_for_curation(&invalid_ground).is_err());
 
         // Candidate validation method checks

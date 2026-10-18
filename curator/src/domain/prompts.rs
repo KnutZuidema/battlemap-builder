@@ -94,18 +94,16 @@ Output Directives:
 - Provide a dense, evocative 40–90 word description.
 - Plain text only — NO markdown formatting, NO bullet points, NO title, and NO conversational commentary.";
 
-/// Formats assigned themes and tags into a user prompt for battlemap description generation.
-pub fn build_description_user_prompt(themes: &[String], tags: &[String]) -> String {
+/// Formats title and tags into a user prompt for battlemap description generation.
+pub fn build_description_user_prompt(title: Option<&str>, tags: &[String]) -> String {
     let mut parts = Vec::new();
     parts.push("Analyze this battlemap image and describe its tangible physical environment.".to_string());
 
-    let clean_themes: Vec<&str> = themes
-        .iter()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if !clean_themes.is_empty() {
-        parts.push(format!("Assigned themes: {}.", clean_themes.join(", ")));
+    if let Some(t) = title {
+        let clean_title = t.trim();
+        if !clean_title.is_empty() {
+            parts.push(format!("Title: {clean_title}."));
+        }
     }
 
     let clean_tags: Vec<&str> = tags
@@ -364,11 +362,11 @@ mod tests {
 
     #[test]
     fn test_build_description_user_prompt_with_themes_and_tags() {
-        let themes = vec!["Dungeon".to_string(), "Crypt".to_string()];
+        let title = Some("Flooded Crypt");
         let tags = vec!["flooded".to_string(), "iron-bars".to_string()];
-        let prompt = build_description_user_prompt(&themes, &tags);
+        let prompt = build_description_user_prompt(title, &tags);
 
-        assert!(prompt.contains("Assigned themes: Dungeon, Crypt."));
+        assert!(prompt.contains("Title: Flooded Crypt."));
         assert!(prompt.contains("Identified tags: flooded, iron-bars."));
         assert!(prompt.contains("40–90 word description"));
         assert!(prompt.contains("without mentioning perspective, art styles, or game mechanics"));
@@ -376,19 +374,18 @@ mod tests {
 
     #[test]
     fn test_build_description_user_prompt_empty_and_whitespace() {
-        let empty_themes = Vec::new();
         let empty_tags = Vec::new();
-        let prompt = build_description_user_prompt(&empty_themes, &empty_tags);
+        let prompt = build_description_user_prompt(None, &empty_tags);
 
-        assert!(!prompt.contains("Assigned themes:"));
+        assert!(!prompt.contains("Title:"));
         assert!(!prompt.contains("Identified tags:"));
         assert!(prompt.contains("Analyze this battlemap image"));
         assert!(prompt.contains("40–90 word description"));
 
-        let whitespace_themes = vec!["   ".to_string(), "".to_string()];
+        let whitespace_title = Some("   ");
         let whitespace_tags = vec!["\t".to_string()];
-        let ws_prompt = build_description_user_prompt(&whitespace_themes, &whitespace_tags);
-        assert!(!ws_prompt.contains("Assigned themes:"));
+        let ws_prompt = build_description_user_prompt(whitespace_title, &whitespace_tags);
+        assert!(!ws_prompt.contains("Title:"));
         assert!(!ws_prompt.contains("Identified tags:"));
     }
 }

@@ -521,6 +521,65 @@ impl GridConfig {
             Self::default()
         }
     }
+
+    /// Calculates the number of full grid columns and rows that fit into the given dimensions.
+    /// Edge remnants smaller than `cell_size_px` are discarded.
+    pub fn lattice_dimensions(&self, width: u32, height: u32) -> (u32, u32) {
+        if self.cell_size_px == 0 {
+            return (0, 0);
+        }
+        let cols = width.saturating_sub(self.offset_x) / self.cell_size_px;
+        let rows = height.saturating_sub(self.offset_y) / self.cell_size_px;
+        (cols, rows)
+    }
+
+    /// Calculates the number of 16×16 section windows along X and Y axes needed to cover
+    /// the full-grid lattice. Returns None if the grid yields fewer than 16 full cells in either dimension.
+    pub fn section_counts(&self, width: u32, height: u32) -> Option<(u32, u32)> {
+        let (cols, rows) = self.lattice_dimensions(width, height);
+        if cols < 16 || rows < 16 {
+            None
+        } else {
+            Some((cols.div_ceil(16), rows.div_ceil(16)))
+        }
+    }
+
+    /// Computes the zero-indexed top-left grid cell coordinate origins `(col, row)`
+    /// for overlapping 16×16 Map Sections evenly spaced across the full grid lattice.
+    pub fn section_origins(&self, width: u32, height: u32) -> Vec<(u32, u32)> {
+        let (cols, rows) = self.lattice_dimensions(width, height);
+        if cols < 16 || rows < 16 {
+            return Vec::new();
+        }
+        let (kx, ky) = (cols.div_ceil(16), rows.div_ceil(16));
+        let col_origins: Vec<u32> = if kx == 1 {
+            vec![0]
+        } else {
+            (0..kx)
+                .map(|i| ((i as f64 * (cols - 16) as f64) / (kx - 1) as f64).round() as u32)
+                .collect()
+        };
+        let row_origins: Vec<u32> = if ky == 1 {
+            vec![0]
+        } else {
+            (0..ky)
+                .map(|j| ((j as f64 * (rows - 16) as f64) / (ky - 1) as f64).round() as u32)
+                .collect()
+        };
+        let mut origins = Vec::with_capacity((kx * ky) as usize);
+        for &r in &row_origins {
+            for &c in &col_origins {
+                origins.push((c, r));
+            }
+        }
+        origins
+    }
+
+    /// Whether the candidate meets the minimum 16×16 full grid cells threshold required for curation.
+    pub fn is_curation_eligible(&self, width: u32, height: u32) -> bool {
+        let (cols, rows) = self.lattice_dimensions(width, height);
+        cols >= 16 && rows >= 16
+    }
 }
 
 #[derive(Deserialize)]
@@ -2557,5 +2616,85 @@ mod tests {
         // Mismatched aspect ratio -> defaults to 64px
         let mismatched = GridConfig::auto_seed((50, 10), (2000, 1500));
         assert_eq!(mismatched.cell_size_px, 64);
+    }
+
+    #[test]
+    fn test_grid_config_lattice_dimensions() {
+        let grid = GridConfig::new(64, 0, 0);
+        // 2048 x 2048 -> 32 x 32 cells exactly
+        assert_eq!(grid.lattice_dimensions(2048, 2048), (32, 32));
+
+        // Partial edge remnant discarded: 2040 x 1500 -> 31 x 23 cells
+        assert_eq!(grid.lattice_dimensions(2040, 1500), (31, 23));
+
+        // With offsets: offset_x = 20, offset_y = 10
+        let offset_grid = GridConfig::new(64, 20, 10);
+        // (2048 - 20) / 64 = 2028 / 64 = 31
+        // (2048 - 10) / 64 = 2038 / 64 = 31
+        assert_eq!(offset_grid.lattice_dimensions(2048, 2048), (31, 31));
+
+        // Image smaller than offset or cell size
+        assert_eq!(offset_grid.lattice_dimensions(10, 5), (0, 0));
+    }
+
+    #[test]
+    fn test_grid_config_section_counts_and_eligibility() {
+        let grid = GridConfig::new(64, 0, 0);
+
+        // 1024 x 1024 -> 16 x 16 cells -> minimum eligible (1 section x 1 section)
+        assert_eq!(grid.lattice_dimensions(1024, 1024), (16, 16));
+        assert!(grid.is_curation_eligible(1024, 1024));
+        assert_eq!(grid.section_counts(1024, 1024), Some((1, 1)));
+
+        // 1023 x 1024 -> 15 x 16 cells -> ineligible (< 16 cols)
+        assert_eq!(grid.lattice_dimensions(1023, 1024), (15, 16));
+        assert!(!grid.is_curation_eligible(1023, 1024));
+        assert_eq!(grid.section_counts(1023, 1024), None);
+
+        // 1024 x 1023 -> 16 x 15 cells -> ineligible (< 16 rows)
+        assert_eq!(grid.lattice_dimensions(1024, 1023), (16, 15));
+        assert!(!grid.is_curation_eligible(1024, 1023));
+        assert_eq!(grid.section_counts(1024, 1023), None);
+
+        // 2048 x 1536 -> 32 x 24 cells -> eligible -> (32.div_ceil(16), 24.div_ceil(16)) = (2, 2)
+        assert_eq!(grid.lattice_dimensions(2048, 1536), (32, 24));
+        assert!(grid.is_curation_eligible(2048, 1536));
+        assert_eq!(grid.section_counts(2048, 1536), Some((2, 2)));
+
+        // 2560 x 1024 -> 40 x 16 cells -> (3, 1)
+        assert_eq!(grid.section_counts(2560, 1024), Some((3, 1)));
+    }
+
+    #[test]
+    fn test_grid_config_section_origins() {
+        let grid = GridConfig::new(64, 0, 0);
+
+        // Undersized map returns empty origins
+        assert_eq!(grid.section_origins(960, 960), Vec::<(u32, u32)>::new());
+
+        // Exactly 16x16 cells (1024x1024 px) -> single origin at (0, 0)
+        assert_eq!(grid.section_origins(1024, 1024), vec![(0, 0)]);
+
+        // 32x32 cells (2048x2048 px) -> kx=2, ky=2 -> origins at col: [0, 16], row: [0, 16]
+        // Cartesian product: (0, 0), (16, 0), (0, 16), (16, 16)
+        assert_eq!(
+            grid.section_origins(2048, 2048),
+            vec![(0, 0), (16, 0), (0, 16), (16, 16)]
+        );
+
+        // 20x20 cells (1280x1280 px) -> kx=2, ky=2 -> cols-16 = 4 -> col origins [0, 4]
+        // Cartesian product: (0, 0), (4, 0), (0, 4), (4, 4)
+        assert_eq!(
+            grid.section_origins(1280, 1280),
+            vec![(0, 0), (4, 0), (0, 4), (4, 4)]
+        );
+
+        // 40x16 cells (2560x1024 px) -> kx=3, ky=1
+        // cols-16 = 24; i=0 -> 0, i=1 -> 12, i=2 -> 24. row: [0]
+        // Cartesian product: (0, 0), (12, 0), (24, 0)
+        assert_eq!(
+            grid.section_origins(2560, 1024),
+            vec![(0, 0), (12, 0), (24, 0)]
+        );
     }
 }

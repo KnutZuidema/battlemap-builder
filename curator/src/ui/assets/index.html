@@ -231,6 +231,18 @@
                     </div>
                 </div>
 
+                <!-- Lattice & Sections Section -->
+                <div class="grid-panel-section grid-lattice-section">
+                    <div class="grid-panel-row">
+                        <span class="grid-panel-label">Full Grid Lattice</span>
+                        <span id="grid-lattice-cells" class="grid-lattice-val mono">0 × 0 cells</span>
+                    </div>
+                    <div class="grid-panel-row">
+                        <span class="grid-panel-label">16×16 Sections</span>
+                        <span id="grid-lattice-sections" class="grid-lattice-sections-val mono badge-sections">0 × 0 sections</span>
+                    </div>
+                </div>
+
                 <!-- Actions Footer -->
                 <div class="grid-panel-footer">
                     <button type="button" id="btn-grid-reset" class="btn btn-secondary btn-sm" title="Reset to 64px, (0, 0)">Reset</button>
@@ -304,6 +316,8 @@
                 <span id="hud-pan-zoom" class="hud-item mono">Zoom: 100%</span>
                 <span class="hud-divider">|</span>
                 <span id="hud-grid-status" class="hud-item">Grid: 64px (5ft) [ON]</span>
+                <span class="hud-divider">|</span>
+                <span id="hud-lattice-status" class="hud-item mono" title="Full-grid lattice & sections readout">0 × 0 cells</span>
                 <span class="hud-divider">|</span>
                 <span id="hud-resolution" class="hud-item mono">2048 × 2048</span>
                 <span class="hud-divider">|</span>
@@ -463,6 +477,7 @@
                     <div class="hud-group hud-group-meta">
                         <span id="fs-map-id-badge" class="hud-badge hud-badge-id mono" title="Curated Map ID">map-id</span>
                         <span id="fs-map-dimensions" class="hud-badge hud-badge-dim mono" title="Map Dimensions">2048 × 2048</span>
+                        <span id="fs-grid-status-badge" class="hud-badge hud-badge-grid mono" title="Full-Grid Lattice & Sections">0 × 0 cells</span>
                         <span id="fs-map-counter" class="hud-badge hud-badge-counter mono" title="Curated Gallery Counter">Map 1 of 1</span>
                     </div>
 
@@ -634,6 +649,18 @@
                             <div class="grid-drag-hint">
                                 <span>Tip: Hold <kbd>Shift</kbd> + drag on map to align grid</span>
                             </div>
+                        </div>
+                    </div>
+
+                    <!-- Lattice & Sections Section -->
+                    <div class="grid-panel-section grid-lattice-section">
+                        <div class="grid-panel-row">
+                            <span class="grid-panel-label">Full Grid Lattice</span>
+                            <span id="fs-grid-lattice-cells" class="grid-lattice-val mono">0 × 0 cells</span>
+                        </div>
+                        <div class="grid-panel-row">
+                            <span class="grid-panel-label">16×16 Sections</span>
+                            <span id="fs-grid-lattice-sections" class="grid-lattice-sections-val mono badge-sections">0 × 0 sections</span>
                         </div>
                     </div>
 

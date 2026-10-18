@@ -128,8 +128,10 @@ async fn test_patch_curated_metadata_success() {
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let updated: CuratedMap = serde_json::from_slice(&body).unwrap();
     assert_eq!(updated.id, "map_to_patch");
-    assert_eq!(updated.themes, vec!["tavern", "coastal"]);
-    assert_eq!(updated.tags, vec!["alehouse", "dockside"]);
+    assert!(updated.tags.contains(&"tavern".to_string()));
+    assert!(updated.tags.contains(&"coastal".to_string()));
+    assert!(updated.tags.contains(&"alehouse".to_string()));
+    assert!(updated.tags.contains(&"dockside".to_string()));
     assert_eq!(
         updated.description.as_deref(),
         Some("Lively harbor tavern with warm hearth")
@@ -138,8 +140,10 @@ async fn test_patch_curated_metadata_success() {
     // Verify storage persistence
     let listed = storage.list_curated(None).unwrap();
     let stored = listed.iter().find(|m| m.id == "map_to_patch").unwrap();
-    assert_eq!(stored.themes, vec!["tavern", "coastal"]);
-    assert_eq!(stored.tags, vec!["alehouse", "dockside"]);
+    assert!(stored.tags.contains(&"tavern".to_string()));
+    assert!(stored.tags.contains(&"coastal".to_string()));
+    assert!(stored.tags.contains(&"alehouse".to_string()));
+    assert!(stored.tags.contains(&"dockside".to_string()));
     assert_eq!(
         stored.description.as_deref(),
         Some("Lively harbor tavern with warm hearth")

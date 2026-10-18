@@ -165,7 +165,8 @@ async fn test_api_curate_endpoint() {
     let res_json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(res_json["status"], "ok");
     assert_eq!(res_json["curated"]["id"], "map_to_curate");
-    assert_eq!(res_json["curated"]["themes"], json!(["dungeon"]));
+    assert_eq!(res_json["curated"]["tags"], json!(["dungeon", "crypt", "stone-floor"]));
+    assert!(res_json["curated"]["themes"].is_null());
     assert_eq!(res_json["curated"]["dimensions"], json!([1920, 1080]));
 
     // Staging should now be empty
@@ -314,9 +315,10 @@ async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() 
     assert_eq!(res_json["status"], "ok");
     assert_eq!(res_json["curated"]["id"], "dungeon_complex");
     assert_eq!(
-        res_json["curated"]["themes"],
-        json!(["dungeon", "crypt", "boss-arena"])
+        res_json["curated"]["tags"],
+        json!(["dungeon", "crypt", "boss-arena", "torchlight", "fantasy"])
     );
+    assert!(res_json["curated"]["themes"].is_null());
     // Rating must not be present in response
     assert!(res_json["curated"]["rating"].is_null());
 
@@ -343,9 +345,10 @@ async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() 
 
     assert_eq!(manifest["id"], "dungeon_complex");
     assert_eq!(
-        manifest["themes"],
-        json!(["dungeon", "crypt", "boss-arena"])
+        manifest["tags"],
+        json!(["dungeon", "crypt", "boss-arena", "torchlight", "fantasy"])
     );
+    assert!(manifest["themes"].is_null());
     assert_eq!(manifest["dimensions"], json!([1920, 1080]));
     assert!(manifest["rating"].is_null(), "Curated map manifest must not have rating");
 
@@ -413,7 +416,8 @@ async fn test_api_curate_building_theme_and_aliases() {
     let res_json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(res_json["status"], "ok");
     assert_eq!(res_json["curated"]["id"], "cabin_map");
-    assert_eq!(res_json["curated"]["themes"], json!(["building"]));
+    assert_eq!(res_json["curated"]["tags"], json!(["building", "isolated-cabin", "timber-roof"]));
+    assert!(res_json["curated"]["themes"].is_null());
 
     // Verify stored under Theme::Building
     let curated = storage.list_curated(Some(&Theme::Building)).unwrap();
@@ -451,7 +455,8 @@ async fn test_api_curate_building_theme_and_aliases() {
     assert_eq!(resp2.status(), StatusCode::OK);
     let body2 = to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
     let res_json2: Value = serde_json::from_slice(&body2).unwrap();
-    assert_eq!(res_json2["curated"]["themes"], json!(["building"]));
+    assert!(res_json2["curated"]["themes"].is_null());
+    assert!(res_json2["curated"]["tags"].as_array().unwrap().contains(&json!("building")));
 
     let building_list = storage.list_curated(Some(&Theme::Building)).unwrap();
     assert_eq!(building_list.len(), 2);
@@ -1557,7 +1562,8 @@ async fn test_api_curate_bundle_validation_and_success() {
     let curate_json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(curate_json["status"], "ok");
     assert_eq!(curate_json["curated"]["id"], "cand_unassigned");
-    assert_eq!(curate_json["curated"]["themes"], json!(["dungeon"]));
+    assert_eq!(curate_json["curated"]["tags"], json!(["dungeon", "crypt"]));
+    assert!(curate_json["curated"]["themes"].is_null());
 
     // Staging should no longer contain cand_unassigned
     let remaining_staging = storage.list_staging().unwrap();
@@ -2361,5 +2367,6 @@ async fn test_legacy_manifest_without_description_deserialization() {
     assert!(legacy_item.is_some(), "Legacy curated item must be returned by GET /api/curated");
     let legacy_item = legacy_item.unwrap();
     assert_eq!(legacy_item.id, legacy_id);
-    assert_eq!(legacy_item.themes, vec!["dungeon"]);
+    assert_eq!(legacy_item.tags, vec!["dungeon", "corridor", "torches"]);
+    assert_eq!(legacy_item.primary_theme(), "dungeon");
 }

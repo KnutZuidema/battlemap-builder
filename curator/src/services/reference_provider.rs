@@ -242,7 +242,7 @@ pub fn detect_theme_for_prompt(prompt: &str) -> Option<Theme> {
 
     best_theme
 }
-/// Scores keyword overlap between a prompt and a curated map's themes, tags, and description.
+/// Scores keyword overlap between a prompt and a curated map's tags and description.
 pub fn score_curated_map_for_prompt(map: &crate::domain::CuratedMap, prompt: &str) -> usize {
     let prompt_lower = prompt.to_lowercase();
     let prompt_words: std::collections::HashSet<&str> = prompt_lower
@@ -252,16 +252,16 @@ pub fn score_curated_map_for_prompt(map: &crate::domain::CuratedMap, prompt: &st
         .collect();
 
     let mut score = 0usize;
-    for theme in &map.themes {
-        let th_lower = theme.to_lowercase();
-        if prompt_words.contains(th_lower.as_str()) || prompt_lower.contains(&th_lower) {
-            score += 2;
-        }
-    }
+    let primary = map.primary_theme().to_lowercase();
     for tag in &map.tags {
         let tag_lower = tag.to_lowercase();
-        if prompt_words.contains(tag_lower.as_str()) || prompt_lower.contains(&tag_lower) {
-            score += 1;
+        let matches = prompt_words.contains(tag_lower.as_str()) || prompt_lower.contains(&tag_lower);
+        if matches {
+            if tag_lower == primary {
+                score += 2;
+            } else {
+                score += 1;
+            }
         }
     }
     if let Some(desc) = map.description.as_deref() {

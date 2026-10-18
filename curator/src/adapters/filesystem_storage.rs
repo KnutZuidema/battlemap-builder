@@ -1084,18 +1084,17 @@ impl FilesystemStorage {
                 let _ = std::fs::remove_file(json_path);
 
                 map.id = stem;
-                if map.themes.is_empty() {
-                    map.themes = vec![theme.as_str().to_string()];
+                if map.tags.is_empty() {
+                    map.tags = vec![theme.as_str().to_string()];
                 }
                 if map.layers.is_empty() {
-                    map.layers = vec![CuratedLayer {
-                        index: 0,
-                        filename: layer_filename,
-                        role: LayerRole::Ground,
-                        elevation: Some(0),
-                        caption: None,
-                        dimensions: map.dimensions,
-                    }];
+                    map.layers = vec![CuratedLayer::new(
+                        0,
+                        layer_filename,
+                        LayerRole::Ground,
+                        Some(0),
+                        map.dimensions,
+                    )];
                 }
                 let manifest_json = serde_json::to_string_pretty(&map)?;
                 Self::atomic_write(&bundle_dir.join("manifest.json"), manifest_json.as_bytes())?;
@@ -1225,14 +1224,15 @@ impl FilesystemStorage {
             if let Some(first) = map.layers.first_mut() {
                 first.caption = Some(cap);
             } else {
-                map.layers.push(CuratedLayer {
-                    index: 0,
-                    filename: format!("{}.png", map.id),
-                    role: LayerRole::Ground,
-                    elevation: Some(0),
-                    caption: Some(cap),
-                    dimensions: map.dimensions,
-                });
+                map.layers.push(
+                    CuratedLayer::new(
+                        0,
+                        format!("{}.png", map.id),
+                        LayerRole::Ground,
+                        Some(0),
+                        map.dimensions,
+                    ).with_caption(cap),
+                );
             }
         }
         if map.description.is_none() {
@@ -1543,14 +1543,13 @@ impl StorageRepository for FilesystemStorage {
         let mut stored_map = map.clone();
         if stored_map.layers.is_empty() {
             let filename = CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), "png");
-            stored_map.layers = vec![CuratedLayer {
-                index: 0,
+            stored_map.layers = vec![CuratedLayer::new(
+                0,
                 filename,
-                role: LayerRole::Ground,
-                elevation: Some(0),
-                caption: None,
-                dimensions: stored_map.dimensions,
-            }];
+                LayerRole::Ground,
+                Some(0),
+                stored_map.dimensions,
+            )];
         }
 
         let first_filename = stored_map.layers[0].filename.clone();
@@ -1664,7 +1663,7 @@ impl StorageRepository for FilesystemStorage {
                         if let Ok(content) = std::fs::read_to_string(&manifest_path) {
                             if let Ok(mut map) = serde_json::from_str::<CuratedMap>(&content) {
                                 let matches_theme = match theme {
-                                    Some(t) => map.themes.iter().any(|m_theme| {
+                                    Some(t) => map.tags.iter().any(|m_theme| {
                                         m_theme.eq_ignore_ascii_case(t.as_str())
                                             || m_theme.parse::<Theme>().ok().as_ref() == Some(t)
                                     }),
@@ -1683,7 +1682,7 @@ impl StorageRepository for FilesystemStorage {
                             if let Ok(content) = std::fs::read_to_string(&path) {
                                 if let Ok(mut map) = serde_json::from_str::<CuratedMap>(&content) {
                                     let matches_theme = match theme {
-                                        Some(t) => map.themes.iter().any(|m_theme| {
+                                        Some(t) => map.tags.iter().any(|m_theme| {
                                             m_theme.eq_ignore_ascii_case(t.as_str())
                                                 || m_theme.parse::<Theme>().ok().as_ref() == Some(t)
                                         }),
@@ -1837,13 +1836,21 @@ impl StorageRepository for FilesystemStorage {
         let themes_updated = update.themes.is_some();
         let tags_updated = update.tags.is_some();
 
-        if let Some(themes) = update.themes {
-            map.themes = themes;
-            map.validate_themes().map_err(StorageError::InvalidData)?;
-        }
-
         if let Some(tags) = update.tags {
             map.tags = tags;
+        }
+
+        if let Some(themes) = update.themes {
+            if themes.is_empty() || themes.iter().all(|t| t.trim().is_empty()) {
+                return Err(StorageError::InvalidData("CuratedMap requires at least 1 theme label".into()));
+            }
+            for t in themes {
+                let trimmed = t.trim().to_string();
+                if !trimmed.is_empty() && !map.tags.iter().any(|existing| existing.eq_ignore_ascii_case(&trimmed)) {
+                    map.tags.push(trimmed);
+                }
+            }
+            map.validate_themes().map_err(StorageError::InvalidData)?;
         }
 
         if let Some(description) = update.description {
@@ -2238,18 +2245,21 @@ impl StorageRepository for FilesystemStorage {
                 let dest_img_path = curated_bundle_dir.join(&dest_filename);
                 Self::atomic_move(&src_img_path, &dest_img_path)?;
 
-                curated_layers.push(CuratedLayer {
-                    index: curated_idx,
-                    filename: dest_filename,
-                    role: src_layer.role,
-                    elevation: src_layer.elevation,
-                    caption: src_layer.caption.clone(),
-                    dimensions: if src_layer.dimensions != (0, 0) {
+                let mut layer = CuratedLayer::new(
+                    curated_idx,
+                    dest_filename,
+                    src_layer.role,
+                    src_layer.elevation,
+                    if src_layer.dimensions != (0, 0) {
                         src_layer.dimensions
                     } else {
                         map.dimensions
                     },
-                });
+                );
+                if let Some(c) = &src_layer.caption {
+                    layer = layer.with_caption(c.clone());
+                }
+                curated_layers.push(layer);
             }
 
             let mut stored_map = map.clone();
@@ -2350,14 +2360,17 @@ impl StorageRepository for FilesystemStorage {
 
         let mut stored_map = map.clone();
         if stored_map.layers.is_empty() {
-            stored_map.layers = vec![CuratedLayer {
-                index: 0,
-                filename: dest_filename,
-                role: LayerRole::Ground,
-                elevation: Some(0),
-                caption: stored_map.description.clone(),
-                dimensions: stored_map.dimensions,
-            }];
+            let mut layer = CuratedLayer::new(
+                0,
+                dest_filename,
+                LayerRole::Ground,
+                Some(0),
+                stored_map.dimensions,
+            );
+            if let Some(desc) = &stored_map.description {
+                layer = layer.with_caption(desc.clone());
+            }
+            stored_map.layers = vec![layer];
         } else if let Some(desc) = &stored_map.description {
             let primary_idx = stored_map
                 .layers
@@ -2700,7 +2713,7 @@ impl StorageRepository for FilesystemStorage {
                 } else {
                     DirectoryStats::default()
                 };
-                for theme_str in &map.themes {
+                for theme_str in &map.tags {
                     if let Ok(th) = theme_str.parse::<Theme>() {
                         if let Some(entry) = curated_by_theme.get_mut(&th) {
                             entry.map_count += 1;
@@ -2847,7 +2860,7 @@ mod tests {
         let dungeon_maps = storage.list_curated(Some(&Theme::Dungeon)).unwrap();
         assert_eq!(dungeon_maps.len(), 1);
         assert_eq!(dungeon_maps[0].id, "map_dungeon_1");
-        assert_eq!(dungeon_maps[0].themes, vec!["dungeon"]);
+        assert_eq!(dungeon_maps[0].tags, vec!["dungeon", "boss-room", "gridless"]);
         assert_eq!(dungeon_maps[0].theme(), Some(Theme::Dungeon));
 
         // Other theme list should be empty
@@ -3124,7 +3137,7 @@ mod tests {
         let curated_maps = storage.list_curated(Some(&Theme::Dungeon)).unwrap();
         assert_eq!(curated_maps.len(), 1);
         assert_eq!(curated_maps[0].id, "raw_map");
-        assert_eq!(curated_maps[0].themes, vec!["dungeon"]);
+        assert_eq!(curated_maps[0].tags, vec!["dungeon", "dungeon-crawl"]);
         assert_eq!(curated_maps[0].theme(), Some(Theme::Dungeon));
     }
 
@@ -3790,8 +3803,10 @@ mod tests {
             .with_description("Luminescent fungal cavern with damp stone floors.");
 
         let updated = storage.update_curated("map_upd_meta", update).unwrap();
-        assert_eq!(updated.themes, vec!["cave", "underdark"]);
-        assert_eq!(updated.tags, vec!["stalactites", "bioluminescence"]);
+        assert!(updated.tags.contains(&"cave".to_string()));
+        assert!(updated.tags.contains(&"underdark".to_string()));
+        assert!(updated.tags.contains(&"stalactites".to_string()));
+        assert!(updated.tags.contains(&"bioluminescence".to_string()));
         assert_eq!(
             updated.description.as_deref(),
             Some("Luminescent fungal cavern with damp stone floors.")
@@ -3800,7 +3815,10 @@ mod tests {
         // Verify manifest on disk
         let list = storage.list_curated(None).unwrap();
         let reloaded = list.iter().find(|m| m.id == "map_upd_meta").unwrap();
-        assert_eq!(reloaded.themes, vec!["cave", "underdark"]);
+        assert!(reloaded.tags.contains(&"cave".to_string()));
+        assert!(reloaded.tags.contains(&"underdark".to_string()));
+        assert!(reloaded.tags.contains(&"stalactites".to_string()));
+        assert!(reloaded.tags.contains(&"bioluminescence".to_string()));
         assert_eq!(
             reloaded.description.as_deref(),
             Some("Luminescent fungal cavern with damp stone floors.")

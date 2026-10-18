@@ -83,7 +83,7 @@ async fn test_api_curated_listing_with_and_without_theme_filtering() {
     // Verify fields and companion caption populated on first layer
     for map in &list_all {
         assert!(!map.id.is_empty());
-        assert!(!map.themes.is_empty());
+        assert!(!map.tags.is_empty());
         assert!(!map.layers.is_empty());
         assert!(
             map.layers[0].caption.is_some(),

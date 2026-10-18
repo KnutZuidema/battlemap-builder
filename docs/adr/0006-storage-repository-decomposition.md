@@ -1,0 +1,3 @@
+# Storage repository decomposition into CatalogRepository and BlobStorage
+
+The 34-method monolithic `StorageRepository` port is decomposed into two asynchronous, focused seams: `CatalogRepository` for domain entity persistence (`Candidate`, `CuratedMap`, `RejectionRecord`) and `BlobStorage` for raw byte I/O addressed by strongly-typed `BlobKey`s with canonical path resolution. Domain workflows (`CurationService`, `RedditIngestionService`, `DatasetExportService`) orchestrate metadata and blob operations directly with saga-style cleanup, extracting LoRA normalization into application logic and enabling lightweight, thread-safe in-memory test doubles without disk I/O.

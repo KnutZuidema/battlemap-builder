@@ -581,22 +581,13 @@ pub async fn post_curate(
     }
 
     // Validate 16x16 full grid cell curation gate on Ground layer
-    let (ground_w, ground_h) = candidate
-        .layers
+    let (ground_w, ground_h) = layers_to_check
         .iter()
         .find(|l| l.role == LayerRole::Ground)
-        .or_else(|| candidate.layers.iter().find(|l| l.index == 0))
+        .or_else(|| layers_to_check.iter().find(|l| l.index == 0))
         .map(|l| l.dimensions)
         .filter(|&(w, h)| w > 0 && h > 0)
-        .or_else(|| {
-            layers_to_check
-                .iter()
-                .find(|l| l.role == LayerRole::Ground)
-                .or_else(|| layers_to_check.iter().find(|l| l.index == 0))
-                .map(|l| l.dimensions)
-                .filter(|&(w, h)| w > 0 && h > 0)
-        })
-        .unwrap_or(candidate.dimensions);
+        .unwrap_or(dimensions);
 
     if !candidate.grid.is_curation_eligible(ground_w, ground_h) {
         let (cols, rows) = candidate.grid.lattice_dimensions(ground_w, ground_h);

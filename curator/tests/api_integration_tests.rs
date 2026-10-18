@@ -2516,3 +2516,119 @@ async fn test_api_curate_gate_rejects_undersized_grid() {
         json_err_offset
     );
 }
+
+#[tokio::test]
+async fn test_api_curate_gate_respects_payload_layer_role_updates() {
+    let (app, storage, _dir) = setup_test_app();
+
+    let img_large = b"\x89PNG\r\n\x1a\nlarge_layer";
+    let img_small = b"\x89PNG\r\n\x1a\nsmall_layer";
+
+    // Candidate initially has:
+    // Layer 0: Ground, 1024x1024 (16x16 with 64px) -> eligible
+    // Layer 1: UpperFloor, 800x600 (12x9 with 64px) -> ineligible
+    let mut cand = Candidate::with_now("role_update_cand", Source::Reddit, "0.png", (1024, 1024));
+    cand.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1024, 1024)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (800, 600)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand, &[img_large.to_vec(), img_small.to_vec()])
+        .unwrap();
+
+    // 1. Curate payload swaps roles: Layer 1 becomes Ground (800x600), Layer 0 becomes UpperFloor.
+    // The gate MUST check the updated payload.layers and reject because Ground is 12x9 (<16x16).
+    let curate_reject_req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "role_update_cand",
+                "theme": "dungeon",
+                "layers": [
+                    {
+                        "index": 0,
+                        "filename": "0.png",
+                        "role": "upper_floor",
+                        "elevation": 1,
+                        "dimensions": [1024, 1024]
+                    },
+                    {
+                        "index": 1,
+                        "filename": "1.png",
+                        "role": "ground",
+                        "elevation": 0,
+                        "dimensions": [800, 600]
+                    }
+                ]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp_reject = app.clone().oneshot(curate_reject_req).await.unwrap();
+    assert_eq!(resp_reject.status(), StatusCode::BAD_REQUEST);
+    let body_reject = to_bytes(resp_reject.into_body(), usize::MAX).await.unwrap();
+    let json_reject: Value = serde_json::from_slice(&body_reject).unwrap();
+    let err_msg = json_reject["error"].as_str().unwrap();
+    assert!(
+        err_msg.contains("Candidate Ground layer yields fewer than 16×16 full Grid Cells"),
+        "Unexpected error message: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("12×9 cells"),
+        "Expected 12×9 cells in error message, got: {}",
+        err_msg
+    );
+
+    // 2. Candidate where staging initially has undersized layer as Ground (800x600)
+    // and large layer as UpperFloor (1024x1024).
+    let mut cand2 = Candidate::with_now("role_update_cand2", Source::Reddit, "0.png", (800, 600));
+    cand2.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (800, 600)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1024, 1024)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand2, &[img_small.to_vec(), img_large.to_vec()])
+        .unwrap();
+
+    // Curate payload promotes Layer 1 (1024x1024) to Ground, and demotes Layer 0 to UpperFloor.
+    // The gate MUST check payload.layers, see Ground is 1024x1024 (16x16 cells), and accept.
+    let curate_accept_req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "role_update_cand2",
+                "theme": "dungeon",
+                "layers": [
+                    {
+                        "index": 0,
+                        "filename": "0.png",
+                        "role": "upper_floor",
+                        "elevation": 1,
+                        "dimensions": [800, 600]
+                    },
+                    {
+                        "index": 1,
+                        "filename": "1.png",
+                        "role": "ground",
+                        "elevation": 0,
+                        "dimensions": [1024, 1024]
+                    }
+                ]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp_accept = app.oneshot(curate_accept_req).await.unwrap();
+    assert_eq!(resp_accept.status(), StatusCode::OK);
+    let body_accept = to_bytes(resp_accept.into_body(), usize::MAX).await.unwrap();
+    let json_accept: Value = serde_json::from_slice(&body_accept).unwrap();
+    assert_eq!(json_accept["status"], "ok");
+    assert_eq!(json_accept["curated"]["id"], "role_update_cand2");
+}

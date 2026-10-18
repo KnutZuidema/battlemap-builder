@@ -605,8 +605,8 @@
      * Retrieves Ground layer dimensions for the current triage candidate.
      */
     function getCurrentGroundDimensions() {
-        if (state.currentCandidate) {
-            const cand = state.candidates[state.currentIndex] || state.currentCandidate;
+        const cand = state.candidates && state.candidates[state.currentIndex];
+        if (cand) {
             const layers = getCandidateLayers(cand);
             const ground = layers.find(l => {
                 const r = (l.role || "").toLowerCase().replace(/[-_]/g, "");
@@ -625,6 +625,9 @@
             if (cand.dimensions && Array.isArray(cand.dimensions) && cand.dimensions[0] > 0 && cand.dimensions[1] > 0) {
                 return { width: cand.dimensions[0], height: cand.dimensions[1] };
             }
+            if (cand.dimensions && cand.dimensions.width && cand.dimensions.height) {
+                return { width: cand.dimensions.width, height: cand.dimensions.height };
+            }
         }
         if (state.currentImage && state.currentImage.naturalWidth > 0) {
             return { width: state.currentImage.naturalWidth, height: state.currentImage.naturalHeight };
@@ -636,12 +639,6 @@
      * Retrieves Ground layer dimensions for the current fullscreen map.
      */
     function getLibraryFullscreenDimensions() {
-        if (state.libraryFullscreenCurrentImage && state.libraryFullscreenCurrentImage.naturalWidth > 0) {
-            return {
-                width: state.libraryFullscreenCurrentImage.naturalWidth,
-                height: state.libraryFullscreenCurrentImage.naturalHeight,
-            };
-        }
         if (state.libraryFullscreenMap) {
             const map = state.libraryFullscreenMap;
             if (map.layers && Array.isArray(map.layers) && map.layers.length > 0) {
@@ -666,6 +663,12 @@
             if (map.dimensions && map.dimensions.width && map.dimensions.height) {
                 return { width: map.dimensions.width, height: map.dimensions.height };
             }
+        }
+        if (state.libraryFullscreenCurrentImage && state.libraryFullscreenCurrentImage.naturalWidth > 0) {
+            return {
+                width: state.libraryFullscreenCurrentImage.naturalWidth,
+                height: state.libraryFullscreenCurrentImage.naturalHeight,
+            };
         }
         return { width: 2048, height: 2048 };
     }

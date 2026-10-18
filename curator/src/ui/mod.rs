@@ -549,6 +549,31 @@ mod tests {
         assert!(js.contains("btn-card-edit"));
     }
 
+    #[test]
+    fn test_embedded_assets_contain_library_filter_empty_state() {
+        let index_html = Assets::get("index.html").expect("index.html must be embedded");
+        let html = std::str::from_utf8(index_html.data.as_ref()).expect("index.html must be valid utf8");
+
+        assert!(html.contains("id=\"library-filter-empty\""));
+        assert!(html.contains("id=\"btn-clear-library-filters\""));
+        assert!(html.contains("id=\"library-empty\""));
+        assert!(!html.contains("No battlemaps matching the selected filter have been approved yet."));
+
+        let app_js = Assets::get("app.js").expect("app.js must be embedded");
+        let js = std::str::from_utf8(app_js.data.as_ref()).expect("app.js must be valid utf8");
+
+        assert!(js.contains("libraryFilterEmpty"));
+        assert!(js.contains("btnClearLibraryFilters"));
+        assert!(js.contains("clearLibraryFilters"));
+        assert!(js.contains("hasAnyCuratedMaps"));
+
+        let style_css = Assets::get("style.css").expect("style.css must be embedded");
+        let css = std::str::from_utf8(style_css.data.as_ref()).expect("style.css must be valid utf8");
+
+        assert!(css.contains(".library-filter-empty"));
+        assert!(css.contains(".library-scroll-container {\n    flex: 1;\n    overflow-y: auto;\n    padding: 1.25rem;\n    position: relative;\n}"));
+    }
+
 
     #[tokio::test]
     async fn test_static_handler_index() {

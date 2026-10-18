@@ -7,14 +7,22 @@ FROM --platform=$BUILDPLATFORM rust:1-bookworm AS builder
 
 ARG TARGETARCH
 
-# Install cross-compilation toolchain when targeting arm64 on an amd64 host
-RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        apt-get update && apt-get install -y --no-install-recommends \
+# Install CA certificates and cross-compilation toolchain when targeting arm64 on amd64
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && if [ "$TARGETARCH" = "arm64" ]; then \
+        apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu \
             libc6-dev-arm64-cross && \
-        rustup target add aarch64-unknown-linux-gnu && \
-        rm -rf /var/lib/apt/lists/*; \
-    fi
+        rustup target add aarch64-unknown-linux-gnu; \
+    fi && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create dedicated non-root user and runtime directories on build host
+RUN groupadd -g 1000 curator && \
+    useradd -u 1000 -g curator -s /bin/bash -m curator && \
+    mkdir -p /tmp/data && \
+    chown -R 1000:1000 /tmp/data
 
 WORKDIR /app
 
@@ -39,24 +47,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     fi
 
 # ==============================================================================
-# Runtime Stage
+# Runtime Stage (targets $TARGETPLATFORM, e.g. linux/arm64 or linux/amd64)
+# Contains zero RUN instructions to eliminate any QEMU emulation requirement
 # ==============================================================================
 FROM debian:bookworm-slim AS runtime
 
-# Install CA certificates for outbound HTTPS requests
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create dedicated non-root user and group (curator:curator, UID/GID 1000:1000)
-RUN groupadd -g 1000 curator && \
-    useradd -u 1000 -g curator -s /bin/bash -m curator
-
-# Create mount point /data owned by curator:curator
-RUN mkdir -p /data && \
-    chown -R curator:curator /data
-
-# Copy compiled binary from builder stage
+# Copy CA certificates, user configuration, data directory and compiled binary
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /etc/passwd /etc/passwd
+COPY --from=builder /etc/group /etc/group
+COPY --from=builder --chown=1000:1000 /tmp/data /data
 COPY --from=builder /usr/local/bin/curator /usr/local/bin/curator
 
 # Set runtime environment variables

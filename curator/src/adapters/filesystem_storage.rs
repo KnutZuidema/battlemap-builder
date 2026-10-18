@@ -1912,11 +1912,7 @@ impl StorageRepository for FilesystemStorage {
         }
 
         if let Some(new_layers) = update.layers {
-            let role_elevation_pairs: Vec<(LayerRole, Option<i8>)> = new_layers
-                .iter()
-                .map(|l| (l.role, l.elevation))
-                .collect();
-            validate_layers_for_curation(&role_elevation_pairs)
+            validate_layers_for_curation(&new_layers)
                 .map_err(StorageError::InvalidData)?;
 
             let effective_layers: Vec<Layer> = if new_layers.iter().any(|l| l.role.is_excluded()) {
@@ -2259,11 +2255,7 @@ impl StorageRepository for FilesystemStorage {
                 candidate_layers
             };
 
-            let role_pairs: Vec<(LayerRole, Option<i8>)> = effective_layers
-                .iter()
-                .map(|l| (l.role, l.elevation))
-                .collect();
-            crate::domain::validate_layers_for_curation(&role_pairs)
+            crate::domain::validate_layers_for_curation(&effective_layers)
                 .map_err(StorageError::InvalidData)?;
 
             let curated_bundle_dir = self.curated_dir().join(&map.id);

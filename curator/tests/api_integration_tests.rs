@@ -27,9 +27,9 @@ impl DescriptionGenerator for MockDescriptionGen {
     async fn generate_description(
         &self,
         _image_bytes: &[u8],
-        _mime_type: &str,
+        _filename: Option<&str>,
         _tags: &[String],
-        _context: Option<&str>,
+        _title: Option<&str>,
     ) -> Result<String, DescriptionError> {
         self.0.clone()
     }
@@ -227,6 +227,53 @@ async fn test_api_curate_endpoint() {
 }
 
 #[tokio::test]
+async fn test_api_curate_accepts_unified_tags_without_legacy_themes() {
+    let (app, storage, _dir) = setup_test_app();
+
+    let img_bytes = b"\x89PNG\r\n\x1a\ntags_only_map";
+    let cand = Candidate::with_now("tags_only_map", Source::Generated, "dungeon.png", (1920, 1080));
+    storage.save_staging(&cand, img_bytes).unwrap();
+
+    let curate_payload = json!({
+        "id": "tags_only_map",
+        "tags": ["dungeon", "crypt", "boss-arena"]
+    });
+
+    let req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let res_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        res_json["curated"]["tags"],
+        json!(["dungeon", "crypt", "boss-arena"])
+    );
+    assert!(res_json["curated"]["themes"].is_null());
+
+    // Missing every tag source is rejected with the tag-specific message.
+    let cand = Candidate::with_now("untagged_map", Source::Generated, "dungeon.png", (1920, 1080));
+    storage.save_staging(&cand, img_bytes).unwrap();
+    let req_missing = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "id": "untagged_map" }).to_string()))
+        .unwrap();
+    let response_missing = app.oneshot(req_missing).await.unwrap();
+    assert_eq!(response_missing.status(), StatusCode::BAD_REQUEST);
+    let body_missing = to_bytes(response_missing.into_body(), usize::MAX).await.unwrap();
+    let missing_json: Value = serde_json::from_slice(&body_missing).unwrap();
+    assert_eq!(missing_json["error"], "At least 1 tag is required");
+}
+
+#[tokio::test]
 async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() {
     let (app, storage, dir) = setup_test_app();
 
@@ -254,7 +301,7 @@ async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() 
             json!({
                 "id": "dungeon_complex",
                 "themes": [],
-                "tags": ["crypt"]
+                "tags": []
             })
             .to_string(),
         ))
@@ -271,7 +318,7 @@ async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() 
             json!({
                 "id": "dungeon_complex",
                 "themes": ["   ", ""],
-                "tags": ["crypt"]
+                "tags": ["   "]
             })
             .to_string(),
         ))

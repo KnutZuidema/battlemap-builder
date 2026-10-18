@@ -16,32 +16,29 @@ pub enum DescriptionError {
 
     #[error("Empty description received from generator")]
     EmptyDescription,
-
-    #[error("Entity not found: {0}")]
-    NotFound(String),
 }
 
 /// Abstract port for generating perspective-neutral physical descriptions of battlemaps.
 #[async_trait]
 pub trait DescriptionGenerator: Send + Sync {
-    /// Generates physical description from image bytes, mime type, tags, and optional context.
+    /// Generates physical description from image bytes, optional filename, tags, and optional title.
     async fn generate_description(
         &self,
         image_bytes: &[u8],
-        mime_type: &str,
+        filename: Option<&str>,
         tags: &[String],
-        context: Option<&str>,
+        title: Option<&str>,
     ) -> Result<String, DescriptionError>;
 
-    /// Convenience helper omitting optional context.
+    /// Convenience helper omitting optional filename and title.
     async fn generate_description_simple(
         &self,
         image_bytes: &[u8],
-        mime_type: &str,
         tags: &[String],
     ) -> Result<String, DescriptionError> {
-        self.generate_description(image_bytes, mime_type, tags, None).await
+        self.generate_description(image_bytes, None, tags, None).await
     }
+
 }
 
 /// Domain service orchestrating physical description generation without silent fallbacks.
@@ -61,13 +58,13 @@ impl DescriptionService {
         self.generator.is_some()
     }
 
-    /// Generates physical description from image bytes, mime or filename, tags, and optional context.
+    /// Generates physical description from image bytes, optional filename, tags, and optional title.
     pub async fn describe(
         &self,
         image_bytes: &[u8],
-        mime_or_filename: &str,
+        filename: Option<&str>,
         tags: &[String],
-        context: Option<&str>,
+        title: Option<&str>,
     ) -> Result<String, DescriptionError> {
         if image_bytes.is_empty() {
             return Err(DescriptionError::ImageUnavailable(
@@ -81,9 +78,8 @@ impl DescriptionService {
             )
         })?;
 
-        let mime = resolve_mime_type(mime_or_filename, image_bytes);
         let desc = gen
-            .generate_description(image_bytes, &mime, tags, context)
+            .generate_description(image_bytes, filename, tags, title)
             .await?;
 
         let trimmed = desc.trim().to_string();
@@ -94,14 +90,14 @@ impl DescriptionService {
         Ok(trimmed)
     }
 
-    /// Generates physical description without extra context.
+    /// Generates physical description without extra title/context.
     pub async fn describe_image(
         &self,
         image_bytes: &[u8],
-        mime_or_filename: &str,
+        filename: Option<&str>,
         tags: &[String],
     ) -> Result<String, DescriptionError> {
-        self.describe(image_bytes, mime_or_filename, tags, None).await
+        self.describe(image_bytes, filename, tags, None).await
     }
 }
 
@@ -150,9 +146,9 @@ mod tests {
         async fn generate_description(
             &self,
             _image_bytes: &[u8],
-            _mime_type: &str,
+            _filename: Option<&str>,
             _tags: &[String],
-            _context: Option<&str>,
+            _title: Option<&str>,
         ) -> Result<String, DescriptionError> {
             self.invoked.store(true, Ordering::SeqCst);
             self.outcome.clone()
@@ -164,7 +160,7 @@ mod tests {
         let svc = DescriptionService::new(None);
         assert!(!svc.is_configured());
 
-        let res = svc.describe(b"fake-bytes", "image/png", &[], None).await;
+        let res = svc.describe(b"fake-bytes", Some("image/png"), &[], None).await;
         assert!(matches!(res, Err(DescriptionError::NotConfigured(_))));
     }
 
@@ -176,7 +172,7 @@ mod tests {
         });
         let svc = DescriptionService::new(Some(gen));
 
-        let res = svc.describe(b"", "image/png", &[], None).await;
+        let res = svc.describe(b"", Some("image/png"), &[], None).await;
         assert!(matches!(res, Err(DescriptionError::ImageUnavailable(_))));
     }
 
@@ -190,7 +186,7 @@ mod tests {
         assert!(svc.is_configured());
 
         let res = svc
-            .describe(b"fake-image", "map.png", &["cave".into()], Some("underground"))
+            .describe(b"fake-image", Some("map.png"), &["cave".into()], Some("underground"))
             .await
             .unwrap();
         assert_eq!(res, "Evocative stone cavern with moss.");
@@ -205,7 +201,7 @@ mod tests {
         });
         let svc = DescriptionService::new(Some(gen));
 
-        let res = svc.describe(b"fake-image", "image/png", &[], None).await;
+        let res = svc.describe(b"fake-image", Some("image/png"), &[], None).await;
         assert_eq!(res, Err(DescriptionError::EmptyDescription));
     }
 

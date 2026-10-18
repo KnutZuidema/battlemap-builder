@@ -87,7 +87,6 @@ impl From<crate::services::description::DescriptionError> for ApiError {
             DescriptionError::EmptyDescription => {
                 ApiError::BadGateway("Empty description received from generator".into())
             }
-            DescriptionError::NotFound(msg) => ApiError::NotFound(msg),
         }
     }
 }

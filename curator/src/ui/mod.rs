@@ -393,6 +393,68 @@ mod tests {
         assert!(js.contains("layer-card-info"));
     }
 
+    #[test]
+    fn test_embedded_assets_contain_fullscreen_stage_overlay() {
+        let index_file = Assets::get("index.html").expect("index.html must be embedded");
+        let html = std::str::from_utf8(index_file.data.as_ref()).expect("index.html must be valid utf8");
+
+        // Fullscreen overlay container & canvas
+        assert!(html.contains("id=\"library-fullscreen-overlay\""));
+        assert!(html.contains("fullscreen-overlay hidden"));
+        assert!(html.contains("id=\"library-fullscreen-canvas\""));
+
+        // Floating HUD overlay bar elements
+        assert!(html.contains("id=\"library-fullscreen-hud\""));
+        assert!(html.contains("id=\"fs-map-id-badge\""));
+        assert!(html.contains("id=\"fs-map-dimensions\""));
+        assert!(html.contains("id=\"fs-map-counter\""));
+        assert!(html.contains("id=\"btn-fs-grid-toggle\""));
+        assert!(html.contains("id=\"btn-fs-grid-adjust\""));
+        assert!(html.contains("id=\"btn-fs-fit\""));
+        assert!(html.contains("id=\"btn-fs-zoom-out\""));
+        assert!(html.contains("id=\"btn-fs-zoom-in\""));
+        assert!(html.contains("id=\"fs-zoom-readout\""));
+        assert!(html.contains("id=\"btn-fs-onion-skin\""));
+        assert!(html.contains("id=\"btn-fs-prev-map\""));
+        assert!(html.contains("id=\"btn-fs-next-map\""));
+        assert!(html.contains("id=\"btn-fs-close\""));
+
+        // Bottom layer deck filmstrip
+        assert!(html.contains("id=\"library-fullscreen-layer-deck\""));
+        assert!(html.contains("id=\"fs-layer-filmstrip-strip\""));
+
+        // CSS styles
+        let css_file = Assets::get("style.css").expect("style.css must be embedded");
+        let css = std::str::from_utf8(css_file.data.as_ref()).expect("style.css must be valid utf8");
+
+        assert!(css.contains(".fullscreen-overlay"));
+        assert!(css.contains(".fullscreen-hud-bar"));
+        assert!(css.contains(".fullscreen-layer-deck"));
+        assert!(css.contains(".fs-layer-card"));
+        assert!(css.contains(".fs-role-chip"));
+        assert!(css.contains(".btn-card-fullscreen"));
+
+        // JavaScript engine and hotkeys
+        let js_file = Assets::get("app.js").expect("app.js must be embedded");
+        let js = std::str::from_utf8(js_file.data.as_ref()).expect("app.js must be valid utf8");
+
+        assert!(js.contains("libraryFullscreenActive"));
+        assert!(js.contains("libraryFullscreenMap"));
+        assert!(js.contains("libraryFullscreenLayerIndex"));
+        assert!(js.contains("renderFullscreenCanvas"));
+        assert!(js.contains("drawFullscreenVttGrid"));
+        assert!(js.contains("fullscreenFitToScreen"));
+        assert!(js.contains("fullscreenZoomStep"));
+        assert!(js.contains("activeFsPanKeys"));
+        assert!(js.contains("fsPanLoop"));
+        assert!(js.contains("loadFullscreenMap"));
+        assert!(js.contains("renderFullscreenLayerDeck"));
+        assert!(js.contains("switchFullscreenLayer"));
+        assert!(js.contains("openLibraryFullscreen"));
+        assert!(js.contains("closeLibraryFullscreen"));
+        assert!(js.contains("btn-card-fullscreen"));
+    }
+
 
     #[tokio::test]
     async fn test_static_handler_index() {

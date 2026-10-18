@@ -276,6 +276,7 @@ export default function App() {
       failureReason: telemetry.failureReason || null,
       attempts: telemetry.attempts || [],
       imageConfig: telemetry.imageConfig || null,
+      conditioning: telemetry.conditioning || null,
       durationMs,
       timestamp: new Date().toISOString()
     }, ...prev]);
@@ -309,6 +310,7 @@ export default function App() {
       failureReason: message,
       attempts,
       imageConfig: telemetry.imageConfig || null,
+      conditioning: telemetry.conditioning || null,
       durationMs: Date.now() - startTimeMs,
       timestamp: new Date().toISOString()
     }, ...prev]);

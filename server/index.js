@@ -199,7 +199,7 @@ function sendGenerationError(res, err) {
 
   const status = code === 'NO_API_KEY'
     ? 503
-    : (code === 'UNKNOWN_PROVIDER' || code === 'MODEL_NOT_VISION_CAPABLE' ? 400 : 502);
+    : (code === 'UNKNOWN_PROVIDER' || code === 'MODEL_NOT_VISION_CAPABLE' || code === 'MODEL_CAPABILITY_UNSUPPORTED' ? 400 : 502);
 
   res.status(status).json({
     error: err.message,

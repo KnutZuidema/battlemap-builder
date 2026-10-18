@@ -1,4 +1,5 @@
 const sharp = require('sharp');
+const { providerFailure } = require('../failure');
 const { getModelPricing, findModel } = require('../modelCatalog');
 
 /**
@@ -384,20 +385,37 @@ async function sourceToBuffer(source) {
  * the exact canvas size the stitchers downstream expect.
  */
 async function requestCanvas({ model, systemInstruction, userPromptText, fullPromptPayload, images = [], width, height, apiKey, apiType }) {
-  const telemetryImages = images.map((img, idx) => ({
+  const aspectRatio = selectAspectRatio(width, height);
+  const imageConfig = { aspect_ratio: aspectRatio };
+  const resolvedApiType = apiType || findModel(model)?.apiType || 'chat';
+  const { selected, conditioning } = selectConditioningImages(images, { model, apiType: resolvedApiType });
+  console.log(`[OpenRouterProvider] conditioning: ${conditioning.explanation}`);
+
+  // Telemetry lists exactly the images that are sent; dropped ones are described in `conditioning`.
+  const telemetryImages = selected.map((img, idx) => ({
     id: idx,
     label: img.label || `Image ${idx + 1}`,
     dataUrl: `data:${img.mimeType || 'image/png'};base64,${img.buffer.toString('base64')}`
   }));
 
-  const aspectRatio = selectAspectRatio(width, height);
-  const imageConfig = { aspect_ratio: aspectRatio };
-  const resolvedApiType = apiType || findModel(model)?.apiType || 'chat';
-  const { conditioning } = selectConditioningImages(images, { model, apiType: resolvedApiType });
-  console.log(`[OpenRouterProvider] conditioning: ${conditioning.explanation}`);
+  // ADR-0001: never silently generate without the conditioning the caller asked for.
+  if (conditioning.provided.length > 0 && selected.length === 0) {
+    throw providerFailure(
+      `${model || 'The model'} cannot be conditioned on the supplied images: ${conditioning.explanation} Choose a model whose API accepts them.`,
+      {
+        code: 'MODEL_CAPABILITY_UNSUPPORTED',
+        provider: 'openrouter',
+        systemInstruction,
+        userPrompt: userPromptText,
+        fullPrompt: fullPromptPayload,
+        conditioning
+      }
+    );
+  }
+
   const payload = resolvedApiType === 'images'
-    ? await postImages({ apiKey, model, systemInstruction, fullPromptPayload, images, aspectRatio })
-    : await postCompletion({ apiKey, model, systemInstruction, fullPromptPayload, images, imageConfig });
+    ? await postImages({ apiKey, model, systemInstruction, fullPromptPayload, images: selected, aspectRatio })
+    : await postCompletion({ apiKey, model, systemInstruction, fullPromptPayload, images: selected, imageConfig });
   const usage = readUsage(payload, model);
   const finishReason = readFinishReason(payload);
   const sources = extractImageSources(payload);

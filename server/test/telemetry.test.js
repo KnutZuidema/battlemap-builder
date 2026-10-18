@@ -243,3 +243,29 @@ test('buildInputReferences selects only visual context for the images API and re
   assert.strictEqual(chatResult.debug.conditioning.adapted, false);
   assert.strictEqual(chatResult.debug.conditioning.selected.length, 4);
 });
+
+test('requestCanvas rejects instead of generating unconditioned when an images-API model keeps no conditioning image', async (t) => {
+  const { requestCanvas } = require('../services/providers/openrouterProvider');
+  const buffer = Buffer.from('x');
+  const originalFetch = global.fetch;
+  let fetched = false;
+  global.fetch = async () => { fetched = true; throw new Error('must not be called'); };
+  t.after(() => { global.fetch = originalFetch; });
+
+  await assert.rejects(
+    requestCanvas({
+      model: 'meta/muse-image', systemInstruction: 's', userPromptText: 'u', fullPromptPayload: 'p',
+      images: [{ role: 'guide', label: 'Highlight guide', buffer }, { role: 'mask', label: 'Region mask', buffer }],
+      width: 64, height: 64, apiKey: 'k'
+    }),
+    (err) => {
+      assert.strictEqual(err.code, 'MODEL_CAPABILITY_UNSUPPORTED');
+      assert.deepStrictEqual(err.telemetry.images, []);
+      assert.deepStrictEqual(err.telemetry.conditioning.selected, []);
+      assert.deepStrictEqual(err.telemetry.conditioning.dropped.map((d) => d.role), ['guide', 'mask']);
+      assert.strictEqual(err.telemetry.conditioning.adapted, true);
+      return true;
+    }
+  );
+  assert.strictEqual(fetched, false, 'no request is sent without conditioning');
+});

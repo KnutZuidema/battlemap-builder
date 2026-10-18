@@ -73,7 +73,7 @@ async function runModel(entry, { systemInstruction, userPromptText, fullPromptPa
       debug: { ...result.debug, provider: entry.provider, model: entry.id }
     };
   } catch (err) {
-    if (err.code === 'NO_API_KEY') throw err;
+    if (err.code === 'NO_API_KEY' || err.code === 'MODEL_CAPABILITY_UNSUPPORTED') throw err;
 
     const failure = describeFailure(entry.provider, err.message);
     console.error(`[BattlemapService] ${entry.id} failed: ${failure}`);

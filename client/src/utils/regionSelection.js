@@ -145,42 +145,6 @@ export function describeRegion(selection, mapWidth, mapHeight) {
   };
 }
 
-/**
- * Computes context bounding box in expanded canvas coordinates.
- */
-export function computeContextWindow(selection, mapWidth, mapHeight, padding = CONTEXT_PADDING) {
-  const minX = Math.min(0, selection.x);
-  const minY = Math.min(0, selection.y);
-  const maxX = Math.max(mapWidth, selection.x + selection.width);
-  const maxY = Math.max(mapHeight, selection.y + selection.height);
-
-  const canvasWidth = maxX - minX;
-  const canvasHeight = maxY - minY;
-
-  const selCanvasX = selection.x - minX;
-  const selCanvasY = selection.y - minY;
-
-  const contextX = Math.max(0, selCanvasX - padding);
-  const contextY = Math.max(0, selCanvasY - padding);
-  const contextRight = Math.min(canvasWidth, selCanvasX + selection.width + padding);
-  const contextBottom = Math.min(canvasHeight, selCanvasY + selection.height + padding);
-
-  const contextWidth = contextRight - contextX;
-  const contextHeight = contextBottom - contextY;
-
-  return {
-    canvasWidth,
-    canvasHeight,
-    mapOffset: { x: -minX, y: -minY },
-    contextRect: { x: contextX, y: contextY, width: contextWidth, height: contextHeight },
-    selectionOnContext: {
-      x: selCanvasX - contextX,
-      y: selCanvasY - contextY,
-      width: selection.width,
-      height: selection.height,
-    },
-  };
-}
 
 /**
  * Maps a selection from original-map space to the resulting post-forge canvas coordinate space.

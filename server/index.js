@@ -2,7 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const dotenv = require('dotenv');
-const { generateBattlemap, forgeRegion, forgeFeatureState, deleteRegion } = require('./services/battlemapService');
+const { generateBattlemap, forgeRegion, forgeFeatureState } = require('./services/battlemapService');
+const { deleteRegion } = require('./services/imageProcessor');
 const { detectFeatures } = require('./services/featureService');
 const { isProviderConfigured, MODEL_CATALOG, DEFAULT_MODEL_ID } = require('./services/modelCatalog');
 const { getWikiTree, getWikiArticle } = require('./services/wikiService');
@@ -270,8 +271,8 @@ app.post('/api/delete-region', async (req, res) => {
 
     console.log(`[API /delete-region] Deleting region (${selection.width}x${selection.height} at ${selection.x},${selection.y})`);
 
-    const result = await deleteRegion({ originalDataUrl, selection });
-    res.json(result);
+    const imageDataUrl = await deleteRegion(originalDataUrl, selection);
+    res.json({ imageDataUrl, selection });
   } catch (err) {
     console.error('[API /api/delete-region error]', err.message);
     res.status(500).json({

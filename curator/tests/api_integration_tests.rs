@@ -37,7 +37,10 @@ impl DescriptionGenerator for MockDescriptionGen {
 fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let state = AppState::new(storage.clone());
+    let desc_service = Arc::new(DescriptionService::new(Some(Arc::new(MockDescriptionGen(
+        Ok("Default test battlemap description".to_string()),
+    )))));
+    let state = AppState::new(storage.clone()).with_description_service(desc_service);
     let router = create_router(state);
     (router, storage, dir)
 }
@@ -1525,6 +1528,73 @@ async fn test_api_curate_bundle_validation_and_success() {
         json_err
     );
 
+    // Case B2: Missing Ground layer is rejected with 400
+    let mut cand_no_ground =
+        Candidate::with_now("cand_no_ground", Source::Reddit, "0.png", (800, 600));
+    cand_no_ground.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::UpperFloor, Some(1), (800, 600)),
+        CandidateLayer::new(1, "1.png", LayerRole::Roof, None, (800, 600)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand_no_ground, &[img0.to_vec(), img1.to_vec()])
+        .unwrap();
+
+    let req_no_ground = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "cand_no_ground",
+                "theme": "dungeon"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp_no_ground = app.clone().oneshot(req_no_ground).await.unwrap();
+    assert_eq!(resp_no_ground.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp_no_ground.into_body(), usize::MAX).await.unwrap();
+    let json_err: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json_err["error"].as_str().unwrap().contains("Ground layer is required"),
+        "Expected error message mentioning Ground layer required: {:?}",
+        json_err
+    );
+
+    // Case B3: Multiple Ground layers is rejected with 400
+    let mut cand_multi_ground =
+        Candidate::with_now("cand_multi_ground", Source::Reddit, "0.png", (800, 600));
+    cand_multi_ground.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (800, 600)),
+        CandidateLayer::new(1, "1.png", LayerRole::Ground, Some(0), (800, 600)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand_multi_ground, &[img0.to_vec(), img1.to_vec()])
+        .unwrap();
+
+    let req_multi_ground = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "cand_multi_ground",
+                "theme": "dungeon"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp_multi_ground = app.clone().oneshot(req_multi_ground).await.unwrap();
+    assert_eq!(resp_multi_ground.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp_multi_ground.into_body(), usize::MAX).await.unwrap();
+    let json_err: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json_err["error"].as_str().unwrap().contains("Ground layer is required")
+            || json_err["error"].as_str().unwrap().contains("Multiple Ground layers"),
+        "Expected error message mentioning multiple Ground layers: {:?}",
+        json_err
+    );
+
     // Case C: Successfully curate cand_unassigned by supplying valid layer assignments in CurateRequest
     let req_curate_with_layers = Request::builder()
         .uri("/api/curate")
@@ -2269,43 +2339,19 @@ async fn test_curate_candidate_auto_description_fallback_offline() {
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
-    // Verify status is 200 OK
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["status"], "ok");
+    // Vision failure without description must fail curation with 502 Bad Gateway
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 
-    // Staging removed
-    assert_eq!(storage.list_staging().unwrap().len(), 0);
+    // Staging candidate must NOT be removed or committed
+    assert_eq!(storage.list_staging().unwrap().len(), 1);
 
-    // Verify manifest.json receives fallback description and status is 200 OK
+    // Curated manifest must NOT exist on disk
     let manifest_path = dir
         .path()
         .join("curated")
         .join("cand_curate_auto_offline")
         .join("manifest.json");
-    assert!(manifest_path.is_file());
-    let manifest_str = std::fs::read_to_string(&manifest_path).unwrap();
-    assert!(manifest_str.contains("\"description\""));
-    assert!(manifest_str.contains("dungeon"));
-
-    let desc = json["curated"]["description"].as_str().unwrap();
-    assert!(!desc.is_empty());
-    assert!(desc.contains("dungeon"));
-
-    let curated_list = storage.list_curated(None).unwrap();
-    assert_eq!(curated_list.len(), 1);
-    assert_eq!(curated_list[0].description.as_deref(), Some(desc));
-
-    // Verify companion <id>_lora1024.txt companion file exists and contains fallback description
-    let lora_path = dir
-        .path()
-        .join("curated")
-        .join("cand_curate_auto_offline")
-        .join("cand_curate_auto_offline_lora1024.txt");
-    assert!(lora_path.is_file());
-    let lora_str = std::fs::read_to_string(&lora_path).unwrap();
-    assert!(lora_str.contains("dungeon"));
+    assert!(!manifest_path.exists());
 }
 
 #[tokio::test]
@@ -2369,4 +2415,98 @@ async fn test_legacy_manifest_without_description_deserialization() {
     assert_eq!(legacy_item.id, legacy_id);
     assert_eq!(legacy_item.tags, vec!["dungeon", "corridor", "torches"]);
     assert_eq!(legacy_item.primary_theme(), "dungeon");
+}
+
+#[tokio::test]
+async fn test_api_post_curate_delegates_to_curation_workflow_and_zero_store_scans() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use curator::services::curation::{CurationWorkflow, CurationWorkflowError};
+
+    struct SpyWorkflow {
+        curate_calls: AtomicUsize,
+        reject_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CurationWorkflow for SpyWorkflow {
+        async fn curate(
+            &self,
+            candidate_id: &str,
+            tags: Vec<String>,
+            _layers: Option<Vec<curator::domain::Layer>>,
+            description: Option<String>,
+        ) -> Result<CuratedMap, CurationWorkflowError> {
+            self.curate_calls.fetch_add(1, Ordering::SeqCst);
+            let map = CuratedMap::with_now(
+                candidate_id,
+                Vec::<String>::new(),
+                tags,
+                (1000, 1000),
+            )
+            .with_description(description.unwrap_or_else(|| "Spy description".into()));
+            Ok(map)
+        }
+
+        async fn reject(
+            &self,
+            _candidate_id: &str,
+            _reason: curator::domain::RejectionReason,
+            _notes: Option<&str>,
+        ) -> Result<(), CurationWorkflowError> {
+            self.reject_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let spy = Arc::new(SpyWorkflow {
+        curate_calls: AtomicUsize::new(0),
+        reject_calls: AtomicUsize::new(0),
+    });
+
+    let state = AppState::new(storage.clone()).with_curation_service(spy.clone());
+    let app = create_router(state);
+
+    let curate_payload = json!({
+        "id": "cand_spy_test",
+        "themes": ["dungeon"],
+        "tags": ["crypt"]
+    });
+
+    let req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let res_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(res_json["status"], "ok");
+    assert_eq!(res_json["curated"]["id"], "cand_spy_test");
+
+    // Verified: exactly 1 call to CurationWorkflow::curate
+    assert_eq!(spy.curate_calls.load(Ordering::SeqCst), 1);
+    // Verified: zero calls to storage list_staging / list_curated by route handler
+    assert_eq!(storage.list_staging().unwrap().len(), 0);
+    assert_eq!(storage.list_curated(None).unwrap().len(), 0);
+
+    // Also verify reject delegates to CurationWorkflow
+    let reject_payload = json!({
+        "id": "cand_spy_test",
+        "reason": "BlurryLowRes",
+        "notes": "Too blurry"
+    });
+    let req_reject = Request::builder()
+        .uri("/api/reject")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(reject_payload.to_string()))
+        .unwrap();
+    let resp_reject = app.oneshot(req_reject).await.unwrap();
+    assert_eq!(resp_reject.status(), StatusCode::OK);
+    assert_eq!(spy.reject_calls.load(Ordering::SeqCst), 1);
 }

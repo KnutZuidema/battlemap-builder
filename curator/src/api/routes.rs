@@ -17,7 +17,7 @@ use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{
     BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
-    CaptionGenerator, CuratedMap, CuratedMapUpdate, CustomPrompt, LayerRole, PurgeStagingResult,
+    CuratedMap, CuratedMapUpdate, CustomPrompt, LayerRole, PurgeStagingResult,
     RedditHarvestRequest, RejectionReason, StorageStats, Theme,
 };
 use crate::ports::cost_tracker::CostStats;
@@ -548,126 +548,33 @@ pub async fn post_curate(
     if themes.is_empty() || themes.iter().all(|t| t.trim().is_empty()) {
         return Err(ApiError::bad_request("At least 1 theme label is required"));
     }
-    // Inspect candidate in staging to preserve dimensions and validate layers
-    let candidates = state.storage.list_staging()?;
-    let candidate = candidates
-        .iter()
-        .find(|c| c.id == payload.id)
-        .ok_or_else(|| ApiError::not_found(format!("Candidate '{}' not found in staging", payload.id)))?;
 
-    let dimensions = candidate.dimensions;
-
-    // Validate layers
-    let layers_to_check: Vec<CandidateLayer> = if let Some(req_layers) = &payload.layers {
-        req_layers.clone()
-    } else {
-        candidate.resolved_layers()
-    };
-
-    if let Some(unassigned_layer) = layers_to_check.iter().find(|l| l.role.is_unassigned()) {
-        return Err(ApiError::bad_request(format!(
-            "Cannot curate bundle: layer {} is Unassigned",
-            unassigned_layer.index
-        )));
-    }
-
-    let included_layers: Vec<&CandidateLayer> = layers_to_check
-        .iter()
-        .filter(|l| l.role.is_included())
-        .collect();
-
-    if included_layers.is_empty() {
-        return Err(ApiError::bad_request("At least 1 layer must be included"));
-    }
-
-    // If request provided layers, update them in staging before curation
-    if let Some(layers) = payload.layers {
-        state.storage.update_staging_layers(&payload.id, layers)?;
-    }
-    let primary_theme = themes
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("dungeon");
-
-    let fallback_description = || {
-        CaptionGenerator::generate_with_theme_str(
-            primary_theme,
-            &payload.tags,
-            candidate.title.as_deref(),
-        )
-    };
-
-    let description = if let Some(desc) = payload
-        .description
-        .as_ref()
-        .map(|d| d.trim())
-        .filter(|d| !d.is_empty())
-    {
-        desc.to_string()
-    } else if let Some(adapter) = state.openrouter_client() {
-        match state.storage.get_staging_image(&payload.id) {
-            Ok(bytes) => {
-                let filename = candidate.resolved_filename();
-                let mime = detect_image_mime(&bytes, Some(&filename));
-                match adapter
-                    .generate_battlemap_description(&bytes, mime, &themes, &payload.tags)
-                    .await
-                {
-                    Ok(desc) if !desc.trim().is_empty() => desc,
-                    Ok(_) => fallback_description(),
-                    Err(err) => {
-                        tracing::warn!(
-                            candidate_id = %payload.id,
-                            error = %err,
-                            "Auto-generating description on curate failed; falling back to caption generator"
-                        );
-                        fallback_description()
-                    }
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    candidate_id = %payload.id,
-                    error = %err,
-                    "Reading candidate image for description generation failed; falling back to caption generator"
-                );
-                fallback_description()
-            }
+    let mut tags = themes;
+    for t in payload.tags {
+        let trimmed = t.trim().to_string();
+        if !trimmed.is_empty() && !tags.iter().any(|existing| existing.eq_ignore_ascii_case(&trimmed)) {
+            tags.push(trimmed);
         }
-    } else {
-        tracing::info!(
-            candidate_id = %payload.id,
-            "OpenRouter client not configured; falling back to caption generator"
-        );
-        fallback_description()
-    };
+    }
 
-    let curated = CuratedMap::with_now(
-        &payload.id,
-        themes,
-        payload.tags,
-        dimensions,
-    )
-    .with_description(description);
-
-    state.storage.curate_staging(&curated)?;
-
-    // Read back curated map with populated layers if available
-    let curated_result = state
-        .storage
-        .list_curated(None)
-        .ok()
-        .and_then(|list| list.into_iter().find(|m| m.id == payload.id))
-        .unwrap_or(curated);
+    let curated = state
+        .curation_service
+        .curate(
+            &payload.id,
+            tags,
+            payload.layers,
+            payload.description,
+        )
+        .await?;
 
     tracing::info!(
-        id = %payload.id,
-        tags = ?curated_result.tags,
+        id = %curated.id,
+        tags = ?curated.tags,
         "Curated candidate image"
     );
     Ok(Json(CurateResponse {
         status: "ok",
-        curated: curated_result,
+        curated,
     }))
 }
 
@@ -1047,8 +954,9 @@ pub async fn post_reject(
     let reason = payload.reason.unwrap_or_default();
 
     state
-        .storage
-        .reject_staging(&payload.id, reason, payload.notes.as_deref())?;
+        .curation_service
+        .reject(&payload.id, reason, payload.notes.as_deref())
+        .await?;
 
     tracing::info!(
         id = %payload.id,

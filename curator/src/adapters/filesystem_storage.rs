@@ -2210,7 +2210,6 @@ impl StorageRepository for FilesystemStorage {
 
     fn curate_staging(&self, map: &CuratedMap) -> Result<(), StorageError> {
         map.validate_themes().map_err(StorageError::InvalidData)?;
-        map.validate_layers().map_err(StorageError::InvalidData)?;
 
         if let Some(bundle_dir) = self.find_staging_bundle_dir(&map.id) {
             let manifest_path = bundle_dir.join("manifest.json");
@@ -2329,6 +2328,9 @@ impl StorageRepository for FilesystemStorage {
                 }
             }
             stored_map.layers = curated_layers;
+            stored_map
+                .validate_layers()
+                .map_err(StorageError::InvalidData)?;
             let curated_json = serde_json::to_string_pretty(&stored_map)?;
             Self::atomic_write(
                 &curated_bundle_dir.join("manifest.json"),

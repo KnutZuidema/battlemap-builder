@@ -187,3 +187,59 @@ test('requestCanvas sends image_config with aspect_ratio in request body and deb
   assert.deepStrictEqual(capturedBody.image_config, { aspect_ratio: '1:1' });
   assert.deepStrictEqual(result.debug.imageConfig, { aspect_ratio: '1:1' });
 });
+
+test('buildInputReferences selects only visual context for the images API and requestCanvas logs the adaptation', async (t) => {
+  const { buildInputReferences, requestCanvas } = require('../services/providers/openrouterProvider');
+  const buffer = Buffer.from('x');
+  const images = [
+    { role: 'context', label: 'Context window', buffer },
+    { role: 'guide', label: 'Highlight guide', buffer },
+    { role: 'mask', label: 'Region mask', buffer },
+    { label: 'Perspective Reference', buffer }
+  ];
+
+  const refs = buildInputReferences(images, 'meta/muse-image');
+  assert.strictEqual(refs.length, 2, 'context + reference images only');
+
+  // Role, not label text, decides selection: a "mask"-worded context label is still sent.
+  assert.strictEqual(
+    buildInputReferences([{ role: 'context', label: 'Cyan mask lookalike label', buffer }], 'meta/muse-image').length,
+    1
+  );
+
+  const originalFetch = global.fetch;
+  const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const bodies = [];
+  global.fetch = async (url, opts) => {
+    bodies.push(JSON.parse(opts.body));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: [{ b64_json: pngBase64 }],
+        choices: [{ finish_reason: 'stop', message: { images: [{ data: pngBase64, mime_type: 'image/png' }] } }]
+      })
+    };
+  };
+  t.after(() => { global.fetch = originalFetch; });
+
+  const imagesResult = await requestCanvas({
+    model: 'meta/muse-image', systemInstruction: 's', userPromptText: 'u', fullPromptPayload: 'p',
+    images, width: 64, height: 64, apiKey: 'k'
+  });
+  assert.strictEqual(bodies[0].input_references.length, 2);
+  const c = imagesResult.debug.conditioning;
+  assert.strictEqual(c.apiType, 'images');
+  assert.strictEqual(c.mode, 'visual-context-only');
+  assert.strictEqual(c.adapted, true);
+  assert.deepStrictEqual(c.dropped.map((d) => d.role), ['guide', 'mask']);
+  assert.deepStrictEqual(c.selected.map((d) => d.role), ['context', 'reference']);
+  assert.match(c.explanation, /accepts only context\/reference/);
+
+  const chatResult = await requestCanvas({
+    model: 'google/gemini-3.1-flash-image', systemInstruction: 's', userPromptText: 'u', fullPromptPayload: 'p',
+    images, width: 64, height: 64, apiKey: 'k'
+  });
+  assert.strictEqual(chatResult.debug.conditioning.adapted, false);
+  assert.strictEqual(chatResult.debug.conditioning.selected.length, 4);
+});

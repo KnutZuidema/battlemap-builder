@@ -1,9 +1,4 @@
-const sharp = require('sharp');
-const {
-  dataUrlToBuffer,
-  bufferToDataUrl,
-  forgeCanvasRegion
-} = require('./canvasForge');
+const { bufferToDataUrl, forgeCanvasRegion } = require('./canvasForge');
 const {
   IMAGE_PROMPTS,
   buildBattlemapPrompt,
@@ -94,7 +89,8 @@ async function runModel(entry, { systemInstruction, userPromptText, fullPromptPa
       fullPrompt: fullPromptPayload,
       images: err.telemetry?.images || [],
       outputImages: err.telemetry?.outputImages || [],
-      imageConfig: err.telemetry?.imageConfig || null
+      imageConfig: err.telemetry?.imageConfig || null,
+      conditioning: err.telemetry?.conditioning || null
     });
   }
 }
@@ -134,6 +130,77 @@ async function generateBattlemap({ prompt, width = 1024, height = 1024, model })
 }
 
 /**
+ * Builds the default render adapter for a region forge: validates the configured model can see
+ * images, labels each conditioning image with its explicit role (context / guide / mask) and runs
+ * the model through the provider dispatch.
+ */
+function createForgeRegionAdapter({ selection, prompt, model, forgeImageMode = 'highlighted-only' }) {
+  const entry = configuredModel(model);
+
+  if (!entry.vision) {
+    throw providerFailure(
+      `The configured model ${entry.label} (${entry.id}) cannot receive images, so it cannot run a region edit. Point DEFAULT_MODEL_ID in server/services/modelCatalog.js at a vision-capable model.`,
+      { code: 'MODEL_NOT_VISION_CAPABLE', provider: entry.provider }
+    );
+  }
+
+  const isAllThree = forgeImageMode === 'all-three' || forgeImageMode === 'all';
+  const systemInstruction = getForgeRegionSystemPrompt(forgeImageMode);
+
+  return async ({ contextBuffer, guideBuffer, maskBuffer, contextW, contextH }) => {
+    const userPromptText = prompt || 'Generate seamless, style-matched battlemap terrain in the target region';
+    const fullPromptPayload = `${systemInstruction}\n\n[USER REGION FORGE REQUEST]\n${buildForgeRegionPrompt(
+      prompt,
+      selection,
+      contextW,
+      contextH
+    )}`;
+
+    const images = isAllThree
+      ? [
+          {
+            role: 'context',
+            label: `Image 1 — Focused battlemap context window (${contextW}x${contextH} px)`,
+            buffer: contextBuffer
+          },
+          {
+            role: 'guide',
+            label: 'Image 2 — Context window with target region highlighted in cyan tint',
+            buffer: guideBuffer
+          },
+          {
+            role: 'mask',
+            label: 'Image 3 — Binary mask (WHITE = target region to forge, BLACK = preserve strictly unchanged)',
+            buffer: maskBuffer
+          }
+        ]
+      : [
+          {
+            role: 'guide',
+            label: `Context window with target region highlighted in cyan tint (${contextW}x${contextH} px)`,
+            buffer: guideBuffer
+          }
+        ];
+
+    const result = await runModel(entry, {
+      systemInstruction,
+      userPromptText,
+      fullPromptPayload,
+      images,
+      width: contextW,
+      height: contextH
+    });
+
+    return {
+      imageBuffer: result.imageBuffer,
+      debug: result.debug,
+      usage: result.debug?.usage || null,
+      cost: result.debug?.usage?.cost ?? null
+    };
+  };
+}
+
+/**
  * Unified region modification and canvas extension:
  * Extracts a focused context window around the selection, runs the vision model
  * with context/guide/mask images, and composites the render back with zero bleed outside
@@ -147,69 +214,7 @@ async function forgeRegion({
   forgeImageMode = 'highlighted-only',
   renderAdapter
 }) {
-  let adapter = renderAdapter;
-
-  if (!adapter) {
-    const entry = configuredModel(model);
-
-    if (!entry.vision) {
-      throw providerFailure(
-        `The configured model ${entry.label} (${entry.id}) cannot receive images, so it cannot run a region edit. Point DEFAULT_MODEL_ID in server/services/modelCatalog.js at a vision-capable model.`,
-        { code: 'MODEL_NOT_VISION_CAPABLE', provider: entry.provider }
-      );
-    }
-
-    const isAllThree = forgeImageMode === 'all-three' || forgeImageMode === 'all';
-    const systemInstruction = getForgeRegionSystemPrompt(forgeImageMode);
-
-    adapter = async ({ contextBuffer, guideBuffer, maskBuffer, contextW, contextH, selOnContext }) => {
-      const userPromptText = prompt || 'Generate seamless, style-matched battlemap terrain in the target region';
-      const fullPromptPayload = `${systemInstruction}\n\n[USER REGION FORGE REQUEST]\n${buildForgeRegionPrompt(
-        prompt,
-        selection,
-        contextW,
-        contextH
-      )}`;
-
-      const images = isAllThree
-        ? [
-            {
-              label: `Image 1 — Focused battlemap context window (${contextW}x${contextH} px)`,
-              buffer: contextBuffer
-            },
-            {
-              label: 'Image 2 — Context window with target region highlighted in cyan tint',
-              buffer: guideBuffer
-            },
-            {
-              label: 'Image 3 — Binary mask (WHITE = target region to forge, BLACK = preserve strictly unchanged)',
-              buffer: maskBuffer
-            }
-          ]
-        : [
-            {
-              label: `Context window with target region highlighted in cyan tint (${contextW}x${contextH} px)`,
-              buffer: guideBuffer
-            }
-          ];
-
-      const result = await runModel(entry, {
-        systemInstruction,
-        userPromptText,
-        fullPromptPayload,
-        images,
-        width: contextW,
-        height: contextH
-      });
-
-      return {
-        imageBuffer: result.imageBuffer,
-        debug: result.debug,
-        usage: result.debug?.usage || null,
-        cost: result.debug?.usage?.cost ?? null
-      };
-    };
-  }
+  const adapter = renderAdapter || createForgeRegionAdapter({ selection, prompt, model, forgeImageMode });
 
   const result = await forgeCanvasRegion({
     originalDataUrl,
@@ -226,65 +231,9 @@ async function forgeRegion({
   };
 }
 
-/**
- * Forges an alternate state for an interactive feature within its bounding box,
- * then extracts and returns the cropped overlay patch.
- */
-async function forgeFeatureState({ originalDataUrl, box, prompt, model, forgeImageMode, renderAdapter }) {
-  if (!originalDataUrl || !box) {
-    const err = new Error('originalDataUrl and box are required for forgeFeatureState');
-    err.code = 'INVALID_PARAMETERS';
-    throw err;
-  }
-
-  const selection = {
-    x: Math.round(box.x),
-    y: Math.round(box.y),
-    width: Math.round(box.width),
-    height: Math.round(box.height)
-  };
-
-  const compositeResult = await forgeRegion({
-    originalDataUrl,
-    selection,
-    prompt,
-    model,
-    forgeImageMode,
-    renderAdapter
-  });
-  const compBuffer = dataUrlToBuffer(compositeResult.imageDataUrl);
-  const meta = await sharp(compBuffer).metadata();
-  const dx = compositeResult.offset?.dx || 0;
-  const dy = compositeResult.offset?.dy || 0;
-  const extractLeft = Math.max(0, Math.min(dx + selection.x, meta.width - 1));
-  const extractTop = Math.max(0, Math.min(dy + selection.y, meta.height - 1));
-  const extractWidth = Math.min(selection.width, meta.width - extractLeft);
-  const extractHeight = Math.min(selection.height, meta.height - extractTop);
-
-  const patchBuffer = await sharp(compBuffer)
-    .extract({
-      left: extractLeft,
-      top: extractTop,
-      width: Math.max(1, extractWidth),
-      height: Math.max(1, extractHeight)
-    })
-    .png()
-    .toBuffer();
-
-  const patchDataUrl = bufferToDataUrl(patchBuffer);
-
-  return {
-    patchDataUrl,
-    offset: compositeResult.offset,
-    debug: compositeResult.debug,
-    usage: compositeResult.usage,
-    cost: compositeResult.cost
-  };
-}
-
 
 module.exports = {
   generateBattlemap,
   forgeRegion,
-  forgeFeatureState
+  createForgeRegionAdapter
 };

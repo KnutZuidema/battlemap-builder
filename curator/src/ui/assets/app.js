@@ -1788,6 +1788,19 @@
             enterLabelingMode("role");
             return false;
         }
+        // 3. Strict Ground layer requirement: candidate must have exactly one Ground layer (role ground)
+        const groundCount = layers.filter((l) => {
+            const r = (l.role || "").toLowerCase().replace(/[-_]/g, "");
+            return r === "ground";
+        }).length;
+        if (groundCount === 0) {
+            showToast("Cannot curate: at least one layer must be assigned as Ground floor before curating.", "danger");
+            return false;
+        }
+        if (groundCount > 1) {
+            showToast("Cannot curate: only one layer can be designated as Ground floor.", "danger");
+            return false;
+        }
 
         return true;
     }
@@ -2230,7 +2243,7 @@
         const candidate = decisionState.candidate;
         if (!candidate) return;
 
-        const acceptedThemes = [...decisionState.acceptedTags];
+        const acceptedTags = Array.from(decisionState.acceptedTags);
         const descriptionValue = decisionDescriptionInput ? decisionDescriptionInput.value.trim() : "";
         closeCurateDecisionModal();
 
@@ -2240,12 +2253,11 @@
         try {
             const payload = {
                 id: candidate.id,
-                themes: acceptedThemes,
-                tags: candidate.tags || [],
+                themes: acceptedTags,
+                tags: acceptedTags,
                 layers: candidate.layers && candidate.layers.length > 0 ? candidate.layers : undefined,
                 description: descriptionValue || undefined,
             };
-
             const res = await fetch("/api/curate", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },

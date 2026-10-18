@@ -242,7 +242,9 @@ pub fn detect_theme_for_prompt(prompt: &str) -> Option<Theme> {
 
     best_theme
 }
-/// Scores keyword overlap between a prompt and a curated map's tags and description.
+/// Scores keyword overlap between a prompt and a curated map's unified tags and physical description:
+/// - +2 for each tag match against the prompt.
+/// - +1 for each overlapping keyword in the physical description.
 pub fn score_curated_map_for_prompt(map: &crate::domain::CuratedMap, prompt: &str) -> usize {
     let prompt_lower = prompt.to_lowercase();
     let prompt_words: std::collections::HashSet<&str> = prompt_lower
@@ -252,16 +254,11 @@ pub fn score_curated_map_for_prompt(map: &crate::domain::CuratedMap, prompt: &st
         .collect();
 
     let mut score = 0usize;
-    let primary = map.primary_theme().to_lowercase();
     for tag in &map.tags {
         let tag_lower = tag.to_lowercase();
         let matches = prompt_words.contains(tag_lower.as_str()) || prompt_lower.contains(&tag_lower);
         if matches {
-            if tag_lower == primary {
-                score += 2;
-            } else {
-                score += 1;
-            }
+            score += 2;
         }
     }
     if let Some(desc) = map.description.as_deref() {
@@ -733,16 +730,33 @@ mod tests {
 
         let prompt = "Stone dungeon crypt with carved limestone sarcophagus and burning braziers";
         let base_score = score_curated_map_for_prompt(&map_without_desc, prompt);
-        // "dungeon" theme (2) + "stone" tag (1) = 3
-        assert_eq!(base_score, 3);
+        // Unified tags: "dungeon" tag (+2) + "stone" tag (+2) = 4
+        assert_eq!(base_score, 4);
 
         let map_with_desc = map_without_desc.with_description(
             "Ancient crypt with carved limestone sarcophagus, burning braziers, and iron gates.",
         );
         let score_with_desc = score_curated_map_for_prompt(&map_with_desc, prompt);
         assert!(score_with_desc > base_score);
-        // base_score (3) + 8 overlapping words ("crypt", "with", "carved", "limestone", "sarcophagus", "and", "burning", "braziers")
-        assert_eq!(score_with_desc, 11);
+        // base_score (4) + 8 overlapping words ("crypt", "with", "carved", "limestone", "sarcophagus", "and", "burning", "braziers")
+        assert_eq!(score_with_desc, 12);
+    }
+
+    #[test]
+    fn test_score_curated_map_for_prompt_unified_tags_score_equally() {
+        let map = CuratedMap::new(
+            "map-unified-tags",
+            vec!["dungeon".to_string()],
+            vec!["cavern".to_string(), "crypt".to_string()],
+            (1024, 1024),
+            Utc::now(),
+        );
+
+        // Each matched tag earns +2 regardless of whether it was initialized via themes or tags
+        assert_eq!(score_curated_map_for_prompt(&map, "dungeon entrance"), 2);
+        assert_eq!(score_curated_map_for_prompt(&map, "cavern entrance"), 2);
+        assert_eq!(score_curated_map_for_prompt(&map, "crypt entrance"), 2);
+        assert_eq!(score_curated_map_for_prompt(&map, "dungeon cavern crypt"), 6);
     }
 
     #[test]

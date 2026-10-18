@@ -26,6 +26,9 @@ pub enum StorageError {
 }
 
 /// Port defining storage operations for staging, curated themes, and rejection records.
+pub type StoragePort = dyn StorageRepository;
+
+/// Port defining storage operations for staging, curated themes, and rejection records.
 pub trait StorageRepository: Send + Sync {
     /// Save a candidate image and its metadata sidecar to staging.
     fn save_staging(&self, candidate: &Candidate, data: &[u8]) -> Result<(), StorageError>;
@@ -169,6 +172,11 @@ pub trait StorageRepository: Send + Sync {
         Err(StorageError::NotFound(format!(
             "Curated layer {layer_index} for map '{id}' not found"
         )))
+    }
+
+    /// Retrieve the raw primary ground image bytes (layer 0) for a curated map directly by ID.
+    fn get_curated_image_by_id(&self, id: &str) -> Result<Vec<u8>, StorageError> {
+        self.get_curated_layer_image_by_id(id, 0)
     }
 
     /// Delete an approved curated map bundle and log its rejection reason to rejection records.
@@ -400,6 +408,10 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
         layer_index: usize,
     ) -> Result<Vec<u8>, StorageError> {
         (**self).get_curated_layer_image_by_id(id, layer_index)
+    }
+
+    fn get_curated_image_by_id(&self, id: &str) -> Result<Vec<u8>, StorageError> {
+        (**self).get_curated_image_by_id(id)
     }
 
     fn delete_curated(

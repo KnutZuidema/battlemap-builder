@@ -22,11 +22,22 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/status", get(get_status))
         .route("/api/staging", get(get_staging))
         .route("/api/curated", get(get_curated))
+        .route("/api/curated/{id}", patch(patch_curated).delete(delete_curated))
+        .route("/api/curated/bulk-delete", post(post_curated_bulk_delete))
+        .route(
+            "/api/curated/{id}/suggest-themes",
+            post(post_curated_suggest_themes).get(post_curated_suggest_themes),
+        )
+        .route(
+            "/api/curated/{id}/describe",
+            post(post_curated_describe).get(post_curated_describe),
+        )
         .route("/api/dataset/export", get(get_dataset_export))
+        .route("/api/dataset/export-selected", post(post_dataset_export_selected))
         .route("/api/image/staging/{id}", get(get_staging_image))
         .route("/api/image/staging/{id}/{layer_index}", get(get_staging_layer_image))
         .route("/api/image/curated/{id}", get(get_curated_image_by_id))
-        .route("/api/image/curated/{theme}/{id}", get(get_curated_image))
+        .route("/api/image/curated/{id}/{layer_index}", get(get_curated_image_or_layer))
         .route("/api/image/curated/{theme}/{id}/{layer_index}", get(get_curated_layer_image))
         .route(
             "/api/staging/{id}/layers",

@@ -18,6 +18,22 @@ use curator::domain::{
 };
 use curator::ports::harvester::{HarvesterError, RedditHarvester};
 use curator::ports::storage::StorageRepository;
+use curator::services::description::{DescriptionError, DescriptionGenerator, DescriptionService};
+
+struct MockDescriptionGen(Result<String, DescriptionError>);
+
+#[async_trait]
+impl DescriptionGenerator for MockDescriptionGen {
+    async fn generate_description(
+        &self,
+        _image_bytes: &[u8],
+        _mime_type: &str,
+        _tags: &[String],
+        _context: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        self.0.clone()
+    }
+}
 fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
@@ -1893,7 +1909,15 @@ async fn test_suggest_themes_empty_candidate_id_returns_bad_request() {
 
 #[tokio::test]
 async fn test_describe_candidate_fallback_when_no_api_key() {
-    let (app, storage, _dir) = setup_test_app();
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let adapter_no_key = Arc::new(OpenRouterAdapter::with_config(
+        "",
+        "http://127.0.0.1:1".to_string(),
+        1,
+    ));
+    let state = AppState::new(storage.clone()).with_openrouter(adapter_no_key);
+    let app = create_router(state);
 
     let cand = Candidate::with_now(
         "cand_desc_fallback",
@@ -1907,7 +1931,7 @@ async fn test_describe_candidate_fallback_when_no_api_key() {
         .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
         .unwrap();
 
-    // 1. GET /api/staging/{id}/describe with empty body
+    // 1. GET /api/staging/{id}/describe with empty body -> 503 SERVICE_UNAVAILABLE
     let req_get = Request::builder()
         .uri("/api/staging/cand_desc_fallback/describe")
         .method("GET")
@@ -1915,14 +1939,9 @@ async fn test_describe_candidate_fallback_when_no_api_key() {
         .unwrap();
 
     let resp_get = app.clone().oneshot(req_get).await.unwrap();
-    assert_eq!(resp_get.status(), StatusCode::OK);
-    let body_get = to_bytes(resp_get.into_body(), usize::MAX).await.unwrap();
-    let json_get: DescribeResponse = serde_json::from_slice(&body_get).unwrap();
-    assert_eq!(json_get.id, "cand_desc_fallback");
-    assert!(json_get.description.contains("dungeon"));
-    assert!(json_get.description.contains("crypt") || json_get.description.contains("stone"));
+    assert_eq!(resp_get.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-    // 2. POST /api/staging/{id}/describe with empty body
+    // 2. POST /api/staging/{id}/describe with empty body -> 503 SERVICE_UNAVAILABLE
     let req_post_empty = Request::builder()
         .uri("/api/staging/cand_desc_fallback/describe")
         .method("POST")
@@ -1930,16 +1949,17 @@ async fn test_describe_candidate_fallback_when_no_api_key() {
         .unwrap();
 
     let resp_post_empty = app.oneshot(req_post_empty).await.unwrap();
-    assert_eq!(resp_post_empty.status(), StatusCode::OK);
-    let body_post_empty = to_bytes(resp_post_empty.into_body(), usize::MAX).await.unwrap();
-    let json_post_empty: DescribeResponse = serde_json::from_slice(&body_post_empty).unwrap();
-    assert_eq!(json_post_empty.id, "cand_desc_fallback");
-    assert!(!json_post_empty.description.is_empty());
+    assert_eq!(resp_post_empty.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
-
 #[tokio::test]
 async fn test_describe_candidate_with_payload_themes_and_tags() {
-    let (app, storage, _dir) = setup_test_app();
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let mock_desc = "Dark underground cave with sharp stalagmites and glowing crystals.";
+    let mock_gen = Arc::new(MockDescriptionGen(Ok(mock_desc.to_string())));
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(mock_gen))));
+    let app = create_router(state);
 
     let cand = Candidate::with_now(
         "cand_desc_payload",
@@ -1971,7 +1991,6 @@ async fn test_describe_candidate_with_payload_themes_and_tags() {
     assert!(json.description.contains("cave"));
     assert!(json.description.contains("stalagmites"));
 }
-
 #[tokio::test]
 async fn test_describe_candidate_with_mock_openrouter() {
     use axum::routing::post;
@@ -2064,7 +2083,7 @@ async fn test_describe_candidate_offline_fallback() {
         "tags": ["crypt", "stone", "water"]
     });
 
-    // 1. With no API key: OpenRouter configured with empty key
+    // 1. With no API key: OpenRouter configured with empty key -> strictly 503 SERVICE_UNAVAILABLE
     let dir1 = tempdir().unwrap();
     let storage1 = Arc::new(FilesystemStorage::new(dir1.path()));
     storage1
@@ -2086,14 +2105,9 @@ async fn test_describe_candidate_offline_fallback() {
         .unwrap();
 
     let resp1 = app1.oneshot(req1).await.unwrap();
-    assert_eq!(resp1.status(), StatusCode::OK); // Assert 200 OK (no 500 error)
-    let body1 = to_bytes(resp1.into_body(), usize::MAX).await.unwrap();
-    let json1: DescribeResponse = serde_json::from_slice(&body1).unwrap();
-    assert_eq!(json1.id, "cand_offline_desc");
-    assert!(!json1.description.is_empty());
-    assert!(json1.description.contains("dungeon"));
+    assert_eq!(resp1.status(), StatusCode::SERVICE_UNAVAILABLE); // Strict error propagation (no silent fallback)
 
-    // 2. Offline / unreachable OpenRouter endpoint (server offline, no 500 error)
+    // 2. Offline / unreachable OpenRouter endpoint -> strictly 502 BAD_GATEWAY
     let dir2 = tempdir().unwrap();
     let storage2 = Arc::new(FilesystemStorage::new(dir2.path()));
     storage2
@@ -2115,12 +2129,7 @@ async fn test_describe_candidate_offline_fallback() {
         .unwrap();
 
     let resp2 = app2.oneshot(req2).await.unwrap();
-    assert_eq!(resp2.status(), StatusCode::OK); // Assert 200 OK with deterministic fallback
-    let body2 = to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
-    let json2: DescribeResponse = serde_json::from_slice(&body2).unwrap();
-    assert_eq!(json2.id, "cand_offline_desc");
-    assert!(!json2.description.is_empty());
-    assert!(json2.description.contains("dungeon"));
+    assert_eq!(resp2.status(), StatusCode::BAD_GATEWAY); // Strict error propagation (no silent fallback)
 }
 
 #[tokio::test]

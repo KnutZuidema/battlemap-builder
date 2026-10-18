@@ -198,16 +198,16 @@ fn test_get_storage_stats_populated() {
 
     // Validate Curated
     assert!(stats.curated.bytes > 0);
-    assert!(stats.curated.file_count >= 6); // 2 curated maps, each bundle has image, manifest, lora png, lora txt
+    assert!(stats.curated.file_count >= 4); // 2 curated maps, each bundle has layer image + manifest.json
     let dungeon_theme_stats = stats.curated_by_theme.get(&Theme::Dungeon).expect("dungeon stats");
     assert_eq!(dungeon_theme_stats.map_count, 1);
     assert!(dungeon_theme_stats.bytes > 0);
-    assert!(dungeon_theme_stats.file_count >= 3);
+    assert!(dungeon_theme_stats.file_count >= 2);
 
     let wilderness_theme_stats = stats.curated_by_theme.get(&Theme::Wilderness).expect("wilderness stats");
     assert_eq!(wilderness_theme_stats.map_count, 1);
     assert!(wilderness_theme_stats.bytes > 0);
-    assert!(wilderness_theme_stats.file_count >= 3);
+    assert!(wilderness_theme_stats.file_count >= 2);
 
     let cave_theme_stats = stats.curated_by_theme.get(&Theme::Cave).expect("cave stats");
     assert_eq!(cave_theme_stats.map_count, 0);
@@ -270,13 +270,14 @@ fn test_purge_staging_resets_staging_and_preserves_curated_rejected_telemetry() 
         .save_curated(&dungeon_map, &curated_image_data)
         .expect("save curated");
 
-    // Verify companion files exist before purge
+    // Verify curated files exist before purge and companion files are NOT on disk
     let dungeon_bundle_dir = dir.path().join("curated/curated_keep_1");
     let lora_png = dungeon_bundle_dir.join("curated_keep_1_lora1024.png");
     let lora_txt = dungeon_bundle_dir.join("curated_keep_1_lora1024.txt");
-    assert!(lora_png.is_file(), "LoRA companion png should exist");
-    assert!(lora_txt.is_file(), "LoRA companion txt should exist");
-    let lora_caption_before = std::fs::read_to_string(&lora_txt).expect("read lora caption");
+    assert!(!lora_png.exists(), "LoRA companion png should NOT exist on disk");
+    assert!(!lora_txt.exists(), "LoRA companion txt should NOT exist on disk");
+    assert!(dungeon_bundle_dir.join("manifest.json").is_file());
+    assert!(dungeon_bundle_dir.join("0_ground.png").is_file());
 
     // 3. Populate Rejection Log
     storage
@@ -331,10 +332,10 @@ fn test_purge_staging_resets_staging_and_preserves_curated_rejected_telemetry() 
     assert_eq!(curated_list.len(), 1);
     assert_eq!(curated_list[0].id, "curated_keep_1");
 
-    assert!(lora_png.is_file(), "LoRA companion png must remain after purge");
-    assert!(lora_txt.is_file(), "LoRA companion txt must remain after purge");
-    let lora_caption_after = std::fs::read_to_string(&lora_txt).expect("read lora caption");
-    assert_eq!(lora_caption_before, lora_caption_after);
+    assert!(!lora_png.exists(), "LoRA companion png should NOT exist on disk");
+    assert!(!lora_txt.exists(), "LoRA companion txt should NOT exist on disk");
+    assert!(dungeon_bundle_dir.join("manifest.json").is_file());
+    assert!(dungeon_bundle_dir.join("0_ground.png").is_file());
 
     assert_eq!(stats_after.curated.bytes, stats_before.curated.bytes);
     assert_eq!(stats_after.curated.file_count, stats_before.curated.file_count);

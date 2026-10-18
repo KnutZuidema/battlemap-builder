@@ -225,13 +225,15 @@ fn test_full_curation_workflow_bundle_lora_files() {
     assert!(!storage.is_in_staging("crypt_bundle_1").unwrap());
     assert!(storage.is_curated("crypt_bundle_1").unwrap());
 
-    // 3. Verify LoRA companion files on disk
+    // 3. Verify LoRA companion files are NOT on disk
     let bundle_dir = storage.curated_dir().join("crypt_bundle_1");
     let bundle_lora_png = bundle_dir.join("crypt_bundle_1_lora1024.png");
     let bundle_lora_txt = bundle_dir.join("crypt_bundle_1_lora1024.txt");
 
-    assert!(bundle_lora_png.is_file(), "bundle_lora_png must exist in bundle dir");
-    assert!(bundle_lora_txt.is_file(), "bundle_lora_txt must exist in bundle dir");
+    assert!(!bundle_lora_png.exists(), "bundle_lora_png must NOT exist in bundle dir");
+    assert!(!bundle_lora_txt.exists(), "bundle_lora_txt must NOT exist in bundle dir");
+    assert!(bundle_dir.join("manifest.json").is_file());
+    assert!(bundle_dir.join("0_ground.png").is_file());
 
     // 4. Verify storage methods
     assert!(storage.is_lora_normalized(&Theme::Dungeon, "crypt_bundle_1").unwrap());
@@ -278,7 +280,12 @@ fn test_full_curation_workflow_flat_candidate_lora_files() {
 
     storage.curate_staging(&curated).unwrap();
 
-    // 3. Verify companion files
+    // 3. Verify companion files are NOT on disk and storage reports normalized
+    let bundle_dir = storage.curated_dir().join("tavern_map_42");
+    assert!(!bundle_dir.join("tavern_map_42_lora1024.png").exists());
+    assert!(!bundle_dir.join("tavern_map_42_lora1024.txt").exists());
+    assert!(bundle_dir.join("manifest.json").is_file());
+    assert!(bundle_dir.join("0_ground.png").is_file());
     assert!(storage.is_lora_normalized(&Theme::Tavern, "tavern_map_42").unwrap());
 
     let lora_png = storage

@@ -1,8 +1,9 @@
 const sharp = require('sharp');
 
 /**
- * Image processing utilities for Battlemap Builder
- * Handles context framing, guide image rendering, mask generation,
+ * Canvas forging and region processing module for Battlemap Builder.
+ * Encapsulates context framing, guide image rendering, mask generation,
+ * in-memory render adapter execution, coordinate offset calculations,
  * and seamless soft-edge alpha compositing for region forging.
  */
 
@@ -277,6 +278,119 @@ async function compositeRegion(origBuffer, modelBuffer, dimensions, featherPx = 
 }
 
 /**
+ * Forges a region on a battlemap (edit, expand, or hybrid).
+ * Encapsulates the 11-field dimensions record, context framing, guide/mask generation,
+ * in-memory render adapter execution, origin coordinate shift offset calculation,
+ * and 20px inward seam feathering.
+ *
+ * @param {Object|string} optionsOrDataUrl - Options object { originalDataUrl, selection, renderAdapter, contextPadding, featherPx } or originalDataUrl string
+ * @param {Object} [selectionArg] - Selection if called positionally
+ * @param {Function} [renderAdapterArg] - Render adapter callback if called positionally
+ * @param {number} [contextPaddingArg] - Context padding if called positionally
+ * @param {number} [featherPxArg] - Feather pixels if called positionally
+ * @returns {Promise<{ imageDataUrl: string, offset: { dx: number, dy: number }, debug?: any, usage?: any, cost?: number|null }>}
+ */
+async function forgeCanvasRegion(optionsOrDataUrl, selectionArg, renderAdapterArg, contextPaddingArg, featherPxArg) {
+  let originalDataUrl;
+  let selection;
+  let renderAdapter;
+  let contextPadding = 512;
+  let featherPx = 20;
+
+  if (
+    typeof optionsOrDataUrl === 'object' &&
+    optionsOrDataUrl !== null &&
+    !Buffer.isBuffer(optionsOrDataUrl) &&
+    ('originalDataUrl' in optionsOrDataUrl || 'selection' in optionsOrDataUrl)
+  ) {
+    originalDataUrl = optionsOrDataUrl.originalDataUrl;
+    selection = optionsOrDataUrl.selection;
+    renderAdapter = optionsOrDataUrl.renderAdapter;
+    if (typeof optionsOrDataUrl.contextPadding === 'number') {
+      contextPadding = optionsOrDataUrl.contextPadding;
+    }
+    if (typeof optionsOrDataUrl.featherPx === 'number') {
+      featherPx = optionsOrDataUrl.featherPx;
+    }
+  } else {
+    originalDataUrl = optionsOrDataUrl;
+    selection = selectionArg;
+    renderAdapter = renderAdapterArg;
+    if (typeof contextPaddingArg === 'number') {
+      contextPadding = contextPaddingArg;
+    }
+    if (typeof featherPxArg === 'number') {
+      featherPx = featherPxArg;
+    }
+  }
+
+  if (!originalDataUrl || !selection) {
+    const err = new Error('originalDataUrl and selection are required for forgeCanvasRegion');
+    err.code = 'INVALID_PARAMETERS';
+    throw err;
+  }
+
+  const prepared = await prepareRegionCanvas(originalDataUrl, selection, contextPadding);
+  const { dimensions, contextBuffer, guideBuffer, maskBuffer } = prepared;
+  const { contextW, contextH, selOnContext } = dimensions;
+
+  // Calculate origin coordinate shift offset { dx, dy } when expanding North or West into Void:
+  // - When expanding West (selection.x < 0), dx = -minX (positive pixel shift of old map origin)
+  // - When expanding North (selection.y < 0), dy = -minY (positive pixel shift of old map origin)
+  // - When not expanding North/West, dx = 0, dy = 0
+  const selX = Math.round(selection.x);
+  const selY = Math.round(selection.y);
+  const minX = Math.min(0, selX);
+  const minY = Math.min(0, selY);
+  const dx = selX < 0 ? -minX : 0;
+  const dy = selY < 0 ? -minY : 0;
+  const offset = { dx, dy };
+
+  let adapterResult;
+  if (typeof renderAdapter === 'function') {
+    adapterResult = await renderAdapter({
+      contextBuffer,
+      guideBuffer,
+      maskBuffer,
+      contextW,
+      contextH,
+      selOnContext
+    });
+  } else {
+    adapterResult = { imageBuffer: contextBuffer };
+  }
+
+  let modelBuffer;
+  let debug = null;
+  let usage = null;
+  let cost = null;
+
+  if (Buffer.isBuffer(adapterResult)) {
+    modelBuffer = adapterResult;
+  } else if (adapterResult && (Buffer.isBuffer(adapterResult.imageBuffer) || typeof adapterResult.imageBuffer === 'string')) {
+    modelBuffer = Buffer.isBuffer(adapterResult.imageBuffer)
+      ? adapterResult.imageBuffer
+      : dataUrlToBuffer(adapterResult.imageBuffer);
+    debug = adapterResult.debug || null;
+    usage = adapterResult.usage || adapterResult.debug?.usage || null;
+    cost = adapterResult.cost ?? adapterResult.debug?.usage?.cost ?? null;
+  } else {
+    throw new Error('renderAdapter must return a Buffer or an object containing imageBuffer');
+  }
+
+  const origBuffer = dataUrlToBuffer(originalDataUrl);
+  const finalStitchedDataUrl = await compositeRegion(origBuffer, modelBuffer, dimensions, featherPx);
+
+  return {
+    imageDataUrl: finalStitchedDataUrl,
+    offset,
+    debug,
+    usage,
+    cost
+  };
+}
+
+/**
  * Deletes a rectangular region from the map image, setting the pixels inside
  * the selection rectangle to transparent.
  *
@@ -326,7 +440,9 @@ async function deleteRegion(originalDataUrl, selection) {
 module.exports = {
   dataUrlToBuffer,
   bufferToDataUrl,
+  forgeCanvasRegion,
+  deleteRegion,
+  REGION_VOID_COLOR,
   prepareRegionCanvas,
-  compositeRegion,
-  deleteRegion
+  compositeRegion
 };

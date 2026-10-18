@@ -80,7 +80,7 @@ Battlemap Builder/
 │   │   ├── modelCatalog.js        # Backend model configuration (provider, vision, cost notes)
 │   │   ├── prompts.js             # IMAGE_PROMPTS + builder functions
 │   │   ├── failure.js             # Upstream error summarising + user-facing failure sentences
-│   │   ├── imageProcessor.js      # Sharp context framing, binary masks & inward seam feathering
+│   │   ├── canvasForge.js         # Deep canvas forging: context framing, render adapter seam, coordinate offsets & feathering
 │   │   └── providers/
 │   │       └── openrouterProvider.js  # OpenRouter chat completions (image contract)
 │   └── .env                   # Server environment & API key
@@ -122,7 +122,7 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
 - The configured model is the only map producer. When its provider key is missing or the model returns no usable image, the error carries `code` + `telemetry` (prompts, model attempt trail, raw response, usage/cost); routes forward it with `400`/`502`/`503` and the client raises the loud failure banner. Never reintroduce a procedural/mock fallback.
 
 ### B. Canvas Region Forging (`FORGE_REGION`)
-- `prepareRegionCanvas()` in `imageProcessor.js` extracts a focused context frame (default 512px padding around selection), a cyan-tinted guide image, and a binary mask.
+- `forgeCanvasRegion()` in `canvasForge.js` encapsulates focused context framing (default 512px padding around selection), cyan-tinted guide image, binary mask, in-memory render adapter seam, origin coordinate offset calculation, and inward seam feathering.
 - **Configurable Image Mode**: Configurable via the Studio Settings menu in the top bar (`forgeImageMode`, persisted in `localStorage`):
   - `highlighted-only` (Default): Sends only 1 image — the context window with the target region highlighted in cyan tint — paired with `IMAGE_PROMPTS.FORGE_REGION_HIGHLIGHTED`. Prevents contradictory multi-image guidance and minimizes token payload.
   - `all-three` (Legacy): Sends all 3 images (raw context window, cyan guide image, and binary mask) paired with `IMAGE_PROMPTS.FORGE_REGION`.

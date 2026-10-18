@@ -5,6 +5,7 @@ pub mod harvester;
 pub mod model_engine;
 pub mod storage;
 pub mod image_processor;
+pub mod curation_store;
 
 #[allow(unused_imports)]
 pub use harvester::*;
@@ -16,3 +17,5 @@ pub use storage::*;
 pub use cost_tracker::*;
 #[allow(unused_imports)]
 pub use image_processor::*;
+#[allow(unused_imports)]
+pub use curation_store::*;

@@ -1,6 +1,6 @@
 use crate::domain::{
-    BenchmarkMetadata, Candidate, CandidateLayer, CuratedMap, CuratedMapUpdate, PurgeStagingResult,
-    RedditSidecarMetadata, RejectionReason, StorageStats, Theme,
+    BenchmarkMetadata, Candidate, CuratedMap, CuratedMapUpdate, Layer,
+    PurgeStagingResult, RedditSidecarMetadata, RejectionReason, StorageStats, Theme,
 };
 use thiserror::Error;
 
@@ -24,6 +24,8 @@ pub enum StorageError {
     #[error("ZIP archive error: {0}")]
     Zip(#[from] zip::result::ZipError),
 }
+
+pub use crate::ports::curation_store::CurationStore;
 
 /// Port defining storage operations for staging, curated themes, and rejection records.
 pub type StoragePort = dyn StorageRepository;
@@ -245,7 +247,7 @@ pub trait StorageRepository: Send + Sync {
     fn update_staging_layers(
         &self,
         id: &str,
-        layers: Vec<CandidateLayer>,
+        layers: Vec<Layer>,
     ) -> Result<Candidate, StorageError> {
         let _ = (id, layers);
         Err(StorageError::InvalidData(
@@ -444,7 +446,7 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
     fn update_staging_layers(
         &self,
         id: &str,
-        layers: Vec<CandidateLayer>,
+        layers: Vec<Layer>,
     ) -> Result<Candidate, StorageError> {
         (**self).update_staging_layers(id, layers)
     }

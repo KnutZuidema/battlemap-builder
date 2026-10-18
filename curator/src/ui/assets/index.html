@@ -836,6 +836,15 @@
                             </svg>
                             <span>Inspect Fullscreen</span>
                         </button>
+                        <button type="button" id="btn-inspector-delete" class="btn btn-danger btn-sm btn-inspect-delete" title="Delete &amp; Reject Map (Hotkey: Delete)">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"/>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                <line x1="10" y1="11" x2="10" y2="17"/>
+                                <line x1="14" y1="11" x2="14" y2="17"/>
+                            </svg>
+                            <span>Delete &amp; Reject</span>
+                        </button>
                     </div>
                     <div class="drawer-footer-right">
                         <button type="button" id="btn-inspector-discard" class="btn btn-secondary btn-sm" title="Discard unsaved edits">
@@ -853,6 +862,99 @@
                     </div>
                 </div>
             </aside>
+
+            <!-- Delete & Reject Curated Map Modal (Issue #137) -->
+            <div id="delete-curated-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="delete-curated-title">
+                <div class="modal-card delete-curated-card">
+                    <div class="modal-header">
+                        <div class="delete-header-title">
+                            <span class="delete-warning-icon">⚠️</span>
+                            <h3 id="delete-curated-title">Delete &amp; Reject Curated Map</h3>
+                        </div>
+                        <button type="button" id="btn-close-delete-modal" class="btn-close" aria-label="Close modal">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="delete-modal-warning">
+                            Permanently delete this curated battlemap bundle from disk? This map and its companion metadata will be permanently removed and logged to <code class="mono">rejections.jsonl</code>.
+                        </p>
+                        <div class="delete-target-preview" id="delete-target-preview">
+                            <span class="delete-target-id mono" id="delete-target-id"></span>
+                        </div>
+                        <div class="form-group">
+                            <label for="delete-reason-select" class="form-label">Rejection Reason (Optional):</label>
+                            <select id="delete-reason-select" class="form-select">
+                                <option value="unspecified" selected>Unspecified</option>
+                                <option value="grid_burned_in">Grid Burned In</option>
+                                <option value="isometric_tilt">Isometric Tilt</option>
+                                <option value="blurry_low_res">Blurry / Low Resolution</option>
+                                <option value="bad_geometry">Bad Geometry / Poché Failures</option>
+                                <option value="irrelevant">Irrelevant / Not a Battlemap</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="delete-notes-group">
+                            <label for="delete-notes-input" class="form-label">Rejection Notes (Optional):</label>
+                            <textarea id="delete-notes-input" class="form-textarea" rows="3" placeholder="Optional notes for rejection log (e.g. visible 5ft grid, angled walls, artifacts)..."></textarea>
+                        </div>
+                        <p class="delete-modal-danger-hint">
+                            This action is immediate and cannot be undone.
+                        </p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" id="btn-cancel-delete" class="btn btn-secondary">
+                            <kbd>Esc</kbd>
+                            <span>Cancel</span>
+                        </button>
+                        <button type="button" id="btn-confirm-delete" class="btn btn-danger btn-affirmative">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"/>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                <line x1="10" y1="11" x2="10" y2="17"/>
+                                <line x1="14" y1="11" x2="14" y2="17"/>
+                            </svg>
+                            <span id="btn-confirm-delete-text">Delete &amp; Reject</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Floating Bottom Action Bar for Multi-Select (Issue #137) -->
+            <div id="library-bulk-bar" class="library-bulk-bar hidden" role="toolbar" aria-label="Bulk Selection Actions">
+                <div class="bulk-bar-content">
+                    <div class="bulk-bar-selection">
+                        <span id="bulk-selected-count" class="bulk-selected-badge mono">0 Selected</span>
+                    </div>
+                    <div class="bulk-bar-actions">
+                        <button type="button" id="btn-bulk-delete" class="btn btn-danger btn-sm btn-bulk" title="Delete &amp; Reject Selected Maps">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"/>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                <line x1="10" y1="11" x2="10" y2="17"/>
+                                <line x1="14" y1="11" x2="14" y2="17"/>
+                            </svg>
+                            <span>Delete &amp; Reject Selected</span>
+                        </button>
+                        <button type="button" id="btn-bulk-tag" class="btn btn-secondary btn-sm btn-bulk" title="Add Tag to Selected Maps">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
+                                <line x1="7" y1="7" x2="7.01" y2="7"/>
+                            </svg>
+                            <span>Add Tag to Selected</span>
+                        </button>
+                        <button type="button" id="btn-bulk-export" class="btn btn-primary btn-sm btn-bulk" title="Export Selected Maps as ZIP">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            <span>Export Selected (ZIP)</span>
+                        </button>
+                        <button type="button" id="btn-bulk-deselect" class="btn btn-ghost btn-sm btn-bulk" title="Deselect All (Esc)">
+                            <span>Deselect All</span>
+                            <kbd>Esc</kbd>
+                        </button>
+                    </div>
+                </div>
+            </div>
         </section>
 
 

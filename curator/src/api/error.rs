@@ -91,6 +91,18 @@ impl From<crate::services::description::DescriptionError> for ApiError {
         }
     }
 }
+impl From<crate::services::curation::CurationWorkflowError> for ApiError {
+    fn from(err: crate::services::curation::CurationWorkflowError) -> Self {
+        use crate::services::curation::CurationWorkflowError;
+        match err {
+            CurationWorkflowError::ValidationFailed(msg) => ApiError::BadRequest(msg),
+            CurationWorkflowError::NotFound(msg) => ApiError::NotFound(msg),
+            CurationWorkflowError::DescriptionFailed(desc_err) => desc_err.into(),
+            CurationWorkflowError::Storage(msg) => ApiError::Internal(msg),
+        }
+    }
+}
+
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {

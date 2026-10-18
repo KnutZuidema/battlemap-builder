@@ -372,17 +372,54 @@ impl Layer {
 
 /// Validates that a slice of `(LayerRole, Option<i8>)` layer assignments is ready for curation:
 /// - At least 1 layer must be included (`role != LayerRole::Exclude`).
-/// - Zero included layers may have `role == LayerRole::Unassigned`.
+/// - 0 unassigned layers (`role != LayerRole::Unassigned`).
+/// - Strictly 1 `LayerRole::Ground` layer.
+/// - Valid elevation indices for UpperFloor (> 0), Basement (< 0), and Ground (0).
 pub fn validate_layers_for_curation(layers: &[(LayerRole, Option<i8>)]) -> Result<(), String> {
+    if layers.iter().any(|(r, _)| r.is_unassigned()) {
+        return Err(
+            "All layers must have an assigned role before curation (none may remain unassigned)".into(),
+        );
+    }
     let included: Vec<&(LayerRole, Option<i8>)> =
         layers.iter().filter(|(r, _)| r.is_included()).collect();
     if included.is_empty() {
-        return Err("At least one layer must be included (not excluded) to curate a bundle".into());
+        return Err("At least 1 layer must be included (not excluded) to curate a bundle".into());
     }
-    if included.iter().any(|(r, _)| r.is_unassigned()) {
-        return Err(
-            "All included layers must have an assigned role before curation (none may remain unassigned)".into(),
-        );
+    let ground_count = included.iter().filter(|(r, _)| r.is_ground()).count();
+    if ground_count == 0 {
+        return Err("Strictly one Ground layer is required to curate a candidate (found none)".into());
+    }
+    if ground_count > 1 {
+        return Err(format!(
+            "Strictly one Ground layer is required to curate a candidate (found {ground_count})"
+        ));
+    }
+    for (role, elev) in &included {
+        match role {
+            LayerRole::UpperFloor => {
+                if let Some(e) = elev {
+                    if *e <= 0 {
+                        return Err(format!("Upper floor elevation must be positive, found {e}"));
+                    }
+                }
+            }
+            LayerRole::Basement => {
+                if let Some(e) = elev {
+                    if *e >= 0 {
+                        return Err(format!("Basement elevation must be negative, found {e}"));
+                    }
+                }
+            }
+            LayerRole::Ground => {
+                if let Some(e) = elev {
+                    if *e != 0 {
+                        return Err(format!("Ground elevation must be 0, found {e}"));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -2412,6 +2449,39 @@ mod tests {
             (LayerRole::Exclude, None),
         ];
         assert!(validate_layers_for_curation(&valid_mix).is_ok());
+        // Fails when missing Ground layer
+        let missing_ground = vec![
+            (LayerRole::UpperFloor, Some(1)),
+            (LayerRole::Roof, None),
+        ];
+        assert!(validate_layers_for_curation(&missing_ground).is_err());
+
+        // Fails when multiple Ground layers
+        let multiple_ground = vec![
+            (LayerRole::Ground, Some(0)),
+            (LayerRole::Ground, Some(0)),
+        ];
+        assert!(validate_layers_for_curation(&multiple_ground).is_err());
+
+        // Fails when UpperFloor elevation is non-positive
+        let invalid_upper = vec![
+            (LayerRole::Ground, Some(0)),
+            (LayerRole::UpperFloor, Some(0)),
+        ];
+        assert!(validate_layers_for_curation(&invalid_upper).is_err());
+
+        // Fails when Basement elevation is non-negative
+        let invalid_basement = vec![
+            (LayerRole::Ground, Some(0)),
+            (LayerRole::Basement, Some(0)),
+        ];
+        assert!(validate_layers_for_curation(&invalid_basement).is_err());
+
+        // Fails when Ground elevation is non-zero
+        let invalid_ground = vec![
+            (LayerRole::Ground, Some(1)),
+        ];
+        assert!(validate_layers_for_curation(&invalid_ground).is_err());
 
         // Candidate validation method checks
         let mut cand_all_excluded = Candidate::with_now(

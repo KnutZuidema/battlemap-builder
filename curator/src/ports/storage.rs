@@ -31,7 +31,7 @@ pub use crate::ports::curation_store::CurationStore;
 pub type StoragePort = dyn StorageRepository;
 
 /// Port defining storage operations for staging, curated themes, and rejection records.
-pub trait StorageRepository: Send + Sync {
+pub trait StorageRepository: CurationStore + Send + Sync {
     /// Save a candidate image and its metadata sidecar to staging.
     fn save_staging(&self, candidate: &Candidate, data: &[u8]) -> Result<(), StorageError>;
 

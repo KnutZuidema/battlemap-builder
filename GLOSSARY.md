@@ -43,11 +43,11 @@ A Forge operation whose Selection lies entirely within the existing Battlemap bo
 _Avoid_: In-place edit, region edit, overpaint
 
 **Extend**:
-A Forge operation whose Selection lies outside the existing Battlemap bounds in the Void, growing the Battlemap footprint.
+A Forge operation whose Selection lies outside the existing Battlemap bounds in the Void, growing the Battlemap footprint. When extending North or West, existing terrain and Interactive Features are translated by the resulting origin offset.
 _Avoid_: Region expand, outpaint, canvas expansion
 
 **Bridge**:
-A Forge operation whose Selection straddles both existing Battlemap terrain and the Void, modifying the boundary while extending the footprint.
+A Forge operation whose Selection straddles both existing Battlemap terrain and the Void, modifying the boundary while extending the footprint. When extending North or West, existing terrain and Interactive Features are translated by the resulting origin offset.
 _Avoid_: Hybrid forge, boundary edit, hybrid region
 
 **Clear**:

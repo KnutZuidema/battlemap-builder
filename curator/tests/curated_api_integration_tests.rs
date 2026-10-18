@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use tempfile::tempdir;
 use tower::ServiceExt;
 
-use curator::adapters::FilesystemStorage;
+use curator::adapters::{FilesystemStorage, OpenRouterAdapter};
 use curator::api::{create_router, AppState, DescribeResponse, SuggestThemesResponse};
 use curator::domain::{
     Candidate, CandidateLayer, CuratedLayer, CuratedMap, CuratedMapUpdate, LayerRole,
@@ -26,7 +26,12 @@ fn create_test_png(width: u32, height: u32) -> Vec<u8> {
 fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let state = AppState::new(storage.clone());
+    let adapter = Arc::new(OpenRouterAdapter::with_config(
+        "",
+        "http://127.0.0.1:1".to_string(),
+        1,
+    ));
+    let state = AppState::new(storage.clone()).with_openrouter(adapter);
     let router = create_router(state);
     (router, storage, dir)
 }

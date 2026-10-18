@@ -1,0 +1,3 @@
+# Deep curation module with unified layers and strict invariants
+
+Candidate curation and rejection transitions are orchestrated by a deep, asynchronous domain module (`CurationService`) implementing a narrow persistence seam (`CurationStore`), replacing fragmented route orchestration and eliminating circular full-store manifest scans. The lifecycle unifies `CandidateLayer` and `CuratedLayer` into a single canonical `Layer` struct, collapses legacy themes into dynamic `Tag` collections with transparent serde migration, strictly requires exactly one `Ground` layer, delegates vision calls to a decoupled `DescriptionService` with no silent fallbacks, and strips synthetic caption mutation from storage read paths.

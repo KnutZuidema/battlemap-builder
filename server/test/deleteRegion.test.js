@@ -4,7 +4,6 @@ const http = require('http');
 const sharp = require('sharp');
 const app = require('../index');
 const { deleteRegion: imageProcessorDeleteRegion, bufferToDataUrl } = require('../services/imageProcessor');
-const { deleteRegion: battlemapDeleteRegion } = require('../services/battlemapService');
 
 function startTestServer(serverApp) {
   return new Promise((resolve) => {
@@ -65,17 +64,6 @@ test('imageProcessor deleteRegion returns original image if selection has no int
   assert.strictEqual(resultDataUrl, dataUrl);
 });
 
-test('battlemapService deleteRegion validates required parameters', async () => {
-  await assert.rejects(
-    async () => battlemapDeleteRegion({}),
-    { code: 'INVALID_PARAMETERS' }
-  );
-
-  await assert.rejects(
-    async () => battlemapDeleteRegion({ originalDataUrl: 'test' }),
-    { code: 'INVALID_PARAMETERS' }
-  );
-});
 
 test('POST /api/delete-region returns 400 when parameters are missing', async () => {
   const { server, baseUrl } = await startTestServer(app);

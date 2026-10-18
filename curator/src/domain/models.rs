@@ -873,6 +873,24 @@ impl IntoThemes for &Theme {
     }
 }
 
+/// An overlapping 16×16 Map Section with cached physical description.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapSection {
+    pub col: u32,
+    pub row: u32,
+    pub description: String,
+}
+
+impl MapSection {
+    pub fn new(col: u32, row: u32, description: impl Into<String>) -> Self {
+        Self {
+            col,
+            row,
+            description: description.into(),
+        }
+    }
+}
+
 /// An approved battlemap filed into curated storage with dynamic theme labels and metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CuratedMap {
@@ -890,6 +908,8 @@ pub struct CuratedMap {
     pub layers: Vec<CuratedLayer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<MapSection>,
 }
 
 #[derive(Deserialize)]
@@ -913,6 +933,8 @@ struct CuratedMapHelper {
     layers: Vec<CuratedLayer>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    sections: Vec<MapSection>,
 }
 
 impl<'de> Deserialize<'de> for CuratedMap {
@@ -940,6 +962,7 @@ impl<'de> Deserialize<'de> for CuratedMap {
             grid: helper.grid.unwrap_or_default(),
             layers: helper.layers,
             description: helper.description,
+            sections: helper.sections,
         })
     }
 }
@@ -962,6 +985,7 @@ impl CuratedMap {
             grid: GridConfig::default(),
             layers: Vec::new(),
             description: None,
+            sections: Vec::new(),
         }
     }
 
@@ -997,6 +1021,11 @@ impl CuratedMap {
 
     pub fn with_optional_description(mut self, description: Option<String>) -> Self {
         self.description = description.filter(|s| !s.trim().is_empty());
+        self
+    }
+
+    pub fn with_sections(mut self, sections: Vec<MapSection>) -> Self {
+        self.sections = sections;
         self
     }
 
@@ -1052,6 +1081,8 @@ pub struct CuratedMapUpdate {
     pub layers: Option<Vec<CuratedLayer>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<GridConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sections: Option<Vec<MapSection>>,
 }
 
 impl CuratedMapUpdate {
@@ -1083,6 +1114,10 @@ impl CuratedMapUpdate {
         self
     }
 
+    pub fn with_sections(mut self, sections: Vec<MapSection>) -> Self {
+        self.sections = Some(sections);
+        self
+    }
 }
 
 static LAYER_EXCLUDE_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -2034,6 +2069,72 @@ mod tests {
         // Empty or whitespace description via with_description sets None
         let map_empty_desc = map_without_desc.clone().with_description("   \t  ");
         assert_eq!(map_empty_desc.description, None);
+    }
+
+    #[test]
+    fn test_curated_map_sections_serde_and_backward_compatibility() {
+        // Direct MapSection serde
+        let section = MapSection::new(0, 16, "Flooded subterranean corridor with damp moss");
+        let section_json = serde_json::to_string(&section).unwrap();
+        assert_eq!(
+            section_json,
+            r#"{"col":0,"row":16,"description":"Flooded subterranean corridor with damp moss"}"#
+        );
+        let parsed_section: MapSection = serde_json::from_str(&section_json).unwrap();
+        assert_eq!(parsed_section, section);
+
+        // CuratedMap without sections omits field in serialized JSON
+        let map_without_sections = CuratedMap::with_now(
+            "map_no_sec",
+            vec!["dungeon".to_string()],
+            vec!["stone".into()],
+            (1024, 1024),
+        );
+        assert!(map_without_sections.sections.is_empty());
+        let json_no_sec = serde_json::to_string(&map_without_sections).unwrap();
+        assert!(!json_no_sec.contains("\"sections\""));
+
+        let parsed_no_sec: CuratedMap = serde_json::from_str(&json_no_sec).unwrap();
+        assert!(parsed_no_sec.sections.is_empty());
+
+        // CuratedMap with sections serializes and deserializes cleanly
+        let sections = vec![
+            MapSection::new(0, 0, "Northwest armory with rusted weapon racks"),
+            MapSection::new(16, 0, "Northeast altar with blackened brazier"),
+            MapSection::new(0, 16, "Southwest prison cells with iron bars"),
+            MapSection::new(16, 16, "Southeast torture chamber with stone table"),
+        ];
+        let map_with_sections = map_without_sections.clone().with_sections(sections.clone());
+        assert_eq!(map_with_sections.sections.len(), 4);
+
+        let json_with_sections = serde_json::to_string(&map_with_sections).unwrap();
+        assert!(json_with_sections.contains("\"sections\":["));
+        assert!(json_with_sections.contains("Northwest armory"));
+
+        let parsed_with_sections: CuratedMap = serde_json::from_str(&json_with_sections).unwrap();
+        assert_eq!(parsed_with_sections.sections, sections);
+        assert_eq!(parsed_with_sections, map_with_sections);
+
+        // Backward compatibility with legacy manifest JSON lacking "sections" field
+        let legacy_manifest = r#"{
+            "id": "legacy_map_no_sections",
+            "themes": ["crypt"],
+            "tags": ["bones"],
+            "dimensions": [1024, 1024],
+            "curated_at": "2026-10-16T12:00:00Z",
+            "layers": []
+        }"#;
+        let legacy_map: CuratedMap = serde_json::from_str(legacy_manifest).unwrap();
+        assert_eq!(legacy_map.id, "legacy_map_no_sections");
+        assert_eq!(legacy_map.sections, Vec::<MapSection>::new());
+
+        // CuratedMapUpdate with sections serde
+        let update = CuratedMapUpdate::default().with_sections(vec![MapSection::new(0, 0, "Updated section")]);
+        let update_json = serde_json::to_string(&update).unwrap();
+        assert!(update_json.contains("\"sections\":["));
+        let parsed_update: CuratedMapUpdate = serde_json::from_str(&update_json).unwrap();
+        assert_eq!(parsed_update.sections.as_ref().unwrap().len(), 1);
+        assert_eq!(parsed_update.sections.as_ref().unwrap()[0].description, "Updated section");
     }
 
     #[test]

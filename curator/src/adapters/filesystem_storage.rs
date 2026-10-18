@@ -9,8 +9,8 @@ use crate::adapters::SimdImageProcessor;
 use crate::domain::{
     infer_bundle_layer_roles, validate_layers_for_curation, BenchmarkMetadata, Candidate,
     CandidateLayer, CaptionGenerator, CuratedLayer, CuratedMap, CuratedMapUpdate, DirectoryStats,
-    LayerRole, PurgeStagingResult, RedditSidecarMetadata, RejectionReason, RejectionRecord, Source,
-    StorageStats, Theme, ThemeStorageStats,
+    LayerRole, MapSection, PurgeStagingResult, RedditSidecarMetadata, RejectionReason,
+    RejectionRecord, Source, StorageStats, Theme, ThemeStorageStats,
 };
 use crate::ports::image_processor::{ImageProcessor, ResizeStrategy};
 use crate::ports::storage::{StorageError, StorageRepository};
@@ -1861,9 +1861,7 @@ impl StorageRepository for FilesystemStorage {
                 Some(trimmed.to_string())
             };
         }
-        if let Some(grid) = update.grid {
-            map.grid = grid;
-        }
+
 
         if let Some(new_layers) = update.layers {
             let role_elevation_pairs: Vec<(LayerRole, Option<i8>)> = new_layers
@@ -2020,6 +2018,69 @@ impl StorageRepository for FilesystemStorage {
             map.layers = updated_layers;
         }
 
+        if let Some(grid) = update.grid {
+            let ground_layer = map
+                .layers
+                .iter()
+                .find(|l| l.role == LayerRole::Ground)
+                .or_else(|| map.layers.first())
+                .cloned();
+            let (mut ground_w, mut ground_h) = ground_layer
+                .as_ref()
+                .map(|l| l.dimensions)
+                .filter(|&(w, h)| w > 0 && h > 0)
+                .unwrap_or(map.dimensions);
+            if ground_w == 0 || ground_h == 0 {
+                if let Some(gl) = &ground_layer {
+                    if let Ok((w, h)) = image::image_dimensions(bundle_dir.join(&gl.filename)) {
+                        ground_w = w;
+                        ground_h = h;
+                    }
+                }
+            }
+            if !grid.is_curation_eligible(ground_w, ground_h) {
+                return Err(StorageError::InvalidData(
+                    "New grid configuration yields fewer than 16×16 full Grid Cells".into(),
+                ));
+            }
+            map.grid = grid;
+        }
+
+        if let Some(sections) = update.sections {
+            map.sections = sections;
+        } else if update.grid.is_some() {
+            let ground_layer = map
+                .layers
+                .iter()
+                .find(|l| l.role == LayerRole::Ground)
+                .or_else(|| map.layers.first())
+                .cloned();
+            let (ground_w, ground_h) = ground_layer
+                .as_ref()
+                .map(|l| l.dimensions)
+                .filter(|&(w, h)| w > 0 && h > 0)
+                .unwrap_or(map.dimensions);
+            let origins = map.grid.section_origins(ground_w, ground_h);
+            let primary_theme = map.primary_theme();
+            if origins.len() <= 1 {
+                let desc = map.description.clone().unwrap_or_else(|| {
+                    CaptionGenerator::generate_with_theme_str(primary_theme, &map.tags, None)
+                });
+                map.sections = vec![MapSection::new(0, 0, desc)];
+            } else {
+                let mut secs = Vec::with_capacity(origins.len());
+                for (col, row) in origins {
+                    let desc = CaptionGenerator::generate_with_theme_str(
+                        primary_theme,
+                        &map.tags,
+                        map.description.as_deref(),
+                    );
+                    secs.push(MapSection::new(col, row, desc));
+                }
+                map.sections = secs;
+            }
+        }
+
         // Check if ground layer or description changed
         let new_ground = map
             .layers
@@ -2056,6 +2117,11 @@ impl StorageRepository for FilesystemStorage {
                     .unwrap_or(0);
                 if let Some(first) = map.layers.get_mut(primary_idx) {
                     first.caption = map.description.clone();
+                }
+                if map.sections.len() == 1 {
+                    if let Some(d) = &map.description {
+                        map.sections[0].description = d.clone();
+                    }
                 }
             }
         } else if themes_updated || tags_updated {
@@ -2282,6 +2348,30 @@ impl StorageRepository for FilesystemStorage {
                 }
             }
             stored_map.layers = curated_layers;
+            if stored_map.sections.is_empty() {
+                let (gw, gh) = stored_map.dimensions;
+                let origins = stored_map.grid.section_origins(gw, gh);
+                if !origins.is_empty() {
+                    let primary_theme = stored_map.primary_theme();
+                    if origins.len() <= 1 {
+                        let desc = stored_map.description.clone().unwrap_or_else(|| {
+                            CaptionGenerator::generate_with_theme_str(primary_theme, &stored_map.tags, None)
+                        });
+                        stored_map.sections = vec![MapSection::new(0, 0, desc)];
+                    } else {
+                        let mut secs = Vec::with_capacity(origins.len());
+                        for (c, r) in origins {
+                            let desc = CaptionGenerator::generate_with_theme_str(
+                                primary_theme,
+                                &stored_map.tags,
+                                stored_map.description.as_deref(),
+                            );
+                            secs.push(MapSection::new(c, r, desc));
+                        }
+                        stored_map.sections = secs;
+                    }
+                }
+            }
             let curated_json = serde_json::to_string_pretty(&stored_map)?;
             Self::atomic_write(
                 &curated_bundle_dir.join("manifest.json"),
@@ -2362,6 +2452,30 @@ impl StorageRepository for FilesystemStorage {
         let mut stored_map = map.clone();
         if let Some(cand) = &candidate {
             stored_map.grid = cand.grid;
+        }
+        if stored_map.sections.is_empty() {
+            let (gw, gh) = stored_map.dimensions;
+            let origins = stored_map.grid.section_origins(gw, gh);
+            if !origins.is_empty() {
+                let primary_theme = stored_map.primary_theme();
+                if origins.len() <= 1 {
+                    let desc = stored_map.description.clone().unwrap_or_else(|| {
+                        CaptionGenerator::generate_with_theme_str(primary_theme, &stored_map.tags, None)
+                    });
+                    stored_map.sections = vec![MapSection::new(0, 0, desc)];
+                } else {
+                    let mut secs = Vec::with_capacity(origins.len());
+                    for (c, r) in origins {
+                        let desc = CaptionGenerator::generate_with_theme_str(
+                            primary_theme,
+                            &stored_map.tags,
+                            stored_map.description.as_deref(),
+                        );
+                        secs.push(MapSection::new(c, r, desc));
+                    }
+                    stored_map.sections = secs;
+                }
+            }
         }
         if stored_map.layers.is_empty() {
             stored_map.layers = vec![CuratedLayer {

@@ -69,10 +69,11 @@ fn curate_test_map(
     map
 }
 
-/// Generator that records the `title` argument it receives while returning a fixed result.
+/// Generator that records the `title` and `tags` arguments it receives while returning a fixed result.
 struct RecordingDescriptionGen {
     result: Result<String, DescriptionError>,
     seen_titles: std::sync::Mutex<Vec<Option<String>>>,
+    seen_tags: std::sync::Mutex<Vec<Vec<String>>>,
 }
 
 impl RecordingDescriptionGen {
@@ -80,6 +81,7 @@ impl RecordingDescriptionGen {
         Self {
             result,
             seen_titles: std::sync::Mutex::new(Vec::new()),
+            seen_tags: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
@@ -90,13 +92,14 @@ impl DescriptionGenerator for RecordingDescriptionGen {
         &self,
         _image_bytes: &[u8],
         _filename: Option<&str>,
-        _tags: &[String],
+        tags: &[String],
         title: Option<&str>,
     ) -> Result<String, DescriptionError> {
         self.seen_titles
             .lock()
             .unwrap()
             .push(title.map(str::to_string));
+        self.seen_tags.lock().unwrap().push(tags.to_vec());
         self.result.clone()
     }
 }
@@ -512,6 +515,99 @@ async fn test_curated_describe_strictly_fails_when_unconfigured() {
         .unwrap();
     let resp_404 = app.oneshot(req_404).await.unwrap();
     assert_eq!(resp_404.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_curated_describe_never_sends_description_as_title_and_merges_tags() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let generator = Arc::new(RecordingDescriptionGen::new(Ok(
+        "Rustic wooden tavern with roaring fireplace.".to_string(),
+    )));
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
+    let app = create_router(state);
+
+    let stored = curate_test_map(
+        &storage,
+        "describe_map_title",
+        Theme::Tavern,
+        vec!["wooden".into(), "fireplace".into()],
+        Some("A cozy roadside tavern description that must not become a title"),
+    );
+
+    // Empty body: fall back to the stored tags and the suggestion cache, never the description.
+    let req = Request::builder()
+        .uri("/api/curated/describe_map_title/describe")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert_eq!(
+        *generator.seen_titles.lock().unwrap(),
+        vec![None],
+        "curated describe must not forward the stored description as the title"
+    );
+    assert_eq!(
+        *generator.seen_tags.lock().unwrap(),
+        vec![stored.tags.clone()],
+        "curated describe must merge stored themes and tags"
+    );
+    assert!(
+        !generator.seen_tags.lock().unwrap()[0]
+            .iter()
+            .any(|tag| tag.contains("roadside")),
+        "stored description must never leak into tags"
+    );
+}
+
+#[tokio::test]
+async fn test_curated_describe_merges_requested_themes_and_tags() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let generator = Arc::new(RecordingDescriptionGen::new(Ok(
+        "Merged description.".to_string(),
+    )));
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
+    let app = create_router(state);
+
+    curate_test_map(
+        &storage,
+        "describe_map_merge",
+        Theme::Dungeon,
+        vec!["stone".into()],
+        Some("Stored description"),
+    );
+
+    let req = Request::builder()
+        .uri("/api/curated/describe_map_merge/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "themes": ["flooded"],
+                "tags": ["stone", "Torchlit", "flooded"]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert_eq!(*generator.seen_titles.lock().unwrap(), vec![None]);
+    assert_eq!(
+        *generator.seen_tags.lock().unwrap(),
+        vec![vec![
+            "flooded".to_string(),
+            "stone".to_string(),
+            "Torchlit".to_string(),
+        ]]
+    );
 }
 
 #[tokio::test]

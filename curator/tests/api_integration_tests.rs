@@ -57,6 +57,29 @@ impl DescriptionGenerator for TaggedMockDescriptionGen {
     }
 }
 
+/// Records the `tags` and `title` arguments passed to the generator.
+#[derive(Default)]
+struct CapturingDescriptionGen {
+    calls: std::sync::Mutex<Vec<(Vec<String>, Option<String>)>>,
+}
+
+#[async_trait]
+impl DescriptionGenerator for CapturingDescriptionGen {
+    async fn generate_description(
+        &self,
+        _image_bytes: &[u8],
+        _filename: Option<&str>,
+        tags: &[String],
+        title: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((tags.to_vec(), title.map(str::to_string)));
+        Ok("Captured physical description.".to_string())
+    }
+}
+
 fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
@@ -2163,6 +2186,58 @@ async fn test_describe_candidate_fallback_when_no_api_key() {
     let resp_post_empty = app.oneshot(req_post_empty).await.unwrap();
     assert_eq!(resp_post_empty.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+#[tokio::test]
+async fn test_describe_candidate_passes_candidate_title_and_merged_tags() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let generator = Arc::new(CapturingDescriptionGen::default());
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
+    state.theme_suggestions_cache.write().await.insert(
+        "cand_desc_title".to_string(),
+        vec!["crypt".to_string(), "flooded".to_string()],
+    );
+    let app = create_router(state);
+
+    let cand = Candidate::with_now(
+        "cand_desc_title",
+        Source::Reddit,
+        "cand_desc_title.png",
+        (1024, 1024),
+    )
+    .with_title("Flooded Stone Dungeon Crypt [50x50]");
+    storage
+        .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
+        .unwrap();
+
+    let payload = json!({
+        "tags": ["stone", "Crypt", "  "]
+    });
+
+    let req = Request::builder()
+        .uri("/api/staging/cand_desc_title/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let calls = generator.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "generator should be called exactly once");
+    assert_eq!(
+        calls[0].1.as_deref(),
+        Some("Flooded Stone Dungeon Crypt [50x50]"),
+        "describe must forward the candidate title, not theme suggestions"
+    );
+    assert_eq!(
+        calls[0].0,
+        vec!["crypt", "flooded", "stone"],
+        "describe must normalize and merge cached themes with payload tags"
+    );
+}
+
 #[tokio::test]
 async fn test_describe_candidate_with_payload_themes_and_tags() {
     let dir = tempdir().unwrap();

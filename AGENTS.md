@@ -110,6 +110,7 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
 |**Build Frontend**|`cd client && npm run build`|Compiles Vite production bundle|
 |**Test Curator**|`cargo test --manifest-path curator/Cargo.toml`|Runs Curator Rust test suite (unit + integration)|
 |**Run Curator Service**|`cargo run --manifest-path curator/Cargo.toml`|Starts Curator Axum web service on port `3002`|
+|**Deploy Curator Locally**|`just curator-deploy`|Publishes the arm64 Curator image for the current commit to `ghcr.io/knutzuidema/curator:<commit>` and rolls the cluster onto that exact tag; `just curator-publish` publishes without rolling, `just curator-rollout <tag>` rolls an already published tag (see `deploy/curator/README.md` §4.3)|
 
 ---
 

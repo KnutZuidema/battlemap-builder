@@ -8,6 +8,7 @@ use axum::{
     },
     Json,
 };
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -16,9 +17,9 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{
-    BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
-    CaptionGenerator, CuratedMap, CuratedMapUpdate, CustomPrompt, LayerRole, MapSection,
-    PurgeStagingResult, RedditHarvestRequest, RejectionReason, StorageStats, Theme,
+    crop_section_box, synthesize_sections, BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata,
+    Candidate, CandidateLayer, CaptionGenerator, CuratedMap, CuratedMapUpdate, CustomPrompt,
+    LayerRole, PurgeStagingResult, RedditHarvestRequest, RejectionReason, StorageStats, Theme,
 };
 use crate::ports::storage::StorageError;
 use crate::ports::cost_tracker::CostStats;
@@ -176,40 +177,19 @@ pub async fn patch_curated(
         let primary_theme = effective_themes.first().map(|s| s.as_str()).unwrap_or("dungeon");
         let effective_desc = update.description.as_deref().or(current_map.description.as_deref());
 
-        let new_sections: Vec<MapSection> = if section_origins.len() <= 1 {
-            let desc = if let Some(d) = effective_desc {
-                d.to_string()
-            } else if let (Some(adapter), Some(bytes)) = (state.openrouter_client(), ground_bytes.as_ref()) {
-                match adapter
-                    .generate_battlemap_description(bytes, "image/png", effective_themes, effective_tags)
-                    .await
-                {
-                    Ok(d) if !d.trim().is_empty() => d,
-                    _ => CaptionGenerator::generate_with_theme_str(primary_theme, effective_tags, None),
-                }
-            } else {
-                CaptionGenerator::generate_with_theme_str(primary_theme, effective_tags, None)
-            };
-            vec![MapSection::new(0, 0, desc)]
-        } else {
-            let mut secs = Vec::with_capacity(section_origins.len());
-            for (col, row) in section_origins {
-                let x = new_grid.offset_x + col * new_grid.cell_size_px;
-                let y = new_grid.offset_y + row * new_grid.cell_size_px;
-                let w = 16 * new_grid.cell_size_px;
-                let h = 16 * new_grid.cell_size_px;
-
+        // Vision descriptions are generated per section only when the grid yields several
+        // sections; a single section reuses the map description instead.
+        let mut section_descriptions: HashMap<(u32, u32), String> = HashMap::new();
+        if section_origins.len() > 1 {
+            for &(col, row) in &section_origins {
                 let section_png = ground_img.as_ref().and_then(|img| {
-                    if x + w <= img.width() && y + h <= img.height() {
-                        let cropped = img.crop_imm(x, y, w, h);
+                    crop_section_box(img, &new_grid, col, row).and_then(|cropped| {
                         let mut bytes = Vec::new();
                         cropped
                             .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
                             .ok()
                             .map(|_| bytes)
-                    } else {
-                        None
-                    }
+                    })
                 });
 
                 let sec_desc = if let (Some(adapter), Some(sec_bytes)) = (state.openrouter_client(), section_png) {
@@ -232,12 +212,29 @@ pub async fn patch_curated(
                     )
                 };
 
-                secs.push(MapSection::new(col, row, sec_desc));
+                section_descriptions.insert((col, row), sec_desc);
             }
-            secs
-        };
+        }
 
-        update.sections = Some(new_sections);
+        update.sections = Some(synthesize_sections(
+            &section_origins,
+            || {
+                effective_desc.map(str::to_string).unwrap_or_else(|| {
+                    CaptionGenerator::generate_with_theme_str(primary_theme, effective_tags, None)
+                })
+            },
+            |col, row| {
+                section_descriptions
+                    .remove(&(col, row))
+                    .unwrap_or_else(|| {
+                        CaptionGenerator::generate_with_theme_str(
+                            primary_theme,
+                            effective_tags,
+                            effective_desc,
+                        )
+                    })
+            },
+        ));
     }
 
     let updated = state.storage.update_curated(&id, update)?;
@@ -780,9 +777,11 @@ pub async fn post_curate(
     };
 
     let section_origins = candidate.grid.section_origins(ground_w, ground_h);
-    let sections: Vec<MapSection> = if section_origins.len() <= 1 {
-        vec![MapSection::new(0, 0, description.clone())]
-    } else {
+
+    // Vision descriptions are generated per section only when the grid yields several sections;
+    // a single section reuses the already computed map description instead.
+    let mut section_descriptions: HashMap<(u32, u32), String> = HashMap::new();
+    if section_origins.len() > 1 {
         let ground_layer_idx = layers_to_check
             .iter()
             .find(|l| l.role == LayerRole::Ground)
@@ -796,24 +795,15 @@ pub async fn post_curate(
             .ok()
             .and_then(|bytes| image::load_from_memory(&bytes).ok());
 
-        let mut secs = Vec::with_capacity(section_origins.len());
-        for (col, row) in section_origins {
-            let x = candidate.grid.offset_x + col * candidate.grid.cell_size_px;
-            let y = candidate.grid.offset_y + row * candidate.grid.cell_size_px;
-            let w = 16 * candidate.grid.cell_size_px;
-            let h = 16 * candidate.grid.cell_size_px;
-
+        for &(col, row) in &section_origins {
             let section_png = ground_img.as_ref().and_then(|img| {
-                if x + w <= img.width() && y + h <= img.height() {
-                    let cropped = img.crop_imm(x, y, w, h);
+                crop_section_box(img, &candidate.grid, col, row).and_then(|cropped| {
                     let mut bytes = Vec::new();
                     cropped
                         .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
                         .ok()
                         .map(|_| bytes)
-                } else {
-                    None
-                }
+                })
             });
 
             let sec_desc = if let (Some(adapter), Some(sec_bytes)) = (state.openrouter_client(), section_png) {
@@ -836,10 +826,25 @@ pub async fn post_curate(
                 )
             };
 
-            secs.push(MapSection::new(col, row, sec_desc));
+            section_descriptions.insert((col, row), sec_desc);
         }
-        secs
-    };
+    }
+
+    let sections = synthesize_sections(
+        &section_origins,
+        || description.clone(),
+        |col, row| {
+            section_descriptions
+                .remove(&(col, row))
+                .unwrap_or_else(|| {
+                    CaptionGenerator::generate_with_theme_str(
+                        primary_theme,
+                        &payload.tags,
+                        candidate.title.as_deref(),
+                    )
+                })
+        },
+    );
 
     let curated = CuratedMap::with_now(
         &payload.id,

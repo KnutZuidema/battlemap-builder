@@ -129,9 +129,6 @@
     const MAX_ZOOM = 5.0;
     const PREFETCH_AHEAD = 3;
 
-    // Per-candidate grid settings cache (candidateId -> { size, offset: { x, y } })
-    const candidateGridSettings = new Map();
-
     const MODEL_PRICES = {
         "google/gemini-3.1-flash-image": 0.07,
         "google/gemini-3.1-flash-lite-image": 0.035,
@@ -1039,11 +1036,7 @@
         state.currentLayerIndex = 0;
         const candidate = state.candidates[index];
         fetchThemeSuggestions(candidate);
-        if (candidateGridSettings.has(candidate.id)) {
-            const saved = candidateGridSettings.get(candidate.id);
-            state.gridSize = saved.size;
-            state.gridOffset = { ...saved.offset };
-        } else if (candidate.grid) {
+        if (candidate.grid) {
             state.gridSize = candidate.grid.cell_size_px ?? 64;
             state.gridOffset = {
                 x: candidate.grid.offset_x ?? 0,
@@ -2412,7 +2405,6 @@
 
             // Remove curated item from local queue and memory cache
             state.imageCache.delete(candidate.id);
-            candidateGridSettings.delete(candidate.id);
             if (candidate.layers) {
                 candidate.layers.forEach((_, idx) => {
                     state.imageCache.delete(`${candidate.id}_layer_${idx}`);
@@ -2544,7 +2536,6 @@
 
             // Remove rejected item from local queue and cache
             state.imageCache.delete(candidate.id);
-            candidateGridSettings.delete(candidate.id);
             if (candidate.layers) {
                 candidate.layers.forEach((_, idx) => {
                     state.imageCache.delete(`${candidate.id}_layer_${idx}`);
@@ -5288,13 +5279,8 @@
         state.libraryFullscreenIndex = clampedIndex;
         state.libraryFullscreenMap = map;
 
-        // Restore or initialize grid settings for this curated map
-        const gridKey = `curated_${map.id}`;
-        if (candidateGridSettings.has(gridKey)) {
-            const saved = candidateGridSettings.get(gridKey);
-            state.libraryFullscreenGridSize = saved.size;
-            state.libraryFullscreenGridOffset = { ...saved.offset };
-        } else if (map.grid) {
+        // Restore or initialize grid settings for this curated map from the persisted grid
+        if (map.grid) {
             state.libraryFullscreenGridSize = map.grid.cell_size_px ?? 64;
             state.libraryFullscreenGridOffset = {
                 x: map.grid.offset_x ?? 0,
@@ -5628,10 +5614,6 @@
                 },
             };
             map.grid = { ...payload.grid };
-            candidateGridSettings.set(`curated_${map.id}`, {
-                size: state.libraryFullscreenGridSize,
-                offset: { ...state.libraryFullscreenGridOffset },
-            });
 
             clearTimeout(saveFullscreenGridTimeout);
             saveFullscreenGridTimeout = setTimeout(async () => {
@@ -7358,10 +7340,6 @@
                     offset_y: state.gridOffset.y,
                 };
                 cand.grid = { ...payload };
-                candidateGridSettings.set(cand.id, {
-                    size: state.gridSize,
-                    offset: { ...state.gridOffset },
-                });
 
                 clearTimeout(saveCandidateGridTimeout);
                 saveCandidateGridTimeout = setTimeout(async () => {

@@ -8,10 +8,11 @@ use chrono::{DateTime, Utc};
 use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
 
 use crate::domain::{
-    infer_bundle_layer_roles, validate_layers_for_curation, BenchmarkMetadata, Candidate,
-    CandidateLayer, CaptionGenerator, CuratedLayer, CuratedMap, CuratedMapUpdate, DirectoryStats,
-    GridConfig, LayerRole, MapSection, PurgeStagingResult, RedditSidecarMetadata, RejectionReason,
-    RejectionRecord, Source, StorageStats, Theme, ThemeStorageStats,
+    crop_section_box, infer_bundle_layer_roles, synthesize_sections, validate_layers_for_curation,
+    BenchmarkMetadata, Candidate, CandidateLayer, CaptionGenerator, CuratedLayer, CuratedMap,
+    CuratedMapUpdate, DirectoryStats, GridConfig, LayerRole, MapSection, PurgeStagingResult,
+    RedditSidecarMetadata, RejectionReason, RejectionRecord, Source, StorageStats, Theme,
+    ThemeStorageStats,
 };
 use crate::ports::storage::{StorageError, StorageRepository};
 
@@ -179,43 +180,31 @@ impl FilesystemStorage {
             }
         }
     }
-    /// Dynamically crop a 16x16 map section and Lanczos3 resample to exact 1024x1024 PNG bytes without letterbox padding bars.
+    /// Crops the exact `16 × 16` Grid Cell Map Section box and Lanczos3-resamples it to exact
+    /// 1024×1024 PNG bytes without letterbox padding bars.
+    ///
+    /// Returns [`StorageError::InvalidData`] when the exact box does not fit inside the image, so
+    /// the LoRA ZIP export skips the section (with a warning) instead of a scale-changing crop.
     fn crop_and_resample_section(
         dynamic_img: &image::DynamicImage,
         grid: &GridConfig,
         col: u32,
         row: u32,
     ) -> Result<Vec<u8>, StorageError> {
-        let cell_size = if grid.cell_size_px > 0 {
-            grid.cell_size_px
-        } else {
-            64
-        };
-        let sec_w = 16 * cell_size;
-        let sec_h = 16 * cell_size;
-        let start_x = grid.offset_x + col * cell_size;
-        let start_y = grid.offset_y + row * cell_size;
-
-        let img_w = dynamic_img.width();
-        let img_h = dynamic_img.height();
-        if img_w == 0 || img_h == 0 {
+        if dynamic_img.width() == 0 || dynamic_img.height() == 0 {
             return Err(StorageError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Image dimensions are 0",
             )));
         }
 
-        let (crop_x, crop_y, crop_w, crop_h) = if start_x + sec_w <= img_w && start_y + sec_h <= img_h {
-            (start_x, start_y, sec_w, sec_h)
-        } else {
-            let actual_x = start_x.min(img_w.saturating_sub(1));
-            let actual_y = start_y.min(img_h.saturating_sub(1));
-            let actual_w = sec_w.min(img_w.saturating_sub(actual_x)).max(1);
-            let actual_h = sec_h.min(img_h.saturating_sub(actual_y)).max(1);
-            (actual_x, actual_y, actual_w, actual_h)
-        };
-
-        let cropped = dynamic_img.crop_imm(crop_x, crop_y, crop_w, crop_h);
+        let cropped = crop_section_box(dynamic_img, grid, col, row).ok_or_else(|| {
+            StorageError::InvalidData(format!(
+                "16x16 Map Section ({col}, {row}) does not fit inside the {}x{} image",
+                dynamic_img.width(),
+                dynamic_img.height()
+            ))
+        })?;
         let cropped_rgba = cropped.to_rgba8();
 
         let mut resizer = Resizer::new();
@@ -688,25 +677,28 @@ impl FilesystemStorage {
                 let effective_sections: Vec<MapSection> = if !map.sections.is_empty() {
                     map.sections.clone()
                 } else {
-                    let origins = map.grid.section_origins(dynamic_img.width(), dynamic_img.height());
-                    if origins.len() <= 1 {
-                        let desc = map.description.clone().unwrap_or_else(|| {
-                            CaptionGenerator::generate_with_theme_str(theme_str, &map.tags, None)
-                        });
-                        vec![MapSection::new(0, 0, desc)]
-                    } else {
-                        origins
-                            .into_iter()
-                            .map(|(col, row)| {
-                                let desc = CaptionGenerator::generate_with_theme_str(
+                    let origins = map
+                        .grid
+                        .section_origins(dynamic_img.width(), dynamic_img.height());
+                    synthesize_sections(
+                        &origins,
+                        || {
+                            map.description.clone().unwrap_or_else(|| {
+                                CaptionGenerator::generate_with_theme_str(
                                     theme_str,
                                     &map.tags,
-                                    map.description.as_deref(),
-                                );
-                                MapSection::new(col, row, desc)
+                                    None,
+                                )
                             })
-                            .collect()
-                    }
+                        },
+                        |_, _| {
+                            CaptionGenerator::generate_with_theme_str(
+                                theme_str,
+                                &map.tags,
+                                map.description.as_deref(),
+                            )
+                        },
+                    )
                 };
 
                 for section in effective_sections {
@@ -1234,6 +1226,9 @@ impl FilesystemStorage {
 
         let bundle_dir = target_base_dir.join(&candidate.id);
         std::fs::create_dir_all(&bundle_dir)?;
+        // First persistence of this candidate: only here may the grid be auto-seeded from the
+        // parsed dimensions. Later saves must preserve an explicit user-selected grid.
+        let is_new_bundle = !bundle_dir.join("manifest.json").is_file();
 
         let mut stored_candidate = candidate.clone();
         // Do not overwrite pixel dimensions with parsed grid dimensions.
@@ -1305,10 +1300,11 @@ impl FilesystemStorage {
                 stored_candidate.dimensions = first.dimensions;
             }
         }
-        if stored_candidate.grid == crate::domain::GridConfig::default() {
+        if is_new_bundle && stored_candidate.grid == GridConfig::default() {
             if let Some(parsed) = stored_candidate.parsed_dimensions {
                 if stored_candidate.dimensions != (0, 0) {
-                    stored_candidate.grid = crate::domain::GridConfig::auto_seed(parsed, stored_candidate.dimensions);
+                    stored_candidate.grid =
+                        GridConfig::auto_seed(parsed, stored_candidate.dimensions);
                 }
             }
         }
@@ -1506,13 +1502,6 @@ impl StorageRepository for FilesystemStorage {
                                 .map(|l| l.filename.as_str())
                                 .unwrap_or("0.png");
                             candidate.filename = format!("{}/{first_file}", candidate.id);
-                        }
-                        if candidate.grid == crate::domain::GridConfig::default() {
-                            if let Some(parsed) = candidate.parsed_dimensions {
-                                if candidate.dimensions != (0, 0) {
-                                    candidate.grid = crate::domain::GridConfig::auto_seed(parsed, candidate.dimensions);
-                                }
-                            }
                         }
                         known_ids.insert(candidate.id.clone());
                         candidates.push(candidate);
@@ -2201,23 +2190,22 @@ impl StorageRepository for FilesystemStorage {
                 .unwrap_or(map.dimensions);
             let origins = map.grid.section_origins(ground_w, ground_h);
             let primary_theme = map.primary_theme();
-            if origins.len() <= 1 {
-                let desc = map.description.clone().unwrap_or_else(|| {
-                    CaptionGenerator::generate_with_theme_str(primary_theme, &map.tags, None)
-                });
-                map.sections = vec![MapSection::new(0, 0, desc)];
-            } else {
-                let mut secs = Vec::with_capacity(origins.len());
-                for (col, row) in origins {
-                    let desc = CaptionGenerator::generate_with_theme_str(
+            let sections = synthesize_sections(
+                &origins,
+                || {
+                    map.description.clone().unwrap_or_else(|| {
+                        CaptionGenerator::generate_with_theme_str(primary_theme, &map.tags, None)
+                    })
+                },
+                |_, _| {
+                    CaptionGenerator::generate_with_theme_str(
                         primary_theme,
                         &map.tags,
                         map.description.as_deref(),
-                    );
-                    secs.push(MapSection::new(col, row, desc));
-                }
-                map.sections = secs;
-            }
+                    )
+                },
+            );
+            map.sections = sections;
         }
 
         let description_changed = old_description != map.description;
@@ -2464,26 +2452,27 @@ impl StorageRepository for FilesystemStorage {
             if stored_map.sections.is_empty() {
                 let (gw, gh) = stored_map.dimensions;
                 let origins = stored_map.grid.section_origins(gw, gh);
-                if !origins.is_empty() {
-                    let primary_theme = stored_map.primary_theme();
-                    if origins.len() <= 1 {
-                        let desc = stored_map.description.clone().unwrap_or_else(|| {
-                            CaptionGenerator::generate_with_theme_str(primary_theme, &stored_map.tags, None)
-                        });
-                        stored_map.sections = vec![MapSection::new(0, 0, desc)];
-                    } else {
-                        let mut secs = Vec::with_capacity(origins.len());
-                        for (c, r) in origins {
-                            let desc = CaptionGenerator::generate_with_theme_str(
+                let primary_theme = stored_map.primary_theme();
+                let sections = synthesize_sections(
+                    &origins,
+                    || {
+                        stored_map.description.clone().unwrap_or_else(|| {
+                            CaptionGenerator::generate_with_theme_str(
                                 primary_theme,
                                 &stored_map.tags,
-                                stored_map.description.as_deref(),
-                            );
-                            secs.push(MapSection::new(c, r, desc));
-                        }
-                        stored_map.sections = secs;
-                    }
-                }
+                                None,
+                            )
+                        })
+                    },
+                    |_, _| {
+                        CaptionGenerator::generate_with_theme_str(
+                            primary_theme,
+                            &stored_map.tags,
+                            stored_map.description.as_deref(),
+                        )
+                    },
+                );
+                stored_map.sections = sections;
             }
             let curated_json = serde_json::to_string_pretty(&stored_map)?;
             Self::atomic_write(
@@ -2557,26 +2546,27 @@ impl StorageRepository for FilesystemStorage {
         if stored_map.sections.is_empty() {
             let (gw, gh) = stored_map.dimensions;
             let origins = stored_map.grid.section_origins(gw, gh);
-            if !origins.is_empty() {
-                let primary_theme = stored_map.primary_theme();
-                if origins.len() <= 1 {
-                    let desc = stored_map.description.clone().unwrap_or_else(|| {
-                        CaptionGenerator::generate_with_theme_str(primary_theme, &stored_map.tags, None)
-                    });
-                    stored_map.sections = vec![MapSection::new(0, 0, desc)];
-                } else {
-                    let mut secs = Vec::with_capacity(origins.len());
-                    for (c, r) in origins {
-                        let desc = CaptionGenerator::generate_with_theme_str(
+            let primary_theme = stored_map.primary_theme();
+            let sections = synthesize_sections(
+                &origins,
+                || {
+                    stored_map.description.clone().unwrap_or_else(|| {
+                        CaptionGenerator::generate_with_theme_str(
                             primary_theme,
                             &stored_map.tags,
-                            stored_map.description.as_deref(),
-                        );
-                        secs.push(MapSection::new(c, r, desc));
-                    }
-                    stored_map.sections = secs;
-                }
-            }
+                            None,
+                        )
+                    })
+                },
+                |_, _| {
+                    CaptionGenerator::generate_with_theme_str(
+                        primary_theme,
+                        &stored_map.tags,
+                        stored_map.description.as_deref(),
+                    )
+                },
+            );
+            stored_map.sections = sections;
         }
         if stored_map.layers.is_empty() {
             stored_map.layers = vec![CuratedLayer {
@@ -4273,5 +4263,53 @@ mod tests {
         let empty_zip = storage.export_selected_lora_dataset(&[]).unwrap();
         let empty_archive = zip::ZipArchive::new(std::io::Cursor::new(empty_zip)).unwrap();
         assert_eq!(empty_archive.len(), 0);
+    }
+
+    #[test]
+    fn test_grid_auto_seed_runs_once_and_preserves_explicit_reset() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+
+        // Candidate parsed as a 40x30 grid on a 2000x1500 image (2000/40 = 50px cells).
+        let mut candidate =
+            Candidate::with_now("cand_seed", Source::Reddit, "cand_seed.png", (2000, 1500));
+        candidate.parsed_dimensions = Some((40, 30));
+        storage
+            .save_staging(&candidate, &create_test_png(2000, 1500))
+            .unwrap();
+
+        // First persistence auto-seeds and persists the grid.
+        let seeded = storage
+            .list_staging()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.id == "cand_seed")
+            .expect("candidate present in staging");
+        assert_eq!(seeded.grid, GridConfig::new(50, 0, 0));
+
+        // An explicit user reset to {64, 0, 0} must survive later loads unchanged.
+        storage
+            .update_staging_grid("cand_seed", GridConfig::new(64, 0, 0))
+            .unwrap();
+        let reloaded = storage
+            .list_staging()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.id == "cand_seed")
+            .expect("candidate present in staging");
+        assert_eq!(reloaded.grid, GridConfig::new(64, 0, 0));
+        assert_eq!(reloaded.grid, GridConfig::default());
+
+        // Re-saving an already persisted candidate also leaves the explicit grid untouched.
+        storage
+            .save_staging(&reloaded, &create_test_png(10, 10))
+            .unwrap();
+        let resaved = storage
+            .list_staging()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.id == "cand_seed")
+            .expect("candidate present in staging");
+        assert_eq!(resaved.grid, GridConfig::new(64, 0, 0));
     }
 }

@@ -152,6 +152,7 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
 - **Upfront Layer Validation Gate**: Triggered upon pressing `Enter` or clicking **Curate**:
   - Candidate must have at least 1 included layer (blocked with danger toast if all layers have role `exclude`).
   - Candidate must not contain any included layer with role `unassigned` (blocked with danger toast; automatically focuses and scrolls to that layer card in the filmstrip deck, opening role labeling mode `1-6`).
+  - Candidate Ground layer must span at least 16×16 full Grid Cells under its persisted Grid Configuration (blocked with a danger toast naming the lattice dimensions; minimum 16×16 required for curation).
   - The curate decision modal only opens when layer validation passes.
 - **Interactive Curate Decision Modal (`#curate-decision-modal`)**:
   - **AI Vision Theme Suggestions**: Asynchronously queries OpenRouter vision models (`POST /api/staging/:id/suggest-themes`) to provide high-signal theme cards. Reviewers accept (`ArrowRight`), reject (`ArrowLeft`), or undo (`Backspace` / `ArrowUp`) suggestion cards.
@@ -166,7 +167,7 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
 - **Flat Curated Storage Structure & Reference Provider Scoring**:
   - Assets are stored under `data/curated/<id>/manifest.json` with deterministically named layer files (`0_ground.png`, `1_upper_1.png`). Dynamic 16×16 MapSection LoRA dataset ZIP export is generated on demand without storing redundant `<id>_lora1024` disk files.
   - **Description Persistence**: `description` is saved in `manifest.json`, the primary Ground layer's `caption` matches the description, and dynamic LoRA dataset export incorporates each section's physical description alongside prompt triggers and tags. Legacy manifests lacking `"description"` deserialize cleanly with `None`.
-  - **Reference Provider Prompt Keyword Scoring**: `ReferenceProvider::score_curated_map_for_prompt` scores prompt keyword overlap against curated maps (+2 points for themes, +1 point for tags, +1 point per matching word in description) to select the optimal curated few-shot orthographic perspective conditioning image for benchmark runs and map generation.
+  - **Reference Provider Section-Aware Scoring**: `ReferenceProvider::score_curated_section_for_prompt` scores prompt keyword overlap against every `(CuratedMap, MapSection)` pair (+2 points for themes, +1 point for tags, +1 point per matching word in the section's Physical Description) and conditions benchmark runs and map generation on that section's exact 16×16 Grid Cell box cropped from the Ground layer. Theme-only resolution selects the most recently curated map's center-most section. A section whose exact box does not fit the loaded image is unresolvable: reference conditioning falls back to the static reference, and the LoRA ZIP export logs a warning and skips that section.
   - Eliminates redundant nested theme directories (`data/curated/<theme>/<id>/`), enabling zero-copy atomic file migrations and multi-theme associations.
 ---
 

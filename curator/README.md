@@ -181,13 +181,14 @@ data/
   - **Primary Layer Caption**: The primary layer (Ground role) `caption` field matches and retains the curated description.
   - **Dynamic LoRA Dataset Export**: LoRA dataset export dynamically crops and Lanczos3-resamples each 16×16 MapSection on demand from the Ground layer into `{theme}/{id}_c{col}_r{row}_lora1024.png` (exact 1024×1024, zero padding bars) and `{theme}/{id}_c{col}_r{row}_lora1024.txt` companion captions with per-section physical descriptions.
   - **Backward Compatibility & Legacy Deserialization**: Legacy `manifest.json` files lacking the `"description"` field deserialize cleanly (with `description: None`), and `GET /api/curated` automatically ensures caption compatibility without errors.
-- **Reference Provider Prompt Keyword Scoring (`ReferenceProvider`)**:
-  - Curated map descriptions are directly leveraged in the benchmark and generation pipeline for few-shot orthographic perspective conditioning.
-  - `ReferenceProvider::score_curated_map_for_prompt` scores keyword overlap between generation prompts and curated maps:
+- **Reference Provider Prompt Keyword Scoring & Section Cropping (`ReferenceProvider`)**:
+  - Curated map sections and physical descriptions are directly leveraged in the benchmark and generation pipeline for few-shot orthographic perspective conditioning.
+  - `ReferenceProvider::score_curated_section_for_prompt` scores keyword overlap between generation prompts and `(CuratedMap, MapSection)` pairs:
     - **Theme match**: +2 points per matching theme.
     - **Tag match**: +1 point per matching tag.
-    - **Description match**: +1 point per matching word in `description`.
-  - The highest scoring curated map is selected as a reference image, enabling fine-grained conditioning based on architectural details (e.g., "sarcophagus", "throne", "stalagmites").
+    - **Section description match**: +1 point per matching word in `section.description`.
+  - The highest scoring `(CuratedMap, MapSection)` pair is selected, and its exact 16×16 Grid Cell box is cropped from the Ground layer and Lanczos3-resampled.
+  - Theme-only resolution selects the most recently curated map and its center-most 16×16 section.
 - **Deterministic Layer Filenames**: Layers are saved with standardized names: `<index>_<role>[_<elevation>].<ext>` (e.g. `0_ground.png`, `1_upper_1.png`, `2_basement_-1.png`).
 - **Atomic Operations**: Files are written and moved atomically (`atomic_write`, `atomic_move`), ensuring crash-safe state updates.
 - **Backward Compatibility**: API routes serve curated images by both direct ID (`/api/image/curated/<id>`) and legacy theme routes (`/api/image/curated/<theme>/<id>`).

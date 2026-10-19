@@ -1,0 +1,1193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DUNGEON FORGE · LoRA Dataset Viewer</title>
+<style>
+  :root {
+    --bg: #0b0f17;
+    --panel: rgba(255, 255, 255, 0.035);
+    --panel-strong: rgba(255, 255, 255, 0.06);
+    --border: rgba(255, 255, 255, 0.09);
+    --fg: #e6edf6;
+    --muted: #8b98ab;
+    --amber: #f59e0b;
+    --cyan: #22d3ee;
+    --danger: #fb7185;
+    --radius: 14px;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 700px at 15% -10%, rgba(245, 158, 11, 0.08), transparent 60%),
+      radial-gradient(900px 600px at 100% 110%, rgba(34, 211, 238, 0.07), transparent 60%),
+      var(--bg);
+    color: var(--fg);
+    font: 14px/1.5 "Plus Jakarta Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  code, .mono { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(11, 15, 23, 0.72);
+    backdrop-filter: blur(14px);
+    flex-wrap: wrap;
+  }
+
+  .brand { font-weight: 700; letter-spacing: 0.08em; font-size: 12px; text-transform: uppercase; }
+  .brand span { color: var(--amber); }
+  .spacer { flex: 1 1 auto; }
+
+  .btn {
+    appearance: none;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--fg);
+    border-radius: 10px;
+    padding: 7px 12px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .btn:hover:not(:disabled) { background: var(--panel-strong); border-color: rgba(255, 255, 255, 0.18); }
+  .btn:disabled { opacity: 0.45; cursor: default; }
+  .btn.primary { background: rgba(245, 158, 11, 0.16); border-color: rgba(245, 158, 11, 0.45); color: #fcd9a0; }
+  .btn.primary:hover:not(:disabled) { background: rgba(245, 158, 11, 0.26); }
+  .btn.active { background: rgba(34, 211, 238, 0.18); border-color: rgba(34, 211, 238, 0.5); color: #a5f3fc; }
+  .btn.icon { padding: 7px 9px; }
+
+  input[type="search"], select {
+    background: rgba(0, 0, 0, 0.28);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 10px;
+    padding: 7px 11px;
+    font: inherit;
+    font-size: 13px;
+    min-width: 0;
+  }
+  input[type="search"] { width: 220px; }
+  input[type="search"]:focus, select:focus { outline: none; border-color: rgba(34, 211, 238, 0.55); }
+
+  .status { font-size: 12px; color: var(--muted); }
+  .status.error { color: var(--danger); }
+
+  /* ---------- main ---------- */
+  main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 360px;
+    min-height: 0;
+  }
+
+  .stage {
+    position: relative;
+    overflow: hidden;
+    background:
+      linear-gradient(45deg, rgba(255, 255, 255, 0.018) 25%, transparent 25%, transparent 75%, rgba(255, 255, 255, 0.018) 75%),
+      linear-gradient(45deg, rgba(255, 255, 255, 0.018) 25%, transparent 25%, transparent 75%, rgba(255, 255, 255, 0.018) 75%);
+    background-size: 32px 32px;
+    background-position: 0 0, 16px 16px;
+    cursor: grab;
+    user-select: none;
+    touch-action: none;
+  }
+  .stage.dragging { cursor: grabbing; }
+  body:not(.has-data) .stage { cursor: default; }
+
+  .canvas-layer {
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform-origin: 0 0;
+    will-change: transform;
+  }
+  .canvas-layer img {
+    display: block;
+    max-width: none;
+    image-rendering: auto;
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
+  }
+  .grid-overlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    display: none;
+    --lw: 1px;
+    background-image:
+      repeating-linear-gradient(to right, rgba(34, 211, 238, 0.38) 0 var(--lw), transparent var(--lw) 64px),
+      repeating-linear-gradient(to bottom, rgba(34, 211, 238, 0.38) 0 var(--lw), transparent var(--lw) 64px);
+  }
+  body.show-grid .grid-overlay { display: block; }
+
+  .stage-hud {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 6px 10px;
+    border-radius: 10px;
+    background: rgba(11, 15, 23, 0.78);
+    border: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--muted);
+    backdrop-filter: blur(10px);
+  }
+  .stage-hud b { color: var(--fg); font-weight: 600; }
+
+  .empty-state {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    text-align: center;
+    padding: 24px;
+  }
+  .empty-state h1 { margin: 0; font-size: 20px; letter-spacing: 0.02em; }
+  .empty-state p { margin: 0; color: var(--muted); max-width: 460px; }
+  .empty-state code { color: var(--cyan); }
+  body.has-data .empty-state { display: none; }
+  body:not(.has-data) .stage-hud { display: none; }
+
+  .stage-error {
+    position: absolute;
+    inset: auto 0 50% 0;
+    text-align: center;
+    color: var(--danger);
+    font-size: 13px;
+    padding: 0 24px;
+  }
+
+  /* ---------- side panel ---------- */
+  .panel {
+    border-left: 1px solid var(--border);
+    background: rgba(11, 15, 23, 0.55);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .panel-head {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .meta-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .chip {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    background: rgba(34, 211, 238, 0.14);
+    border: 1px solid rgba(34, 211, 238, 0.35);
+    color: #a5f3fc;
+  }
+  .chip.amber { background: rgba(245, 158, 11, 0.14); border-color: rgba(245, 158, 11, 0.4); color: #fcd9a0; }
+  .sample-id { font-size: 15px; font-weight: 600; word-break: break-all; }
+  .sample-sub { font-size: 12px; color: var(--muted); }
+
+  .caption-wrap {
+    padding: 12px 14px;
+    overflow: auto;
+    min-height: 0;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .caption-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .caption-chips .tok {
+    font-size: 12px;
+    padding: 3px 9px;
+    border-radius: 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--fg);
+  }
+  .caption-chips .tok.prefix { background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.32); color: #fbd79a; }
+  .caption-raw {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.65;
+    color: #cdd8e6;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+  .panel-foot {
+    padding: 10px 14px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .panel-foot .status { margin-left: auto; }
+
+  /* ---------- filmstrip ---------- */
+  .filmstrip {
+    border-top: 1px solid var(--border);
+    background: rgba(11, 15, 23, 0.7);
+    padding: 8px 10px;
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    min-height: 108px;
+  }
+  body:not(.has-data) .filmstrip { display: none; }
+  .thumb {
+    flex: 0 0 auto;
+    width: 84px;
+    height: 84px;
+    padding: 0;
+    border: 2px solid transparent;
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.35);
+    overflow: hidden;
+    cursor: pointer;
+    position: relative;
+    transition: border-color 0.12s, transform 0.12s;
+  }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb:hover { transform: translateY(-2px); }
+  .thumb.current { border-color: var(--amber); }
+  .thumb .idx {
+    position: absolute;
+    left: 3px;
+    bottom: 3px;
+    font-size: 10px;
+    padding: 0 4px;
+    border-radius: 5px;
+    background: rgba(0, 0, 0, 0.65);
+    color: var(--muted);
+  }
+
+  /* ---------- drop overlay ---------- */
+  .drop-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(11, 15, 23, 0.82);
+    border: 2px dashed rgba(34, 211, 238, 0.6);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    color: var(--cyan);
+    z-index: 50;
+    backdrop-filter: blur(4px);
+  }
+  body.dragging-file .drop-overlay { display: flex; }
+
+  .hidden { display: none !important; }
+
+  @media (max-width: 900px) {
+    main { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+    .panel { border-left: none; border-top: 1px solid var(--border); max-height: 45vh; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Dungeon<span>Forge</span> · LoRA Viewer</div>
+  <button class="btn primary" id="btn-load">Load ZIP…</button>
+  <button class="btn" id="btn-clear" disabled>Clear</button>
+  <select id="theme-filter" title="Filter by theme folder"><option value="all">All themes</option></select>
+  <input type="search" id="search" placeholder="Search id / caption / c r…" spellcheck="false" />
+  <span class="spacer"></span>
+  <span class="status" id="status">No dataset loaded</span>
+  <button class="btn icon" id="btn-grid" title="Toggle 64px grid (G)">Grid</button>
+  <button class="btn icon" id="btn-fit" title="Fit to window (0)">Fit</button>
+  <button class="btn icon" id="btn-100" title="Actual pixels (1)">1:1</button>
+  <button class="btn icon" id="btn-play" title="Slideshow (Space)">▶ Play</button>
+</header>
+
+<main>
+  <section class="stage" id="stage">
+    <div class="empty-state" id="empty">
+      <h1>LoRA Dataset Viewer</h1>
+      <p>Drop one or more <code>lora-dataset.zip</code> exports here — or use <b>Load ZIP…</b>.
+         Archives are parsed in the browser; nothing is uploaded.</p>
+      <button class="btn primary" id="btn-load-2">Choose ZIP…</button>
+    </div>
+    <div class="canvas-layer" id="canvas-layer">
+      <img id="main-img" alt="" draggable="false" />
+      <div class="grid-overlay" id="grid-overlay"></div>
+    </div>
+    <div class="stage-error hidden" id="stage-error"></div>
+    <div class="stage-hud">
+      <span><b id="hud-pos">0 / 0</b></span>
+      <span>·</span>
+      <span id="hud-size">–</span>
+      <span>·</span>
+      <span id="hud-zoom">–</span>
+    </div>
+  </section>
+
+  <aside class="panel">
+    <div class="panel-head">
+      <div class="meta-row">
+        <span class="chip amber" id="meta-theme">–</span>
+        <span class="chip" id="meta-section">–</span>
+      </div>
+      <div class="sample-id" id="meta-id">–</div>
+      <div class="sample-sub" id="meta-sub">No sample selected</div>
+    </div>
+    <div class="caption-wrap">
+      <div class="caption-chips" id="caption-chips"></div>
+      <pre class="caption-raw" id="caption-raw"></pre>
+    </div>
+    <div class="panel-foot">
+      <button class="btn" id="btn-copy">Copy caption</button>
+      <span class="status" id="copy-status"></span>
+    </div>
+  </aside>
+</main>
+
+<div class="filmstrip" id="filmstrip"></div>
+
+<div class="drop-overlay">Drop LoRA dataset ZIPs</div>
+<input type="file" id="file-input" class="hidden" accept=".zip,application/zip" multiple />
+
+<script>
+(() => {
+  "use strict";
+
+  // Kohya / AI-Toolkit caption prefix written by curator/src/domain/caption.rs.
+  const CAPTION_PREFIX_TOKENS = 5;
+  const GRID_CELLS = 16;          // LoRA sections are 16x16 grid cells.
+  const THUMB_PX = 192;
+  const URL_CACHE_MAX = 32;
+  const TEXT_CONCURRENCY = 16;
+  const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp"]);
+
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    stage: $("stage"),
+    canvasLayer: $("canvas-layer"),
+    mainImg: $("main-img"),
+    gridOverlay: $("grid-overlay"),
+    stageError: $("stage-error"),
+    hudPos: $("hud-pos"),
+    hudSize: $("hud-size"),
+    hudZoom: $("hud-zoom"),
+    status: $("status"),
+    fileInput: $("file-input"),
+    themeFilter: $("theme-filter"),
+    search: $("search"),
+    filmstrip: $("filmstrip"),
+    metaTheme: $("meta-theme"),
+    metaSection: $("meta-section"),
+    metaId: $("meta-id"),
+    metaSub: $("meta-sub"),
+    captionChips: $("caption-chips"),
+    captionRaw: $("caption-raw"),
+    copyStatus: $("copy-status"),
+    btnGrid: $("btn-grid"),
+    btnFit: $("btn-fit"),
+    btn100: $("btn-100"),
+    btnPlay: $("btn-play"),
+    btnClear: $("btn-clear"),
+  };
+
+  const state = {
+    samples: [],   // every parsed sample
+    filtered: [],  // samples matching theme + search
+    index: 0,
+    theme: "all",
+    query: "",
+    playing: false,
+    playTimer: 0,
+  };
+
+  let uid = 0;
+
+  // ======================================================================
+  // ZIP reader (central directory + raw DEFLATE via DecompressionStream)
+  // ======================================================================
+
+  const SIG_EOCD = 0x06054b50;
+  const SIG_EOCD64 = 0x06064b50;
+  const SIG_LOC64 = 0x07064b50;
+  const SIG_CD = 0x02014b50;
+  const SIG_LFH = 0x04034b50;
+
+  function parseZip(bytes) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const len = bytes.byteLength;
+
+    let eocd = -1;
+    const floor = Math.max(0, len - 65557);
+    for (let i = len - 22; i >= floor; i--) {
+      if (dv.getUint32(i, true) === SIG_EOCD) { eocd = i; break; }
+    }
+    if (eocd < 0) throw new Error("not a ZIP archive (no end-of-central-directory record)");
+
+    let count = dv.getUint16(eocd + 10, true);
+    let cdSize = dv.getUint32(eocd + 12, true);
+    let cdOffset = dv.getUint32(eocd + 16, true);
+
+    if (count === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
+      const loc = eocd - 20;
+      if (loc >= 0 && dv.getUint32(loc, true) === SIG_LOC64) {
+        const z64 = Number(dv.getBigUint64(loc + 8, true));
+        if (z64 + 56 <= len && dv.getUint32(z64, true) === SIG_EOCD64) {
+          count = Number(dv.getBigUint64(z64 + 32, true));
+          cdSize = Number(dv.getBigUint64(z64 + 40, true));
+          cdOffset = Number(dv.getBigUint64(z64 + 48, true));
+        }
+      }
+    }
+
+    const decoder = new TextDecoder("utf-8");
+    const entries = [];
+    let p = cdOffset;
+
+    for (let i = 0; i < count && p + 46 <= len; i++) {
+      if (dv.getUint32(p, true) !== SIG_CD) break;
+
+      const flags = dv.getUint16(p + 8, true);
+      const method = dv.getUint16(p + 10, true);
+      let compSize = dv.getUint32(p + 20, true);
+      let uncompSize = dv.getUint32(p + 24, true);
+      const nameLen = dv.getUint16(p + 28, true);
+      const extraLen = dv.getUint16(p + 30, true);
+      const commentLen = dv.getUint16(p + 32, true);
+      let localOffset = dv.getUint32(p + 42, true);
+      const name = decoder.decode(bytes.subarray(p + 46, p + 46 + nameLen));
+
+      // ZIP64 extended information extra field.
+      let ep = p + 46 + nameLen;
+      const extraEnd = ep + extraLen;
+      while (ep + 4 <= extraEnd) {
+        const headerId = dv.getUint16(ep, true);
+        const headerSize = dv.getUint16(ep + 2, true);
+        if (headerId === 0x0001) {
+          let q = ep + 4;
+          const stop = ep + 4 + headerSize;
+          if (uncompSize === 0xffffffff && q + 8 <= stop) { uncompSize = Number(dv.getBigUint64(q, true)); q += 8; }
+          if (compSize === 0xffffffff && q + 8 <= stop) { compSize = Number(dv.getBigUint64(q, true)); q += 8; }
+          if (localOffset === 0xffffffff && q + 8 <= stop) { localOffset = Number(dv.getBigUint64(q, true)); q += 8; }
+          break;
+        }
+        ep += 4 + headerSize;
+      }
+
+      p += 46 + nameLen + extraLen + commentLen;
+      if (name.endsWith("/")) continue;
+      if (localOffset + 30 > len || dv.getUint32(localOffset, true) !== SIG_LFH) continue;
+
+      const lfhNameLen = dv.getUint16(localOffset + 26, true);
+      const lfhExtraLen = dv.getUint16(localOffset + 28, true);
+      entries.push({
+        name,
+        method,
+        flags,
+        compSize,
+        uncompSize,
+        dataOffset: localOffset + 30 + lfhNameLen + lfhExtraLen,
+        src: bytes,
+      });
+    }
+
+    return entries;
+  }
+
+  async function entryBytes(entry) {
+    if (entry.flags & 0x1) throw new Error(`encrypted entry: ${entry.name}`);
+    const raw = entry.src.subarray(entry.dataOffset, entry.dataOffset + entry.compSize);
+    if (entry.method === 0) return raw;
+    if (entry.method !== 8) throw new Error(`unsupported compression method ${entry.method} in ${entry.name}`);
+    if (typeof DecompressionStream !== "function") {
+      throw new Error('browser lacks DecompressionStream("deflate-raw") — use Chrome 103+, Firefox 113+ or Safari 16.4+');
+    }
+    const stream = new Blob([raw]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  // ======================================================================
+  // Sample indexing
+  // ======================================================================
+
+  const SECTION_RE = /^(?:(.*)\/)?(.*?)_c(\d+)_r(\d+)(?:_lora1024)?$/;
+
+  function classify(entries) {
+    const textByBase = new Map();
+    const images = [];
+    for (const entry of entries) {
+      const dot = entry.name.lastIndexOf(".");
+      if (dot <= 0) continue;
+      const base = entry.name.slice(0, dot);
+      const ext = entry.name.slice(dot + 1).toLowerCase();
+      if (ext === "txt") textByBase.set(base.toLowerCase(), entry);
+      else if (IMAGE_EXTS.has(ext)) images.push({ base, entry });
+    }
+    return { textByBase, images };
+  }
+
+  function buildSamples(zipName, entries) {
+    const { textByBase, images } = classify(entries);
+    if (!images.length) throw new Error("no images found");
+
+    const samples = [];
+    for (const { base, entry } of images) {
+      const match = SECTION_RE.exec(base);
+      const slash = base.lastIndexOf("/");
+      const fallbackId = slash >= 0 ? base.slice(slash + 1) : base;
+      const theme = match?.[1] || (slash >= 0 ? base.slice(0, slash) : "(root)");
+      const id = match?.[2] || fallbackId;
+      const col = match ? Number(match[3]) : null;
+      const row = match ? Number(match[4]) : null;
+
+      samples.push({
+        key: `${++uid}:${entry.name}`,
+        zip: zipName,
+        theme,
+        id,
+        col,
+        row,
+        img: entry,
+        txt: textByBase.get(base.toLowerCase()) || null,
+        caption: "",
+      });
+    }
+    return samples;
+  }
+
+  function sortSamples(samples) {
+    samples.sort((a, b) =>
+      a.theme.localeCompare(b.theme, undefined, { numeric: true }) ||
+      a.id.localeCompare(b.id, undefined, { numeric: true }) ||
+      (a.col ?? -1) - (b.col ?? -1) ||
+      (a.row ?? -1) - (b.row ?? -1));
+  }
+
+  async function mapLimit(items, limit, fn) {
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (cursor < items.length) {
+        const i = cursor++;
+        await fn(items[i], i);
+      }
+    });
+    await Promise.all(workers);
+  }
+
+  async function loadFiles(fileList) {
+    const files = Array.from(fileList || []).filter((f) => /\.zip$/i.test(f.name));
+    if (!files.length) {
+      setStatus("No .zip files in selection", true);
+      return 0;
+    }
+
+    stopPlayback();
+    setStatus(`Reading ${files.length} archive${files.length === 1 ? "" : "s"}…`);
+    const added = [];
+    const failures = [];
+
+    for (const file of files) {
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const samples = buildSamples(file.name, parseZip(bytes));
+        sortSamples(samples);
+        added.push(...samples);
+      } catch (err) {
+        failures.push(`${file.name}: ${err.message}`);
+      }
+    }
+
+    if (!added.length) {
+      setStatus(failures.join(" · ") || "No samples found", true);
+      return 0;
+    }
+
+    state.samples = state.samples.concat(added);
+    sortSamples(state.samples);
+    document.body.classList.add("has-data");
+    els.btnClear.disabled = false;
+
+    setStatus(`Reading ${added.length} captions…`);
+    let done = 0;
+    await mapLimit(added, TEXT_CONCURRENCY, async (sample) => {
+      if (!sample.txt) return;
+      try {
+        sample.caption = new TextDecoder("utf-8").decode(await entryBytes(sample.txt)).trim();
+      } catch { /* caption stays empty */ }
+      if (++done % 25 === 0) setStatus(`Reading captions… ${done}/${added.length}`);
+    });
+
+    rebuildThemeOptions();
+    applyFilters({ keepKey: state.filtered[state.index]?.key });
+    const total = state.samples.length;
+    setStatus(failures.length
+      ? `Loaded ${total} samples · ${failures.join(" · ")}`
+      : `Loaded ${total} samples from ${files.length} archive${files.length === 1 ? "" : "s"}`,
+      failures.length > 0);
+    return added.length;
+  }
+
+  function clearAll() {
+    stopPlayback();
+    state.samples = [];
+    state.filtered = [];
+    state.index = 0;
+    els.filmstrip.replaceChildren();
+    for (const url of urlCache.values()) URL.revokeObjectURL(url);
+    urlCache.clear();
+    for (const promise of thumbCache.values()) {
+      promise.then((url) => url && URL.revokeObjectURL(url)).catch(() => {});
+    }
+    thumbCache.clear();
+    thumbQueue.length = 0;
+    els.mainImg.removeAttribute("src");
+    els.canvasLayer.style.width = "0";
+    els.canvasLayer.style.height = "0";
+    els.gridOverlay.style.width = "0";
+    els.gridOverlay.style.height = "0";
+    document.body.classList.remove("has-data");
+    els.btnClear.disabled = true;
+    els.search.value = "";
+    state.query = "";
+    setStatus("No dataset loaded");
+    renderMeta(null);
+  }
+
+  // ======================================================================
+  // Filtering & navigation
+  // ======================================================================
+
+  function rebuildThemeOptions() {
+    const themes = [...new Set(state.samples.map((s) => s.theme))].sort((a, b) =>
+      a.localeCompare(b, undefined, { numeric: true }));
+    const current = state.theme;
+    els.themeFilter.replaceChildren(new Option("All themes", "all"));
+    for (const theme of themes) {
+      const n = state.samples.filter((s) => s.theme === theme).length;
+      els.themeFilter.append(new Option(`${theme} (${n})`, theme));
+    }
+    if (current !== "all" && themes.includes(current)) els.themeFilter.value = current;
+    else { state.theme = "all"; els.themeFilter.value = "all"; }
+  }
+
+  function applyFilters({ keepKey = null } = {}) {
+    const query = state.query.trim().toLowerCase();
+    state.filtered = state.samples.filter((s) => {
+      if (state.theme !== "all" && s.theme !== state.theme) return false;
+      if (!query) return true;
+      if (s.id.toLowerCase().includes(query)) return true;
+      if (s.theme.toLowerCase().includes(query)) return true;
+      if (s.caption.toLowerCase().includes(query)) return true;
+      if (s.col !== null && `c${s.col}r${s.row}`.includes(query)) return true;
+      return false;
+    });
+
+    let index = keepKey ? state.filtered.findIndex((s) => s.key === keepKey) : -1;
+    if (index < 0) index = 0;
+    state.index = index;
+
+    renderFilmstrip();
+    show(index);
+  }
+
+  function go(index) {
+    if (!state.filtered.length) return;
+    const clamped = Math.max(0, Math.min(state.filtered.length - 1, index));
+    if (clamped === state.index) { show(clamped); return; }
+    show(clamped);
+  }
+
+  function step(delta) { go(state.index + delta); }
+
+  // ======================================================================
+  // Image / thumbnail caches
+  // ======================================================================
+
+  const urlCache = new Map();   // key -> blob URL (LRU, current sample pinned)
+  const thumbCache = new Map(); // key -> Promise<blob URL|null>
+  let pinnedKey = null;
+
+  function evictUrls() {
+    while (urlCache.size > URL_CACHE_MAX) {
+      let victim = null;
+      for (const key of urlCache.keys()) {
+        if (key !== pinnedKey) { victim = key; break; }
+      }
+      if (!victim) return;
+      URL.revokeObjectURL(urlCache.get(victim));
+      urlCache.delete(victim);
+    }
+  }
+
+  async function imageUrl(sample) {
+    const cached = urlCache.get(sample.key);
+    if (cached) {
+      urlCache.delete(sample.key);
+      urlCache.set(sample.key, cached);
+      return cached;
+    }
+    const bytes = await entryBytes(sample.img);
+    const url = URL.createObjectURL(new Blob([bytes], { type: "image/png" }));
+    urlCache.set(sample.key, url);
+    evictUrls();
+    return url;
+  }
+
+  function thumbUrl(sample) {
+    const cached = thumbCache.get(sample.key);
+    if (cached) return cached;
+
+    const promise = (async () => {
+      const bytes = await entryBytes(sample.img);
+      const blob = new Blob([bytes], { type: "image/png" });
+      if (typeof createImageBitmap !== "function") return URL.createObjectURL(blob);
+
+      // Ask the decoder to downscale: cheaper than decoding 1024² then redrawing.
+      let bitmap;
+      try {
+        bitmap = await createImageBitmap(blob, { resizeWidth: THUMB_PX, resizeQuality: "medium" });
+      } catch {
+        bitmap = await createImageBitmap(blob);
+      }
+
+      const scale = Math.min(THUMB_PX / bitmap.width, THUMB_PX / bitmap.height, 1);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      bitmap.close?.();
+
+      const small = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
+      return small ? URL.createObjectURL(small) : URL.createObjectURL(blob);
+    })();
+
+    thumbCache.set(sample.key, promise);
+    return promise;
+  }
+
+  // ======================================================================
+  // Rendering
+  // ======================================================================
+
+  let renderToken = 0;
+
+  function show(index) {
+    state.index = index;
+    const sample = state.filtered[index] || null;
+    const token = ++renderToken;
+
+    pinnedKey = sample ? sample.key : null;
+    highlightFilmstrip(index);
+    renderMeta(sample);
+
+    if (!sample) {
+      els.mainImg.removeAttribute("src");
+      els.hudPos.textContent = "0 / 0";
+      els.hudSize.textContent = "–";
+      return;
+    }
+
+    els.hudPos.textContent = `${index + 1} / ${state.filtered.length}`;
+    els.stageError.classList.add("hidden");
+
+    imageUrl(sample).then((url) => {
+      if (token !== renderToken) return;
+      els.mainImg.src = url;
+    }).catch((err) => {
+      if (token !== renderToken) return;
+      els.mainImg.removeAttribute("src");
+      els.stageError.textContent = `Cannot read ${sample.id}: ${err.message}`;
+      els.stageError.classList.remove("hidden");
+    });
+
+    for (const offset of [1, -1, 2]) {
+      const neighbour = state.filtered[index + offset];
+      if (neighbour) imageUrl(neighbour).catch(() => {});
+    }
+  }
+
+  function renderMeta(sample) {
+    if (!sample) {
+      els.metaTheme.textContent = "–";
+      els.metaSection.textContent = "–";
+      els.metaId.textContent = "–";
+      els.metaSub.textContent = "No sample selected";
+      els.captionChips.replaceChildren();
+      els.captionRaw.textContent = "";
+      return;
+    }
+
+    els.metaTheme.textContent = sample.theme;
+    els.metaSection.textContent = sample.col === null ? "whole image" : `c${sample.col} r${sample.row}`;
+
+    const inMap = state.samples.filter((s) => s.id === sample.id && s.theme === sample.theme).length;
+    const words = sample.caption ? sample.caption.split(/\s+/).filter(Boolean).length : 0;
+    els.metaId.textContent = sample.id;
+    els.metaSub.textContent =
+      `${inMap} section${inMap === 1 ? "" : "s"} in map · ${words} caption words · ${sample.zip}`;
+
+    const tokens = sample.caption ? sample.caption.split(",").map((t) => t.trim()).filter(Boolean) : [];
+    const chips = tokens.map((token, i) => {
+      const el = document.createElement("span");
+      el.className = i < CAPTION_PREFIX_TOKENS ? "tok prefix" : "tok";
+      el.textContent = token;
+      return el;
+    });
+    if (!chips.length) {
+      const el = document.createElement("span");
+      el.className = "tok";
+      el.textContent = "no caption";
+      chips.push(el);
+    }
+    els.captionChips.replaceChildren(...chips);
+    els.captionRaw.textContent = sample.caption || "(no companion .txt in archive)";
+  }
+
+  function renderFilmstrip() {
+    const nodes = state.filtered.map((sample, i) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "thumb";
+      button.dataset.index = String(i);
+      button.title = `${sample.theme}/${sample.id}${sample.col === null ? "" : ` c${sample.col} r${sample.row}`}`;
+
+      const img = document.createElement("img");
+      img.alt = "";
+      img.dataset.index = String(i);
+      img.loading = "lazy";
+
+      const badge = document.createElement("span");
+      badge.className = "idx";
+      badge.textContent = String(i + 1);
+
+      button.append(img, badge);
+      return button;
+    });
+    els.filmstrip.replaceChildren(...nodes);
+    thumbObserver.disconnect();
+    for (const node of els.filmstrip.querySelectorAll("img")) thumbObserver.observe(node);
+  }
+
+  // Thumbnail work is queued and bounded: flipping fast through hundreds of samples must never
+  // flood the decoder or starve the stage image. Items that scrolled away before being picked up
+  // are re-armed instead of decoded.
+  const THUMB_CONCURRENCY = 4;
+  const THUMB_MARGIN = 600;
+  const thumbQueue = [];
+  let thumbWorkers = 0;
+
+  function stripVisible(img) {
+    const strip = els.filmstrip.getBoundingClientRect();
+    const box = img.getBoundingClientRect();
+    return box.right > strip.left - THUMB_MARGIN && box.left < strip.right + THUMB_MARGIN;
+  }
+
+  function pumpThumbs() {
+    while (thumbWorkers < THUMB_CONCURRENCY && thumbQueue.length) {
+      const img = thumbQueue.shift();
+      img.dataset.queued = "";
+      if (!img.isConnected || img.src) continue;
+      if (!stripVisible(img)) { thumbObserver.observe(img); continue; }
+
+      const sample = state.filtered[Number(img.dataset.index)];
+      if (!sample) continue;
+
+      thumbWorkers++;
+      thumbUrl(sample)
+        .then((url) => { if (url && img.isConnected) img.src = url; })
+        .catch(() => {})
+        .then(() => { thumbWorkers--; pumpThumbs(); });
+    }
+  }
+
+  const thumbObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const img = entry.target;
+      thumbObserver.unobserve(img);
+      if (img.dataset.queued) continue;
+      img.dataset.queued = "1";
+      thumbQueue.push(img);
+    }
+    pumpThumbs();
+  }, { root: els.filmstrip, rootMargin: `${THUMB_MARGIN}px 0px` });
+
+  function highlightFilmstrip(index) {
+    const previous = els.filmstrip.querySelector(".thumb.current");
+    if (previous) previous.classList.remove("current");
+    const current = els.filmstrip.querySelector(`.thumb[data-index="${index}"]`);
+    if (!current) return;
+    current.classList.add("current");
+    current.scrollIntoView({ block: "nearest", inline: "center", behavior: "smooth" });
+  }
+
+  // ======================================================================
+  // Zoom / pan / grid
+  // ======================================================================
+
+  const view = { scale: 1, x: 0, y: 0, fit: true };
+
+  function applyTransform() {
+    els.canvasLayer.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
+    els.gridOverlay.style.setProperty("--lw", `${(1 / view.scale).toFixed(3)}px`);
+    els.hudZoom.textContent = `${Math.round(view.scale * 100)}%`;
+  }
+
+  function fitToStage() {
+    const iw = els.mainImg.naturalWidth || 1024;
+    const ih = els.mainImg.naturalHeight || 1024;
+    const cw = els.stage.clientWidth;
+    const ch = els.stage.clientHeight;
+    view.scale = Math.min(cw / iw, ch / ih) * 0.96;
+    view.x = (cw - iw * view.scale) / 2;
+    view.y = (ch - ih * view.scale) / 2;
+    view.fit = true;
+    applyTransform();
+  }
+
+  function zoomAt(scale, cx, cy) {
+    const next = Math.max(0.05, Math.min(16, scale));
+    const k = next / view.scale;
+    view.x = cx - (cx - view.x) * k;
+    view.y = cy - (cy - view.y) * k;
+    view.scale = next;
+    view.fit = false;
+    applyTransform();
+  }
+
+  function zoomCentered(scale) {
+    zoomAt(scale, els.stage.clientWidth / 2, els.stage.clientHeight / 2);
+  }
+
+  function syncImageBox() {
+    const iw = els.mainImg.naturalWidth || 1024;
+    const ih = els.mainImg.naturalHeight || 1024;
+    els.canvasLayer.style.width = `${iw}px`;
+    els.canvasLayer.style.height = `${ih}px`;
+    els.gridOverlay.style.width = `${iw}px`;
+    els.gridOverlay.style.height = `${ih}px`;
+    els.hudSize.textContent = `${iw}×${ih} · ${GRID_CELLS}×${GRID_CELLS} grid (${Math.round(iw / GRID_CELLS)}px cells)`;
+  }
+
+  els.mainImg.addEventListener("load", () => {
+    syncImageBox();
+    fitToStage();
+  });
+
+  els.stage.addEventListener("wheel", (event) => {
+    if (!document.body.classList.contains("has-data")) return;
+    event.preventDefault();
+    const rect = els.stage.getBoundingClientRect();
+    const factor = Math.exp(-event.deltaY * 0.0015);
+    zoomAt(view.scale * factor, event.clientX - rect.left, event.clientY - rect.top);
+  }, { passive: false });
+
+  let dragging = null;
+
+  els.stage.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || !document.body.classList.contains("has-data")) return;
+    dragging = { id: event.pointerId, x: event.clientX, y: event.clientY, ox: view.x, oy: view.y };
+    els.stage.classList.add("dragging");
+    els.stage.setPointerCapture(event.pointerId);
+  });
+
+  els.stage.addEventListener("pointermove", (event) => {
+    if (!dragging || dragging.id !== event.pointerId) return;
+    view.x = dragging.ox + (event.clientX - dragging.x);
+    view.y = dragging.oy + (event.clientY - dragging.y);
+    view.fit = false;
+    applyTransform();
+  });
+
+  const endDrag = (event) => {
+    if (!dragging || dragging.id !== event.pointerId) return;
+    dragging = null;
+    els.stage.classList.remove("dragging");
+  };
+  els.stage.addEventListener("pointerup", endDrag);
+  els.stage.addEventListener("pointercancel", endDrag);
+
+  els.stage.addEventListener("dblclick", () => {
+    if (!document.body.classList.contains("has-data")) return;
+    if (Math.abs(view.scale - 1) < 0.01) fitToStage();
+    else zoomCentered(1);
+  });
+
+  new ResizeObserver(() => { if (view.fit) fitToStage(); }).observe(els.stage);
+
+  function toggleGrid(force) {
+    const on = force ?? !document.body.classList.contains("show-grid");
+    document.body.classList.toggle("show-grid", on);
+    els.btnGrid.classList.toggle("active", on);
+  }
+
+  // ======================================================================
+  // Slideshow
+  // ======================================================================
+
+  function togglePlayback() {
+    if (!state.filtered.length) return;
+    state.playing ? stopPlayback() : startPlayback();
+  }
+
+  function startPlayback() {
+    state.playing = true;
+    els.btnPlay.textContent = "⏸ Pause";
+    els.btnPlay.classList.add("active");
+    state.playTimer = setInterval(() => {
+      if (state.index >= state.filtered.length - 1) { stopPlayback(); return; }
+      step(1);
+    }, 1400);
+  }
+
+  function stopPlayback() {
+    if (state.playTimer) clearInterval(state.playTimer);
+    state.playTimer = 0;
+    state.playing = false;
+    els.btnPlay.textContent = "▶ Play";
+    els.btnPlay.classList.remove("active");
+  }
+
+  // ======================================================================
+  // Chrome / wiring
+  // ======================================================================
+
+  function setStatus(message, isError = false) {
+    els.status.textContent = message;
+    els.status.classList.toggle("error", isError);
+  }
+
+  async function copyCaption() {
+    const sample = state.filtered[state.index];
+    if (!sample || !sample.caption) { flashCopy("nothing to copy"); return; }
+    try {
+      await navigator.clipboard.writeText(sample.caption);
+      flashCopy("copied");
+    } catch {
+      const area = document.createElement("textarea");
+      area.value = sample.caption;
+      document.body.append(area);
+      area.select();
+      const ok = document.execCommand("copy");
+      area.remove();
+      flashCopy(ok ? "copied" : "copy failed");
+    }
+  }
+
+  let copyTimer = 0;
+  function flashCopy(text) {
+    els.copyStatus.textContent = text;
+    clearTimeout(copyTimer);
+    copyTimer = setTimeout(() => { els.copyStatus.textContent = ""; }, 1400);
+  }
+
+  $("btn-load").addEventListener("click", () => els.fileInput.click());
+  $("btn-load-2").addEventListener("click", () => els.fileInput.click());
+  els.fileInput.addEventListener("change", async () => {
+    await loadFiles(els.fileInput.files);
+    els.fileInput.value = "";
+  });
+  els.btnClear.addEventListener("click", clearAll);
+  els.btnGrid.addEventListener("click", () => toggleGrid());
+  els.btnFit.addEventListener("click", fitToStage);
+  els.btn100.addEventListener("click", () => zoomCentered(1));
+  els.btnPlay.addEventListener("click", togglePlayback);
+  $("btn-copy").addEventListener("click", copyCaption);
+
+  els.themeFilter.addEventListener("change", () => {
+    state.theme = els.themeFilter.value;
+    applyFilters();
+  });
+
+  let searchTimer = 0;
+  els.search.addEventListener("input", () => {
+    state.query = els.search.value;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => applyFilters(), 120);
+  });
+
+  els.filmstrip.addEventListener("click", (event) => {
+    const button = event.target.closest(".thumb");
+    if (!button) return;
+    stopPlayback();
+    go(Number(button.dataset.index));
+  });
+
+  document.addEventListener("keydown", (event) => {
+    const target = event.target;
+    if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement) {
+      if (event.key === "Escape") target.blur();
+      return;
+    }
+    if (!document.body.classList.contains("has-data")) return;
+
+    switch (event.key) {
+      case "ArrowRight": case "d": case "j": stopPlayback(); step(1); break;
+      case "ArrowLeft": case "a": case "k": stopPlayback(); step(-1); break;
+      case "ArrowDown": case "PageDown": stopPlayback(); step(10); break;
+      case "ArrowUp": case "PageUp": stopPlayback(); step(-10); break;
+      case "Home": stopPlayback(); go(0); break;
+      case "End": stopPlayback(); go(state.filtered.length - 1); break;
+      case "g": case "G": toggleGrid(); break;
+      case "0": fitToStage(); break;
+      case "1": zoomCentered(1); break;
+      case " ": togglePlayback(); break;
+      case "c": copyCaption(); break;
+      default: return;
+    }
+    event.preventDefault();
+  });
+
+  let dragDepth = 0;
+  window.addEventListener("dragenter", (event) => {
+    event.preventDefault();
+    dragDepth++;
+    document.body.classList.add("dragging-file");
+  });
+  window.addEventListener("dragover", (event) => event.preventDefault());
+  window.addEventListener("dragleave", () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) document.body.classList.remove("dragging-file");
+  });
+  window.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    dragDepth = 0;
+    document.body.classList.remove("dragging-file");
+    if (event.dataTransfer?.files?.length) await loadFiles(event.dataTransfer.files);
+  });
+
+  window.LoraViewer = { state, loadFiles, clearAll, go, show, applyFilters, toggleGrid, fitToStage };
+})();
+</script>
+</body>
+</html>

@@ -222,3 +222,23 @@ cargo run --manifest-path curator/Cargo.toml
 # Run specific API integration tests
 cargo test --manifest-path curator/Cargo.toml --test api_integration_tests
 ```
+
+---
+
+## 7. LoRA Dataset Viewer (`tools/lora-viewer.html`)
+
+Single-file, offline browser app for reviewing exported LoRA dataset ZIPs. Open `curator/tools/lora-viewer.html`
+directly in Chrome 103+/Firefox 113+/Safari 16.4+ (`file://` works) and drop one or more `lora-dataset.zip`
+archives — or pick them via **Load ZIP…**. Archives are parsed in the browser (central directory + raw DEFLATE
+via `DecompressionStream`); nothing is uploaded and no network access is used.
+
+- **Samples**: every `<theme>/<id>_c<col>_r<row>_lora1024.png` is paired with its `.txt` companion caption.
+- **Flipping**: `←`/`→` (or `a`/`d`, `j`/`k`) step one sample, `↑`/`↓`/`PageUp`/`PageDown` step ten, `Home`/`End`
+  jump to the ends, `Space` toggles a 1.4 s slideshow, and the filmstrip below the stage jumps directly.
+- **Filtering**: theme dropdown (built from the archive's theme folders) plus a search box matching map id, theme,
+  section coordinates, and full caption text.
+- **Inspection**: `G` overlays the 16×16 section lattice (1024 px / 16 = 64 px cells, line width held at 1 px
+  regardless of zoom), `0` fits the stage, `1` shows actual pixels, wheel zooms at the cursor, drag pans,
+  double-click toggles fit/1:1, and `c` copies the current caption.
+- **Loading**: image bytes stay in the archive and are inflated on demand (LRU-capped object URLs, neighbours
+  prefetched); captions are read eagerly at load so search covers the whole dataset.

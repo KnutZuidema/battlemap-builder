@@ -129,7 +129,7 @@ While `#curate-decision-modal` is active:
 ### 2.5. Submission & State Handling
 
 Upon completion, `submitDecisionCuration()` dispatches `POST /api/curate`:
-- **Payload**: `{ id: candidate.id, themes: acceptedThemes, tags: candidate.tags, description: generatedDescription, layers: candidate.layers }`.
+- **Payload**: `{ id: candidate.id, tags: acceptedTags, description: generatedDescription, layers: candidate.layers }` (tags-only; the legacy `themes` field is still accepted for compatibility but is never sent by the UI).
 - **On Success**:
   - Persists `description` to `manifest.json` and primary layer caption.
   - Removes the candidate from staging queue and local memory image cache.
@@ -166,7 +166,7 @@ data/
 │       └── 1.png
 ├── curated/
 │   └── <candidate_id>/
-│       ├── manifest.json            # Contains themes, tags, dimensions, grid, sections, and description
+│       ├── manifest.json            # Contains tags, dimensions, grid, sections, and description (legacy "themes" is read-only compatibility)
 │       ├── 0_ground.png             # Deterministically named layer file
 │       └── 1_upper_1.png
 └── rejections.jsonl

@@ -3,12 +3,13 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    normalize_tags, validate_layers_for_curation, CaptionGenerator, CuratedMap, Layer, LayerRole,
-    MapSection, RejectionReason,
+    normalize_tags, validate_layers_for_curation, CuratedMap, Layer, LayerRole, MapSection,
+    RejectionReason,
 };
 use crate::ports::curation_store::CurationStore;
 use crate::ports::storage::StorageError;
 use crate::services::description::{DescriptionError, DescriptionService};
+use crate::services::sections::{describe_map_sections, SectionDescriptionContext};
 
 /// Errors arising during the curation and rejection workflow.
 #[derive(Debug, Error)]
@@ -132,18 +133,25 @@ impl CurationWorkflow for CurationService {
         }
 
         // 4. Physical description resolution via DescriptionService (STRICT: no procedural caption fallback)
+        let ground_layer_index = ground_layer.index;
+        let mut ground_bytes: Option<Vec<u8>> = None;
         let final_description = if let Some(desc) = description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
             desc.to_string()
         } else {
-            let ground_bytes = self.store.get_staging_layer_bytes(trimmed_id, ground_layer.index)?;
-            self.description_service
+            let bytes = self
+                .store
+                .get_staging_layer_bytes(trimmed_id, ground_layer_index)?;
+            let described = self
+                .description_service
                 .describe(
-                    &ground_bytes,
-                    Some(&ground_layer.filename),
+                    &bytes,
+                    Some(ground_layer.filename.as_str()),
                     &clean_tags,
                     candidate.title.as_deref(),
                 )
-                .await?
+                .await?;
+            ground_bytes = Some(bytes);
+            described
         };
 
         // 5. Update ground layer caption with resolved description
@@ -154,26 +162,33 @@ impl CurationWorkflow for CurationService {
             }
         }
 
-        // 6. Derive overlapping 16×16 Map Sections from the candidate's grid configuration
+        // 6. Derive overlapping 16×16 Map Sections with crop-specific descriptions.
+        //    Multi-section maps get a vision description per Ground-layer crop (with a
+        //    deterministic per-section caption fallback); single-section maps reuse the
+        //    strict map-level physical description verbatim.
         let section_origins = candidate.grid.section_origins(ground_w, ground_h);
         let sections = if section_origins.len() <= 1 {
             vec![MapSection::new(0, 0, final_description.clone())]
         } else {
-            let primary_theme = clean_tags.first().map(String::as_str).unwrap_or("dungeon");
-            section_origins
-                .into_iter()
-                .map(|(col, row)| {
-                    MapSection::new(
-                        col,
-                        row,
-                        CaptionGenerator::generate_with_theme_str(
-                            primary_theme,
-                            &clean_tags,
-                            Some(&final_description),
-                        ),
-                    )
-                })
-                .collect()
+            let bytes = match ground_bytes {
+                Some(bytes) => bytes,
+                None => self
+                    .store
+                    .get_staging_layer_bytes(trimmed_id, ground_layer_index)?,
+            };
+            let ground_image = image::load_from_memory(&bytes).ok();
+            describe_map_sections(
+                &self.description_service,
+                SectionDescriptionContext {
+                    grid: &candidate.grid,
+                    ground_image: ground_image.as_ref(),
+                    ground_dimensions: (ground_w, ground_h),
+                    tags: &clean_tags,
+                    title: candidate.title.as_deref(),
+                    map_description: &final_description,
+                },
+            )
+            .await
         };
 
         // 7. Construct CuratedMap for atomic commit (bypassing staging manifest disk rewrites)
@@ -218,7 +233,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
-    use crate::domain::{Candidate, Source};
+    use crate::domain::{Candidate, CaptionGenerator, Source};
     use crate::services::description::DescriptionGenerator;
 
     struct MockDescriptionGenerator {
@@ -372,10 +387,67 @@ mod tests {
         cand
     }
 
+    /// Generator whose output depends on the exact image bytes it receives, so distinct
+    /// section crops produce distinct descriptions.
+    struct ContentKeyedGenerator {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl DescriptionGenerator for ContentKeyedGenerator {
+        async fn generate_description(
+            &self,
+            image_bytes: &[u8],
+            _filename: Option<&str>,
+            _tags: &[String],
+            _title: Option<&str>,
+        ) -> Result<String, DescriptionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let checksum = image_bytes.iter().fold(0u64, |acc, byte| {
+                acc.wrapping_mul(1_000_003).wrapping_add(u64::from(*byte))
+            });
+            Ok(format!(
+                "vision crop {checksum:016x} ({} bytes)",
+                image_bytes.len()
+            ))
+        }
+    }
+
+    /// Builds a 2048×1024 candidate whose default 64px grid yields exactly two
+    /// 16×16 Map Sections (columns 0 and 16). Pixel content varies horizontally so
+    /// the two crops are byte-distinct.
+    fn two_section_candidate() -> (Candidate, Vec<u8>) {
+        let image = image::RgbaImage::from_fn(2048, 1024, |x, y| {
+            image::Rgba([
+                (x % 251) as u8,
+                (y % 241) as u8,
+                ((x + y) % 239) as u8,
+                255,
+            ])
+        });
+        let mut png = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode gradient PNG");
+
+        let mut cand = Candidate::with_now("cand_two", Source::Reddit, "0.png", (2048, 1024));
+        cand.layers = vec![Layer::new(
+            0,
+            "0.png",
+            LayerRole::Ground,
+            Some(0),
+            (2048, 1024),
+        )];
+        (cand, png)
+    }
+
     #[tokio::test]
     async fn test_curate_with_user_description_bypasses_vision_and_returns_in_memory() {
         let cand = sample_candidate();
-        let store = Arc::new(MockCurationStore::new(Some(cand)));
+        let store = Arc::new(
+            MockCurationStore::new(Some(cand))
+                .with_layer_bytes(0, b"\x89PNG\r\n\x1a\nfake_ground_bytes".to_vec()),
+        );
         let desc_service = Arc::new(DescriptionService::new(None)); // Unconfigured vision
         let service = CurationService::new(store.clone(), desc_service);
 
@@ -389,9 +461,10 @@ mod tests {
             .await
             .expect("curation should succeed with user description");
 
-        // O(1) single candidate lookup, zero layer byte reads
+        // O(1) single candidate lookup; the user description skips map-level vision, but
+        // multi-section maps still read Ground bytes once to crop section descriptions.
         assert_eq!(store.get_staging_candidate_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(store.get_staging_layer_bytes_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(store.get_staging_layer_bytes_calls.load(Ordering::SeqCst), 1);
         assert_eq!(store.commit_curation_calls.load(Ordering::SeqCst), 1);
 
         // CuratedMap returned directly in memory
@@ -434,6 +507,101 @@ mod tests {
 
         assert_eq!(result.description.as_deref(), Some("An ancient mossy stone dungeon"));
         assert_eq!(result.layers[0].caption.as_deref(), Some("An ancient mossy stone dungeon"));
+    }
+
+    #[tokio::test]
+    async fn test_curate_multi_section_generates_distinct_vision_descriptions() {
+        let (cand, ground_png) = two_section_candidate();
+        let store = Arc::new(
+            MockCurationStore::new(Some(cand)).with_layer_bytes(0, ground_png),
+        );
+        let generator = Arc::new(ContentKeyedGenerator {
+            calls: AtomicUsize::new(0),
+        });
+        let desc_service = Arc::new(DescriptionService::new(Some(generator.clone())));
+        let service = CurationService::new(store.clone(), desc_service);
+
+        let result = service
+            .curate("cand_two", vec!["dungeon".into(), "crypt".into()], None, None)
+            .await
+            .expect("multi-section curation should succeed");
+
+        // Ground bytes are read once and reused for the map description plus both crops.
+        assert_eq!(store.get_staging_layer_bytes_calls.load(Ordering::SeqCst), 1);
+        // One map-level description plus one per section.
+        assert_eq!(generator.calls.load(Ordering::SeqCst), 3);
+
+        assert_eq!(result.sections.len(), 2);
+        assert_eq!(
+            result
+                .sections
+                .iter()
+                .map(|s| (s.col, s.row))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (16, 0)]
+        );
+        assert!(
+            result
+                .sections
+                .iter()
+                .all(|s| s.description.starts_with("vision crop")),
+            "Every section must use its crop-specific vision description: {:?}",
+            result.sections
+        );
+        assert_ne!(
+            result.sections[0].description, result.sections[1].description,
+            "Multi-section maps must never persist identical section descriptions"
+        );
+
+        let committed = store
+            .committed
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("curation must be committed");
+        assert_eq!(committed.sections, result.sections);
+        assert_eq!(committed.description, result.description);
+        assert_eq!(committed.layers[0].caption, result.description);
+    }
+
+    #[tokio::test]
+    async fn test_curate_multi_section_section_failure_uses_deterministic_fallback() {
+        let (cand, ground_png) = two_section_candidate();
+        let store = Arc::new(
+            MockCurationStore::new(Some(cand)).with_layer_bytes(0, ground_png),
+        );
+        let generator = Arc::new(MockDescriptionGenerator::failure(
+            DescriptionError::GenerationFailed("OpenRouter 500 error".into()),
+        ));
+        let desc_service = Arc::new(DescriptionService::new(Some(generator.clone())));
+        let service = CurationService::new(store.clone(), desc_service);
+
+        // The map-level description is supplied, so only section crops hit the failing generator.
+        let result = service
+            .curate(
+                "cand_two",
+                vec!["dungeon".into(), "crypt".into()],
+                None,
+                Some("Map-level physical description".into()),
+            )
+            .await
+            .expect("section failures must not abort curation");
+
+        assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(result.sections.len(), 2);
+        let expected =
+            CaptionGenerator::generate_with_theme_str("dungeon", &result.tags, None);
+        assert!(
+            result
+                .sections
+                .iter()
+                .all(|section| section.description == expected),
+            "Every failed section must use the deterministic caption fallback: {:?}",
+            result.sections
+        );
+
+        let committed = store.committed.lock().unwrap().clone().unwrap();
+        assert_eq!(committed.sections, result.sections);
     }
 
     #[tokio::test]
@@ -640,7 +808,10 @@ mod tests {
     #[tokio::test]
     async fn test_curate_custom_layers_bypass_manifest_rewrite_and_curates_subset() {
         let cand = sample_candidate(); // 2 layers: 0=Ground, 1=UpperFloor
-        let store = Arc::new(MockCurationStore::new(Some(cand)));
+        let store = Arc::new(
+            MockCurationStore::new(Some(cand))
+                .with_layer_bytes(0, b"\x89PNG\r\n\x1a\nfake_ground_bytes".to_vec()),
+        );
         let desc_service = Arc::new(DescriptionService::new(None));
         let service = CurationService::new(store.clone(), desc_service);
 

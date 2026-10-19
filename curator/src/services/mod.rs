@@ -3,7 +3,9 @@ pub mod description;
 pub mod benchmark;
 pub mod ingestion;
 pub mod reference_provider;
+pub mod sections;
 pub use description::*;
+pub use sections::{crop_section_png, describe_map_sections, SectionDescriptionContext};
 pub use curation::*;
 
 pub use benchmark::*;

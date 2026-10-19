@@ -244,7 +244,10 @@ mod tests {
         assert!(js.contains("gridAlignMode: false"));
         assert!(js.contains("gridPanelOpen: false"));
         assert!(js.contains("isDraggingGrid: false"));
-        assert!(js.contains("candidateGridSettings = new Map()"));
+        // The persisted grid is authoritative: no in-memory per-candidate grid cache shadows it.
+        assert!(!js.contains("candidateGridSettings"));
+        assert!(js.contains("candidate.grid.cell_size_px"));
+        assert!(js.contains("map.grid.cell_size_px"));
 
         // Verify grid helper functions
         assert!(js.contains("function setGridSize("));

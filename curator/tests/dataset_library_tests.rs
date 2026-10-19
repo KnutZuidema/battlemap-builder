@@ -153,7 +153,9 @@ async fn test_api_curated_listing_with_and_without_theme_filtering() {
 fn test_storage_export_lora_dataset_paired_png_and_txt() {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = FilesystemStorage::new(dir.path());
-    let png_bytes = create_test_png(128, 128);
+    // 1024x1024 matches the maps' declared dimensions and default 64px grid so the exact
+    // 16x16 Grid Cell section box resolves.
+    let png_bytes = create_test_png(1024, 1024);
 
     let map1 = CuratedMap::with_now(
         "dungeon_temple",
@@ -213,7 +215,9 @@ fn test_storage_export_lora_dataset_paired_png_and_txt() {
 #[tokio::test]
 async fn test_api_dataset_export_headers_and_stream() {
     let (app, storage, _dir) = setup_test_app();
-    let png_bytes = create_test_png(64, 64);
+    // 1024x1024 matches the map's declared dimensions and default 64px grid so the exact
+    // 16x16 Grid Cell section box resolves.
+    let png_bytes = create_test_png(1024, 1024);
 
     let map = CuratedMap::with_now(
         "catacomb_map",

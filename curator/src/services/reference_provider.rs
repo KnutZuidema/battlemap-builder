@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{info, warn};
 
-use crate::domain::{CuratedMap, GridConfig, LayerRole, MapSection, ReferenceImage, Theme};
+use crate::domain::{
+    crop_section_box, CuratedMap, GridConfig, LayerRole, MapSection, ReferenceImage, Theme,
+};
 use crate::ports::storage::{StorageError, StorageRepository};
 
 // Embedded fallback reference image bytes so resolution succeeds reliably in any environment
@@ -155,48 +157,10 @@ pub fn preprocess_reference_image(
     Ok(output_bytes)
 }
 
-/// Crops a 16×16 section from an image according to grid configuration.
-///
-/// Computes coordinates:
-/// - `x = grid.offset_x + section.col * cell_size_px`
-/// - `y = grid.offset_y + section.row * cell_size_px`
-/// - `w = 16 * cell_size_px`
-/// - `h = 16 * cell_size_px`
-///
-/// Bounds checking: crops the exact `16 * cell_size_px` box when it fits inside the image;
-/// otherwise falls back to a centered square crop of the largest fitting size.
-pub fn crop_section_image(
-    img: &image::DynamicImage,
-    grid: &GridConfig,
-    section: &MapSection,
-) -> image::DynamicImage {
-    let (img_w, img_h) = (img.width(), img.height());
-    let cell_size = if grid.cell_size_px > 0 {
-        grid.cell_size_px
-    } else {
-        GridConfig::DEFAULT_CELL_SIZE
-    };
-    let target_w = 16 * cell_size;
-    let target_h = 16 * cell_size;
-    let x = grid
-        .offset_x
-        .saturating_add(section.col.saturating_mul(cell_size));
-    let y = grid
-        .offset_y
-        .saturating_add(section.row.saturating_mul(cell_size));
-
-    if x < img_w && y < img_h && target_w <= img_w - x && target_h <= img_h - y {
-        img.crop_imm(x, y, target_w, target_h)
-    } else {
-        let size = img_w.min(img_h);
-        let cx = (img_w - size) / 2;
-        let cy = (img_h - size) / 2;
-        img.crop_imm(cx, cy, size, size)
-    }
-}
-
 /// Preprocesses a curated ground image for a specific section:
-/// 1. Crops the 16×16 section box from the image.
+/// 1. Crops the exact `16 * cell_size_px` Map Section box from the image via
+///    [`crop_section_box`]. A section that does not fit is unresolvable and returns an error
+///    (the caller falls back to the static reference) instead of a scale-changing crop.
 /// 2. Resizes to `target_size x target_size` using high-quality Lanczos3 filter.
 /// 3. Encodes to JPEG format with quality 85.
 pub fn preprocess_section_reference_image(
@@ -206,7 +170,15 @@ pub fn preprocess_section_reference_image(
     target_size: u32,
 ) -> Result<Vec<u8>, ReferenceProviderError> {
     let img = image::load_from_memory(raw_bytes)?;
-    let cropped = crop_section_image(&img, grid, section);
+    let cropped = crop_section_box(&img, grid, section.col, section.row).ok_or_else(|| {
+        ReferenceProviderError::NotFound(format!(
+            "16x16 Map Section ({}, {}) does not fit inside the {}x{} ground image",
+            section.col,
+            section.row,
+            img.width(),
+            img.height()
+        ))
+    })?;
     let resized = cropped.resize_exact(target_size, target_size, FilterType::Lanczos3);
 
     let mut output_bytes = Vec::new();
@@ -385,12 +357,6 @@ pub fn score_curated_section_for_prompt(
         }
     }
     score
-}
-
-/// Scores keyword overlap between a prompt and a curated map's themes, tags, and description.
-pub fn score_curated_map_for_prompt(map: &CuratedMap, prompt: &str) -> usize {
-    let synthetic_section = MapSection::new(0, 0, map.description.clone().unwrap_or_default());
-    score_curated_section_for_prompt(map, &synthetic_section, prompt)
 }
 
 /// Service providing visual reference conditioning images for few-shot benchmark generation.
@@ -767,7 +733,7 @@ mod tests {
             (1024, 1024),
             older_time,
         );
-        let img_bytes = create_test_image_bytes(512, 512, [0, 255, 0]);
+        let img_bytes = create_test_image_bytes(1024, 1024, [0, 255, 0]);
         storage.save_curated(&map_older, &img_bytes).unwrap();
 
         let map_newer = CuratedMap::new(
@@ -806,7 +772,7 @@ mod tests {
             (1024, 1024),
             Utc::now() - chrono::Duration::hours(1),
         );
-        let img_bytes = create_test_image_bytes(512, 512, [0, 0, 255]);
+        let img_bytes = create_test_image_bytes(1024, 1024, [0, 0, 255]);
         storage.save_curated(&map_a, &img_bytes).unwrap();
 
         // Map B: 3 overlaps with prompt ("dungeon", "crypt", "sarcophagus")
@@ -844,7 +810,7 @@ mod tests {
             (1024, 1024),
             Utc::now(),
         );
-        let img_bytes = create_test_image_bytes(512, 512, [100, 100, 100]);
+        let img_bytes = create_test_image_bytes(1024, 1024, [100, 100, 100]);
         storage.save_curated(&map_dungeon, &img_bytes).unwrap();
 
         // Prompt is about wilderness
@@ -863,30 +829,6 @@ mod tests {
     }
 
     #[test]
-    fn test_score_curated_map_for_prompt_includes_description() {
-        let map_without_desc = CuratedMap::new(
-            "map-no-desc",
-            vec!["dungeon".to_string()],
-            vec!["stone".to_string()],
-            (1024, 1024),
-            Utc::now(),
-        );
-
-        let prompt = "Stone dungeon crypt with carved limestone sarcophagus and burning braziers";
-        let base_score = score_curated_map_for_prompt(&map_without_desc, prompt);
-        // "dungeon" theme (2) + "stone" tag (1) = 3
-        assert_eq!(base_score, 3);
-
-        let map_with_desc = map_without_desc.with_description(
-            "Ancient crypt with carved limestone sarcophagus, burning braziers, and iron gates.",
-        );
-        let score_with_desc = score_curated_map_for_prompt(&map_with_desc, prompt);
-        assert!(score_with_desc > base_score);
-        // base_score (3) + 8 overlapping words ("crypt", "with", "carved", "limestone", "sarcophagus", "and", "burning", "braziers")
-        assert_eq!(score_with_desc, 11);
-    }
-
-    #[test]
     fn test_prompt_keyword_overlap_prioritizes_description_match() {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
@@ -900,7 +842,7 @@ mod tests {
             (1024, 1024),
             Utc::now(),
         );
-        let img_bytes = create_test_image_bytes(512, 512, [0, 0, 255]);
+        let img_bytes = create_test_image_bytes(1024, 1024, [0, 0, 255]);
         storage.save_curated(&map_a, &img_bytes).unwrap();
 
         // Map B: Older, but rich description matching specific prompt elements ("altar", "obsidian", "braziers")
@@ -1011,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn test_crop_section_image_exact_pixel_box() {
+    fn test_crop_section_box_exact_pixel_box() {
         // 512x512 image, 4 quadrants of 256x256:
         // (0, 0): Red [255, 0, 0]
         // (16, 0): Green [0, 255, 0]
@@ -1036,8 +978,7 @@ mod tests {
         let grid = GridConfig::new(16, 0, 0); // 16 * 16 = 256px per section
 
         // 1. Top-left section (0, 0)
-        let sec_tl = MapSection::new(0, 0, "Top-left red quadrant");
-        let cropped_tl = crop_section_image(&dyn_img, &grid, &sec_tl);
+        let cropped_tl = crop_section_box(&dyn_img, &grid, 0, 0).expect("top-left box fits");
         assert_eq!(cropped_tl.width(), 256);
         assert_eq!(cropped_tl.height(), 256);
         let rgb_tl = cropped_tl.to_rgb8();
@@ -1045,8 +986,7 @@ mod tests {
         assert_eq!(rgb_tl.get_pixel(255, 255).0, [255, 0, 0]);
 
         // 2. Top-right section (16, 0)
-        let sec_tr = MapSection::new(16, 0, "Top-right green quadrant");
-        let cropped_tr = crop_section_image(&dyn_img, &grid, &sec_tr);
+        let cropped_tr = crop_section_box(&dyn_img, &grid, 16, 0).expect("top-right box fits");
         assert_eq!(cropped_tr.width(), 256);
         assert_eq!(cropped_tr.height(), 256);
         let rgb_tr = cropped_tr.to_rgb8();
@@ -1054,8 +994,7 @@ mod tests {
         assert_eq!(rgb_tr.get_pixel(255, 255).0, [0, 255, 0]);
 
         // 3. Bottom-left section (0, 16)
-        let sec_bl = MapSection::new(0, 16, "Bottom-left blue quadrant");
-        let cropped_bl = crop_section_image(&dyn_img, &grid, &sec_bl);
+        let cropped_bl = crop_section_box(&dyn_img, &grid, 0, 16).expect("bottom-left box fits");
         assert_eq!(cropped_bl.width(), 256);
         assert_eq!(cropped_bl.height(), 256);
         let rgb_bl = cropped_bl.to_rgb8();
@@ -1063,8 +1002,7 @@ mod tests {
         assert_eq!(rgb_bl.get_pixel(255, 255).0, [0, 0, 255]);
 
         // 4. Bottom-right section (16, 16)
-        let sec_br = MapSection::new(16, 16, "Bottom-right yellow quadrant");
-        let cropped_br = crop_section_image(&dyn_img, &grid, &sec_br);
+        let cropped_br = crop_section_box(&dyn_img, &grid, 16, 16).expect("bottom-right box fits");
         assert_eq!(cropped_br.width(), 256);
         assert_eq!(cropped_br.height(), 256);
         let rgb_br = cropped_br.to_rgb8();
@@ -1312,29 +1250,25 @@ mod tests {
     }
 
     #[test]
-    fn test_crop_section_image_out_of_bounds_falls_back_to_center_crop() {
-        // 512x300 image split down the middle: left half red, right half green.
-        let mut img = image::RgbImage::new(512, 300);
-        for y in 0..300 {
-            for x in 0..512 {
-                let color = if x < 256 { [255, 0, 0] } else { [0, 255, 0] };
-                img.put_pixel(x, y, Rgb(color));
-            }
-        }
-        let dyn_img = image::DynamicImage::ImageRgb8(img);
+    fn test_crop_section_box_out_of_bounds_is_unresolved() {
+        // 512x300 image: the exact 256x256 box for section (0, 16) starts at y = 256, leaving
+        // only 44px below it. The box does not fit, so the section is unresolvable -- no
+        // magnified, center-cropped, or otherwise scale-changing fallback crop is produced.
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(512, 300));
         let grid = GridConfig::new(16, 0, 0); // 16 * 16 = 256px per section
 
-        // Section (0, 16) starts at y = 256; only 44px remain below, so the exact 256x256 box
-        // cannot fit. A magnified top-left corner square would be 44x44; the documented
-        // fallback is instead the centred 300x300 crop.
-        let section = MapSection::new(0, 16, "Overflowing section");
-        let cropped = crop_section_image(&dyn_img, &grid, &section);
-        assert_eq!(cropped.width(), 300);
-        assert_eq!(cropped.height(), 300);
+        assert!(crop_section_box(&img, &grid, 0, 16).is_none());
+        // In-bounds boxes still resolve to the exact 256x256 box.
+        let cropped = crop_section_box(&img, &grid, 0, 0).expect("top-left box fits");
+        assert_eq!((cropped.width(), cropped.height()), (256, 256));
 
-        // The fallback is centred on the image, not anchored at the section's top-left corner.
-        let rgb = cropped.to_rgb8();
-        assert_eq!(rgb.get_pixel(0, 150).0, [255, 0, 0]);
-        assert_eq!(rgb.get_pixel(299, 150).0, [0, 255, 0]);
+        // The reference provider treats an unresolvable section as unresolved (error), which
+        // callers answer with the static fallback reference.
+        let section = MapSection::new(0, 16, "Overflowing section");
+        let raw_bytes = create_test_image_bytes(512, 300, [255, 0, 0]);
+        assert!(matches!(
+            preprocess_section_reference_image(&raw_bytes, &grid, &section, 512),
+            Err(ReferenceProviderError::NotFound(_))
+        ));
     }
 }

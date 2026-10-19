@@ -1365,6 +1365,54 @@ kbd {
     color: var(--text-secondary);
 }
 
+.grid-lattice-val {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.badge-sections {
+    font-size: 0.74rem;
+    font-weight: 600;
+    padding: 0.15rem 0.45rem;
+    border-radius: 4px;
+    background: rgba(56, 189, 248, 0.12);
+    color: var(--accent-cyan);
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    transition: all 0.15s ease;
+}
+
+.badge-sections.badge-sections-valid {
+    background: rgba(16, 185, 129, 0.12);
+    color: var(--accent-emerald);
+    border-color: rgba(16, 185, 129, 0.3);
+}
+
+.badge-sections.badge-sections-warning {
+    background: rgba(244, 63, 94, 0.15);
+    color: #f43f5e;
+    border-color: rgba(244, 63, 94, 0.4);
+}
+
+.hud-item.hud-warning {
+    color: #f43f5e !important;
+}
+
+.fullscreen-hud-bar .hud-badge-grid {
+    color: var(--accent-cyan);
+    background: rgba(56, 189, 248, 0.12);
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    font-size: 0.74rem;
+    padding: 0.15rem 0.45rem;
+    border-radius: 4px;
+}
+
+.fullscreen-hud-bar .hud-badge-grid.hud-badge-warning {
+    color: #f43f5e;
+    background: rgba(244, 63, 94, 0.15);
+    border-color: rgba(244, 63, 94, 0.4);
+}
+
 .grid-panel-footer {
     display: flex;
     align-items: center;

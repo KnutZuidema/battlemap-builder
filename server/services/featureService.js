@@ -1,5 +1,8 @@
+const sharp = require('sharp');
 const { parseUsage } = require('./wikiPrompter');
 const { providerFailure, describeFailure, summarizeUpstreamError } = require('./failure');
+const { dataUrlToBuffer, bufferToDataUrl, forgeCanvasRegion } = require('./canvasForge');
+const { createForgeRegionAdapter } = require('./battlemapService');
 
 const OPENROUTER_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const FEATURE_DETECTION_MODEL = 'openai/gpt-6-luna';
@@ -299,11 +302,67 @@ async function detectFeatures({ mapDataUrl, prompt = '', wikiContext = null, map
   };
 }
 
+/**
+ * Forges an alternate state for an interactive feature within its bounding box, then extracts the
+ * cropped overlay patch from the composited map. Canvas composition is delegated to
+ * `canvasForge.forgeCanvasRegion`; `renderAdapter` may be injected, otherwise the configured model
+ * runner adapter is built.
+ */
+async function forgeFeatureState({ originalDataUrl, box, prompt, model, forgeImageMode = 'highlighted-only', renderAdapter }) {
+  if (!originalDataUrl || !box) {
+    const err = new Error('originalDataUrl and box are required for forgeFeatureState');
+    err.code = 'INVALID_PARAMETERS';
+    throw err;
+  }
+
+  const selection = {
+    x: Math.round(box.x),
+    y: Math.round(box.y),
+    width: Math.round(box.width),
+    height: Math.round(box.height)
+  };
+
+  const adapter = renderAdapter || createForgeRegionAdapter({ selection, prompt, model, forgeImageMode });
+  const compositeResult = await forgeCanvasRegion({
+    originalDataUrl,
+    selection,
+    renderAdapter: adapter
+  });
+
+  const compBuffer = dataUrlToBuffer(compositeResult.imageDataUrl);
+  const meta = await sharp(compBuffer).metadata();
+  const dx = compositeResult.offset?.dx || 0;
+  const dy = compositeResult.offset?.dy || 0;
+  const extractLeft = Math.max(0, Math.min(dx + selection.x, meta.width - 1));
+  const extractTop = Math.max(0, Math.min(dy + selection.y, meta.height - 1));
+  const extractWidth = Math.min(selection.width, meta.width - extractLeft);
+  const extractHeight = Math.min(selection.height, meta.height - extractTop);
+
+  const patchBuffer = await sharp(compBuffer)
+    .extract({
+      left: extractLeft,
+      top: extractTop,
+      width: Math.max(1, extractWidth),
+      height: Math.max(1, extractHeight)
+    })
+    .png()
+    .toBuffer();
+
+  return {
+    patchDataUrl: bufferToDataUrl(patchBuffer),
+    offset: compositeResult.offset,
+    debug: compositeResult.debug,
+    usage: compositeResult.usage,
+    cost: compositeResult.cost
+  };
+}
+
 module.exports = {
   FEATURE_DETECTION_MODEL,
   FEATURE_DEFINITIONS,
   SYSTEM_INSTRUCTION,
   snapBoxTo64,
   normalizeFeatures,
-  detectFeatures
+  detectFeatures,
+  forgeFeatureState
 };

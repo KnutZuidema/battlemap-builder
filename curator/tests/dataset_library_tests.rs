@@ -11,8 +11,9 @@ use zip::ZipArchive;
 
 use curator::adapters::FilesystemStorage;
 use curator::api::{create_router, AppState};
-use curator::domain::{CuratedMap, Theme};
+use curator::domain::{Candidate, CuratedMap, GridConfig, MapSection, Source, Theme};
 use curator::ports::storage::StorageRepository;
+use image::GenericImageView;
 
 fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
     let dir = tempdir().expect("Failed to create tempdir");
@@ -175,14 +176,14 @@ fn test_storage_export_lora_dataset_paired_png_and_txt() {
         .collect();
     filenames.sort();
 
-    assert!(filenames.contains(&"dungeon/dungeon_temple_lora1024.png".to_string()));
-    assert!(filenames.contains(&"dungeon/dungeon_temple_lora1024.txt".to_string()));
-    assert!(filenames.contains(&"cave/cave_grotto_lora1024.png".to_string()));
-    assert!(filenames.contains(&"cave/cave_grotto_lora1024.txt".to_string()));
+    assert!(filenames.contains(&"dungeon/dungeon_temple_c0_r0_lora1024.png".to_string()));
+    assert!(filenames.contains(&"dungeon/dungeon_temple_c0_r0_lora1024.txt".to_string()));
+    assert!(filenames.contains(&"cave/cave_grotto_c0_r0_lora1024.png".to_string()));
+    assert!(filenames.contains(&"cave/cave_grotto_c0_r0_lora1024.txt".to_string()));
 
     // Verify caption content inside ZIP
     let mut txt_file = archive
-        .by_name("dungeon/dungeon_temple_lora1024.txt")
+        .by_name("dungeon/dungeon_temple_c0_r0_lora1024.txt")
         .unwrap();
     let mut caption_content = String::new();
     std::io::Read::read_to_string(&mut txt_file, &mut caption_content).unwrap();
@@ -197,8 +198,8 @@ fn test_storage_export_lora_dataset_paired_png_and_txt() {
     let d_names: Vec<String> = (0..dungeon_archive.len())
         .map(|i| dungeon_archive.by_index(i).unwrap().name().to_string())
         .collect();
-    assert!(d_names.contains(&"dungeon/dungeon_temple_lora1024.png".to_string()));
-    assert!(d_names.contains(&"dungeon/dungeon_temple_lora1024.txt".to_string()));
+    assert!(d_names.contains(&"dungeon/dungeon_temple_c0_r0_lora1024.png".to_string()));
+    assert!(d_names.contains(&"dungeon/dungeon_temple_c0_r0_lora1024.txt".to_string()));
     assert!(!d_names.iter().any(|n| n.contains("cave")));
 }
 
@@ -240,7 +241,7 @@ async fn test_api_dataset_export_headers_and_stream() {
     assert_eq!(archive.len(), 2);
 
     let file0 = archive.by_index(0).unwrap();
-    assert!(file0.name().starts_with("dungeon/catacomb_map_lora1024."));
+    assert!(file0.name().starts_with("dungeon/catacomb_map_c0_r0_lora1024."));
 }
 
 #[tokio::test]
@@ -276,4 +277,173 @@ async fn test_empty_theme_export_handling() {
     let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let http_archive = ZipArchive::new(Cursor::new(&body_bytes)).unwrap();
     assert_eq!(http_archive.len(), 0);
+}
+
+#[tokio::test]
+async fn test_curation_does_not_write_lora_files_to_disk() {
+    let (_app, storage, dir) = setup_test_app();
+    let png_bytes = create_test_png(1024, 1024);
+
+    let cand = Candidate::with_now(
+        "clean_bundle_map",
+        Source::Reddit,
+        "clean_bundle_map.png",
+        (1024, 1024),
+    )
+    .with_title("Clean Crypt Without Disk Artifacts");
+    storage.save_staging(&cand, &png_bytes).unwrap();
+
+    let curated = CuratedMap::with_now(
+        "clean_bundle_map",
+        Theme::Dungeon,
+        vec!["crypt".into(), "clean".into()],
+        (1024, 1024),
+    )
+    .with_description("A clean crypt bundle");
+
+    storage.curate_staging(&curated).unwrap();
+
+    let bundle_dir = dir.path().join("curated").join("clean_bundle_map");
+    assert!(bundle_dir.is_dir());
+    assert!(bundle_dir.join("manifest.json").is_file());
+    assert!(bundle_dir.join("0_ground.png").is_file());
+
+    // Assert NO _lora1024 files on disk
+    assert!(!bundle_dir.join("clean_bundle_map_lora1024.png").exists());
+    assert!(!bundle_dir.join("clean_bundle_map_lora1024.txt").exists());
+
+    // Bundle directory must contain only manifest.json and layer image files
+    let entries: Vec<_> = std::fs::read_dir(&bundle_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(entries.len(), 2);
+    assert!(entries.contains(&"manifest.json".to_string()));
+    assert!(entries.contains(&"0_ground.png".to_string()));
+}
+
+#[tokio::test]
+async fn test_multisection_map_export_produces_four_distinct_pairs_with_per_section_descriptions() {
+    let (app, storage, _dir) = setup_test_app();
+    let png_bytes = create_test_png(2048, 2048);
+
+    let sections = vec![
+        MapSection::new(0, 0, "northwest crypt chamber with obsidian altar"),
+        MapSection::new(16, 0, "northeast guard room with weapon racks"),
+        MapSection::new(0, 16, "southwest flooded dungeon cell with iron bars"),
+        MapSection::new(16, 16, "southeast torture dungeon with iron maiden"),
+    ];
+
+    let multi_map = CuratedMap::with_now(
+        "multi_sec_map",
+        Theme::Dungeon,
+        vec!["dungeon".into(), "stone".into()],
+        (2048, 2048),
+    )
+    .with_grid(GridConfig::new(64, 0, 0))
+    .with_sections(sections);
+
+    storage.save_curated(&multi_map, &png_bytes).unwrap();
+
+    // GET /api/dataset/export?theme=dungeon
+    let req = Request::builder()
+        .uri("/api/dataset/export?theme=dungeon")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let mut archive = ZipArchive::new(Cursor::new(&body_bytes)).unwrap();
+    assert_eq!(archive.len(), 8); // 4 pngs + 4 txts
+
+    let mut names: Vec<String> = (0..archive.len())
+        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .collect();
+    names.sort();
+
+    let expected_names = [
+        "dungeon/multi_sec_map_c0_r0_lora1024.png",
+        "dungeon/multi_sec_map_c0_r0_lora1024.txt",
+        "dungeon/multi_sec_map_c0_r16_lora1024.png",
+        "dungeon/multi_sec_map_c0_r16_lora1024.txt",
+        "dungeon/multi_sec_map_c16_r0_lora1024.png",
+        "dungeon/multi_sec_map_c16_r0_lora1024.txt",
+        "dungeon/multi_sec_map_c16_r16_lora1024.png",
+        "dungeon/multi_sec_map_c16_r16_lora1024.txt",
+    ];
+
+    for expected in &expected_names {
+        assert!(names.contains(&expected.to_string()), "Missing entry: {expected}");
+    }
+
+    // Verify each PNG is exact 1024x1024 without letterbox bars
+    for (col, row) in [(0, 0), (16, 0), (0, 16), (16, 16)] {
+        let png_name = format!("dungeon/multi_sec_map_c{col}_r{row}_lora1024.png");
+        let mut png_entry = archive.by_name(&png_name).unwrap();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut png_entry, &mut bytes).unwrap();
+        let decoded = image::load_from_memory(&bytes).expect("valid png bytes");
+        assert_eq!(decoded.dimensions(), (1024, 1024));
+    }
+
+    // Verify each TXT caption contains its respective section's physical description
+    let checks = [
+        ("dungeon/multi_sec_map_c0_r0_lora1024.txt", "obsidian altar"),
+        ("dungeon/multi_sec_map_c16_r0_lora1024.txt", "weapon racks"),
+        ("dungeon/multi_sec_map_c0_r16_lora1024.txt", "iron bars"),
+        ("dungeon/multi_sec_map_c16_r16_lora1024.txt", "iron maiden"),
+    ];
+    for (txt_name, keyword) in checks {
+        let mut txt_entry = archive.by_name(txt_name).unwrap();
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut txt_entry, &mut text).unwrap();
+        assert!(text.contains("ttrpg battlemap"));
+        assert!(text.contains("dungeon"));
+        assert!(text.contains(keyword), "Caption {txt_name} should contain '{keyword}', got: {text}");
+    }
+}
+
+#[tokio::test]
+async fn test_post_export_selected_multisection_and_custom_grid() {
+    let (app, storage, _dir) = setup_test_app();
+    let png_bytes = create_test_png(2048, 2048);
+
+    let multi_map = CuratedMap::with_now(
+        "selected_multi",
+        Theme::Cave,
+        vec!["crystal".into()],
+        (2048, 2048),
+    )
+    .with_grid(GridConfig::new(64, 0, 0))
+    .with_description("Sprawling underground cavern network");
+
+    storage.save_curated(&multi_map, &png_bytes).unwrap();
+
+    let req = Request::builder()
+        .uri("/api/dataset/export-selected")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::json!({
+            "ids": ["selected_multi"]
+        }).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let mut archive = ZipArchive::new(Cursor::new(&body_bytes)).unwrap();
+    assert_eq!(archive.len(), 8); // 4 png + 4 txt
+
+    let names: Vec<String> = (0..archive.len())
+        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .collect();
+
+    assert!(names.contains(&"cave/selected_multi_c0_r0_lora1024.png".to_string()));
+    assert!(names.contains(&"cave/selected_multi_c0_r0_lora1024.txt".to_string()));
+    assert!(names.contains(&"cave/selected_multi_c16_r16_lora1024.png".to_string()));
+    assert!(names.contains(&"cave/selected_multi_c16_r16_lora1024.txt".to_string()));
 }

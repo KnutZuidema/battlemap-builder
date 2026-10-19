@@ -457,6 +457,169 @@ impl RejectionRecord {
 }
 
 /// An uncurated map candidate residing in the staging area.
+/// Configuration for battlemap grid alignment and cell dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct GridConfig {
+    pub cell_size_px: u32,
+    pub offset_x: u32,
+    pub offset_y: u32,
+}
+
+impl Default for GridConfig {
+    fn default() -> Self {
+        Self {
+            cell_size_px: 64,
+            offset_x: 0,
+            offset_y: 0,
+        }
+    }
+}
+
+impl GridConfig {
+    pub const MIN_CELL_SIZE: u32 = 16;
+    pub const MAX_CELL_SIZE: u32 = 300;
+    pub const DEFAULT_CELL_SIZE: u32 = 64;
+
+    pub fn new(cell_size_px: u32, offset_x: u32, offset_y: u32) -> Self {
+        let clamped_size = cell_size_px.clamp(Self::MIN_CELL_SIZE, Self::MAX_CELL_SIZE);
+        let ox = offset_x % clamped_size;
+        let oy = offset_y % clamped_size;
+        Self {
+            cell_size_px: clamped_size,
+            offset_x: ox,
+            offset_y: oy,
+        }
+    }
+
+    pub fn with_signed_offsets(cell_size_px: u32, offset_x: i64, offset_y: i64) -> Self {
+        let clamped_size = cell_size_px.clamp(Self::MIN_CELL_SIZE, Self::MAX_CELL_SIZE);
+        let size_i64 = clamped_size as i64;
+        let ox = offset_x.rem_euclid(size_i64) as u32;
+        let oy = offset_y.rem_euclid(size_i64) as u32;
+        Self {
+            cell_size_px: clamped_size,
+            offset_x: ox,
+            offset_y: oy,
+        }
+    }
+
+    pub fn auto_seed(parsed_dims: (u32, u32), image_dims: (u32, u32)) -> Self {
+        let (cols, rows) = parsed_dims;
+        let (width, height) = image_dims;
+        if cols == 0 || rows == 0 || width == 0 || height == 0 {
+            return Self::default();
+        }
+
+        let img_ratio = width as f64 / height as f64;
+        let grid_ratio_normal = cols as f64 / rows as f64;
+        let grid_ratio_swapped = rows as f64 / cols as f64;
+
+        let matches_normal = (img_ratio - grid_ratio_normal).abs() / img_ratio <= 0.05;
+        let matches_swapped = (img_ratio - grid_ratio_swapped).abs() / img_ratio <= 0.05;
+
+        if matches_normal {
+            let cell_w = width as f64 / cols as f64;
+            let cell_h = height as f64 / rows as f64;
+            let avg_cell = ((cell_w + cell_h) / 2.0).round() as u32;
+            Self::new(avg_cell, 0, 0)
+        } else if matches_swapped {
+            let cell_w = width as f64 / rows as f64;
+            let cell_h = height as f64 / cols as f64;
+            let avg_cell = ((cell_w + cell_h) / 2.0).round() as u32;
+            Self::new(avg_cell, 0, 0)
+        } else {
+            Self::default()
+        }
+    }
+
+    /// Calculates the number of full grid columns and rows that fit into the given dimensions.
+    /// Edge remnants smaller than `cell_size_px` are discarded.
+    pub fn lattice_dimensions(&self, width: u32, height: u32) -> (u32, u32) {
+        if self.cell_size_px == 0 {
+            return (0, 0);
+        }
+        let cols = width.saturating_sub(self.offset_x) / self.cell_size_px;
+        let rows = height.saturating_sub(self.offset_y) / self.cell_size_px;
+        (cols, rows)
+    }
+
+    /// Calculates the number of 16×16 section windows along X and Y axes needed to cover
+    /// the full-grid lattice. Returns None if the grid yields fewer than 16 full cells in either dimension.
+    pub fn section_counts(&self, width: u32, height: u32) -> Option<(u32, u32)> {
+        let (cols, rows) = self.lattice_dimensions(width, height);
+        if cols < 16 || rows < 16 {
+            None
+        } else {
+            Some((cols.div_ceil(16), rows.div_ceil(16)))
+        }
+    }
+
+    /// Computes the zero-indexed top-left grid cell coordinate origins `(col, row)`
+    /// for overlapping 16×16 Map Sections evenly spaced across the full grid lattice.
+    pub fn section_origins(&self, width: u32, height: u32) -> Vec<(u32, u32)> {
+        let (cols, rows) = self.lattice_dimensions(width, height);
+        if cols < 16 || rows < 16 {
+            return Vec::new();
+        }
+        let (kx, ky) = (cols.div_ceil(16), rows.div_ceil(16));
+        let col_origins: Vec<u32> = if kx == 1 {
+            vec![0]
+        } else {
+            (0..kx)
+                .map(|i| ((i as f64 * (cols - 16) as f64) / (kx - 1) as f64).round() as u32)
+                .collect()
+        };
+        let row_origins: Vec<u32> = if ky == 1 {
+            vec![0]
+        } else {
+            (0..ky)
+                .map(|j| ((j as f64 * (rows - 16) as f64) / (ky - 1) as f64).round() as u32)
+                .collect()
+        };
+        let mut origins = Vec::with_capacity((kx * ky) as usize);
+        for &r in &row_origins {
+            for &c in &col_origins {
+                origins.push((c, r));
+            }
+        }
+        origins
+    }
+
+    /// Whether the candidate meets the minimum 16×16 full grid cells threshold required for curation.
+    pub fn is_curation_eligible(&self, width: u32, height: u32) -> bool {
+        let (cols, rows) = self.lattice_dimensions(width, height);
+        cols >= 16 && rows >= 16
+    }
+}
+
+#[derive(Deserialize)]
+struct GridConfigHelper {
+    #[serde(default = "default_cell_size_px")]
+    cell_size_px: u32,
+    #[serde(default)]
+    offset_x: i64,
+    #[serde(default)]
+    offset_y: i64,
+}
+
+fn default_cell_size_px() -> u32 {
+    64
+}
+
+impl<'de> Deserialize<'de> for GridConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let helper = GridConfigHelper::deserialize(deserializer)?;
+        Ok(GridConfig::with_signed_offsets(
+            helper.cell_size_px,
+            helper.offset_x,
+            helper.offset_y,
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     pub id: String,
@@ -476,6 +639,8 @@ pub struct Candidate {
     pub parsed_gridless: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parsed_dimensions: Option<(u32, u32)>,
+    #[serde(default)]
+    pub grid: GridConfig,
     #[serde(default)]
     pub layers: Vec<CandidateLayer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -501,6 +666,7 @@ impl Candidate {
             author: None,
             parsed_gridless: None,
             parsed_dimensions: None,
+            grid: GridConfig::default(),
             layers: Vec::new(),
             parent_group_id: None,
         }
@@ -539,6 +705,11 @@ impl Candidate {
         self.parsed_dimensions = Some(dimensions);
         self
     }
+    pub fn with_grid(mut self, grid: GridConfig) -> Self {
+        self.grid = grid;
+        self
+    }
+
 
     pub fn with_layers(mut self, layers: Vec<CandidateLayer>) -> Self {
         self.layers = layers;
@@ -632,6 +803,7 @@ impl From<RedditSidecarMetadata> for Candidate {
             author: Some(meta.author),
             parsed_gridless: Some(meta.parsed_gridless),
             parsed_dimensions: meta.parsed_dimensions,
+            grid: GridConfig::default(),
             layers: Vec::new(),
             parent_group_id: None,
         }
@@ -725,6 +897,24 @@ pub fn normalize_tags(tags: impl IntoIterator<Item = String>) -> Vec<String> {
     normalized
 }
 
+/// An overlapping 16×16 Map Section with cached physical description.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapSection {
+    pub col: u32,
+    pub row: u32,
+    pub description: String,
+}
+
+impl MapSection {
+    pub fn new(col: u32, row: u32, description: impl Into<String>) -> Self {
+        Self {
+            col,
+            row,
+            description: description.into(),
+        }
+    }
+}
+
 /// An approved battlemap filed into curated storage with dynamic tags and metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CuratedMap {
@@ -736,9 +926,13 @@ pub struct CuratedMap {
     pub dimensions: (u32, u32),
     pub curated_at: DateTime<Utc>,
     #[serde(default)]
-    pub layers: Vec<Layer>,
+    pub grid: GridConfig,
+    #[serde(default)]
+    pub layers: Vec<CuratedLayer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<MapSection>,
 }
 
 #[derive(Deserialize)]
@@ -757,9 +951,13 @@ struct CuratedMapHelper {
     dimensions: (u32, u32),
     curated_at: DateTime<Utc>,
     #[serde(default)]
-    layers: Vec<Layer>,
+    grid: Option<GridConfig>,
+    #[serde(default)]
+    layers: Vec<CuratedLayer>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    sections: Vec<MapSection>,
 }
 
 impl<'de> Deserialize<'de> for CuratedMap {
@@ -785,8 +983,10 @@ impl<'de> Deserialize<'de> for CuratedMap {
             tags,
             dimensions: helper.dimensions,
             curated_at: helper.curated_at,
+            grid: helper.grid.unwrap_or_default(),
             layers: helper.layers,
             description: helper.description,
+            sections: helper.sections,
         })
     }
 }
@@ -806,8 +1006,10 @@ impl CuratedMap {
             tags: merged_tags,
             dimensions,
             curated_at,
+            grid: GridConfig::default(),
             layers: Vec::new(),
             description: None,
+            sections: Vec::new(),
         }
     }
 
@@ -824,6 +1026,11 @@ impl CuratedMap {
         self.layers = layers;
         self
     }
+    pub fn with_grid(mut self, grid: GridConfig) -> Self {
+        self.grid = grid;
+        self
+    }
+
 
     pub fn with_source(mut self, source: Source) -> Self {
         self.source = Some(source);
@@ -841,7 +1048,12 @@ impl CuratedMap {
         self
     }
 
-    /// Primary (first) theme string, defaulting to "dungeon" if tags is empty.
+    pub fn with_sections(mut self, sections: Vec<MapSection>) -> Self {
+        self.sections = sections;
+        self
+    }
+
+    /// Primary (first) tag string, falling back to "dungeon" when no tags exist.
     pub fn primary_theme(&self) -> &str {
         self.tags.first().map(|s| s.as_str()).unwrap_or("dungeon")
     }
@@ -891,6 +1103,10 @@ pub struct CuratedMapUpdate {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layers: Option<Vec<CuratedLayer>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<GridConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sections: Option<Vec<MapSection>>,
 }
 
 impl CuratedMapUpdate {
@@ -915,6 +1131,15 @@ impl CuratedMapUpdate {
 
     pub fn with_layers(mut self, layers: Vec<CuratedLayer>) -> Self {
         self.layers = Some(layers);
+        self
+    }
+    pub fn with_grid(mut self, grid: GridConfig) -> Self {
+        self.grid = Some(grid);
+        self
+    }
+
+    pub fn with_sections(mut self, sections: Vec<MapSection>) -> Self {
+        self.sections = Some(sections);
         self
     }
 }
@@ -1991,6 +2216,72 @@ mod tests {
     }
 
     #[test]
+    fn test_curated_map_sections_serde_and_backward_compatibility() {
+        // Direct MapSection serde
+        let section = MapSection::new(0, 16, "Flooded subterranean corridor with damp moss");
+        let section_json = serde_json::to_string(&section).unwrap();
+        assert_eq!(
+            section_json,
+            r#"{"col":0,"row":16,"description":"Flooded subterranean corridor with damp moss"}"#
+        );
+        let parsed_section: MapSection = serde_json::from_str(&section_json).unwrap();
+        assert_eq!(parsed_section, section);
+
+        // CuratedMap without sections omits field in serialized JSON
+        let map_without_sections = CuratedMap::with_now(
+            "map_no_sec",
+            vec!["dungeon".to_string()],
+            vec!["stone".into()],
+            (1024, 1024),
+        );
+        assert!(map_without_sections.sections.is_empty());
+        let json_no_sec = serde_json::to_string(&map_without_sections).unwrap();
+        assert!(!json_no_sec.contains("\"sections\""));
+
+        let parsed_no_sec: CuratedMap = serde_json::from_str(&json_no_sec).unwrap();
+        assert!(parsed_no_sec.sections.is_empty());
+
+        // CuratedMap with sections serializes and deserializes cleanly
+        let sections = vec![
+            MapSection::new(0, 0, "Northwest armory with rusted weapon racks"),
+            MapSection::new(16, 0, "Northeast altar with blackened brazier"),
+            MapSection::new(0, 16, "Southwest prison cells with iron bars"),
+            MapSection::new(16, 16, "Southeast torture chamber with stone table"),
+        ];
+        let map_with_sections = map_without_sections.clone().with_sections(sections.clone());
+        assert_eq!(map_with_sections.sections.len(), 4);
+
+        let json_with_sections = serde_json::to_string(&map_with_sections).unwrap();
+        assert!(json_with_sections.contains("\"sections\":["));
+        assert!(json_with_sections.contains("Northwest armory"));
+
+        let parsed_with_sections: CuratedMap = serde_json::from_str(&json_with_sections).unwrap();
+        assert_eq!(parsed_with_sections.sections, sections);
+        assert_eq!(parsed_with_sections, map_with_sections);
+
+        // Backward compatibility with legacy manifest JSON lacking "sections" field
+        let legacy_manifest = r#"{
+            "id": "legacy_map_no_sections",
+            "themes": ["crypt"],
+            "tags": ["bones"],
+            "dimensions": [1024, 1024],
+            "curated_at": "2026-10-16T12:00:00Z",
+            "layers": []
+        }"#;
+        let legacy_map: CuratedMap = serde_json::from_str(legacy_manifest).unwrap();
+        assert_eq!(legacy_map.id, "legacy_map_no_sections");
+        assert_eq!(legacy_map.sections, Vec::<MapSection>::new());
+
+        // CuratedMapUpdate with sections serde
+        let update = CuratedMapUpdate::default().with_sections(vec![MapSection::new(0, 0, "Updated section")]);
+        let update_json = serde_json::to_string(&update).unwrap();
+        assert!(update_json.contains("\"sections\":["));
+        let parsed_update: CuratedMapUpdate = serde_json::from_str(&update_json).unwrap();
+        assert_eq!(parsed_update.sections.as_ref().unwrap().len(), 1);
+        assert_eq!(parsed_update.sections.as_ref().unwrap()[0].description, "Updated section");
+    }
+
+    #[test]
     fn test_reddit_sort_and_timerange_serde() {
         assert_eq!(RedditSort::Hot.as_str(), "hot");
         assert_eq!(RedditSort::Top.as_str(), "top");
@@ -2547,5 +2838,139 @@ mod tests {
         assert!(empty.tags.is_none());
         assert!(empty.description.is_none());
         assert!(empty.layers.is_none());
+    }
+    #[test]
+    fn test_grid_config_normalization_and_serde() {
+        let default_grid = GridConfig::default();
+        assert_eq!(default_grid.cell_size_px, 64);
+        assert_eq!(default_grid.offset_x, 0);
+        assert_eq!(default_grid.offset_y, 0);
+
+        // Clamping & modulo
+        let small = GridConfig::new(10, 100, 200);
+        assert_eq!(small.cell_size_px, 16);
+        assert_eq!(small.offset_x, 100 % 16);
+        assert_eq!(small.offset_y, 200 % 16);
+
+        let big = GridConfig::new(500, 350, 400);
+        assert_eq!(big.cell_size_px, 300);
+        assert_eq!(big.offset_x, 350 % 300);
+        assert_eq!(big.offset_y, 400 % 300);
+
+        // Signed offset normalization with Euclidean modulo
+        let signed = GridConfig::with_signed_offsets(64, -5, -70);
+        assert_eq!(signed.cell_size_px, 64);
+        assert_eq!(signed.offset_x, 59); // -5 mod 64 = 59
+        assert_eq!(signed.offset_y, 58); // -70 mod 64 = 58
+
+        // Deserialization with legacy / missing fields
+        let legacy_json = "{}";
+        let parsed_legacy: GridConfig = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed_legacy, GridConfig::default());
+
+        // Deserialization with signed negative offsets in JSON
+        let json = r#"{"cell_size_px": 50, "offset_x": -10, "offset_y": 60}"#;
+        let parsed: GridConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.cell_size_px, 50);
+        assert_eq!(parsed.offset_x, 40);
+        assert_eq!(parsed.offset_y, 10);
+    }
+
+    #[test]
+    fn test_grid_config_auto_seed() {
+        // Matching normal aspect ratio within 5%
+        // 2000x1500 image, 40x30 grid -> cell size 50px
+        let seeded = GridConfig::auto_seed((40, 30), (2000, 1500));
+        assert_eq!(seeded.cell_size_px, 50);
+        assert_eq!(seeded.offset_x, 0);
+        assert_eq!(seeded.offset_y, 0);
+
+        // Matching swapped aspect ratio (image 1500x2000, parsed 40x30)
+        let seeded_swapped = GridConfig::auto_seed((40, 30), (1500, 2000));
+        assert_eq!(seeded_swapped.cell_size_px, 50);
+
+        // Mismatched aspect ratio -> defaults to 64px
+        let mismatched = GridConfig::auto_seed((50, 10), (2000, 1500));
+        assert_eq!(mismatched.cell_size_px, 64);
+    }
+
+    #[test]
+    fn test_grid_config_lattice_dimensions() {
+        let grid = GridConfig::new(64, 0, 0);
+        // 2048 x 2048 -> 32 x 32 cells exactly
+        assert_eq!(grid.lattice_dimensions(2048, 2048), (32, 32));
+
+        // Partial edge remnant discarded: 2040 x 1500 -> 31 x 23 cells
+        assert_eq!(grid.lattice_dimensions(2040, 1500), (31, 23));
+
+        // With offsets: offset_x = 20, offset_y = 10
+        let offset_grid = GridConfig::new(64, 20, 10);
+        // (2048 - 20) / 64 = 2028 / 64 = 31
+        // (2048 - 10) / 64 = 2038 / 64 = 31
+        assert_eq!(offset_grid.lattice_dimensions(2048, 2048), (31, 31));
+
+        // Image smaller than offset or cell size
+        assert_eq!(offset_grid.lattice_dimensions(10, 5), (0, 0));
+    }
+
+    #[test]
+    fn test_grid_config_section_counts_and_eligibility() {
+        let grid = GridConfig::new(64, 0, 0);
+
+        // 1024 x 1024 -> 16 x 16 cells -> minimum eligible (1 section x 1 section)
+        assert_eq!(grid.lattice_dimensions(1024, 1024), (16, 16));
+        assert!(grid.is_curation_eligible(1024, 1024));
+        assert_eq!(grid.section_counts(1024, 1024), Some((1, 1)));
+
+        // 1023 x 1024 -> 15 x 16 cells -> ineligible (< 16 cols)
+        assert_eq!(grid.lattice_dimensions(1023, 1024), (15, 16));
+        assert!(!grid.is_curation_eligible(1023, 1024));
+        assert_eq!(grid.section_counts(1023, 1024), None);
+
+        // 1024 x 1023 -> 16 x 15 cells -> ineligible (< 16 rows)
+        assert_eq!(grid.lattice_dimensions(1024, 1023), (16, 15));
+        assert!(!grid.is_curation_eligible(1024, 1023));
+        assert_eq!(grid.section_counts(1024, 1023), None);
+
+        // 2048 x 1536 -> 32 x 24 cells -> eligible -> (32.div_ceil(16), 24.div_ceil(16)) = (2, 2)
+        assert_eq!(grid.lattice_dimensions(2048, 1536), (32, 24));
+        assert!(grid.is_curation_eligible(2048, 1536));
+        assert_eq!(grid.section_counts(2048, 1536), Some((2, 2)));
+
+        // 2560 x 1024 -> 40 x 16 cells -> (3, 1)
+        assert_eq!(grid.section_counts(2560, 1024), Some((3, 1)));
+    }
+
+    #[test]
+    fn test_grid_config_section_origins() {
+        let grid = GridConfig::new(64, 0, 0);
+
+        // Undersized map returns empty origins
+        assert_eq!(grid.section_origins(960, 960), Vec::<(u32, u32)>::new());
+
+        // Exactly 16x16 cells (1024x1024 px) -> single origin at (0, 0)
+        assert_eq!(grid.section_origins(1024, 1024), vec![(0, 0)]);
+
+        // 32x32 cells (2048x2048 px) -> kx=2, ky=2 -> origins at col: [0, 16], row: [0, 16]
+        // Cartesian product: (0, 0), (16, 0), (0, 16), (16, 16)
+        assert_eq!(
+            grid.section_origins(2048, 2048),
+            vec![(0, 0), (16, 0), (0, 16), (16, 16)]
+        );
+
+        // 20x20 cells (1280x1280 px) -> kx=2, ky=2 -> cols-16 = 4 -> col origins [0, 4]
+        // Cartesian product: (0, 0), (4, 0), (0, 4), (4, 4)
+        assert_eq!(
+            grid.section_origins(1280, 1280),
+            vec![(0, 0), (4, 0), (0, 4), (4, 4)]
+        );
+
+        // 40x16 cells (2560x1024 px) -> kx=3, ky=1
+        // cols-16 = 24; i=0 -> 0, i=1 -> 12, i=2 -> 24. row: [0]
+        // Cartesian product: (0, 0), (12, 0), (24, 0)
+        assert_eq!(
+            grid.section_origins(2560, 1024),
+            vec![(0, 0), (12, 0), (24, 0)]
+        );
     }
 }

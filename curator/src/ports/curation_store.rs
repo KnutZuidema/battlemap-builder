@@ -10,8 +10,9 @@ pub trait CurationStore: Send + Sync {
     fn get_staging_layer_bytes(&self, id: &str, layer_index: usize) -> Result<Vec<u8>, StorageError>;
 
     /// Atomically commit an approved candidate into curated storage:
-    /// performs atomic moves, writes `<id>/manifest.json`, writes LoRA companion files
-    /// (`<id>_lora1024.png` / `<id>_lora1024.txt`), and cleans up staging bundle.
+    /// performs atomic moves, writes `<id>/manifest.json`, and cleans up the staging bundle.
+    /// No `<id>_lora1024.*` companions are written: the dynamic dataset ZIP export derives
+    /// per-MapSection LoRA assets on demand.
     ///
     /// Returns the `CuratedMap` exactly as persisted to disk, so callers never have to
     /// re-derive a response that could disagree with the stored manifest.

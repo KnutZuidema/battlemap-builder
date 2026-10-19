@@ -276,6 +276,7 @@ export default function App() {
       failureReason: telemetry.failureReason || null,
       attempts: telemetry.attempts || [],
       imageConfig: telemetry.imageConfig || null,
+      conditioning: telemetry.conditioning || null,
       durationMs,
       timestamp: new Date().toISOString()
     }, ...prev]);
@@ -309,6 +310,7 @@ export default function App() {
       failureReason: message,
       attempts,
       imageConfig: telemetry.imageConfig || null,
+      conditioning: telemetry.conditioning || null,
       durationMs: Date.now() - startTimeMs,
       timestamp: new Date().toISOString()
     }, ...prev]);
@@ -347,6 +349,8 @@ export default function App() {
     setMapImage(prev.mapImage);
     if (Array.isArray(prev.features)) {
       setFeatures(prev.features);
+    } else {
+      setFeatures([]);
     }
     setHistoryIndex(historyIndex - 1);
     setRegionSelection(null);
@@ -360,6 +364,8 @@ export default function App() {
     setMapImage(next.mapImage);
     if (Array.isArray(next.features)) {
       setFeatures(next.features);
+    } else {
+      setFeatures([]);
     }
     setHistoryIndex(historyIndex + 1);
     setRegionSelection(null);
@@ -453,7 +459,8 @@ export default function App() {
       model: selectedModel,
       forgeImageMode,
       label,
-      resultRegion
+      resultRegion,
+      features
     };
     setRetryContext(currentContext);
     setIsRetryPillDismissed(false);
@@ -471,9 +478,22 @@ export default function App() {
         forgeImageMode
       });
 
+      const dx = res.offset?.dx || 0;
+      const dy = res.offset?.dy || 0;
+      let nextFeatures = features;
+      if (dx !== 0 || dy !== 0) {
+        nextFeatures = features.map((f) => ({
+          ...f,
+          box: f.box ? { ...f.box, x: f.box.x + dx, y: f.box.y + dy } : f.box,
+          ...(typeof f.x === 'number' ? { x: f.x + dx } : {}),
+          ...(typeof f.y === 'number' ? { y: f.y + dy } : {})
+        }));
+        setFeatures(nextFeatures);
+      }
+
       setMapImage(res.imageDataUrl);
       setRegionPrompt('');
-      pushHistoryState(res.imageDataUrl);
+      pushHistoryState(res.imageDataUrl, nextFeatures);
       addMapCost(res.usage || res.debug?.usage, false);
       pushDebugLog('FORGE_REGION', `${label}: ${regionPrompt || 'seamless terrain'}`, res, startTimeMs);
       confetti({ particleCount: 50, spread: 60, origin: { y: 0.8 } });
@@ -546,7 +566,7 @@ export default function App() {
     setFailure(null);
 
     if (retryContext.type === 'FORGE_REGION') {
-      const { originalDataUrl, selection, prompt: savedPrompt, label } = retryContext;
+      const { originalDataUrl, selection, prompt: savedPrompt, label, features: baseFeatures } = retryContext;
       setIsForgingRegion(true);
       setGenerationPhaseText('RETRYING REGION FORGE...');
 
@@ -559,8 +579,24 @@ export default function App() {
           forgeImageMode: retryContext.forgeImageMode || forgeImageMode
         });
 
+        const sourceFeatures = baseFeatures || features;
+        const dx = res.offset?.dx || 0;
+        const dy = res.offset?.dy || 0;
+        let nextFeatures = sourceFeatures;
+        if (dx !== 0 || dy !== 0) {
+          nextFeatures = sourceFeatures.map((f) => ({
+            ...f,
+            box: f.box ? { ...f.box, x: f.box.x + dx, y: f.box.y + dy } : f.box,
+            ...(typeof f.x === 'number' ? { x: f.x + dx } : {}),
+            ...(typeof f.y === 'number' ? { y: f.y + dy } : {})
+          }));
+          setFeatures(nextFeatures);
+        } else if (baseFeatures && baseFeatures !== features) {
+          setFeatures(nextFeatures);
+        }
+
         setMapImage(res.imageDataUrl);
-        pushHistoryState(res.imageDataUrl);
+        pushHistoryState(res.imageDataUrl, nextFeatures);
         addMapCost(res.usage || res.debug?.usage, false);
         pushDebugLog('FORGE_REGION', `${label} (retry): ${savedPrompt || 'seamless terrain'}`, res, startTimeMs);
         confetti({ particleCount: 50, spread: 60, origin: { y: 0.8 } });
@@ -588,7 +624,9 @@ export default function App() {
         });
 
         setMapImage(res.imageDataUrl);
-        pushHistoryState(res.imageDataUrl);
+        setFeatures([]);
+        setSelectedFeatureId(null);
+        pushHistoryState(res.imageDataUrl, []);
         addMapCost(res.usage || res.debug?.usage, true);
         pushDebugLog('GENERATE', `Retry: ${savedPrompt}`, res, startTimeMs);
         confetti({ particleCount: 55, spread: 65, origin: { y: 0.8 } });
@@ -761,7 +799,7 @@ export default function App() {
             : data.history.length - 1;
         setHistoryIndex(validIndex);
       } else {
-        setHistory([{ mapImage: data.mapImage }]);
+        setHistory([{ mapImage: data.mapImage, features: Array.isArray(data.features) ? data.features : [] }]);
         setHistoryIndex(0);
       }
       setRegionSelection(null);

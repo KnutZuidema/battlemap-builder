@@ -13,8 +13,8 @@ use curator::api::{create_router, AppState, DescribeResponse, SuggestThemesRespo
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use curator::ports::cost_tracker::{CostTracker, GenerationCostRecord};
 use curator::domain::{
-    Candidate, CandidateLayer, CuratedMap, HarvestedMedia, LayerRole, ParsedTags, RedditHarvestQuery,
-    RedditPost, Source, Theme,
+    Candidate, CandidateLayer, CuratedMap, GridConfig, HarvestedMedia, LayerRole, ParsedTags,
+    RedditHarvestQuery, RedditPost, Source, Theme,
 };
 use curator::ports::harvester::{HarvesterError, RedditHarvester};
 use curator::ports::storage::StorageRepository;
@@ -1456,10 +1456,10 @@ async fn test_api_layer_image_retrieval() {
     let img0 = b"\x89PNG\r\n\x1a\nlayer0_bytes_staging";
     let img1 = b"\x89PNG\r\n\x1a\nlayer1_bytes_staging";
 
-    let mut cand = Candidate::with_now("bundle_img_test", Source::Reddit, "0.png", (1000, 1000));
+    let mut cand = Candidate::with_now("bundle_img_test", Source::Reddit, "0.png", (1024, 1024));
     cand.layers = vec![
-        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1000, 1000)),
-        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1000, 1000)),
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1024, 1024)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1024, 1024)),
     ];
     storage
         .save_staging_bundle(None, &cand, &[img0.to_vec(), img1.to_vec()])
@@ -1575,10 +1575,10 @@ async fn test_api_curate_bundle_validation_and_success() {
 
     // Case A: Bundle in staging with Unassigned layer is rejected with 400
     let mut cand_unassigned =
-        Candidate::with_now("cand_unassigned", Source::Reddit, "0.png", (800, 600));
+        Candidate::with_now("cand_unassigned", Source::Reddit, "0.png", (1024, 1024));
     cand_unassigned.layers = vec![
-        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (800, 600)),
-        CandidateLayer::new(1, "1.png", LayerRole::Unassigned, None, (800, 600)),
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1024, 1024)),
+        CandidateLayer::new(1, "1.png", LayerRole::Unassigned, None, (1024, 1024)),
     ];
     storage
         .save_staging_bundle(None, &cand_unassigned, &[img0.to_vec(), img1.to_vec()])
@@ -1609,10 +1609,10 @@ async fn test_api_curate_bundle_validation_and_success() {
 
     // Case B: Bundle in staging with all Exclude layers is rejected with 400
     let mut cand_excluded =
-        Candidate::with_now("cand_excluded", Source::Reddit, "0.png", (800, 600));
+        Candidate::with_now("cand_excluded", Source::Reddit, "0.png", (1024, 1024));
     cand_excluded.layers = vec![
-        CandidateLayer::new(0, "0.png", LayerRole::Exclude, None, (800, 600)),
-        CandidateLayer::new(1, "1.png", LayerRole::Exclude, None, (800, 600)),
+        CandidateLayer::new(0, "0.png", LayerRole::Exclude, None, (1024, 1024)),
+        CandidateLayer::new(1, "1.png", LayerRole::Exclude, None, (1024, 1024)),
     ];
     storage
         .save_staging_bundle(None, &cand_excluded, &[img0.to_vec(), img1.to_vec()])
@@ -1725,14 +1725,14 @@ async fn test_api_curate_bundle_validation_and_success() {
                         "filename": "0.png",
                         "role": "ground",
                         "elevation": 0,
-                        "dimensions": [800, 600]
+                        "dimensions": [1024, 1024]
                     },
                     {
                         "index": 1,
                         "filename": "1.png",
                         "role": "upper_floor",
                         "elevation": 1,
-                        "dimensions": [800, 600]
+                        "dimensions": [1024, 1024]
                     }
                 ]
             })
@@ -2406,14 +2406,22 @@ async fn test_curate_candidate_with_explicit_description_persistence() {
         .expect("Ground layer must be present");
     assert_eq!(ground_layer.caption.as_deref(), Some(custom_desc));
 
-    // 4. <id>_lora1024.txt companion file exists and contains the description
-    let lora_path = dir
+    // 4. <id>_lora1024 companion files do NOT exist on disk, and storage dynamically returns caption with description
+    let lora_txt_path = dir
         .path()
         .join("curated")
         .join("cand_curate_explicit_desc")
         .join("cand_curate_explicit_desc_lora1024.txt");
-    assert!(lora_path.is_file());
-    let lora_str = std::fs::read_to_string(&lora_path).unwrap();
+    assert!(!lora_txt_path.exists());
+    let lora_png_path = dir
+        .path()
+        .join("curated")
+        .join("cand_curate_explicit_desc")
+        .join("cand_curate_explicit_desc_lora1024.png");
+    assert!(!lora_png_path.exists());
+    let lora_str = storage
+        .get_curated_lora_caption(&Theme::Dungeon, "cand_curate_explicit_desc")
+        .unwrap();
     assert!(lora_str.contains("obsidian dais"));
 }
 
@@ -2622,4 +2630,514 @@ async fn test_api_post_curate_delegates_to_curation_workflow_and_zero_store_scan
     let resp_reject = app.oneshot(req_reject).await.unwrap();
     assert_eq!(resp_reject.status(), StatusCode::OK);
     assert_eq!(spy.reject_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_staging_grid_patch_and_curation_persistence() {
+    let (app, storage, _dir) = setup_test_app();
+
+    // Stage candidate with default grid (64, 0, 0)
+    let cand = Candidate::with_now("cand_grid_test", Source::Reddit, "cand_grid_test.png", (2560, 2560));
+    let dummy_image = create_test_png();
+    storage.save_staging(&cand, &dummy_image).unwrap();
+
+    // Verify initial candidate grid in storage
+    let staging_list = storage.list_staging().unwrap();
+    let initial_cand = staging_list.iter().find(|c| c.id == "cand_grid_test").unwrap();
+    assert_eq!(initial_cand.grid.cell_size_px, 64);
+    assert_eq!(initial_cand.grid.offset_x, 0);
+    assert_eq!(initial_cand.grid.offset_y, 0);
+    // 1. PATCH /api/staging/{id}/grid updates staging candidate grid
+    let grid_payload = json!({
+        "cell_size_px": 128,
+        "offset_x": 10,
+        "offset_y": 20
+    });
+    let req = Request::builder()
+        .uri("/api/staging/cand_grid_test/grid")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(grid_payload.to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let updated_cand: Candidate = serde_json::from_slice(&body).unwrap();
+    assert_eq!(updated_cand.grid.cell_size_px, 128);
+    assert_eq!(updated_cand.grid.offset_x, 10);
+    assert_eq!(updated_cand.grid.offset_y, 20);
+
+    // Verify persisted on disk for staging candidate
+    let staging_list = storage.list_staging().unwrap();
+    let persisted_staging = staging_list.iter().find(|c| c.id == "cand_grid_test").unwrap();
+    assert_eq!(persisted_staging.grid.cell_size_px, 128);
+    assert_eq!(persisted_staging.grid.offset_x, 10);
+    assert_eq!(persisted_staging.grid.offset_y, 20);
+    // 2. Curation carries candidate grid to curated map
+    let curate_payload = json!({
+        "id": "cand_grid_test",
+        "themes": ["dungeon"],
+        "tags": ["crypt", "stone"]
+    });
+    let req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let curated_list = storage.list_curated(None).unwrap();
+    let curated_map = curated_list.iter().find(|m| m.id == "cand_grid_test").unwrap();
+    assert_eq!(curated_map.grid.cell_size_px, 128);
+    assert_eq!(curated_map.grid.offset_x, 10);
+    assert_eq!(curated_map.grid.offset_y, 20);
+
+    // 3. PATCH /api/curated/{id} updates curated map grid
+    let patch_curated_payload = json!({
+        "grid": {
+            "cell_size_px": 70,
+            "offset_x": 5,
+            "offset_y": 15
+        }
+    });
+    let req = Request::builder()
+        .uri("/api/curated/cand_grid_test")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(patch_curated_payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let updated_curated: CuratedMap = serde_json::from_slice(&body).unwrap();
+    assert_eq!(updated_curated.grid.cell_size_px, 70);
+    assert_eq!(updated_curated.grid.offset_x, 5);
+    assert_eq!(updated_curated.grid.offset_y, 15);
+
+    // Verify persisted on disk for curated map
+    let curated_list = storage.list_curated(None).unwrap();
+    let persisted_curated = curated_list.iter().find(|m| m.id == "cand_grid_test").unwrap();
+    assert_eq!(persisted_curated.grid.cell_size_px, 70);
+    assert_eq!(persisted_curated.grid.offset_x, 5);
+    assert_eq!(persisted_curated.grid.offset_y, 15);
+}
+
+#[tokio::test]
+async fn test_api_curate_gate_rejects_undersized_grid() {
+    let (app, storage, _dir) = setup_test_app();
+
+    // 1. Single-image candidate with < 16 full cells (e.g. 800x600 px with 64px grid -> 12x9 cells)
+    let small_cand = Candidate::with_now("small_map", Source::Reddit, "small.png", (800, 600));
+    storage.save_staging(&small_cand, b"\x89PNG\r\n\x1a\nsmall").unwrap();
+
+    let curate_req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "small_map",
+                "theme": "dungeon"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.clone().oneshot(curate_req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json_err: Value = serde_json::from_slice(&body).unwrap();
+    let err_msg = json_err["error"].as_str().unwrap();
+    assert!(
+        err_msg.contains("Candidate Ground layer yields fewer than 16×16 full Grid Cells"),
+        "Unexpected error message: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("12×9 cells"),
+        "Unexpected error message: {}",
+        err_msg
+    );
+
+    // 2. Candidate with Ground layer having offset that pushes full cells below 16
+    // 1024x1024 with 64px is normally 16x16, but offset_x = 10 -> (1024-10)/64 = 15 cols
+    let mut offset_cand = Candidate::with_now("offset_map", Source::Reddit, "offset.png", (1024, 1024));
+    offset_cand.grid = GridConfig::new(64, 10, 0);
+    storage.save_staging(&offset_cand, b"\x89PNG\r\n\x1a\noffset").unwrap();
+
+    let offset_req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "offset_map",
+                "theme": "cave"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp_offset = app.clone().oneshot(offset_req).await.unwrap();
+    assert_eq!(resp_offset.status(), StatusCode::BAD_REQUEST);
+    let body_offset = to_bytes(resp_offset.into_body(), usize::MAX).await.unwrap();
+    let json_err_offset: Value = serde_json::from_slice(&body_offset).unwrap();
+    assert!(
+        json_err_offset["error"].as_str().unwrap().contains("15×16 cells"),
+        "Unexpected error: {:?}",
+        json_err_offset
+    );
+}
+
+#[tokio::test]
+async fn test_api_curate_gate_respects_payload_layer_role_updates() {
+    let (app, storage, _dir) = setup_test_app();
+
+    let img_large = b"\x89PNG\r\n\x1a\nlarge_layer";
+    let img_small = b"\x89PNG\r\n\x1a\nsmall_layer";
+
+    // Candidate initially has:
+    // Layer 0: Ground, 1024x1024 (16x16 with 64px) -> eligible
+    // Layer 1: UpperFloor, 800x600 (12x9 with 64px) -> ineligible
+    let mut cand = Candidate::with_now("role_update_cand", Source::Reddit, "0.png", (1024, 1024));
+    cand.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1024, 1024)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (800, 600)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand, &[img_large.to_vec(), img_small.to_vec()])
+        .unwrap();
+
+    // 1. Curate payload swaps roles: Layer 1 becomes Ground (800x600), Layer 0 becomes UpperFloor.
+    // The gate MUST check the updated payload.layers and reject because Ground is 12x9 (<16x16).
+    let curate_reject_req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "role_update_cand",
+                "theme": "dungeon",
+                "layers": [
+                    {
+                        "index": 0,
+                        "filename": "0.png",
+                        "role": "upper_floor",
+                        "elevation": 1,
+                        "dimensions": [1024, 1024]
+                    },
+                    {
+                        "index": 1,
+                        "filename": "1.png",
+                        "role": "ground",
+                        "elevation": 0,
+                        "dimensions": [800, 600]
+                    }
+                ]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp_reject = app.clone().oneshot(curate_reject_req).await.unwrap();
+    assert_eq!(resp_reject.status(), StatusCode::BAD_REQUEST);
+    let body_reject = to_bytes(resp_reject.into_body(), usize::MAX).await.unwrap();
+    let json_reject: Value = serde_json::from_slice(&body_reject).unwrap();
+    let err_msg = json_reject["error"].as_str().unwrap();
+    assert!(
+        err_msg.contains("Candidate Ground layer yields fewer than 16×16 full Grid Cells"),
+        "Unexpected error message: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("12×9 cells"),
+        "Expected 12×9 cells in error message, got: {}",
+        err_msg
+    );
+
+    // 2. Candidate where staging initially has undersized layer as Ground (800x600)
+    // and large layer as UpperFloor (1024x1024).
+    let mut cand2 = Candidate::with_now("role_update_cand2", Source::Reddit, "0.png", (800, 600));
+    cand2.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (800, 600)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1024, 1024)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand2, &[img_small.to_vec(), img_large.to_vec()])
+        .unwrap();
+
+    // Curate payload promotes Layer 1 (1024x1024) to Ground, and demotes Layer 0 to UpperFloor.
+    // The gate MUST check payload.layers, see Ground is 1024x1024 (16x16 cells), and accept.
+    let curate_accept_req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "role_update_cand2",
+                "theme": "dungeon",
+                "layers": [
+                    {
+                        "index": 0,
+                        "filename": "0.png",
+                        "role": "upper_floor",
+                        "elevation": 1,
+                        "dimensions": [800, 600]
+                    },
+                    {
+                        "index": 1,
+                        "filename": "1.png",
+                        "role": "ground",
+                        "elevation": 0,
+                        "dimensions": [1024, 1024]
+                    }
+                ]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp_accept = app.oneshot(curate_accept_req).await.unwrap();
+    assert_eq!(resp_accept.status(), StatusCode::OK);
+    let body_accept = to_bytes(resp_accept.into_body(), usize::MAX).await.unwrap();
+    let json_accept: Value = serde_json::from_slice(&body_accept).unwrap();
+    assert_eq!(json_accept["status"], "ok");
+    assert_eq!(json_accept["curated"]["id"], "role_update_cand2");
+}
+
+#[tokio::test]
+async fn test_curate_exactly_16x16_produces_single_map_section_reusing_description() {
+    let (app, storage, dir) = setup_test_app();
+
+    // 16x16 cells at 64px = 1024x1024 px
+    let img_bytes = create_test_png();
+    let cand = Candidate::with_now(
+        "cand_16x16_single",
+        Source::Generated,
+        "cand_16x16_single.png",
+        (1024, 1024),
+    );
+    storage.save_staging(&cand, &img_bytes).unwrap();
+
+    let custom_desc = "Compact 16x16 arcane summoning chamber with inscribed runic circle.";
+    let curate_payload = json!({
+        "id": "cand_16x16_single",
+        "themes": ["dungeon"],
+        "tags": ["runes", "circle"],
+        "description": custom_desc
+    });
+
+    let req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let res_json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(res_json["status"], "ok");
+    assert_eq!(res_json["curated"]["id"], "cand_16x16_single");
+    assert_eq!(res_json["curated"]["description"].as_str(), Some(custom_desc));
+
+    // Must produce exactly 1 MapSection at (0, 0) reusing the map description
+    let sections = res_json["curated"]["sections"].as_array().expect("sections array exists");
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0]["col"], 0);
+    assert_eq!(sections[0]["row"], 0);
+    assert_eq!(sections[0]["description"].as_str(), Some(custom_desc));
+
+    // Verify manifest.json on disk
+    let manifest_path = dir.path().join("curated").join("cand_16x16_single").join("manifest.json");
+    let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
+    let curated_manifest: CuratedMap = serde_json::from_str(&manifest_content).unwrap();
+    assert_eq!(curated_manifest.sections.len(), 1);
+    assert_eq!(curated_manifest.sections[0].col, 0);
+    assert_eq!(curated_manifest.sections[0].row, 0);
+    assert_eq!(curated_manifest.sections[0].description, custom_desc);
+}
+
+#[tokio::test]
+async fn test_curate_multi_section_32x32_produces_all_map_sections() {
+    let (app, storage, dir) = setup_test_app();
+
+    // 32x32 cells at 64px = 2048x2048 px
+    // Generate valid 2048x2048 PNG image
+    let img = image::RgbaImage::new(2048, 2048);
+    let mut img_bytes = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut img_bytes), image::ImageFormat::Png).unwrap();
+
+    let cand = Candidate::with_now(
+        "cand_32x32_multi",
+        Source::Generated,
+        "cand_32x32_multi.png",
+        (2048, 2048),
+    );
+    storage.save_staging(&cand, &img_bytes).unwrap();
+
+    let curate_payload = json!({
+        "id": "cand_32x32_multi",
+        "themes": ["dungeon", "crypt"],
+        "tags": ["stone", "sarcophagus"],
+        "description": "Massive ancient necropolis spanning multiple wings."
+    });
+
+    let req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let res_json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(res_json["status"], "ok");
+    assert_eq!(res_json["curated"]["id"], "cand_32x32_multi");
+
+    // 32x32 cells -> kx = 2, ky = 2 -> 4 sections: (0, 0), (16, 0), (0, 16), (16, 16)
+    let sections = res_json["curated"]["sections"].as_array().expect("sections array exists");
+    assert_eq!(sections.len(), 4);
+
+    let origins: Vec<(u64, u64)> = sections
+        .iter()
+        .map(|s| (s["col"].as_u64().unwrap(), s["row"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(origins, vec![(0, 0), (16, 0), (0, 16), (16, 16)]);
+
+    for s in sections {
+        let desc = s["description"].as_str().unwrap();
+        assert!(!desc.trim().is_empty());
+        assert!(desc.contains("dungeon") || desc.contains("stone"));
+    }
+
+    // Verify manifest.json on disk
+    let manifest_path = dir.path().join("curated").join("cand_32x32_multi").join("manifest.json");
+    let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
+    let curated_manifest: CuratedMap = serde_json::from_str(&manifest_content).unwrap();
+    assert_eq!(curated_manifest.sections.len(), 4);
+    assert_eq!(curated_manifest.sections[0].col, 0);
+    assert_eq!(curated_manifest.sections[0].row, 0);
+    assert_eq!(curated_manifest.sections[1].col, 16);
+    assert_eq!(curated_manifest.sections[1].row, 0);
+    assert_eq!(curated_manifest.sections[2].col, 0);
+    assert_eq!(curated_manifest.sections[2].row, 16);
+    assert_eq!(curated_manifest.sections[3].col, 16);
+    assert_eq!(curated_manifest.sections[3].row, 16);
+}
+
+#[tokio::test]
+async fn test_patch_curated_grid_validates_curation_gate_and_recomputes_sections() {
+    let (app, storage, dir) = setup_test_app();
+
+    // 1. Stage and curate a 2048x2048 map with default 64px grid (32x32 cells -> 4 sections)
+    let img = image::RgbaImage::new(2048, 2048);
+    let mut img_bytes = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut img_bytes), image::ImageFormat::Png).unwrap();
+
+    let cand = Candidate::with_now(
+        "map_to_regrid",
+        Source::Generated,
+        "map_to_regrid.png",
+        (2048, 2048),
+    );
+    storage.save_staging(&cand, &img_bytes).unwrap();
+
+    let curate_payload = json!({
+        "id": "map_to_regrid",
+        "themes": ["dungeon"],
+        "tags": ["crypt"],
+        "description": "A sprawling subterranean temple complex."
+    });
+    let curate_req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+    let curate_resp = app.clone().oneshot(curate_req).await.unwrap();
+    assert_eq!(curate_resp.status(), StatusCode::OK);
+
+    // Initial curated map has 4 sections
+    let curated_list = storage.list_curated(None).unwrap();
+    let initial_curated = curated_list.iter().find(|m| m.id == "map_to_regrid").unwrap();
+    assert_eq!(initial_curated.sections.len(), 4);
+
+    // 2. Reject undersized grid configuration (< 16x16 full cells)
+    // 2048px with 200px cell size -> 2048 / 200 = 10 cells < 16 -> HTTP 400 Bad Request
+    let undersized_payload = json!({
+        "grid": {
+            "cell_size_px": 200,
+            "offset_x": 0,
+            "offset_y": 0
+        }
+    });
+    let reject_req = Request::builder()
+        .uri("/api/curated/map_to_regrid")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(undersized_payload.to_string()))
+        .unwrap();
+    let reject_resp = app.clone().oneshot(reject_req).await.unwrap();
+    assert_eq!(reject_resp.status(), StatusCode::BAD_REQUEST);
+    let reject_body = to_bytes(reject_resp.into_body(), usize::MAX).await.unwrap();
+    let reject_json: Value = serde_json::from_slice(&reject_body).unwrap();
+    assert!(
+        reject_json["error"].as_str().unwrap().contains("fewer than 16×16 full Grid Cells"),
+        "Error message must specify fewer than 16x16: {:?}",
+        reject_json
+    );
+
+    // 3. Update with valid grid yielding exactly 16x16 cells (128px on 2048px -> 16x16 cells)
+    // Should recompute sections down from 4 to 1 MapSection at (0, 0) reusing map description
+    let valid_regrid_payload = json!({
+        "grid": {
+            "cell_size_px": 128,
+            "offset_x": 0,
+            "offset_y": 0
+        }
+    });
+    let valid_req = Request::builder()
+        .uri("/api/curated/map_to_regrid")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(valid_regrid_payload.to_string()))
+        .unwrap();
+    let valid_resp = app.oneshot(valid_req).await.unwrap();
+    assert_eq!(valid_resp.status(), StatusCode::OK);
+    let valid_body = to_bytes(valid_resp.into_body(), usize::MAX).await.unwrap();
+    let valid_json: Value = serde_json::from_slice(&valid_body).unwrap();
+
+    assert_eq!(valid_json["grid"]["cell_size_px"], 128);
+    let updated_sections = valid_json["sections"].as_array().expect("sections array exists");
+    assert_eq!(updated_sections.len(), 1);
+    assert_eq!(updated_sections[0]["col"], 0);
+    assert_eq!(updated_sections[0]["row"], 0);
+    assert_eq!(
+        updated_sections[0]["description"].as_str(),
+        Some("A sprawling subterranean temple complex.")
+    );
+
+    // 4. Verify updated manifest.json on disk
+    let manifest_path = dir.path().join("curated").join("map_to_regrid").join("manifest.json");
+    let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
+    let updated_manifest: CuratedMap = serde_json::from_str(&manifest_content).unwrap();
+    assert_eq!(updated_manifest.grid.cell_size_px, 128);
+    assert_eq!(updated_manifest.sections.len(), 1);
+    assert_eq!(updated_manifest.sections[0].col, 0);
+    assert_eq!(updated_manifest.sections[0].row, 0);
+    assert_eq!(
+        updated_manifest.sections[0].description,
+        "A sprawling subterranean temple complex."
+    );
 }

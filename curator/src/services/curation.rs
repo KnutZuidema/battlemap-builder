@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    normalize_tags, validate_layers_for_curation, CuratedMap, Layer, LayerRole, RejectionReason,
+    normalize_tags, validate_layers_for_curation, CaptionGenerator, CuratedMap, Layer, LayerRole,
+    MapSection, RejectionReason,
 };
 use crate::ports::curation_store::CurationStore;
 use crate::ports::storage::StorageError;
@@ -117,7 +118,20 @@ impl CurationWorkflow for CurationService {
                 )
             })?;
 
-        // 3. Physical description resolution via DescriptionService (STRICT: no procedural caption fallback)
+        // 3. 16×16 full-grid curation gate (Ground layer dimensions win over manifest dims)
+        let (ground_w, ground_h) = if ground_layer.dimensions != (0, 0) {
+            ground_layer.dimensions
+        } else {
+            candidate.dimensions
+        };
+        if !candidate.grid.is_curation_eligible(ground_w, ground_h) {
+            let (cols, rows) = candidate.grid.lattice_dimensions(ground_w, ground_h);
+            return Err(CurationWorkflowError::ValidationFailed(format!(
+                "Candidate Ground layer yields fewer than 16×16 full Grid Cells ({cols}×{rows} cells); minimum 16×16 required for curation"
+            )));
+        }
+
+        // 4. Physical description resolution via DescriptionService (STRICT: no procedural caption fallback)
         let final_description = if let Some(desc) = description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
             desc.to_string()
         } else {
@@ -132,7 +146,7 @@ impl CurationWorkflow for CurationService {
                 .await?
         };
 
-        // 4. Update ground layer caption with resolved description
+        // 5. Update ground layer caption with resolved description
         let mut layers_for_commit = raw_layers;
         for layer in &mut layers_for_commit {
             if layer.role == LayerRole::Ground {
@@ -140,7 +154,29 @@ impl CurationWorkflow for CurationService {
             }
         }
 
-        // 5. Construct CuratedMap for atomic commit (bypassing staging manifest disk rewrites)
+        // 6. Derive overlapping 16×16 Map Sections from the candidate's grid configuration
+        let section_origins = candidate.grid.section_origins(ground_w, ground_h);
+        let sections = if section_origins.len() <= 1 {
+            vec![MapSection::new(0, 0, final_description.clone())]
+        } else {
+            let primary_theme = clean_tags.first().map(String::as_str).unwrap_or("dungeon");
+            section_origins
+                .into_iter()
+                .map(|(col, row)| {
+                    MapSection::new(
+                        col,
+                        row,
+                        CaptionGenerator::generate_with_theme_str(
+                            primary_theme,
+                            &clean_tags,
+                            Some(&final_description),
+                        ),
+                    )
+                })
+                .collect()
+        };
+
+        // 7. Construct CuratedMap for atomic commit (bypassing staging manifest disk rewrites)
         let map_to_commit = CuratedMap::with_now(
             trimmed_id,
             Vec::<String>::new(),
@@ -148,10 +184,12 @@ impl CurationWorkflow for CurationService {
             candidate.dimensions,
         )
         .with_source(candidate.source)
+        .with_grid(candidate.grid)
         .with_layers(layers_for_commit)
-        .with_description(final_description);
+        .with_description(final_description)
+        .with_sections(sections);
 
-        // 6. Atomic commit, returning the map exactly as written to disk
+        // 8. Atomic commit, returning the map exactly as written to disk
         let stored_map = self.store.commit_curation(&map_to_commit)?;
         Ok(stored_map)
     }

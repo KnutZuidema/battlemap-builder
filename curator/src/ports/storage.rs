@@ -255,6 +255,17 @@ pub trait StorageRepository: CurationStore + Send + Sync {
             "update_staging_layers not implemented".into(),
         ))
     }
+    /// Update the grid configuration for a staged candidate and persist to its manifest.
+    fn update_staging_grid(
+        &self,
+        id: &str,
+        grid: crate::domain::GridConfig,
+    ) -> Result<Candidate, StorageError> {
+        let _ = (id, grid);
+        Err(StorageError::InvalidData(
+            "update_staging_grid not implemented".into(),
+        ))
+    }
 
     /// Split a multi-layer staged bundle (`layers.len() > 1`) into standalone 1-layer candidates (`{id}_0`, `{id}_1`, ...)
     /// with `parent_group_id: Some(id)`.
@@ -450,6 +461,13 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
         layers: Vec<Layer>,
     ) -> Result<Candidate, StorageError> {
         (**self).update_staging_layers(id, layers)
+    }
+    fn update_staging_grid(
+        &self,
+        id: &str,
+        grid: crate::domain::GridConfig,
+    ) -> Result<Candidate, StorageError> {
+        (**self).update_staging_grid(id, grid)
     }
 
     fn split_staging_bundle(&self, id: &str) -> Result<Vec<Candidate>, StorageError> {

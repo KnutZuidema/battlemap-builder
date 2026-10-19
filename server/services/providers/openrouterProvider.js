@@ -1,4 +1,5 @@
 const sharp = require('sharp');
+const { providerFailure } = require('../failure');
 const { getModelPricing, findModel } = require('../modelCatalog');
 
 /**
@@ -25,19 +26,67 @@ function buildUserContent(fullPromptPayload, images) {
   }
   return parts;
 }
+
 /**
- * Filters out synthetic mask and cyan guide images so diffusion models receive only visual scene context.
+ * Image roles a request can carry. `context` and `reference` are visual scene context; `guide` (the
+ * cyan-tinted region highlight) and `mask` (the binary region mask) are synthetic edit guides.
+ * Images without an explicit role are treated as `reference` imagery.
  */
-function buildInputReferences(images) {
-  if (!Array.isArray(images) || !images.length) return [];
-  const filtered = images.filter((img) => {
-    if (!img) return false;
-    if (img.label && (img.label.toLowerCase().includes('cyan') || img.label.toLowerCase().includes('mask'))) {
-      return false;
-    }
-    return true;
-  });
-  return filtered.map((img) => ({
+const VISUAL_CONTEXT_ROLES = ['context', 'reference'];
+const ALL_IMAGE_ROLES = ['context', 'reference', 'guide', 'mask'];
+
+function imageRole(image) {
+  return image.role || 'reference';
+}
+
+/**
+ * Explicit conditioning capability per API surface (ADR-0001: no silent adaptation).
+ * - `chat` completions accept every image role in one multi-part message.
+ * - `images` endpoint `input_references` only takes visual scene context; guides and masks cannot be
+ *   interpreted as edit instructions there, so they are not sent.
+ */
+function conditioningCapability(apiType) {
+  return apiType === 'images'
+    ? { apiType: 'images', mode: 'visual-context-only', acceptedRoles: VISUAL_CONTEXT_ROLES }
+    : { apiType: apiType || 'chat', mode: 'multi-image', acceptedRoles: ALL_IMAGE_ROLES };
+}
+
+/**
+ * Applies the model's conditioning capability to the request images and reports exactly what was
+ * selected and what was dropped, so the debug telemetry can explain the adaptation.
+ */
+function selectConditioningImages(images, { model, apiType } = {}) {
+  const resolvedApiType = apiType || findModel(model)?.apiType || 'chat';
+  const capability = conditioningCapability(resolvedApiType);
+  const candidates = Array.isArray(images) ? images.filter(Boolean) : [];
+  const describe = (img) => ({ label: img.label || null, role: imageRole(img) });
+  const selected = candidates.filter((img) => capability.acceptedRoles.includes(imageRole(img)));
+  const dropped = candidates.filter((img) => !capability.acceptedRoles.includes(imageRole(img)));
+
+  const conditioning = {
+    model: model || null,
+    apiType: capability.apiType,
+    mode: capability.mode,
+    acceptedRoles: capability.acceptedRoles,
+    provided: candidates.map(describe),
+    selected: selected.map(describe),
+    dropped: dropped.map(describe),
+    adapted: dropped.length > 0,
+    explanation: dropped.length > 0
+      ? `${capability.apiType} API for ${model || 'model'} accepts only ${capability.acceptedRoles.join('/')} images (${capability.mode}); ${dropped.length} of ${candidates.length} image(s) with role ${[...new Set(dropped.map(imageRole))].join('/')} were not sent.`
+      : `${capability.apiType} API for ${model || 'model'} (${capability.mode}) accepted all ${candidates.length} image(s).`
+  };
+
+  return { selected, conditioning };
+}
+
+/**
+ * Builds the `input_references` payload for the images endpoint from the images the model's
+ * conditioning capability accepts.
+ */
+function buildInputReferences(images, model) {
+  const { selected } = selectConditioningImages(images, { model, apiType: 'images' });
+  return selected.map((img) => ({
     type: 'image_url',
     image_url: {
       url: `data:${img.mimeType || 'image/png'};base64,${img.buffer.toString('base64')}`
@@ -53,7 +102,7 @@ async function postImages({ apiKey, model, systemInstruction, fullPromptPayload,
     ? `${systemInstruction}\n\n[USER REQUEST]\n${fullPromptPayload}`
     : fullPromptPayload;
 
-  const inputReferences = buildInputReferences(images);
+  const inputReferences = buildInputReferences(images, model);
   const body = {
     model,
     prompt: combinedPrompt,
@@ -336,18 +385,37 @@ async function sourceToBuffer(source) {
  * the exact canvas size the stitchers downstream expect.
  */
 async function requestCanvas({ model, systemInstruction, userPromptText, fullPromptPayload, images = [], width, height, apiKey, apiType }) {
-  const telemetryImages = images.map((img, idx) => ({
+  const aspectRatio = selectAspectRatio(width, height);
+  const imageConfig = { aspect_ratio: aspectRatio };
+  const resolvedApiType = apiType || findModel(model)?.apiType || 'chat';
+  const { selected, conditioning } = selectConditioningImages(images, { model, apiType: resolvedApiType });
+  console.log(`[OpenRouterProvider] conditioning: ${conditioning.explanation}`);
+
+  // Telemetry lists exactly the images that are sent; dropped ones are described in `conditioning`.
+  const telemetryImages = selected.map((img, idx) => ({
     id: idx,
     label: img.label || `Image ${idx + 1}`,
     dataUrl: `data:${img.mimeType || 'image/png'};base64,${img.buffer.toString('base64')}`
   }));
 
-  const aspectRatio = selectAspectRatio(width, height);
-  const imageConfig = { aspect_ratio: aspectRatio };
-  const resolvedApiType = apiType || findModel(model)?.apiType || 'chat';
+  // ADR-0001: never silently generate without the conditioning the caller asked for.
+  if (conditioning.provided.length > 0 && selected.length === 0) {
+    throw providerFailure(
+      `${model || 'The model'} cannot be conditioned on the supplied images: ${conditioning.explanation} Choose a model whose API accepts them.`,
+      {
+        code: 'MODEL_CAPABILITY_UNSUPPORTED',
+        provider: 'openrouter',
+        systemInstruction,
+        userPrompt: userPromptText,
+        fullPrompt: fullPromptPayload,
+        conditioning
+      }
+    );
+  }
+
   const payload = resolvedApiType === 'images'
-    ? await postImages({ apiKey, model, systemInstruction, fullPromptPayload, images, aspectRatio })
-    : await postCompletion({ apiKey, model, systemInstruction, fullPromptPayload, images, imageConfig });
+    ? await postImages({ apiKey, model, systemInstruction, fullPromptPayload, images: selected, aspectRatio })
+    : await postCompletion({ apiKey, model, systemInstruction, fullPromptPayload, images: selected, imageConfig });
   const usage = readUsage(payload, model);
   const finishReason = readFinishReason(payload);
   const sources = extractImageSources(payload);
@@ -372,7 +440,8 @@ async function requestCanvas({ model, systemInstruction, userPromptText, fullPro
       fullPrompt: fullPromptPayload,
       images: telemetryImages,
       outputImages: [],
-      imageConfig
+      imageConfig,
+      conditioning
     };
     throw err;
   }
@@ -412,7 +481,8 @@ async function requestCanvas({ model, systemInstruction, userPromptText, fullPro
       fullPrompt: fullPromptPayload,
       images: telemetryImages,
       outputImages,
-      imageConfig
+      imageConfig,
+      conditioning
     }
   };
 }

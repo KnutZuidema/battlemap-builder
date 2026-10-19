@@ -17,9 +17,10 @@ use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{
     BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
-    normalize_tags, CuratedMap, CuratedMapUpdate, CustomPrompt, LayerRole, PurgeStagingResult,
-    RedditHarvestRequest, RejectionReason, StorageStats, Theme,
+    normalize_tags, CaptionGenerator, CuratedMap, CuratedMapUpdate, CustomPrompt, LayerRole,
+    MapSection, PurgeStagingResult, RedditHarvestRequest, RejectionReason, StorageStats, Theme,
 };
+use crate::ports::storage::StorageError;
 use crate::ports::cost_tracker::CostStats;
 use crate::services::{IngestionSummary, RedditIngestionService};
 use crate::adapters::clean_tags;
@@ -86,10 +87,128 @@ pub async fn get_curated(
 pub async fn patch_curated(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(update): Json<CuratedMapUpdate>,
+    Json(mut update): Json<CuratedMapUpdate>,
 ) -> Result<Json<CuratedMap>, ApiError> {
     if id.trim().is_empty() {
         return Err(ApiError::bad_request("Curated map ID cannot be empty"));
+    }
+
+    if let Some(new_grid) = update.grid {
+        let maps = state.storage.list_curated(None)?;
+        let current_map = maps
+            .into_iter()
+            .find(|m| m.id == id)
+            .ok_or_else(|| ApiError::not_found(format!("Curated map '{id}' not found")))?;
+
+        let ground_layer = current_map
+            .layers
+            .iter()
+            .find(|l| l.role == LayerRole::Ground)
+            .or_else(|| current_map.layers.first())
+            .cloned();
+        let ground_layer_idx = ground_layer.as_ref().map(|l| l.index).unwrap_or(0);
+
+        let ground_bytes = state
+            .storage
+            .get_curated_layer_image_by_id(&id, ground_layer_idx)
+            .or_else(|_| state.storage.get_curated_image_by_id(&id))
+            .or_else(|_| {
+                for theme in Theme::ALL {
+                    if let Ok(b) = state.storage.get_curated_image(theme, &id) {
+                        return Ok(b);
+                    }
+                }
+                Err(StorageError::NotFound(format!("Ground layer image for '{id}' not found")))
+            })
+            .ok();
+
+        let ground_img = ground_bytes.as_ref().and_then(|b| image::load_from_memory(b).ok());
+        let (mut ground_w, mut ground_h) = ground_layer
+            .as_ref()
+            .map(|l| l.dimensions)
+            .filter(|&(w, h)| w > 0 && h > 0)
+            .unwrap_or(current_map.dimensions);
+
+        if ground_w == 0 || ground_h == 0 {
+            if let Some(img) = &ground_img {
+                ground_w = img.width();
+                ground_h = img.height();
+            }
+        }
+
+        if !new_grid.is_curation_eligible(ground_w, ground_h) {
+            return Err(ApiError::bad_request(
+                "New grid configuration yields fewer than 16×16 full Grid Cells",
+            ));
+        }
+
+        let section_origins = new_grid.section_origins(ground_w, ground_h);
+        let effective_tags = update.tags.as_ref().unwrap_or(&current_map.tags);
+        let primary_theme = effective_tags.first().map(|s| s.as_str()).unwrap_or("dungeon");
+        let effective_desc = update.description.as_deref().or(current_map.description.as_deref());
+
+        let new_sections: Vec<MapSection> = if section_origins.len() <= 1 {
+            let desc = if let Some(d) = effective_desc {
+                d.to_string()
+            } else if let (Some(adapter), Some(bytes)) = (state.openrouter_client(), ground_bytes.as_ref()) {
+                match adapter
+                    .generate_battlemap_description(bytes, "image/png", effective_desc, effective_tags)
+                    .await
+                {
+                    Ok(d) if !d.trim().is_empty() => d,
+                    _ => CaptionGenerator::generate_with_theme_str(primary_theme, effective_tags, None),
+                }
+            } else {
+                CaptionGenerator::generate_with_theme_str(primary_theme, effective_tags, None)
+            };
+            vec![MapSection::new(0, 0, desc)]
+        } else {
+            let mut secs = Vec::with_capacity(section_origins.len());
+            for (col, row) in section_origins {
+                let x = new_grid.offset_x + col * new_grid.cell_size_px;
+                let y = new_grid.offset_y + row * new_grid.cell_size_px;
+                let w = 16 * new_grid.cell_size_px;
+                let h = 16 * new_grid.cell_size_px;
+
+                let section_png = ground_img.as_ref().and_then(|img| {
+                    if x + w <= img.width() && y + h <= img.height() {
+                        let cropped = img.crop_imm(x, y, w, h);
+                        let mut bytes = Vec::new();
+                        cropped
+                            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+                            .ok()
+                            .map(|_| bytes)
+                    } else {
+                        None
+                    }
+                });
+
+                let sec_desc = if let (Some(adapter), Some(sec_bytes)) = (state.openrouter_client(), section_png) {
+                    match adapter
+                        .generate_battlemap_description(&sec_bytes, "image/png", effective_desc, effective_tags)
+                        .await
+                    {
+                        Ok(d) if !d.trim().is_empty() => d,
+                        _ => CaptionGenerator::generate_with_theme_str(
+                            primary_theme,
+                            effective_tags,
+                            effective_desc,
+                        ),
+                    }
+                } else {
+                    CaptionGenerator::generate_with_theme_str(
+                        primary_theme,
+                        effective_tags,
+                        effective_desc,
+                    )
+                };
+
+                secs.push(MapSection::new(col, row, sec_desc));
+            }
+            secs
+        };
+
+        update.sections = Some(new_sections);
     }
 
     let updated = state.storage.update_curated(&id, update)?;
@@ -555,6 +674,20 @@ pub async fn patch_staging_layers(
     }
 
     let updated_candidate = state.storage.update_staging_layers(&id, payload.layers)?;
+
+    Ok(Json(updated_candidate))
+}
+/// PATCH /api/staging/{id}/grid - Update candidate grid configuration in staging manifest.
+pub async fn patch_staging_grid(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<crate::domain::GridConfig>,
+) -> Result<Json<Candidate>, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Candidate ID cannot be empty"));
+    }
+
+    let updated_candidate = state.storage.update_staging_grid(&id, payload)?;
 
     Ok(Json(updated_candidate))
 }

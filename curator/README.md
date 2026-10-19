@@ -44,11 +44,11 @@ Curate Decision Modal (#curate-decision-modal)
     │
     └── Step 3: Vision Description Generation (Gemini 3.5 Flash Lite)
           ├── Online: POST /api/staging/:id/describe ──► Rich 40-90 word physical description
-          └── Offline: Deterministic fallback ──► CaptionGenerator synthesized description
+          └── Vision unavailable: request fails explicitly (ADR-0007) ──► no synthesized fallback
     │
     ▼
 POST /api/curate
-    ├── Success: atomic move to data/curated/<id>/, persist description & companions, load next
+    ├── Success: atomic move to data/curated/<id>/, persist description & metadata, load next
     └── Error: danger toast, candidate preserved in staging
 ```
 
@@ -115,7 +115,7 @@ Curator features an automated vision description workflow powered by Google Gemi
      - **NO game mechanics**: Strictly forbids statistics, grid square counts, or rule system references.
    - **Output Format**: Dense, evocative 40–90 word description in plain text only (no markdown, no bullets, no commentary).
    - **User Prompt (`build_description_user_prompt`)**: Combines the candidate `title` (when present) and its `tags` with strict instructions to guide the model's focus onto the identified architectural features.
-4. **Strict Failure Propagation (ADR-0005)**:
+4. **Strict Failure Propagation (ADR-0007)**:
    - There is no deterministic caption fallback. `POST /api/staging/:id/describe` propagates vision failures as HTTP errors: `503 Service Unavailable` when the vision engine is unconfigured (missing/invalid `OPENROUTER_API_KEY` or disabled) and `502 Bad Gateway` when the upstream provider fails or returns an empty description.
    - During curation (`POST /api/curate`), an omitted description is generated through the same strict path; if vision is unavailable, curation fails with the propagated error instead of persisting a synthesized description.
 
@@ -131,7 +131,7 @@ While `#curate-decision-modal` is active:
 Upon completion, `submitDecisionCuration()` dispatches `POST /api/curate`:
 - **Payload**: `{ id: candidate.id, themes: acceptedThemes, tags: candidate.tags, description: generatedDescription, layers: candidate.layers }`.
 - **On Success**:
-  - Persists `description` to `manifest.json`, primary layer caption, and `<id>_lora1024.txt`.
+  - Persists `description` to `manifest.json` and primary layer caption.
   - Removes the candidate from staging queue and local memory image cache.
   - Updates staging and curated count indicators via `/api/status`.
   - Loads the next candidate in sequence.
@@ -166,12 +166,9 @@ data/
 │       └── 1.png
 ├── curated/
 │   └── <candidate_id>/
-│       ├── manifest.json            # Contains themes, tags, dimensions, layers, and description
+│       ├── manifest.json            # Contains themes, tags, dimensions, grid, sections, and description
 │       ├── 0_ground.png             # Deterministically named layer file
-│       ├── 1_upper_1.png
-│       ├── <candidate_id>.png       # Primary display image
-│       ├── <candidate_id>_lora1024.png # Normalized 1024x1024 training image (SIMD Lanczos3)
-│       └── <candidate_id>_lora1024.txt # Companion LoRA training caption with description
+│       └── 1_upper_1.png
 └── rejections.jsonl
 ```
 
@@ -181,8 +178,8 @@ data/
 - **Description Persistence**:
   - **Manifest**: The `description` string is persisted directly in `data/curated/<id>/manifest.json`.
   - **Primary Layer Caption**: The primary layer (Ground role) `caption` field matches and retains the curated description.
-  - **LoRA Companion Files**: Automatically generates paired `<id>_lora1024.png` and `<id>_lora1024.txt` companion files. The `.txt` file incorporates prompt triggers, themes, tags, and the curated description.
-  - **Backward Compatibility & Legacy Deserialization**: Legacy `manifest.json` files lacking the `"description"` field deserialize cleanly (with `description: None`). Curated reads (`GET /api/curated`, `GET /api/curated/:id`) are pure: they return the persisted manifest as-is and never synthesize or rewrite captions.
+  - **Dynamic LoRA Dataset Export**: LoRA dataset export dynamically crops and Lanczos3-resamples each 16×16 MapSection on demand from the Ground layer into `{theme}/{id}_c{col}_r{row}_lora1024.png` (exact 1024×1024, zero padding bars) and `{theme}/{id}_c{col}_r{row}_lora1024.txt` companion captions with per-section physical descriptions.
+  - **Backward Compatibility & Legacy Deserialization**: Legacy `manifest.json` files lacking the `"description"` field deserialize cleanly (with `description: None`). `GET /api/curated` is a pure read: it returns persisted manifests as-is and never synthesizes or rewrites captions. The only handlers registered on `/api/curated/{id}` are `PATCH` and `DELETE`; updates happen exclusively through `PATCH /api/curated/{id}`.
 - **Reference Provider Prompt Keyword Scoring (`ReferenceProvider`)**:
   - Curated map descriptions are directly leveraged in the benchmark and generation pipeline for few-shot orthographic perspective conditioning.
   - `ReferenceProvider::score_curated_map_for_prompt` scores keyword overlap between generation prompts and curated maps:

@@ -227,37 +227,15 @@ impl FilesystemStorage {
 
         resizer
             .resize(&cropped_rgba, &mut scaled_rgba, &resize_options)
-            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
 
         let mut png_bytes = Vec::new();
         let mut cursor = std::io::Cursor::new(&mut png_bytes);
         scaled_rgba
             .write_to(&mut cursor, image::ImageFormat::Png)
-            .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
 
         Ok(png_bytes)
-    }
-
-    /// Retrieve Ground layer image bytes for a curated map, checking bundle dir and legacy paths.
-    fn get_curated_ground_image_bytes(&self, map: &CuratedMap) -> Result<Vec<u8>, StorageError> {
-        let ground_idx = map
-            .layers
-            .iter()
-            .find(|l| l.role == LayerRole::Ground)
-            .map(|l| l.index)
-            .or_else(|| map.layers.first().map(|l| l.index))
-            .unwrap_or(0);
-
-        if let Ok(bytes) = self.get_curated_layer_image_by_id(&map.id, ground_idx) {
-            return Ok(bytes);
-        }
-
-        let primary_theme = map.theme().unwrap_or(Theme::Dungeon);
-        if let Ok(bytes) = self.get_curated_layer_image(&primary_theme, &map.id, ground_idx) {
-            return Ok(bytes);
-        }
-
-        self.get_curated_image(&primary_theme, &map.id)
     }
 
     /// Locate and deserialize a CuratedMap by its ID.
@@ -1970,6 +1948,27 @@ impl StorageRepository for FilesystemStorage {
                 ))
             })?;
         std::fs::read(path).map_err(StorageError::Io)
+    }
+
+    fn get_curated_ground_image_bytes(&self, map: &CuratedMap) -> Result<Vec<u8>, StorageError> {
+        let ground_idx = map
+            .layers
+            .iter()
+            .find(|l| l.role == LayerRole::Ground)
+            .map(|l| l.index)
+            .or_else(|| map.layers.first().map(|l| l.index))
+            .unwrap_or(0);
+
+        if let Ok(bytes) = self.get_curated_layer_image_by_id(&map.id, ground_idx) {
+            return Ok(bytes);
+        }
+
+        let primary_theme = map.theme().unwrap_or(Theme::Dungeon);
+        if let Ok(bytes) = self.get_curated_layer_image(&primary_theme, &map.id, ground_idx) {
+            return Ok(bytes);
+        }
+
+        self.get_curated_image(&primary_theme, &map.id)
     }
 
     fn delete_curated(

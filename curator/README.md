@@ -180,12 +180,14 @@ data/
   - **Primary Layer Caption**: The primary layer (Ground role) `caption` field matches and retains the curated description.
   - **Dynamic LoRA Dataset Export**: LoRA dataset export dynamically crops and Lanczos3-resamples each 16×16 MapSection on demand from the Ground layer into `{theme}/{id}_c{col}_r{row}_lora1024.png` (exact 1024×1024, zero padding bars) and `{theme}/{id}_c{col}_r{row}_lora1024.txt` companion captions with per-section physical descriptions.
   - **Backward Compatibility & Legacy Deserialization**: Legacy `manifest.json` files lacking the `"description"` field deserialize cleanly (with `description: None`). `GET /api/curated` is a pure read: it returns persisted manifests as-is and never synthesizes or rewrites captions. The only handlers registered on `/api/curated/{id}` are `PATCH` and `DELETE`; updates happen exclusively through `PATCH /api/curated/{id}`.
-- **Reference Provider Prompt Keyword Scoring (`ReferenceProvider`)**:
-  - Curated map descriptions are directly leveraged in the benchmark and generation pipeline for few-shot orthographic perspective conditioning.
-  - `ReferenceProvider::score_curated_map_for_prompt` scores keyword overlap between generation prompts and curated maps:
-    - **Tag match**: +2 points per tag found in the prompt (canonical themes are stored as tags).
-    - **Description match**: +1 point per matching word in `description`.
-  - The highest scoring curated map is selected as a reference image, enabling fine-grained conditioning based on architectural details (e.g., "sarcophagus", "throne", "stalagmites").
+- **Reference Provider Prompt Keyword Scoring & Section Cropping (`ReferenceProvider`)**:
+  - Curated map sections and physical descriptions are directly leveraged in the benchmark and generation pipeline for few-shot orthographic perspective conditioning.
+  - `ReferenceProvider::score_curated_section_for_prompt` scores keyword overlap between generation prompts and `(CuratedMap, MapSection)` pairs:
+    - **Tag match**: +2 points per matching tag (legacy themes are stored as tags, so they score identically).
+    - **Section description match**: +1 point per matching word in `section.description`.
+  - `ReferenceProvider::score_curated_map_for_prompt` scores a whole map by synthesizing a section from `map.description`, so map-level and section-level queries share one scoring rule.
+  - The highest scoring `(CuratedMap, MapSection)` pair is selected, and its exact 16×16 Grid Cell box is cropped from the Ground layer and Lanczos3-resampled.
+  - Tag-only resolution selects the most recently curated map and its center-most 16×16 section.
 - **Deterministic Layer Filenames**: Layers are saved with standardized names: `<index>_<role>[_<elevation>].<ext>` (e.g. `0_ground.png`, `1_upper_1.png`, `2_basement_-1.png`).
 - **Atomic Operations**: Files are written and moved atomically (`atomic_write`, `atomic_move`), ensuring crash-safe state updates.
 - **Backward Compatibility**: API routes serve curated images by both direct ID (`/api/image/curated/<id>`) and legacy theme routes (`/api/image/curated/<theme>/<id>`).

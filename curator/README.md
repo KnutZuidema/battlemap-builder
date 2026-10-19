@@ -44,7 +44,7 @@ Curate Decision Modal (#curate-decision-modal)
     │
     └── Step 3: Vision Description Generation (Gemini 3.5 Flash Lite)
           ├── Online: POST /api/staging/:id/describe ──► Rich 40-90 word physical description
-          └── Vision unavailable: request fails explicitly (ADR-0007) ──► no synthesized fallback
+          └── Vision unavailable: request fails explicitly (ADR-0005) ──► no synthesized fallback
     │
     ▼
 POST /api/curate
@@ -117,7 +117,7 @@ Curator features an automated vision description workflow powered by Google Gemi
      - **NO game mechanics**: Strictly forbids statistics, grid square counts, or rule system references.
    - **Output Format**: Dense, evocative 40–90 word description in plain text only (no markdown, no bullets, no commentary).
    - **User Prompt (`build_description_user_prompt`)**: Combines the candidate `title` (when present) and its `tags` with strict instructions to guide the model's focus onto the identified architectural features.
-4. **Failure Propagation & Section Fallback (ADR-0007)**:
+4. **Failure Propagation & Section Fallback (ADR-0005)**:
    - **Map-level physical description is strict**: there is no deterministic caption fallback. `POST /api/staging/:id/describe` and `POST /api/curated/:id/describe` propagate vision failures as HTTP errors: `503 Service Unavailable` when the vision engine is unconfigured (missing/invalid `OPENROUTER_API_KEY` or disabled) and `502 Bad Gateway` when the upstream provider fails or returns an empty description.
    - During curation (`POST /api/curate`), an omitted map-level description is generated through the same strict path; if vision is unavailable, curation fails with the propagated error instead of persisting a synthesized description.
    - **Per-section captions are best-effort**: for multi-section maps, each 16×16 section is described independently and falls back to the deterministic `CaptionGenerator` when its vision call fails or its crop is unavailable, so a single failed section never blocks curation or regridding. Single-section maps reuse the map-level description verbatim.

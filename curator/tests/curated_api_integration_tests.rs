@@ -10,7 +10,7 @@ use tower::ServiceExt;
 use curator::adapters::{FilesystemStorage, OpenRouterAdapter};
 use curator::api::{create_router, AppState, DescribeResponse, SuggestThemesResponse};
 use curator::domain::{
-    Candidate, CandidateLayer, CuratedLayer, CuratedMap, CuratedMapUpdate, LayerRole,
+    Candidate, CandidateLayer, CuratedLayer, CuratedMap, CuratedMapUpdate, GridConfig, LayerRole,
     RejectionReason, Source, Theme,
 };
 use curator::ports::storage::StorageRepository;
@@ -67,6 +67,83 @@ fn curate_test_map(
     }
     storage.save_curated(&map, &png).expect("save curated test map");
     map
+}
+
+/// Generator that records the `title` argument it receives while returning a fixed result.
+struct RecordingDescriptionGen {
+    result: Result<String, DescriptionError>,
+    seen_titles: std::sync::Mutex<Vec<Option<String>>>,
+}
+
+impl RecordingDescriptionGen {
+    fn new(result: Result<String, DescriptionError>) -> Self {
+        Self {
+            result,
+            seen_titles: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl DescriptionGenerator for RecordingDescriptionGen {
+    async fn generate_description(
+        &self,
+        _image_bytes: &[u8],
+        _filename: Option<&str>,
+        _tags: &[String],
+        title: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        self.seen_titles
+            .lock()
+            .unwrap()
+            .push(title.map(str::to_string));
+        self.result.clone()
+    }
+}
+
+fn curate_map_with_grid(
+    storage: &FilesystemStorage,
+    id: &str,
+    dimensions: (u32, u32),
+    cell_size_px: u32,
+    desc: Option<&str>,
+) -> CuratedMap {
+    let png = create_test_png(dimensions.0, dimensions.1);
+    let mut map = CuratedMap::with_now(id, Theme::Dungeon, vec!["dungeon".into()], dimensions)
+        .with_grid(GridConfig::new(cell_size_px, 0, 0));
+    if let Some(d) = desc {
+        map = map.with_description(d);
+    }
+    storage.save_curated(&map, &png).expect("save curated test map");
+    map
+}
+
+/// 512×512 curated map with a 32px grid: exactly 16×16 full cells, i.e. one Map Section.
+fn curate_single_section_map(
+    storage: &FilesystemStorage,
+    id: &str,
+    desc: Option<&str>,
+) -> CuratedMap {
+    curate_map_with_grid(storage, id, (512, 512), 32, desc)
+}
+
+/// 2048×2048 curated map with the default 64px grid: 32×32 cells, i.e. four Map Sections.
+fn curate_multi_section_map(
+    storage: &FilesystemStorage,
+    id: &str,
+    desc: Option<&str>,
+) -> CuratedMap {
+    curate_map_with_grid(storage, id, (2048, 2048), 64, desc)
+}
+
+fn regrid_payload(cell_size_px: u32) -> Value {
+    json!({
+        "grid": {
+            "cell_size_px": cell_size_px,
+            "offset_x": 0,
+            "offset_y": 0
+        }
+    })
 }
 
 fn curate_test_bundle(
@@ -560,4 +637,122 @@ async fn test_get_curated_layer_image_by_id() {
         .unwrap();
     let resp_nf = app.oneshot(req_nf).await.unwrap();
     assert_eq!(resp_nf.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_patch_curated_regrid_strictly_fails_when_vision_unconfigured() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(None)));
+    let app = create_router(state);
+
+    curate_multi_section_map(&storage, "regrid_unconfigured", None);
+
+    let req = Request::builder()
+        .uri("/api/curated/regrid_unconfigured")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(regrid_payload(64).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let err: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        err["error"].as_str().unwrap().contains("not configured"),
+        "Unexpected error payload: {err}"
+    );
+
+    // Nothing was synthesized or persisted: manifest still lacks description/sections.
+    let stored = storage
+        .list_curated(None)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == "regrid_unconfigured")
+        .unwrap();
+    assert_eq!(stored.description, None);
+    assert!(stored.sections.is_empty());
+}
+
+#[tokio::test]
+async fn test_patch_curated_regrid_strictly_fails_when_vision_errors() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let generator = Arc::new(RecordingDescriptionGen::new(Err(
+        DescriptionError::GenerationFailed("upstream 500".into()),
+    )));
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
+    let app = create_router(state);
+
+    curate_multi_section_map(&storage, "regrid_failing_vision", None);
+
+    let req = Request::builder()
+        .uri("/api/curated/regrid_failing_vision")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(regrid_payload(64).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+
+    let stored = storage
+        .list_curated(None)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == "regrid_failing_vision")
+        .unwrap();
+    assert_eq!(stored.description, None);
+    assert!(stored.sections.is_empty());
+}
+
+#[tokio::test]
+async fn test_patch_curated_regrid_persists_vision_description_without_description_title() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let generated = "Vision-generated subterranean vault with flooded channels";
+    let generator = Arc::new(RecordingDescriptionGen::new(Ok(generated.to_string())));
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
+    let app = create_router(state);
+
+    curate_single_section_map(&storage, "regrid_success", None);
+
+    let req = Request::builder()
+        .uri("/api/curated/regrid_success")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(regrid_payload(32).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let updated: CuratedMap = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(updated.description.as_deref(), Some(generated));
+    assert_eq!(updated.sections.len(), 1);
+    assert_eq!(updated.sections[0].col, 0);
+    assert_eq!(updated.sections[0].row, 0);
+    assert_eq!(updated.sections[0].description, generated);
+
+    // The description must never be passed as the generator's `title` argument.
+    assert_eq!(
+        *generator.seen_titles.lock().unwrap(),
+        vec![None],
+        "PATCH regrid must call the generator with no title, not the description"
+    );
+
+    let manifest_path = dir
+        .path()
+        .join("curated")
+        .join("regrid_success")
+        .join("manifest.json");
+    let persisted: CuratedMap =
+        serde_json::from_str(&std::fs::read_to_string(manifest_path).unwrap()).unwrap();
+    assert_eq!(persisted.description.as_deref(), Some(generated));
+    assert_eq!(persisted.sections[0].description, generated);
 }

@@ -34,12 +34,35 @@ impl DescriptionGenerator for MockDescriptionGen {
         self.0.clone()
     }
 }
+/// Default test generator: echoes the request tags and distinguishes image content,
+/// so multi-section curation tests receive crop-specific descriptions.
+struct TaggedMockDescriptionGen;
+
+#[async_trait]
+impl DescriptionGenerator for TaggedMockDescriptionGen {
+    async fn generate_description(
+        &self,
+        image_bytes: &[u8],
+        _filename: Option<&str>,
+        tags: &[String],
+        _title: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        let checksum = image_bytes
+            .iter()
+            .fold(0u64, |acc, byte| acc.wrapping_mul(31).wrapping_add(u64::from(*byte)));
+        Ok(format!(
+            "Default test battlemap description for {} (checksum {checksum})",
+            tags.join(", ")
+        ))
+    }
+}
+
 fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let desc_service = Arc::new(DescriptionService::new(Some(Arc::new(MockDescriptionGen(
-        Ok("Default test battlemap description".to_string()),
-    )))));
+    let desc_service = Arc::new(DescriptionService::new(Some(Arc::new(
+        TaggedMockDescriptionGen,
+    ))));
     let state = AppState::new(storage.clone()).with_description_service(desc_service);
     let router = create_router(state);
     (router, storage, dir)

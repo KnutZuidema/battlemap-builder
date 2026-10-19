@@ -916,7 +916,8 @@ pub async fn post_describe_candidate(
     let bytes = state.storage.get_staging_image(&id)?;
     let filename = candidate.resolved_filename();
 
-    // 3. Resolve themes and tags (prefer payload themes/tags, fallback to candidate tags/title)
+    // 3. Resolve themes and tags (prefer payload themes/tags, fallback to cached suggestions).
+    // Themes and tags share one normalized tag vocabulary in the vision prompt.
     let mut themes = req.themes.unwrap_or_default();
     if themes.is_empty() {
         let cache = state.theme_suggestions_cache.read().await;
@@ -924,17 +925,16 @@ pub async fn post_describe_candidate(
             themes = cached.clone();
         }
     }
-    let tags = req.tags.unwrap_or_default();
-
-    let context = if !themes.is_empty() {
-        Some(themes.join(", "))
-    } else {
-        candidate.title.clone()
-    };
+    let tags = normalize_tags(themes.into_iter().chain(req.tags.unwrap_or_default()));
 
     let description = state
         .description_service
-        .describe(&bytes, Some(&filename), &tags, context.as_deref())
+        .describe(
+            &bytes,
+            Some(&filename),
+            &tags,
+            candidate.title.as_deref(),
+        )
         .await?;
 
     Ok(Json(DescribeResponse { id, description }))
@@ -998,22 +998,19 @@ pub async fn post_curated_describe(
             themes = cached.clone();
         }
     }
-    let mut tags = req.tags.unwrap_or_default();
-    if tags.is_empty() {
+    let mut requested_tags = req.tags.unwrap_or_default();
+    if requested_tags.is_empty() {
         if let Some(m) = &curated_map {
-            tags = m.tags.clone();
+            requested_tags = m.tags.clone();
         }
     }
+    let tags = normalize_tags(themes.into_iter().chain(requested_tags));
 
-    let context = if !themes.is_empty() {
-        Some(themes.join(", "))
-    } else {
-        curated_map.as_ref().and_then(|m| m.description.clone())
-    };
-
+    // `CuratedMap` has no standalone title field, so no title is forwarded. The stored
+    // description is generation output and is never an input to its own regeneration.
     let description = state
         .description_service
-        .describe(&bytes, filename, &tags, context.as_deref())
+        .describe(&bytes, filename, &tags, None)
         .await?;
 
     Ok(Json(DescribeResponse { id, description }))

@@ -10,6 +10,8 @@ use crate::ports::cost_tracker::CostTracker;
 use crate::ports::harvester::RedditHarvester;
 use crate::ports::storage::StorageRepository;
 use crate::services::BenchmarkService;
+use crate::services::curation::{CurationService, CurationWorkflow};
+use crate::services::description::{DescriptionGenerator, DescriptionService};
 
 /// Shared application state for the Axum HTTP server.
 #[derive(Clone)]
@@ -21,15 +23,32 @@ pub struct AppState {
     pub benchmark_cancelled: Arc<AtomicBool>,
     pub theme_suggestions_cache: Arc<RwLock<HashMap<String, Vec<String>>>>,
     pub openrouter: Option<Arc<OpenRouterAdapter>>,
+    pub description_service: Arc<DescriptionService>,
+    pub curation_service: Arc<dyn CurationWorkflow>,
     pub start_time: Instant,
 }
 
 impl AppState {
+    fn default_description_service(openrouter: Option<&Arc<OpenRouterAdapter>>) -> Arc<DescriptionService> {
+        let generator: Option<Arc<dyn DescriptionGenerator>> =
+            openrouter.map(|a| a.clone() as Arc<dyn DescriptionGenerator>);
+        Arc::new(DescriptionService::new(generator))
+    }
+    fn default_curation_service(
+        storage: Arc<dyn StorageRepository + Send + Sync>,
+        description_service: Arc<DescriptionService>,
+    ) -> Arc<dyn CurationWorkflow> {
+        Arc::new(CurationService::new(storage, description_service))
+    }
+
+
     /// Creates a new `AppState` wrapping the given storage repository and default RedditCrawler.
     pub fn new(storage: Arc<dyn StorageRepository + Send + Sync>) -> Self {
         let cost_tracker: Arc<dyn CostTracker + Send + Sync> = Arc::new(FileCostLedger::default());
         let benchmark_service = Self::default_benchmark_service(storage.clone(), cost_tracker.clone());
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
+        let description_service = Self::default_description_service(openrouter.as_ref());
+        let curation_service = Self::default_curation_service(storage.clone(), description_service.clone());
         Self {
             storage,
             harvester: Arc::new(RedditCrawler::from_env()),
@@ -38,6 +57,8 @@ impl AppState {
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
             theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
             openrouter,
+            description_service,
+            curation_service,
             start_time: Instant::now(),
         }
     }
@@ -50,6 +71,8 @@ impl AppState {
         let cost_tracker: Arc<dyn CostTracker + Send + Sync> = Arc::new(FileCostLedger::default());
         let benchmark_service = Self::default_benchmark_service(storage.clone(), cost_tracker.clone());
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
+        let description_service = Self::default_description_service(openrouter.as_ref());
+        let curation_service = Self::default_curation_service(storage.clone(), description_service.clone());
         Self {
             storage,
             harvester,
@@ -58,6 +81,8 @@ impl AppState {
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
             theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
             openrouter,
+            description_service,
+            curation_service,
             start_time: Instant::now(),
         }
     }
@@ -69,6 +94,8 @@ impl AppState {
     ) -> Self {
         let benchmark_service = Self::default_benchmark_service(storage.clone(), cost_tracker.clone());
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
+        let description_service = Self::default_description_service(openrouter.as_ref());
+        let curation_service = Self::default_curation_service(storage.clone(), description_service.clone());
         Self {
             storage,
             harvester: Arc::new(RedditCrawler::from_env()),
@@ -77,6 +104,8 @@ impl AppState {
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
             theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
             openrouter,
+            description_service,
+            curation_service,
             start_time: Instant::now(),
         }
     }
@@ -89,6 +118,8 @@ impl AppState {
     ) -> Self {
         let benchmark_service = Self::default_benchmark_service(storage.clone(), cost_tracker.clone());
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
+        let description_service = Self::default_description_service(openrouter.as_ref());
+        let curation_service = Self::default_curation_service(storage.clone(), description_service.clone());
         Self {
             storage,
             harvester,
@@ -97,6 +128,8 @@ impl AppState {
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
             theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
             openrouter,
+            description_service,
+            curation_service,
             start_time: Instant::now(),
         }
     }
@@ -108,6 +141,8 @@ impl AppState {
         cost_tracker: Arc<dyn CostTracker + Send + Sync>,
     ) -> Self {
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
+        let description_service = Self::default_description_service(openrouter.as_ref());
+        let curation_service = Self::default_curation_service(storage.clone(), description_service.clone());
         Self {
             storage,
             harvester: Arc::new(RedditCrawler::from_env()),
@@ -116,13 +151,33 @@ impl AppState {
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
             theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
             openrouter,
+            description_service,
+            curation_service,
             start_time: Instant::now(),
         }
     }
 
     /// Creates a new `AppState` with an explicit OpenRouter adapter (ideal for testing).
     pub fn with_openrouter(mut self, openrouter: Arc<OpenRouterAdapter>) -> Self {
-        self.openrouter = Some(openrouter);
+        self.openrouter = Some(openrouter.clone());
+        let desc_service = Arc::new(DescriptionService::new(Some(
+            openrouter as Arc<dyn DescriptionGenerator>,
+        )));
+        self.description_service = desc_service.clone();
+        self.curation_service = Self::default_curation_service(self.storage.clone(), desc_service);
+        self
+    }
+
+    /// Creates a new `AppState` with an explicit description service (ideal for testing).
+    pub fn with_description_service(mut self, description_service: Arc<DescriptionService>) -> Self {
+        self.description_service = description_service.clone();
+        self.curation_service = Self::default_curation_service(self.storage.clone(), description_service);
+        self
+    }
+
+    /// Creates a new `AppState` with an explicit curation workflow (ideal for testing).
+    pub fn with_curation_service(mut self, curation_service: Arc<dyn CurationWorkflow>) -> Self {
+        self.curation_service = curation_service;
         self
     }
 

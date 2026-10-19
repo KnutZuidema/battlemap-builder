@@ -1,6 +1,6 @@
 use crate::domain::{
-    BenchmarkMetadata, Candidate, CandidateLayer, CuratedMap, CuratedMapUpdate, PurgeStagingResult,
-    RedditSidecarMetadata, RejectionReason, StorageStats, Theme,
+    BenchmarkMetadata, Candidate, CuratedMap, CuratedMapUpdate, Layer,
+    PurgeStagingResult, RedditSidecarMetadata, RejectionReason, StorageStats, Theme,
 };
 use thiserror::Error;
 
@@ -25,11 +25,13 @@ pub enum StorageError {
     Zip(#[from] zip::result::ZipError),
 }
 
+pub use crate::ports::curation_store::CurationStore;
+
 /// Port defining storage operations for staging, curated themes, and rejection records.
 pub type StoragePort = dyn StorageRepository;
 
 /// Port defining storage operations for staging, curated themes, and rejection records.
-pub trait StorageRepository: Send + Sync {
+pub trait StorageRepository: CurationStore + Send + Sync {
     /// Save a candidate image and its metadata sidecar to staging.
     fn save_staging(&self, candidate: &Candidate, data: &[u8]) -> Result<(), StorageError>;
 
@@ -220,8 +222,9 @@ pub trait StorageRepository: Send + Sync {
     /// Check if a candidate ID has been previously rejected.
     fn is_rejected(&self, id: &str) -> Result<bool, StorageError>;
 
-    /// Curate a candidate from staging: atomically moves the image to curated/<theme>/ and writes <id>.json metadata.
-    fn curate_staging(&self, map: &CuratedMap) -> Result<(), StorageError>;
+    /// Curate a candidate from staging: atomically moves the image to curated storage and
+    /// writes `manifest.json`, returning the map exactly as persisted.
+    fn curate_staging(&self, map: &CuratedMap) -> Result<CuratedMap, StorageError>;
 
     /// Reject a candidate from staging: deletes it from staging and logs rejection to rejections.json.
     fn reject_staging(
@@ -232,7 +235,7 @@ pub trait StorageRepository: Send + Sync {
     ) -> Result<(), StorageError>;
 
     /// Alias for `curate_staging`.
-    fn curate_candidate(&self, map: &CuratedMap) -> Result<(), StorageError> {
+    fn curate_candidate(&self, map: &CuratedMap) -> Result<CuratedMap, StorageError> {
         self.curate_staging(map)
     }
 
@@ -249,7 +252,7 @@ pub trait StorageRepository: Send + Sync {
     fn update_staging_layers(
         &self,
         id: &str,
-        layers: Vec<CandidateLayer>,
+        layers: Vec<Layer>,
     ) -> Result<Candidate, StorageError> {
         let _ = (id, layers);
         Err(StorageError::InvalidData(
@@ -410,7 +413,7 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
         (**self).is_duplicate(id)
     }
 
-    fn curate_staging(&self, map: &CuratedMap) -> Result<(), StorageError> {
+    fn curate_staging(&self, map: &CuratedMap) -> Result<CuratedMap, StorageError> {
         (**self).curate_staging(map)
     }
     fn export_selected_lora_dataset(&self, ids: &[String]) -> Result<Vec<u8>, StorageError> {
@@ -463,7 +466,7 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
     fn update_staging_layers(
         &self,
         id: &str,
-        layers: Vec<CandidateLayer>,
+        layers: Vec<Layer>,
     ) -> Result<Candidate, StorageError> {
         (**self).update_staging_layers(id, layers)
     }

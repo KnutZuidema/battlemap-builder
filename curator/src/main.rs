@@ -143,8 +143,12 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// Serializes tests that mutate `CURATOR_ENV_FILE`, which is process-global.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_load_dotenv_from_custom_env_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let mut temp_file = tempfile::NamedTempFile::new().expect("temp file");
         writeln!(temp_file, "CURATOR_TEST_VAR_123=hello_world").unwrap();
         let path = temp_file.path().to_path_buf();
@@ -163,6 +167,7 @@ mod tests {
 
     #[test]
     fn test_load_dotenv_nonexistent_custom_env_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("CURATOR_ENV_FILE", "/nonexistent/path/to/custom.env");
         let _ = load_dotenv();
         std::env::remove_var("CURATOR_ENV_FILE");

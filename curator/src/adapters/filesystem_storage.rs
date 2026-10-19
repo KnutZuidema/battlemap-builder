@@ -8,12 +8,13 @@ use chrono::{DateTime, Utc};
 use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
 
 use crate::domain::{
-    crop_section_box, infer_bundle_layer_roles, synthesize_sections, validate_layers_for_curation,
-    BenchmarkMetadata, Candidate, CandidateLayer, CaptionGenerator, CuratedLayer, CuratedMap,
-    CuratedMapUpdate, DirectoryStats, GridConfig, LayerRole, MapSection, PurgeStagingResult,
+    crop_section_box, infer_bundle_layer_roles, normalize_tags, synthesize_sections,
+    validate_layers_for_curation, BenchmarkMetadata, Candidate, CaptionGenerator, CuratedMap,
+    CuratedMapUpdate, DirectoryStats, GridConfig, Layer, LayerRole, MapSection, PurgeStagingResult,
     RedditSidecarMetadata, RejectionReason, RejectionRecord, Source, StorageStats, Theme,
     ThemeStorageStats,
 };
+use crate::ports::curation_store::CurationStore;
 use crate::ports::storage::{StorageError, StorageRepository};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1032,7 +1033,7 @@ impl FilesystemStorage {
                 }
 
                 let caption = cand.layers.first().and_then(|l| l.caption.clone());
-                layers.push(CandidateLayer {
+                layers.push(Layer {
                     index: new_idx,
                     filename: layer_filename,
                     role,
@@ -1101,7 +1102,7 @@ impl FilesystemStorage {
                 cand.filename = format!("{stem}/{layer_filename}");
             }
             if cand.layers.is_empty() {
-                cand.layers = vec![CandidateLayer {
+                cand.layers = vec![Layer {
                     index: 0,
                     filename: layer_filename,
                     role: LayerRole::Ground,
@@ -1178,25 +1179,24 @@ impl FilesystemStorage {
                     .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("png");
-                let layer_filename = CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), img_ext);
+                let layer_filename = Layer::format_filename(0, LayerRole::Ground, Some(0), img_ext);
                 let target_img = bundle_dir.join(&layer_filename);
 
                 Self::atomic_move(&img_path, &target_img)?;
                 let _ = std::fs::remove_file(json_path);
 
                 map.id = stem;
-                if map.themes.is_empty() {
-                    map.themes = vec![theme.as_str().to_string()];
+                if map.tags.is_empty() {
+                    map.tags = vec![theme.as_str().to_string()];
                 }
                 if map.layers.is_empty() {
-                    map.layers = vec![CuratedLayer {
-                        index: 0,
-                        filename: layer_filename,
-                        role: LayerRole::Ground,
-                        elevation: Some(0),
-                        caption: None,
-                        dimensions: map.dimensions,
-                    }];
+                    map.layers = vec![Layer::new(
+                        0,
+                        layer_filename,
+                        LayerRole::Ground,
+                        Some(0),
+                        map.dimensions,
+                    )];
                 }
                 let manifest_json = serde_json::to_string_pretty(&map)?;
                 Self::atomic_write(&bundle_dir.join("manifest.json"), manifest_json.as_bytes())?;
@@ -1237,7 +1237,7 @@ impl FilesystemStorage {
             let default_ext = Self::extract_extension(&stored_candidate.filename);
             if layer_images.len() == 1 {
                 let layer_file = format!("0.{default_ext}");
-                stored_candidate.layers = vec![CandidateLayer {
+                stored_candidate.layers = vec![Layer {
                     index: 0,
                     filename: layer_file,
                     role: LayerRole::Ground,
@@ -1253,7 +1253,7 @@ impl FilesystemStorage {
                 stored_candidate.layers = roles
                     .into_iter()
                     .enumerate()
-                    .map(|(i, (role, elevation))| CandidateLayer {
+                    .map(|(i, (role, elevation))| Layer {
                         index: i,
                         filename: format!("{i}.{default_ext}"),
                         role,
@@ -1330,12 +1330,13 @@ impl FilesystemStorage {
             if let Some(first) = map.layers.first_mut() {
                 first.caption = Some(cap);
             } else {
-                map.layers.push(CuratedLayer {
+                map.layers.push(Layer {
                     index: 0,
                     filename: format!("{}.png", map.id),
                     role: LayerRole::Ground,
                     elevation: Some(0),
                     caption: Some(cap),
+                    source_url: None,
                     dimensions: map.dimensions,
                 });
             }
@@ -1353,6 +1354,71 @@ impl FilesystemStorage {
             }
         }
     }
+
+    /// Retrieve candidate metadata from staging by ID directly ($O(1)$) without listing directory.
+    pub fn get_staging_candidate(&self, id: &str) -> Result<Candidate, StorageError> {
+        if let Some(bundle_dir) = self.find_staging_bundle_dir(id) {
+            let manifest_path = bundle_dir.join("manifest.json");
+            if let Ok(content) = std::fs::read_to_string(&manifest_path) {
+                if let Some(cand) = Self::parse_candidate_json(&content) {
+                    return Ok(cand);
+                }
+            }
+        }
+
+        if let Some(sidecar_path) = self.find_staging_sidecar_path(id) {
+            if sidecar_path.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&sidecar_path) {
+                    if let Some(cand) = Self::parse_candidate_json(&content) {
+                        return Ok(cand);
+                    }
+                }
+            }
+        }
+
+        if let Some(image_path) = self.find_staging_image_path(id, None) {
+            if image_path.is_file() {
+                let dimensions = image::image_dimensions(&image_path).unwrap_or((0, 0));
+                let created_at = image_path
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(DateTime::<Utc>::from)
+                    .unwrap_or_else(Utc::now);
+                let ext = image_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("png");
+                let layer_filename = format!("0.{ext}");
+                let rel_filename = image_path
+                    .strip_prefix(&self.staging_dir())
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| format!("{id}.{ext}"));
+                let cand = Candidate::new(
+                    id.to_string(),
+                    Source::Manual,
+                    rel_filename,
+                    dimensions,
+                    created_at,
+                )
+                .with_layers(vec![Layer {
+                    index: 0,
+                    filename: layer_filename,
+                    role: LayerRole::Ground,
+                    elevation: Some(0),
+                    caption: None,
+                    source_url: None,
+                    dimensions,
+                }]);
+                return Ok(cand);
+            }
+        }
+
+        Err(StorageError::NotFound(format!(
+            "Candidate '{id}' not found in staging"
+        )))
+    }
+
 }
 
 impl StorageRepository for FilesystemStorage {
@@ -1565,7 +1631,7 @@ impl StorageRepository for FilesystemStorage {
                     dimensions,
                     created_at,
                 )
-                .with_layers(vec![CandidateLayer {
+                .with_layers(vec![Layer {
                     index: 0,
                     filename: layer_filename,
                     role: LayerRole::Ground,
@@ -1635,7 +1701,7 @@ impl StorageRepository for FilesystemStorage {
     }
 
     fn save_curated(&self, map: &CuratedMap, data: &[u8]) -> Result<(), StorageError> {
-        map.validate_themes().map_err(StorageError::InvalidData)?;
+        map.validate_tags().map_err(StorageError::InvalidData)?;
         map.validate_layers().map_err(StorageError::InvalidData)?;
 
         let bundle_dir = self.curated_dir().join(&map.id);
@@ -1643,15 +1709,14 @@ impl StorageRepository for FilesystemStorage {
 
         let mut stored_map = map.clone();
         if stored_map.layers.is_empty() {
-            let filename = CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), "png");
-            stored_map.layers = vec![CuratedLayer {
-                index: 0,
+            let filename = Layer::format_filename(0, LayerRole::Ground, Some(0), "png");
+            stored_map.layers = vec![Layer::new(
+                0,
                 filename,
-                role: LayerRole::Ground,
-                elevation: Some(0),
-                caption: None,
-                dimensions: stored_map.dimensions,
-            }];
+                LayerRole::Ground,
+                Some(0),
+                stored_map.dimensions,
+            )];
         }
 
         let first_filename = stored_map.layers[0].filename.clone();
@@ -1788,16 +1853,15 @@ impl StorageRepository for FilesystemStorage {
                     let manifest_path = path.join("manifest.json");
                     if manifest_path.is_file() {
                         if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-                            if let Ok(mut map) = serde_json::from_str::<CuratedMap>(&content) {
+                            if let Ok(map) = serde_json::from_str::<CuratedMap>(&content) {
                                 let matches_theme = match theme {
-                                    Some(t) => map.themes.iter().any(|m_theme| {
+                                    Some(t) => map.tags.iter().any(|m_theme| {
                                         m_theme.eq_ignore_ascii_case(t.as_str())
                                             || m_theme.parse::<Theme>().ok().as_ref() == Some(t)
                                     }),
                                     None => true,
                                 };
                                 if matches_theme {
-                                    self.ensure_curated_caption(&mut map);
                                     results.push(map);
                                 }
                             }
@@ -1807,16 +1871,15 @@ impl StorageRepository for FilesystemStorage {
                     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                         if ext == "json" && name != "manifest.json" {
                             if let Ok(content) = std::fs::read_to_string(&path) {
-                                if let Ok(mut map) = serde_json::from_str::<CuratedMap>(&content) {
+                                if let Ok(map) = serde_json::from_str::<CuratedMap>(&content) {
                                     let matches_theme = match theme {
-                                        Some(t) => map.themes.iter().any(|m_theme| {
+                                        Some(t) => map.tags.iter().any(|m_theme| {
                                             m_theme.eq_ignore_ascii_case(t.as_str())
                                                 || m_theme.parse::<Theme>().ok().as_ref() == Some(t)
                                         }),
                                         None => true,
                                     };
                                     if matches_theme {
-                                        self.ensure_curated_caption(&mut map);
                                         results.push(map);
                                     }
                                 }
@@ -1850,8 +1913,7 @@ impl StorageRepository for FilesystemStorage {
             } else if let Some(bundle_dir) = self.find_curated_bundle_dir(id) {
                 let manifest_path = bundle_dir.join("manifest.json");
                 if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-                    if let Ok(mut map) = serde_json::from_str::<CuratedMap>(&content) {
-                        self.ensure_curated_caption(&mut map);
+                    if let Ok(map) = serde_json::from_str::<CuratedMap>(&content) {
                         selected_maps.push(map);
                     }
                 }
@@ -1972,13 +2034,25 @@ impl StorageRepository for FilesystemStorage {
         let mut map: CuratedMap = serde_json::from_str(&content)?;
 
         let old_description = map.description.clone();
-        if let Some(themes) = update.themes {
-            map.themes = themes;
-            map.validate_themes().map_err(StorageError::InvalidData)?;
-        }
+        let mut tags_updated = false;
 
         if let Some(tags) = update.tags {
-            map.tags = tags;
+            map.tags = normalize_tags(tags);
+            tags_updated = true;
+        }
+
+        // Legacy `themes` payloads fold into the single `tags` list. An empty or
+        // whitespace-only array is a no-op so tags-only clients can still PATCH.
+        if let Some(themes) = update.themes {
+            let legacy_tags = normalize_tags(themes);
+            if !legacy_tags.is_empty() {
+                map.tags = normalize_tags(map.tags.into_iter().chain(legacy_tags));
+                tags_updated = true;
+            }
+        }
+
+        if tags_updated {
+            map.validate_tags().map_err(StorageError::InvalidData)?;
         }
 
         if let Some(description) = update.description {
@@ -1992,14 +2066,10 @@ impl StorageRepository for FilesystemStorage {
 
 
         if let Some(new_layers) = update.layers {
-            let role_elevation_pairs: Vec<(LayerRole, Option<i8>)> = new_layers
-                .iter()
-                .map(|l| (l.role, l.elevation))
-                .collect();
-            validate_layers_for_curation(&role_elevation_pairs)
+            validate_layers_for_curation(&new_layers)
                 .map_err(StorageError::InvalidData)?;
 
-            let effective_layers: Vec<CuratedLayer> = if new_layers.iter().any(|l| l.role.is_excluded()) {
+            let mut effective_layers: Vec<Layer> = if new_layers.iter().any(|l| l.role.is_excluded()) {
                 new_layers
                     .into_iter()
                     .filter(|l| l.role.is_included())
@@ -2007,6 +2077,23 @@ impl StorageRepository for FilesystemStorage {
             } else {
                 new_layers
             };
+
+            // PATCH payloads may omit provenance fields; carry them over from the
+            // existing layer at the same index (falling back to the same filename).
+            for layer in &mut effective_layers {
+                let existing = map
+                    .layers
+                    .iter()
+                    .find(|l| l.index == layer.index)
+                    .or_else(|| map.layers.iter().find(|l| l.filename == layer.filename));
+                let Some(existing) = existing else { continue };
+                if layer.source_url.is_none() {
+                    layer.source_url = existing.source_url.clone();
+                }
+                if layer.caption.is_none() {
+                    layer.caption = existing.caption.clone();
+                }
+            }
 
             let mut temp_map = map.clone();
             temp_map.layers = effective_layers.clone();
@@ -2089,7 +2176,7 @@ impl StorageRepository for FilesystemStorage {
             // Deterministically format filenames and stage files
             let mut updated_layers = Vec::new();
             for (new_idx, (mut layer, bytes, ext, dims)) in layer_sources.into_iter().enumerate() {
-                let dest_filename = CuratedLayer::format_filename(
+                let dest_filename = Layer::format_filename(
                     new_idx,
                     layer.role,
                     layer.elevation,
@@ -2323,9 +2410,8 @@ impl StorageRepository for FilesystemStorage {
         Ok(false)
     }
 
-    fn curate_staging(&self, map: &CuratedMap) -> Result<(), StorageError> {
-        map.validate_themes().map_err(StorageError::InvalidData)?;
-        map.validate_layers().map_err(StorageError::InvalidData)?;
+    fn curate_staging(&self, map: &CuratedMap) -> Result<CuratedMap, StorageError> {
+        map.validate_tags().map_err(StorageError::InvalidData)?;
 
         if let Some(bundle_dir) = self.find_staging_bundle_dir(&map.id) {
             let manifest_path = bundle_dir.join("manifest.json");
@@ -2340,7 +2426,7 @@ impl StorageRepository for FilesystemStorage {
             let candidate_layers = candidate.resolved_layers();
 
             // Determine effective layer roles/elevations (either overridden on `map.layers` or from `candidate`)
-            let effective_layers: Vec<CandidateLayer> = if !map.layers.is_empty() {
+            let effective_layers: Vec<Layer> = if !map.layers.is_empty() {
                 map.layers
                     .iter()
                     .map(|cl| {
@@ -2360,13 +2446,16 @@ impl StorageRepository for FilesystemStorage {
                             .caption
                             .clone()
                             .or_else(|| src_layer.and_then(|l| l.caption.clone()));
-                        CandidateLayer {
+                        Layer {
                             index: cl.index,
                             filename: src_filename,
                             role: cl.role,
                             elevation: cl.elevation,
                             caption,
-                            source_url: src_layer.and_then(|l| l.source_url.clone()),
+                            source_url: cl
+                                .source_url
+                                .clone()
+                                .or_else(|| src_layer.and_then(|l| l.source_url.clone())),
                             dimensions: dims,
                         }
                     })
@@ -2375,11 +2464,7 @@ impl StorageRepository for FilesystemStorage {
                 candidate_layers
             };
 
-            let role_pairs: Vec<(LayerRole, Option<i8>)> = effective_layers
-                .iter()
-                .map(|l| (l.role, l.elevation))
-                .collect();
-            crate::domain::validate_layers_for_curation(&role_pairs)
+            crate::domain::validate_layers_for_curation(&effective_layers)
                 .map_err(StorageError::InvalidData)?;
 
             let curated_bundle_dir = self.curated_dir().join(&map.id);
@@ -2399,7 +2484,7 @@ impl StorageRepository for FilesystemStorage {
                     .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("png");
-                let dest_filename = CuratedLayer::format_filename(
+                let dest_filename = Layer::format_filename(
                     curated_idx,
                     src_layer.role,
                     src_layer.elevation,
@@ -2408,18 +2493,24 @@ impl StorageRepository for FilesystemStorage {
                 let dest_img_path = curated_bundle_dir.join(&dest_filename);
                 Self::atomic_move(&src_img_path, &dest_img_path)?;
 
-                curated_layers.push(CuratedLayer {
-                    index: curated_idx,
-                    filename: dest_filename,
-                    role: src_layer.role,
-                    elevation: src_layer.elevation,
-                    caption: src_layer.caption.clone(),
-                    dimensions: if src_layer.dimensions != (0, 0) {
+                let mut layer = Layer::new(
+                    curated_idx,
+                    dest_filename,
+                    src_layer.role,
+                    src_layer.elevation,
+                    if src_layer.dimensions != (0, 0) {
                         src_layer.dimensions
                     } else {
                         map.dimensions
                     },
-                });
+                );
+                if let Some(c) = &src_layer.caption {
+                    layer = layer.with_caption(c.clone());
+                }
+                if let Some(source_url) = &src_layer.source_url {
+                    layer = layer.with_source_url(source_url.clone());
+                }
+                curated_layers.push(layer);
             }
 
             let mut stored_map = map.clone();
@@ -2449,6 +2540,9 @@ impl StorageRepository for FilesystemStorage {
                 }
             }
             stored_map.layers = curated_layers;
+            stored_map
+                .validate_layers()
+                .map_err(StorageError::InvalidData)?;
             if stored_map.sections.is_empty() {
                 let (gw, gh) = stored_map.dimensions;
                 let origins = stored_map.grid.section_origins(gw, gh);
@@ -2481,7 +2575,7 @@ impl StorageRepository for FilesystemStorage {
             )?;
 
             let _ = std::fs::remove_dir_all(&bundle_dir);
-            return Ok(());
+            return Ok(stored_map);
         }
 
         // Fallback for raw drop-in image or unmigrated flat file in staging
@@ -2524,12 +2618,15 @@ impl StorageRepository for FilesystemStorage {
         let curated_bundle_dir = self.curated_dir().join(&map.id);
         std::fs::create_dir_all(&curated_bundle_dir)?;
 
-        let dest_filename = CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), ext);
+        let dest_filename = Layer::format_filename(0, LayerRole::Ground, Some(0), ext);
         let target_image = curated_bundle_dir.join(&dest_filename);
         let target_manifest = curated_bundle_dir.join("manifest.json");
 
         Self::atomic_move(&staging_image, &target_image)?;
 
+        // Only one image is physically moved for a flat/sidecar-only candidate, so the
+        // persisted manifest must describe exactly that file rather than the caller's
+        // (possibly multi-layer) assignment list.
         let mut stored_map = map.clone();
         if let Some(cand) = &candidate {
             stored_map.grid = cand.grid;
@@ -2568,27 +2665,31 @@ impl StorageRepository for FilesystemStorage {
             );
             stored_map.sections = sections;
         }
-        if stored_map.layers.is_empty() {
-            stored_map.layers = vec![CuratedLayer {
-                index: 0,
-                filename: dest_filename,
-                role: LayerRole::Ground,
-                elevation: Some(0),
-                caption: stored_map.description.clone(),
-                dimensions: stored_map.dimensions,
-            }];
-        } else if let Some(desc) = &stored_map.description {
-            let primary_idx = stored_map
-                .layers
-                .iter()
-                .position(|l| l.role == LayerRole::Ground)
-                .unwrap_or(0);
-            if let Some(layer) = stored_map.layers.get_mut(primary_idx) {
-                if layer.caption.is_none() {
-                    layer.caption = Some(desc.clone());
-                }
-            }
+        let mut layer = stored_map
+            .layers
+            .iter()
+            .find(|l| l.role.is_ground())
+            .cloned()
+            .unwrap_or_else(|| {
+                Layer::new(
+                    0,
+                    &dest_filename,
+                    LayerRole::Ground,
+                    Some(0),
+                    stored_map.dimensions,
+                )
+            });
+        layer.index = 0;
+        layer.filename = dest_filename;
+        layer.role = LayerRole::Ground;
+        layer.elevation = Some(0);
+        if layer.dimensions == (0, 0) {
+            layer.dimensions = stored_map.dimensions;
         }
+        if layer.caption.is_none() {
+            layer.caption = stored_map.description.clone();
+        }
+        stored_map.layers = vec![layer];
         let curated_json = serde_json::to_string_pretty(&stored_map)?;
         Self::atomic_write(&target_manifest, curated_json.as_bytes())?;
 
@@ -2598,7 +2699,7 @@ impl StorageRepository for FilesystemStorage {
             }
         }
 
-        Ok(())
+        Ok(stored_map)
     }
 
     fn reject_staging(
@@ -2615,7 +2716,7 @@ impl StorageRepository for FilesystemStorage {
     fn update_staging_layers(
         &self,
         id: &str,
-        layers: Vec<CandidateLayer>,
+        layers: Vec<Layer>,
     ) -> Result<Candidate, StorageError> {
         let bundle_dir = self.find_staging_bundle_dir(id).ok_or_else(|| {
             StorageError::NotFound(format!("Candidate bundle '{id}' not found in staging"))
@@ -2708,7 +2809,7 @@ impl StorageRepository for FilesystemStorage {
                 candidate.dimensions
             };
 
-            let child_layer = CandidateLayer {
+            let child_layer = Layer {
                 index: 0,
                 filename: child_img_filename.clone(),
                 role: LayerRole::Ground,
@@ -2815,7 +2916,7 @@ impl StorageRepository for FilesystemStorage {
             Self::atomic_move(&src_img, &dest_img)?;
             let _ = std::fs::remove_dir_all(child_dir);
 
-            regrouped_layers.push(CandidateLayer {
+            regrouped_layers.push(Layer {
                 index: new_idx,
                 filename: layer_filename,
                 role,
@@ -2929,7 +3030,7 @@ impl StorageRepository for FilesystemStorage {
                 } else {
                     DirectoryStats::default()
                 };
-                for theme_str in &map.themes {
+                for theme_str in &map.tags {
                     if let Ok(th) = theme_str.parse::<Theme>() {
                         if let Some(entry) = curated_by_theme.get_mut(&th) {
                             entry.map_count += 1;
@@ -2999,6 +3100,29 @@ impl StorageRepository for FilesystemStorage {
             reclaimed_bytes,
             remaining_staging_files,
         })
+    }
+}
+
+impl CurationStore for FilesystemStorage {
+    fn get_staging_candidate(&self, id: &str) -> Result<Candidate, StorageError> {
+        self.get_staging_candidate(id)
+    }
+
+    fn get_staging_layer_bytes(&self, id: &str, layer_index: usize) -> Result<Vec<u8>, StorageError> {
+        self.get_staging_layer_image(id, layer_index)
+    }
+
+    fn commit_curation(&self, map: &CuratedMap) -> Result<CuratedMap, StorageError> {
+        self.curate_staging(map)
+    }
+
+    fn reject_candidate(
+        &self,
+        id: &str,
+        reason: RejectionReason,
+        notes: Option<&str>,
+    ) -> Result<(), StorageError> {
+        self.reject_staging(id, reason, notes)
     }
 }
 
@@ -3076,7 +3200,7 @@ mod tests {
         let dungeon_maps = storage.list_curated(Some(&Theme::Dungeon)).unwrap();
         assert_eq!(dungeon_maps.len(), 1);
         assert_eq!(dungeon_maps[0].id, "map_dungeon_1");
-        assert_eq!(dungeon_maps[0].themes, vec!["dungeon"]);
+        assert_eq!(dungeon_maps[0].tags, vec!["dungeon", "boss-room", "gridless"]);
         assert_eq!(dungeon_maps[0].theme(), Some(Theme::Dungeon));
 
         // Other theme list should be empty
@@ -3135,13 +3259,137 @@ mod tests {
         let ground_layer = map.layers.iter().find(|l| l.role == LayerRole::Ground).unwrap();
         assert_eq!(ground_layer.caption.as_deref(), Some(desc_text));
 
-        // Test ensure_curated_caption populates map.description when manifest description is None
-        let mut map_without_desc = map.clone();
-        map_without_desc.description = None;
-        storage.ensure_curated_caption(&mut map_without_desc);
-        assert_eq!(map_without_desc.description.as_deref(), Some(desc_text));
+        // Verify pure read queries: list_curated does NOT invent description if absent
+        let map_without_desc = CuratedMap::with_now(
+            "map_without_desc",
+            Theme::Dungeon,
+            vec!["boss-room".into()],
+            (1024, 1024),
+        );
+        let bundle_no_desc = dir.path().join("curated").join("map_without_desc");
+        std::fs::create_dir_all(&bundle_no_desc).unwrap();
+        std::fs::write(
+            bundle_no_desc.join("manifest.json"),
+            serde_json::to_string_pretty(&map_without_desc).unwrap(),
+        ).unwrap();
+
+        let list_no_desc = storage.list_curated(None).unwrap();
+        let fetched = list_no_desc.iter().find(|m| m.id == "map_without_desc").unwrap();
+        assert_eq!(fetched.description, None);
     }
 
+    #[test]
+    fn test_curation_store_trait_and_pure_reads() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+        let store: &dyn CurationStore = &storage;
+
+        // 1. Stage a multi-layer candidate bundle
+        let mut candidate = Candidate::with_now(
+            "castle_store_test",
+            Source::Reddit,
+            "castle_store_test/0.png",
+            (1920, 1080),
+        ).with_title("Castle Courtyard");
+        candidate.layers = vec![
+            Layer::new(0, "0.png", LayerRole::Ground, Some(0), (1920, 1080)),
+            Layer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1920, 1080)),
+        ];
+        let img0 = b"test-ground-layer-bytes";
+        let img1 = b"test-upper-layer-bytes";
+        storage.save_staging_bundle(None, &candidate, &[img0.to_vec(), img1.to_vec()]).unwrap();
+
+        // 2. Test get_staging_candidate (O(1) direct lookup)
+        let loaded = store.get_staging_candidate("castle_store_test").expect("direct candidate lookup");
+        assert_eq!(loaded.id, "castle_store_test");
+        assert_eq!(loaded.layers.len(), 2);
+        assert_eq!(loaded.layers[0].role, LayerRole::Ground);
+        assert_eq!(loaded.layers[1].role, LayerRole::UpperFloor);
+
+        // Not found check
+        assert!(matches!(
+            store.get_staging_candidate("non_existent"),
+            Err(StorageError::NotFound(_))
+        ));
+
+        // 3. Test get_staging_layer_bytes
+        let bytes0 = store.get_staging_layer_bytes("castle_store_test", 0).expect("layer 0 bytes");
+        assert_eq!(bytes0, img0);
+        let bytes1 = store.get_staging_layer_bytes("castle_store_test", 1).expect("layer 1 bytes");
+        assert_eq!(bytes1, img1);
+        assert!(matches!(
+            store.get_staging_layer_bytes("castle_store_test", 99),
+            Err(StorageError::NotFound(_))
+        ));
+
+        // 4. Test commit_curation
+        let curated = CuratedMap::with_now(
+            "castle_store_test",
+            Theme::Building,
+            vec!["courtyard".into(), "medieval".into()],
+            (1920, 1080),
+        ).with_description("Castle courtyard with upper battlements");
+        store.commit_curation(&curated).expect("commit curation");
+
+        // Staging bundle must be cleaned up
+        assert!(!dir.path().join("staging").join("castle_store_test").exists());
+
+        // Curated directory must contain manifest.json but NO on-disk LoRA companions:
+        // the dynamic dataset ZIP export owns `*_c{col}_r{row}_lora1024.*` generation.
+        let curated_bundle = dir.path().join("curated").join("castle_store_test");
+        assert!(curated_bundle.join("manifest.json").is_file());
+        assert!(!curated_bundle.join("castle_store_test_lora1024.txt").exists());
+        assert!(!curated_bundle.join("castle_store_test_lora1024.png").exists());
+        let zip = storage
+            .export_selected_lora_dataset(&["castle_store_test".to_string()])
+            .expect("dynamic LoRA dataset export");
+        assert!(!zip.is_empty());
+
+        // 5. Test pure read queries: manifest without description is NOT mutated
+        let pure_map = CuratedMap::with_now(
+            "pure_read_map",
+            Theme::Dungeon,
+            vec!["crypt".into()],
+            (800, 600),
+        );
+        let pure_bundle = dir.path().join("curated").join("pure_read_map");
+        std::fs::create_dir_all(&pure_bundle).unwrap();
+        let pure_manifest_path = pure_bundle.join("manifest.json");
+        std::fs::write(
+            &pure_manifest_path,
+            serde_json::to_string_pretty(&pure_map).unwrap(),
+        ).unwrap();
+
+        let list_before = storage.list_curated(None).unwrap();
+        let target = list_before.iter().find(|m| m.id == "pure_read_map").unwrap();
+        assert_eq!(target.description, None);
+        if let Some(first_layer) = target.layers.first() {
+            assert_eq!(first_layer.caption, None);
+        }
+
+        let _ = storage.export_selected_lora_dataset(&["pure_read_map".into()]);
+
+        let manifest_content_after = std::fs::read_to_string(&pure_manifest_path).unwrap();
+        assert!(!manifest_content_after.contains("\"caption\":"));
+        assert!(!manifest_content_after.contains("\"description\":"));
+
+        // 6. Test reject_candidate
+        let mut reject_cand = Candidate::with_now(
+            "reject_store_test",
+            Source::Generated,
+            "reject_store_test/0.png",
+            (1024, 1024),
+        );
+        reject_cand.layers = vec![
+            Layer::new(0, "0.png", LayerRole::Ground, Some(0), (1024, 1024)),
+        ];
+        storage.save_staging_bundle(None, &reject_cand, &[b"bad-map-content".to_vec()]).unwrap();
+        assert!(dir.path().join("staging").join("reject_store_test").exists());
+
+        store.reject_candidate("reject_store_test", RejectionReason::BlurryLowRes, Some("Artifacts present")).unwrap();
+        assert!(!dir.path().join("staging").join("reject_store_test").exists());
+        assert!(storage.is_rejected("reject_store_test").unwrap());
+    }
     #[test]
     fn test_reject_candidate_workflow() {
         let dir = tempdir().unwrap();
@@ -3201,7 +3449,7 @@ mod tests {
         );
         let err = storage.save_curated(&invalid_map_empty, b"test").unwrap_err();
         match err {
-            StorageError::InvalidData(msg) => assert!(msg.contains("1 theme label")),
+            StorageError::InvalidData(msg) => assert!(msg.contains("1 tag label")),
             other => panic!("Expected InvalidData error, got {other:?}"),
         }
     }
@@ -3355,8 +3603,162 @@ mod tests {
         let curated_maps = storage.list_curated(Some(&Theme::Dungeon)).unwrap();
         assert_eq!(curated_maps.len(), 1);
         assert_eq!(curated_maps[0].id, "raw_map");
-        assert_eq!(curated_maps[0].themes, vec!["dungeon"]);
+        assert_eq!(curated_maps[0].tags, vec!["dungeon", "dungeon-crawl"]);
         assert_eq!(curated_maps[0].theme(), Some(Theme::Dungeon));
+    }
+
+    #[tokio::test]
+    async fn test_curate_flat_staging_image_via_service_rewrites_manifest_layer() {
+        use crate::services::{CurationService, CurationWorkflow, DescriptionService};
+        use std::sync::Arc;
+
+        let dir = tempdir().unwrap();
+        let storage = Arc::new(FilesystemStorage::new(dir.path()));
+        let staging = storage.staging_dir();
+        std::fs::create_dir_all(&staging).unwrap();
+
+        // Flat drop-in image: no bundle directory and no sidecar manifest.
+        // 1024×1024 at the default 64px grid yields the 16×16 cells curation requires.
+        let png_data = create_test_png(1024, 1024);
+        std::fs::write(staging.join("flat_cand.png"), &png_data).unwrap();
+        assert!(!staging.join("flat_cand.json").exists());
+        assert!(!staging.join("flat_cand").exists());
+
+        let service = CurationService::new(
+            storage.clone(),
+            Arc::new(DescriptionService::new(None)),
+        );
+
+        let stored = service
+            .curate(
+                "flat_cand",
+                vec!["crypt".into()],
+                None,
+                Some("Damp stone crypt beneath a ruined keep.".into()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(stored.layers.len(), 1);
+        let layer = &stored.layers[0];
+        assert_eq!(layer.index, 0);
+        assert_eq!(layer.filename, "0_ground.png");
+        assert_eq!(layer.role, LayerRole::Ground);
+        assert_eq!(layer.elevation, Some(0));
+        assert_eq!(layer.dimensions, (1024, 1024));
+        assert_eq!(
+            layer.caption.as_deref(),
+            Some("Damp stone crypt beneath a ruined keep.")
+        );
+
+        let bundle_dir = storage.find_curated_bundle_dir("flat_cand").unwrap();
+        assert!(bundle_dir.join("0_ground.png").is_file());
+        assert_eq!(
+            std::fs::read(bundle_dir.join("0_ground.png")).unwrap(),
+            png_data
+        );
+
+        let manifest: CuratedMap = serde_json::from_str(
+            &std::fs::read_to_string(bundle_dir.join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.layers.len(), 1);
+        assert_eq!(manifest.layers[0].filename, "0_ground.png");
+        assert_eq!(manifest.layers[0].role, LayerRole::Ground);
+        assert_eq!(manifest.layers[0].elevation, Some(0));
+        assert_eq!(manifest.layers[0].dimensions, (1024, 1024));
+    }
+
+    #[test]
+    fn test_update_curated_preserves_omitted_source_url_and_caption() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+
+        let png = create_test_png(512, 512);
+        let candidate = Candidate::with_now(
+            "map_upd_provenance",
+            Source::Reddit,
+            "0.png",
+            (512, 512),
+        )
+        .with_source_url("https://reddit.example/post/abc");
+        storage.save_staging(&candidate, &png).unwrap();
+
+        let curated = CuratedMap::with_now(
+            "map_upd_provenance",
+            Theme::Dungeon,
+            vec!["crypt".into()],
+            (512, 512),
+        )
+        .with_description("Flooded crypt with shattered sarcophagi.");
+        storage.curate_staging(&curated).unwrap();
+
+        let stored = storage.list_curated(None).unwrap();
+        let stored_map = stored
+            .iter()
+            .find(|m| m.id == "map_upd_provenance")
+            .unwrap();
+        assert_eq!(
+            stored_map.layers[0].source_url.as_deref(),
+            Some("https://reddit.example/post/abc")
+        );
+
+        // PATCH layer omits source_url and caption: both are carried over.
+        let update = CuratedMapUpdate::default().with_layers(vec![Layer::new(
+            0,
+            "0_ground.png",
+            LayerRole::Ground,
+            Some(0),
+            (512, 512),
+        )]);
+        let updated = storage
+            .update_curated("map_upd_provenance", update)
+            .unwrap();
+        assert_eq!(
+            updated.layers[0].source_url.as_deref(),
+            Some("https://reddit.example/post/abc")
+        );
+        assert_eq!(
+            updated.layers[0].caption.as_deref(),
+            Some("Flooded crypt with shattered sarcophagi.")
+        );
+
+        // Explicit source_url overrides the stored provenance.
+        let mut explicit = Layer::new(
+            0,
+            "0_ground.png",
+            LayerRole::Ground,
+            Some(0),
+            (512, 512),
+        )
+        .with_source_url("https://example.com/new-source");
+        explicit.caption = Some("Explicit caption.".into());
+        let updated = storage
+            .update_curated(
+                "map_upd_provenance",
+                CuratedMapUpdate::default().with_layers(vec![explicit]),
+            )
+            .unwrap();
+        assert_eq!(
+            updated.layers[0].source_url.as_deref(),
+            Some("https://example.com/new-source")
+        );
+        assert_eq!(updated.layers[0].caption.as_deref(), Some("Explicit caption."));
+
+        let manifest: CuratedMap = serde_json::from_str(
+            &std::fs::read_to_string(
+                storage
+                    .find_curated_bundle_dir("map_upd_provenance")
+                    .unwrap()
+                    .join("manifest.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.layers[0].source_url.as_deref(),
+            Some("https://example.com/new-source")
+        );
     }
 
     #[test]
@@ -3535,6 +3937,63 @@ mod tests {
     }
 
     #[test]
+    fn test_commit_curation_preserves_layer_source_url_provenance() {
+        let dir = tempdir().unwrap();
+        let storage = FilesystemStorage::new(dir.path());
+
+        let mut candidate = Candidate::with_now(
+            "provenance_bundle",
+            Source::Reddit,
+            "provenance_bundle/0.png",
+            (1024, 1024),
+        );
+        candidate.layers = vec![
+            Layer::new(0, "0.png", LayerRole::Ground, Some(0), (1024, 1024))
+                .with_source_url("https://i.redd.it/ground.png"),
+            Layer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1024, 1024))
+                .with_source_url("https://i.redd.it/upper.png"),
+        ];
+        storage
+            .save_staging_bundle(
+                None,
+                &candidate,
+                &[b"ground-bytes".to_vec(), b"upper-bytes".to_vec()],
+            )
+            .unwrap();
+
+        let curated = CuratedMap::with_now(
+            "provenance_bundle",
+            Theme::Dungeon,
+            vec!["provenance".into()],
+            (1024, 1024),
+        )
+        .with_description("Provenance-preserving dungeon");
+
+        let stored = storage.commit_curation(&curated).unwrap();
+        assert_eq!(
+            stored.layers[0].source_url.as_deref(),
+            Some("https://i.redd.it/ground.png")
+        );
+        assert_eq!(
+            stored.layers[1].source_url.as_deref(),
+            Some("https://i.redd.it/upper.png")
+        );
+
+        let manifest_path = dir
+            .path()
+            .join("curated")
+            .join("provenance_bundle")
+            .join("manifest.json");
+        let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+        assert!(manifest.contains("https://i.redd.it/ground.png"));
+        assert!(manifest.contains("https://i.redd.it/upper.png"));
+
+        let listed = storage.list_curated(None).unwrap();
+        let persisted = listed.iter().find(|m| m.id == "provenance_bundle").unwrap();
+        assert_eq!(persisted.layers, stored.layers);
+    }
+
+    #[test]
     fn test_uniform_bundle_directory_layout_staging() {
         let dir = tempdir().unwrap();
         let storage = FilesystemStorage::new(dir.path());
@@ -3546,8 +4005,8 @@ mod tests {
             (1920, 1080),
         );
         candidate.layers = vec![
-            CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1920, 1080)),
-            CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1920, 1080)),
+            Layer::new(0, "0.png", LayerRole::Ground, Some(0), (1920, 1080)),
+            Layer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1920, 1080)),
         ];
         let img0 = b"png-bytes-ground-layer";
         let img1 = b"png-bytes-upper-layer";
@@ -3601,9 +4060,9 @@ mod tests {
             (2048, 2048),
         );
         candidate.layers = vec![
-            CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (2048, 2048)),
-            CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (2048, 2048)),
-            CandidateLayer::new(2, "2.png", LayerRole::Exclude, None, (2048, 2048)),
+            Layer::new(0, "0.png", LayerRole::Ground, Some(0), (2048, 2048)),
+            Layer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (2048, 2048)),
+            Layer::new(2, "2.png", LayerRole::Exclude, None, (2048, 2048)),
         ];
         let img0 = b"keep-ground-bytes";
         let img1 = b"keep-upper-bytes";
@@ -3692,7 +4151,7 @@ mod tests {
             parsed_gridless: Some(true),
             parsed_dimensions: Some((1000, 1000)),
             grid: Default::default(),
-            layers: vec![CandidateLayer {
+            layers: vec![Layer {
                 index: 0,
                 filename: "legacy_post_0.png".to_string(),
                 role: LayerRole::Ground,
@@ -3715,7 +4174,7 @@ mod tests {
             parsed_gridless: Some(true),
             parsed_dimensions: Some((1000, 1000)),
             grid: Default::default(),
-            layers: vec![CandidateLayer {
+            layers: vec![Layer {
                 index: 0,
                 filename: "legacy_post_1.png".to_string(),
                 role: LayerRole::UpperFloor,
@@ -3850,10 +4309,10 @@ mod tests {
             (1920, 1080),
         );
         candidate.title = Some("Two-story tavern".to_string());
-        let mut layer0 = CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1920, 1080));
+        let mut layer0 = Layer::new(0, "0.png", LayerRole::Ground, Some(0), (1920, 1080));
         layer0.caption = Some("1st Floor Tavern".to_string());
         let mut layer1 =
-            CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1920, 1080));
+            Layer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1920, 1080));
         layer1.caption = Some("2nd Floor Rooms".to_string());
         candidate.layers = vec![layer0, layer1];
 
@@ -4023,8 +4482,10 @@ mod tests {
             .with_description("Luminescent fungal cavern with damp stone floors.");
 
         let updated = storage.update_curated("map_upd_meta", update).unwrap();
-        assert_eq!(updated.themes, vec!["cave", "underdark"]);
-        assert_eq!(updated.tags, vec!["stalactites", "bioluminescence"]);
+        assert!(updated.tags.contains(&"cave".to_string()));
+        assert!(updated.tags.contains(&"underdark".to_string()));
+        assert!(updated.tags.contains(&"stalactites".to_string()));
+        assert!(updated.tags.contains(&"bioluminescence".to_string()));
         assert_eq!(
             updated.description.as_deref(),
             Some("Luminescent fungal cavern with damp stone floors.")
@@ -4033,7 +4494,10 @@ mod tests {
         // Verify manifest on disk
         let list = storage.list_curated(None).unwrap();
         let reloaded = list.iter().find(|m| m.id == "map_upd_meta").unwrap();
-        assert_eq!(reloaded.themes, vec!["cave", "underdark"]);
+        assert!(reloaded.tags.contains(&"cave".to_string()));
+        assert!(reloaded.tags.contains(&"underdark".to_string()));
+        assert!(reloaded.tags.contains(&"stalactites".to_string()));
+        assert!(reloaded.tags.contains(&"bioluminescence".to_string()));
         assert_eq!(
             reloaded.description.as_deref(),
             Some("Luminescent fungal cavern with damp stone floors.")
@@ -4048,12 +4512,15 @@ mod tests {
             .unwrap();
         assert!(lora_txt.contains("luminescent"));
         assert!(lora_txt.contains("fungal cavern"));
-        // Validation error on empty themes
-        let invalid_update = CuratedMapUpdate::default().with_themes(vec![]);
-        let err = storage
-            .update_curated("map_upd_meta", invalid_update)
-            .unwrap_err();
-        assert!(matches!(err, StorageError::InvalidData(_)));
+
+        // Empty legacy themes is a no-op
+        let unchanged = storage
+            .update_curated("map_upd_meta", CuratedMapUpdate::default().with_themes(vec![]))
+            .unwrap();
+        assert_eq!(
+            unchanged.tags,
+            vec!["stalactites", "bioluminescence", "cave", "underdark"]
+        );
 
         // Updating non-existent curated map returns NotFound
         let err_nf = storage
@@ -4083,8 +4550,8 @@ mod tests {
             .update_staging_layers(
                 "map_upd_layers",
                 vec![
-                    CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1000, 1000)),
-                    CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1200, 1200)),
+                    Layer::new(0, "0.png", LayerRole::Ground, Some(0), (1000, 1000)),
+                    Layer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1200, 1200)),
                 ],
             )
             .unwrap();
@@ -4114,14 +4581,14 @@ mod tests {
 
         // Update: Swap roles so layer 1 (img1) becomes Ground, and layer 0 (img0) becomes Roof
         let new_layers = vec![
-            CuratedLayer::new(
+            Layer::new(
                 0,
                 "1_upper_1.png",
                 LayerRole::Ground,
                 Some(0),
                 (1200, 1200),
             ),
-            CuratedLayer::new(
+            Layer::new(
                 1,
                 "0_ground.png",
                 LayerRole::Roof,
@@ -4163,7 +4630,7 @@ mod tests {
 
         // Verify invalid layer updates: all excluded or unassigned fails
         let unassigned_update = CuratedMapUpdate::default().with_layers(vec![
-            CuratedLayer::new(0, "0_ground.png", LayerRole::Unassigned, None, (1000, 1000)),
+            Layer::new(0, "0_ground.png", LayerRole::Unassigned, None, (1000, 1000)),
         ]);
         assert!(storage
             .update_curated("map_upd_layers", unassigned_update)

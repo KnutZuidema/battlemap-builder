@@ -10,10 +10,27 @@ use tower::ServiceExt;
 use curator::adapters::{FilesystemStorage, OpenRouterAdapter};
 use curator::api::{create_router, AppState, DescribeResponse, SuggestThemesResponse};
 use curator::domain::{
-    Candidate, CandidateLayer, CuratedLayer, CuratedMap, CuratedMapUpdate, LayerRole,
+    Candidate, CandidateLayer, CuratedLayer, CuratedMap, CuratedMapUpdate, GridConfig, LayerRole,
     RejectionReason, Source, Theme,
 };
 use curator::ports::storage::StorageRepository;
+use async_trait::async_trait;
+use curator::services::description::{DescriptionError, DescriptionGenerator, DescriptionService};
+
+struct MockCuratedGen(Result<String, DescriptionError>);
+
+#[async_trait]
+impl DescriptionGenerator for MockCuratedGen {
+    async fn generate_description(
+        &self,
+        _image_bytes: &[u8],
+        _filename: Option<&str>,
+        _tags: &[String],
+        _title: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        self.0.clone()
+    }
+}
 
 fn create_test_png(width: u32, height: u32) -> Vec<u8> {
     let img = image::RgbaImage::new(width, height);
@@ -52,6 +69,86 @@ fn curate_test_map(
     }
     storage.save_curated(&map, &png).expect("save curated test map");
     map
+}
+
+/// Generator that records the `title` and `tags` arguments it receives while returning a fixed result.
+struct RecordingDescriptionGen {
+    result: Result<String, DescriptionError>,
+    seen_titles: std::sync::Mutex<Vec<Option<String>>>,
+    seen_tags: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
+impl RecordingDescriptionGen {
+    fn new(result: Result<String, DescriptionError>) -> Self {
+        Self {
+            result,
+            seen_titles: std::sync::Mutex::new(Vec::new()),
+            seen_tags: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl DescriptionGenerator for RecordingDescriptionGen {
+    async fn generate_description(
+        &self,
+        _image_bytes: &[u8],
+        _filename: Option<&str>,
+        tags: &[String],
+        title: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        self.seen_titles
+            .lock()
+            .unwrap()
+            .push(title.map(str::to_string));
+        self.seen_tags.lock().unwrap().push(tags.to_vec());
+        self.result.clone()
+    }
+}
+
+fn curate_map_with_grid(
+    storage: &FilesystemStorage,
+    id: &str,
+    dimensions: (u32, u32),
+    cell_size_px: u32,
+    desc: Option<&str>,
+) -> CuratedMap {
+    let png = create_test_png(dimensions.0, dimensions.1);
+    let mut map = CuratedMap::with_now(id, Theme::Dungeon, vec!["dungeon".into()], dimensions)
+        .with_grid(GridConfig::new(cell_size_px, 0, 0));
+    if let Some(d) = desc {
+        map = map.with_description(d);
+    }
+    storage.save_curated(&map, &png).expect("save curated test map");
+    map
+}
+
+/// 512×512 curated map with a 32px grid: exactly 16×16 full cells, i.e. one Map Section.
+fn curate_single_section_map(
+    storage: &FilesystemStorage,
+    id: &str,
+    desc: Option<&str>,
+) -> CuratedMap {
+    curate_map_with_grid(storage, id, (512, 512), 32, desc)
+}
+
+/// 2048×2048 curated map with the default 64px grid: 32×32 cells, i.e. four Map Sections.
+fn curate_multi_section_map(
+    storage: &FilesystemStorage,
+    id: &str,
+    desc: Option<&str>,
+) -> CuratedMap {
+    curate_map_with_grid(storage, id, (2048, 2048), 64, desc)
+}
+
+fn regrid_payload(cell_size_px: u32) -> Value {
+    json!({
+        "grid": {
+            "cell_size_px": cell_size_px,
+            "offset_x": 0,
+            "offset_y": 0
+        }
+    })
 }
 
 fn curate_test_bundle(
@@ -113,8 +210,10 @@ async fn test_patch_curated_metadata_success() {
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let updated: CuratedMap = serde_json::from_slice(&body).unwrap();
     assert_eq!(updated.id, "map_to_patch");
-    assert_eq!(updated.themes, vec!["tavern", "coastal"]);
-    assert_eq!(updated.tags, vec!["alehouse", "dockside"]);
+    assert!(updated.tags.contains(&"tavern".to_string()));
+    assert!(updated.tags.contains(&"coastal".to_string()));
+    assert!(updated.tags.contains(&"alehouse".to_string()));
+    assert!(updated.tags.contains(&"dockside".to_string()));
     assert_eq!(
         updated.description.as_deref(),
         Some("Lively harbor tavern with warm hearth")
@@ -123,8 +222,10 @@ async fn test_patch_curated_metadata_success() {
     // Verify storage persistence
     let listed = storage.list_curated(None).unwrap();
     let stored = listed.iter().find(|m| m.id == "map_to_patch").unwrap();
-    assert_eq!(stored.themes, vec!["tavern", "coastal"]);
-    assert_eq!(stored.tags, vec!["alehouse", "dockside"]);
+    assert!(stored.tags.contains(&"tavern".to_string()));
+    assert!(stored.tags.contains(&"coastal".to_string()));
+    assert!(stored.tags.contains(&"alehouse".to_string()));
+    assert!(stored.tags.contains(&"dockside".to_string()));
     assert_eq!(
         stored.description.as_deref(),
         Some("Lively harbor tavern with warm hearth")
@@ -162,6 +263,45 @@ async fn test_patch_curated_layers() {
 }
 
 #[tokio::test]
+async fn test_patch_curated_tags_only_payload_without_themes() {
+    let (app, storage, _dir) = setup_test_app();
+    curate_test_bundle(&storage, "tags_only_patch", Theme::Dungeon, vec!["tower".into()]);
+
+    // The library inspector sends tags, description, and layers — never `themes`.
+    let payload = json!({
+        "tags": ["tower", "crypt"],
+        "description": "A fortified tower with a flooded crypt below",
+        "layers": [
+            { "index": 0, "filename": "0.png", "role": "ground", "elevation": 0, "dimensions": [300, 300] },
+            { "index": 1, "filename": "1.png", "role": "upper_floor", "elevation": 1, "dimensions": [300, 300] }
+        ]
+    });
+
+    let req = Request::builder()
+        .uri("/api/curated/tags_only_patch")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let updated: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(updated["tags"], json!(["tower", "crypt"]));
+    assert_eq!(
+        updated["description"],
+        "A fortified tower with a flooded crypt below"
+    );
+    assert!(updated.get("themes").is_none());
+
+    let listed = storage.list_curated(None).unwrap();
+    let stored = listed.iter().find(|m| m.id == "tags_only_patch").unwrap();
+    assert_eq!(stored.tags, vec!["tower", "crypt"]);
+}
+
+#[tokio::test]
 async fn test_patch_curated_not_found_and_validation() {
     let (app, storage, _dir) = setup_test_app();
     curate_test_map(&storage, "map_val_1", Theme::Cave, vec![], None);
@@ -176,7 +316,7 @@ async fn test_patch_curated_not_found_and_validation() {
     let resp_404 = app.clone().oneshot(req_404).await.unwrap();
     assert_eq!(resp_404.status(), StatusCode::NOT_FOUND);
 
-    // 400 for empty themes
+    // Empty legacy themes is a no-op, not a validation failure
     let req_empty_themes = Request::builder()
         .uri("/api/curated/map_val_1")
         .method("PATCH")
@@ -184,7 +324,10 @@ async fn test_patch_curated_not_found_and_validation() {
         .body(Body::from(json!({ "themes": [] }).to_string()))
         .unwrap();
     let resp_empty_themes = app.clone().oneshot(req_empty_themes).await.unwrap();
-    assert_eq!(resp_empty_themes.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp_empty_themes.status(), StatusCode::OK);
+    let empty_body = to_bytes(resp_empty_themes.into_body(), usize::MAX).await.unwrap();
+    let unchanged: CuratedMap = serde_json::from_slice(&empty_body).unwrap();
+    assert_eq!(unchanged.tags, vec!["cave".to_string()]);
 
     // 400 for whitespace/empty ID
     let req_empty_id = Request::builder()
@@ -346,7 +489,7 @@ async fn test_curated_suggest_themes_and_caching() {
 }
 
 #[tokio::test]
-async fn test_curated_describe_deterministic_fallback() {
+async fn test_curated_describe_strictly_fails_when_unconfigured() {
     let (app, storage, _dir) = setup_test_app();
     curate_test_map(
         &storage,
@@ -356,7 +499,7 @@ async fn test_curated_describe_deterministic_fallback() {
         Some("A cozy roadside tavern"),
     );
 
-    // Call describe with empty body (offline fallback)
+    // Call describe with empty body while unconfigured -> must return 503 SERVICE_UNAVAILABLE (no silent fallback)
     let req = Request::builder()
         .uri("/api/curated/describe_map_test/describe")
         .method("POST")
@@ -364,35 +507,7 @@ async fn test_curated_describe_deterministic_fallback() {
         .unwrap();
 
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    let res: DescribeResponse = serde_json::from_slice(&body).unwrap();
-    assert_eq!(res.id, "describe_map_test");
-    assert!(res.description.contains("ttrpg battlemap"));
-    assert!(res.description.contains("tavern"));
-
-    // Call describe with explicit override themes & tags
-    let override_req = Request::builder()
-        .uri("/api/curated/describe_map_test/describe")
-        .method("POST")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(
-            json!({
-                "themes": ["coastal"],
-                "tags": ["beach", "lighthouse"]
-            })
-            .to_string(),
-        ))
-        .unwrap();
-
-    let override_resp = app.clone().oneshot(override_req).await.unwrap();
-    assert_eq!(override_resp.status(), StatusCode::OK);
-
-    let override_body = to_bytes(override_resp.into_body(), usize::MAX).await.unwrap();
-    let override_res: DescribeResponse = serde_json::from_slice(&override_body).unwrap();
-    assert!(override_res.description.contains("coastal"));
-    assert!(override_res.description.contains("beach"));
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     // Non-existent map returns 404
     let req_404 = Request::builder()
@@ -402,6 +517,131 @@ async fn test_curated_describe_deterministic_fallback() {
         .unwrap();
     let resp_404 = app.oneshot(req_404).await.unwrap();
     assert_eq!(resp_404.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_curated_describe_never_sends_description_as_title_and_merges_tags() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let generator = Arc::new(RecordingDescriptionGen::new(Ok(
+        "Rustic wooden tavern with roaring fireplace.".to_string(),
+    )));
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
+    let app = create_router(state);
+
+    let stored = curate_test_map(
+        &storage,
+        "describe_map_title",
+        Theme::Tavern,
+        vec!["wooden".into(), "fireplace".into()],
+        Some("A cozy roadside tavern description that must not become a title"),
+    );
+
+    // Empty body: fall back to the stored tags and the suggestion cache, never the description.
+    let req = Request::builder()
+        .uri("/api/curated/describe_map_title/describe")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert_eq!(
+        *generator.seen_titles.lock().unwrap(),
+        vec![None],
+        "curated describe must not forward the stored description as the title"
+    );
+    assert_eq!(
+        *generator.seen_tags.lock().unwrap(),
+        vec![stored.tags.clone()],
+        "curated describe must merge stored themes and tags"
+    );
+    assert!(
+        !generator.seen_tags.lock().unwrap()[0]
+            .iter()
+            .any(|tag| tag.contains("roadside")),
+        "stored description must never leak into tags"
+    );
+}
+
+#[tokio::test]
+async fn test_curated_describe_merges_requested_themes_and_tags() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let generator = Arc::new(RecordingDescriptionGen::new(Ok(
+        "Merged description.".to_string(),
+    )));
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
+    let app = create_router(state);
+
+    curate_test_map(
+        &storage,
+        "describe_map_merge",
+        Theme::Dungeon,
+        vec!["stone".into()],
+        Some("Stored description"),
+    );
+
+    let req = Request::builder()
+        .uri("/api/curated/describe_map_merge/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "themes": ["flooded"],
+                "tags": ["stone", "Torchlit", "flooded"]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert_eq!(*generator.seen_titles.lock().unwrap(), vec![None]);
+    assert_eq!(
+        *generator.seen_tags.lock().unwrap(),
+        vec![vec![
+            "flooded".to_string(),
+            "stone".to_string(),
+            "Torchlit".to_string(),
+        ]]
+    );
+}
+
+#[tokio::test]
+async fn test_curated_describe_success_with_service() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let mock_desc = "Rustic wooden tavern with roaring fireplace and sturdy oak tables.";
+    let mock_gen = Arc::new(MockCuratedGen(Ok(mock_desc.to_string())));
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(mock_gen))));
+    let app = create_router(state);
+
+    curate_test_map(
+        &storage,
+        "describe_map_success",
+        Theme::Tavern,
+        vec!["wooden".into(), "fireplace".into()],
+        Some("A cozy roadside tavern"),
+    );
+
+    let req = Request::builder()
+        .uri("/api/curated/describe_map_success/describe")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let res: DescribeResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(res.id, "describe_map_success");
+    assert_eq!(res.description, mock_desc);
 }
 
 #[tokio::test]
@@ -495,4 +735,122 @@ async fn test_get_curated_layer_image_by_id() {
         .unwrap();
     let resp_nf = app.oneshot(req_nf).await.unwrap();
     assert_eq!(resp_nf.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_patch_curated_regrid_strictly_fails_when_vision_unconfigured() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(None)));
+    let app = create_router(state);
+
+    curate_multi_section_map(&storage, "regrid_unconfigured", None);
+
+    let req = Request::builder()
+        .uri("/api/curated/regrid_unconfigured")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(regrid_payload(64).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let err: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        err["error"].as_str().unwrap().contains("not configured"),
+        "Unexpected error payload: {err}"
+    );
+
+    // Nothing was synthesized or persisted: manifest still lacks description/sections.
+    let stored = storage
+        .list_curated(None)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == "regrid_unconfigured")
+        .unwrap();
+    assert_eq!(stored.description, None);
+    assert!(stored.sections.is_empty());
+}
+
+#[tokio::test]
+async fn test_patch_curated_regrid_strictly_fails_when_vision_errors() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let generator = Arc::new(RecordingDescriptionGen::new(Err(
+        DescriptionError::GenerationFailed("upstream 500".into()),
+    )));
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
+    let app = create_router(state);
+
+    curate_multi_section_map(&storage, "regrid_failing_vision", None);
+
+    let req = Request::builder()
+        .uri("/api/curated/regrid_failing_vision")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(regrid_payload(64).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+
+    let stored = storage
+        .list_curated(None)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.id == "regrid_failing_vision")
+        .unwrap();
+    assert_eq!(stored.description, None);
+    assert!(stored.sections.is_empty());
+}
+
+#[tokio::test]
+async fn test_patch_curated_regrid_persists_vision_description_without_description_title() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let generated = "Vision-generated subterranean vault with flooded channels";
+    let generator = Arc::new(RecordingDescriptionGen::new(Ok(generated.to_string())));
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
+    let app = create_router(state);
+
+    curate_single_section_map(&storage, "regrid_success", None);
+
+    let req = Request::builder()
+        .uri("/api/curated/regrid_success")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(regrid_payload(32).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let updated: CuratedMap = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(updated.description.as_deref(), Some(generated));
+    assert_eq!(updated.sections.len(), 1);
+    assert_eq!(updated.sections[0].col, 0);
+    assert_eq!(updated.sections[0].row, 0);
+    assert_eq!(updated.sections[0].description, generated);
+
+    // The description must never be passed as the generator's `title` argument.
+    assert_eq!(
+        *generator.seen_titles.lock().unwrap(),
+        vec![None],
+        "PATCH regrid must call the generator with no title, not the description"
+    );
+
+    let manifest_path = dir
+        .path()
+        .join("curated")
+        .join("regrid_success")
+        .join("manifest.json");
+    let persisted: CuratedMap =
+        serde_json::from_str(&std::fs::read_to_string(manifest_path).unwrap()).unwrap();
+    assert_eq!(persisted.description.as_deref(), Some(generated));
+    assert_eq!(persisted.sections[0].description, generated);
 }

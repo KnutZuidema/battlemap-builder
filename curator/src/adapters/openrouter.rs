@@ -25,6 +25,7 @@ use crate::domain::{
     SYSTEM_INSTRUCTION_SUGGEST_THEMES, USER_PROMPT_SUGGEST_THEMES,
 };
 use crate::ports::model_engine::{ModelEngine, ModelEngineError};
+use crate::services::description::{DescriptionError, DescriptionGenerator};
 
 /// Default OpenRouter API endpoint base URL.
 pub const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -307,13 +308,13 @@ impl OpenRouterAdapter {
         Ok(suggestions)
     }
 
-    /// Generates a rich, tangible battlemap description from an image and assigned themes/tags
+    /// Generates a rich, tangible battlemap description from an image and optional title / tags
     /// using Gemini 3.5 Flash Lite via OpenRouter.
     pub async fn generate_battlemap_description(
         &self,
         image_bytes: &[u8],
         mime_type: &str,
-        themes: &[String],
+        title: Option<&str>,
         tags: &[String],
     ) -> Result<String, ModelEngineError> {
         if self.inner.api_key.trim().is_empty() {
@@ -337,7 +338,7 @@ impl OpenRouterAdapter {
         let endpoint = self.chat_endpoint_url();
         let b64_data = BASE64_STANDARD.encode(image_bytes);
         let data_url = format!("data:{mime_type};base64,{b64_data}");
-        let user_prompt = build_description_user_prompt(themes, tags);
+        let user_prompt = build_description_user_prompt(title, tags);
 
         let body = json!({
             "model": model,
@@ -401,6 +402,43 @@ impl OpenRouterAdapter {
         Ok(description)
     }
 }
+#[async_trait]
+impl DescriptionGenerator for OpenRouterAdapter {
+    async fn generate_description(
+        &self,
+        image_bytes: &[u8],
+        filename: Option<&str>,
+        tags: &[String],
+        title: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        if self.inner.api_key.trim().is_empty() {
+            return Err(DescriptionError::NotConfigured(
+                "OpenRouter API key is empty".to_string(),
+            ));
+        }
+
+        let mime_type = crate::services::description::resolve_mime_type(
+            filename.unwrap_or("image/png"),
+            image_bytes,
+        );
+
+        let desc = self
+            .generate_battlemap_description(image_bytes, &mime_type, title, tags)
+            .await
+            .map_err(|e| match e {
+                ModelEngineError::Auth(msg) => DescriptionError::NotConfigured(msg),
+                other => DescriptionError::GenerationFailed(other.to_string()),
+            })?;
+
+        let trimmed = desc.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(DescriptionError::EmptyDescription);
+        }
+
+        Ok(trimmed)
+    }
+}
+
 
 /// Resolves `OPENROUTER_API_KEY` by checking `server/.env`, `.env`, and environment variables.
 pub fn resolve_api_key() -> Result<String, ModelEngineError> {
@@ -1795,11 +1833,11 @@ mod tests {
         );
 
         let fake_image = b"fake-png-data";
-        let themes = vec!["Dungeon".to_string(), "Crypt".to_string()];
+        let title = Some("Flooded Crypt");
         let tags = vec!["flooded".to_string()];
 
         let result = adapter
-            .generate_battlemap_description(fake_image, "image/png", &themes, &tags)
+            .generate_battlemap_description(fake_image, "image/png", title, &tags)
             .await
             .expect("generate_battlemap_description");
 
@@ -1817,7 +1855,7 @@ mod tests {
         let user_parts = messages[1]["content"].as_array().unwrap();
         assert_eq!(user_parts[0]["type"], "text");
         let prompt_text = user_parts[0]["text"].as_str().unwrap();
-        assert!(prompt_text.contains("Assigned themes: Dungeon, Crypt."));
+        assert!(prompt_text.contains("Title: Flooded Crypt."));
         assert!(prompt_text.contains("Identified tags: flooded."));
         assert_eq!(user_parts[1]["type"], "image_url");
         let url = user_parts[1]["image_url"]["url"].as_str().unwrap();
@@ -1866,7 +1904,7 @@ mod tests {
         );
 
         let result = adapter
-            .generate_battlemap_description(b"test", "image/png", &[], &[])
+            .generate_battlemap_description(b"test", "image/png", None, &[])
             .await
             .expect("parse array content");
 
@@ -1878,7 +1916,7 @@ mod tests {
     async fn test_generate_battlemap_description_empty_api_key() {
         let adapter = OpenRouterAdapter::new("");
         let err = adapter
-            .generate_battlemap_description(b"bytes", "image/png", &[], &[])
+            .generate_battlemap_description(b"bytes", "image/png", None, &[])
             .await
             .unwrap_err();
         assert!(matches!(err, ModelEngineError::Auth(_)));

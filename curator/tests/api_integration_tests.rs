@@ -18,10 +18,75 @@ use curator::domain::{
 };
 use curator::ports::harvester::{HarvesterError, RedditHarvester};
 use curator::ports::storage::StorageRepository;
+use curator::services::description::{DescriptionError, DescriptionGenerator, DescriptionService};
+
+struct MockDescriptionGen(Result<String, DescriptionError>);
+
+#[async_trait]
+impl DescriptionGenerator for MockDescriptionGen {
+    async fn generate_description(
+        &self,
+        _image_bytes: &[u8],
+        _filename: Option<&str>,
+        _tags: &[String],
+        _title: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        self.0.clone()
+    }
+}
+/// Default test generator: echoes the request tags and distinguishes image content,
+/// so multi-section curation tests receive crop-specific descriptions.
+struct TaggedMockDescriptionGen;
+
+#[async_trait]
+impl DescriptionGenerator for TaggedMockDescriptionGen {
+    async fn generate_description(
+        &self,
+        image_bytes: &[u8],
+        _filename: Option<&str>,
+        tags: &[String],
+        _title: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        let checksum = image_bytes
+            .iter()
+            .fold(0u64, |acc, byte| acc.wrapping_mul(31).wrapping_add(u64::from(*byte)));
+        Ok(format!(
+            "Default test battlemap description for {} (checksum {checksum})",
+            tags.join(", ")
+        ))
+    }
+}
+
+/// Records the `tags` and `title` arguments passed to the generator.
+#[derive(Default)]
+struct CapturingDescriptionGen {
+    calls: std::sync::Mutex<Vec<(Vec<String>, Option<String>)>>,
+}
+
+#[async_trait]
+impl DescriptionGenerator for CapturingDescriptionGen {
+    async fn generate_description(
+        &self,
+        _image_bytes: &[u8],
+        _filename: Option<&str>,
+        tags: &[String],
+        title: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((tags.to_vec(), title.map(str::to_string)));
+        Ok("Captured physical description.".to_string())
+    }
+}
+
 fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let state = AppState::new(storage.clone());
+    let desc_service = Arc::new(DescriptionService::new(Some(Arc::new(
+        TaggedMockDescriptionGen,
+    ))));
+    let state = AppState::new(storage.clone()).with_description_service(desc_service);
     let router = create_router(state);
     (router, storage, dir)
 }
@@ -149,7 +214,8 @@ async fn test_api_curate_endpoint() {
     let res_json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(res_json["status"], "ok");
     assert_eq!(res_json["curated"]["id"], "map_to_curate");
-    assert_eq!(res_json["curated"]["themes"], json!(["dungeon"]));
+    assert_eq!(res_json["curated"]["tags"], json!(["dungeon", "crypt", "stone-floor"]));
+    assert!(res_json["curated"]["themes"].is_null());
     assert_eq!(res_json["curated"]["dimensions"], json!([1920, 1080]));
 
     // Staging should now be empty
@@ -207,6 +273,119 @@ async fn test_api_curate_endpoint() {
 }
 
 #[tokio::test]
+async fn test_api_curate_accepts_unified_tags_without_legacy_themes() {
+    let (app, storage, _dir) = setup_test_app();
+
+    let img_bytes = b"\x89PNG\r\n\x1a\ntags_only_map";
+    let cand = Candidate::with_now("tags_only_map", Source::Generated, "dungeon.png", (1920, 1080));
+    storage.save_staging(&cand, img_bytes).unwrap();
+
+    let curate_payload = json!({
+        "id": "tags_only_map",
+        "tags": ["dungeon", "crypt", "boss-arena"]
+    });
+
+    let req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+
+    let response = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let res_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        res_json["curated"]["tags"],
+        json!(["dungeon", "crypt", "boss-arena"])
+    );
+    assert!(res_json["curated"]["themes"].is_null());
+
+    // Missing every tag source is rejected with the tag-specific message.
+    let cand = Candidate::with_now("untagged_map", Source::Generated, "dungeon.png", (1920, 1080));
+    storage.save_staging(&cand, img_bytes).unwrap();
+    let req_missing = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "id": "untagged_map" }).to_string()))
+        .unwrap();
+    let response_missing = app.oneshot(req_missing).await.unwrap();
+    assert_eq!(response_missing.status(), StatusCode::BAD_REQUEST);
+    let body_missing = to_bytes(response_missing.into_body(), usize::MAX).await.unwrap();
+    let missing_json: Value = serde_json::from_slice(&body_missing).unwrap();
+    assert_eq!(missing_json["error"], "At least 1 tag is required");
+}
+
+#[tokio::test]
+async fn test_curate_response_matches_curated_listing_including_provenance() {
+    let (app, storage, _dir) = setup_test_app();
+
+    let mut cand = Candidate::with_now("provenance_map", Source::Reddit, "0.png", (1920, 1080));
+    cand.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1920, 1080))
+            .with_source_url("https://i.redd.it/provenance_0.png"),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1920, 1080))
+            .with_source_url("https://i.redd.it/provenance_1.png"),
+    ];
+    storage
+        .save_staging_bundle(
+            None,
+            &cand,
+            &[
+                b"\x89PNG\r\n\x1a\nprovenance_ground".to_vec(),
+                b"\x89PNG\r\n\x1a\nprovenance_upper".to_vec(),
+            ],
+        )
+        .unwrap();
+
+    let curate_payload = json!({
+        "id": "provenance_map",
+        "tags": ["dungeon", "crypt"]
+    });
+    let req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let curate_json: Value = serde_json::from_slice(&body).unwrap();
+    let returned = curate_json["curated"].clone();
+
+    assert_eq!(
+        returned["layers"][0]["source_url"],
+        "https://i.redd.it/provenance_0.png"
+    );
+    assert_eq!(
+        returned["layers"][1]["source_url"],
+        "https://i.redd.it/provenance_1.png"
+    );
+
+    // GET /api/curated must report byte-for-byte what POST /api/curate returned.
+    let list_req = Request::builder()
+        .uri("/api/curated")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let list_resp = app.oneshot(list_req).await.unwrap();
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let list_body = to_bytes(list_resp.into_body(), usize::MAX).await.unwrap();
+    let listed: Vec<Value> = serde_json::from_slice(&list_body).unwrap();
+    let stored = listed
+        .iter()
+        .find(|m| m["id"] == "provenance_map")
+        .expect("curated map listed");
+
+    assert_eq!(&returned, stored, "curate response must equal stored manifest");
+}
+
+#[tokio::test]
 async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() {
     let (app, storage, dir) = setup_test_app();
 
@@ -234,7 +413,7 @@ async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() 
             json!({
                 "id": "dungeon_complex",
                 "themes": [],
-                "tags": ["crypt"]
+                "tags": []
             })
             .to_string(),
         ))
@@ -251,7 +430,7 @@ async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() 
             json!({
                 "id": "dungeon_complex",
                 "themes": ["   ", ""],
-                "tags": ["crypt"]
+                "tags": ["   "]
             })
             .to_string(),
         ))
@@ -298,9 +477,10 @@ async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() 
     assert_eq!(res_json["status"], "ok");
     assert_eq!(res_json["curated"]["id"], "dungeon_complex");
     assert_eq!(
-        res_json["curated"]["themes"],
-        json!(["dungeon", "crypt", "boss-arena"])
+        res_json["curated"]["tags"],
+        json!(["dungeon", "crypt", "boss-arena", "torchlight", "fantasy"])
     );
+    assert!(res_json["curated"]["themes"].is_null());
     // Rating must not be present in response
     assert!(res_json["curated"]["rating"].is_null());
 
@@ -327,9 +507,10 @@ async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() 
 
     assert_eq!(manifest["id"], "dungeon_complex");
     assert_eq!(
-        manifest["themes"],
-        json!(["dungeon", "crypt", "boss-arena"])
+        manifest["tags"],
+        json!(["dungeon", "crypt", "boss-arena", "torchlight", "fantasy"])
     );
+    assert!(manifest["themes"].is_null());
     assert_eq!(manifest["dimensions"], json!([1920, 1080]));
     assert!(manifest["rating"].is_null(), "Curated map manifest must not have rating");
 
@@ -397,7 +578,8 @@ async fn test_api_curate_building_theme_and_aliases() {
     let res_json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(res_json["status"], "ok");
     assert_eq!(res_json["curated"]["id"], "cabin_map");
-    assert_eq!(res_json["curated"]["themes"], json!(["building"]));
+    assert_eq!(res_json["curated"]["tags"], json!(["building", "isolated-cabin", "timber-roof"]));
+    assert!(res_json["curated"]["themes"].is_null());
 
     // Verify stored under Theme::Building
     let curated = storage.list_curated(Some(&Theme::Building)).unwrap();
@@ -435,7 +617,8 @@ async fn test_api_curate_building_theme_and_aliases() {
     assert_eq!(resp2.status(), StatusCode::OK);
     let body2 = to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
     let res_json2: Value = serde_json::from_slice(&body2).unwrap();
-    assert_eq!(res_json2["curated"]["themes"], json!(["building"]));
+    assert!(res_json2["curated"]["themes"].is_null());
+    assert!(res_json2["curated"]["tags"].as_array().unwrap().contains(&json!("building")));
 
     let building_list = storage.list_curated(Some(&Theme::Building)).unwrap();
     assert_eq!(building_list.len(), 2);
@@ -1467,8 +1650,8 @@ async fn test_api_curate_bundle_validation_and_success() {
     let body = to_bytes(resp_unassigned.into_body(), usize::MAX).await.unwrap();
     let json_err: Value = serde_json::from_slice(&body).unwrap();
     assert!(
-        json_err["error"].as_str().unwrap().contains("Unassigned"),
-        "Expected error message mentioning Unassigned: {:?}",
+        json_err["error"].as_str().unwrap().contains("unassigned"),
+        "Expected error message mentioning unassigned: {:?}",
         json_err
     );
 
@@ -1503,6 +1686,73 @@ async fn test_api_curate_bundle_validation_and_success() {
     assert!(
         json_err["error"].as_str().unwrap().contains("At least 1 layer must be included"),
         "Expected error message mentioning at least 1 layer included: {:?}",
+        json_err
+    );
+
+    // Case B2: Missing Ground layer is rejected with 400
+    let mut cand_no_ground =
+        Candidate::with_now("cand_no_ground", Source::Reddit, "0.png", (800, 600));
+    cand_no_ground.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::UpperFloor, Some(1), (800, 600)),
+        CandidateLayer::new(1, "1.png", LayerRole::Roof, None, (800, 600)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand_no_ground, &[img0.to_vec(), img1.to_vec()])
+        .unwrap();
+
+    let req_no_ground = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "cand_no_ground",
+                "theme": "dungeon"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp_no_ground = app.clone().oneshot(req_no_ground).await.unwrap();
+    assert_eq!(resp_no_ground.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp_no_ground.into_body(), usize::MAX).await.unwrap();
+    let json_err: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json_err["error"].as_str().unwrap().contains("Ground layer is required"),
+        "Expected error message mentioning Ground layer required: {:?}",
+        json_err
+    );
+
+    // Case B3: Multiple Ground layers is rejected with 400
+    let mut cand_multi_ground =
+        Candidate::with_now("cand_multi_ground", Source::Reddit, "0.png", (800, 600));
+    cand_multi_ground.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (800, 600)),
+        CandidateLayer::new(1, "1.png", LayerRole::Ground, Some(0), (800, 600)),
+    ];
+    storage
+        .save_staging_bundle(None, &cand_multi_ground, &[img0.to_vec(), img1.to_vec()])
+        .unwrap();
+
+    let req_multi_ground = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "cand_multi_ground",
+                "theme": "dungeon"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp_multi_ground = app.clone().oneshot(req_multi_ground).await.unwrap();
+    assert_eq!(resp_multi_ground.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp_multi_ground.into_body(), usize::MAX).await.unwrap();
+    let json_err: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json_err["error"].as_str().unwrap().contains("Ground layer is required")
+            || json_err["error"].as_str().unwrap().contains("Multiple Ground layers"),
+        "Expected error message mentioning multiple Ground layers: {:?}",
         json_err
     );
 
@@ -1543,7 +1793,8 @@ async fn test_api_curate_bundle_validation_and_success() {
     let curate_json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(curate_json["status"], "ok");
     assert_eq!(curate_json["curated"]["id"], "cand_unassigned");
-    assert_eq!(curate_json["curated"]["themes"], json!(["dungeon"]));
+    assert_eq!(curate_json["curated"]["tags"], json!(["dungeon", "crypt"]));
+    assert!(curate_json["curated"]["themes"].is_null());
 
     // Staging should no longer contain cand_unassigned
     let remaining_staging = storage.list_staging().unwrap();
@@ -1895,7 +2146,15 @@ async fn test_suggest_themes_empty_candidate_id_returns_bad_request() {
 
 #[tokio::test]
 async fn test_describe_candidate_fallback_when_no_api_key() {
-    let (app, storage, _dir) = setup_test_app();
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let adapter_no_key = Arc::new(OpenRouterAdapter::with_config(
+        "",
+        "http://127.0.0.1:1".to_string(),
+        1,
+    ));
+    let state = AppState::new(storage.clone()).with_openrouter(adapter_no_key);
+    let app = create_router(state);
 
     let cand = Candidate::with_now(
         "cand_desc_fallback",
@@ -1909,7 +2168,7 @@ async fn test_describe_candidate_fallback_when_no_api_key() {
         .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
         .unwrap();
 
-    // 1. GET /api/staging/{id}/describe with empty body
+    // 1. GET /api/staging/{id}/describe with empty body -> 503 SERVICE_UNAVAILABLE
     let req_get = Request::builder()
         .uri("/api/staging/cand_desc_fallback/describe")
         .method("GET")
@@ -1917,14 +2176,9 @@ async fn test_describe_candidate_fallback_when_no_api_key() {
         .unwrap();
 
     let resp_get = app.clone().oneshot(req_get).await.unwrap();
-    assert_eq!(resp_get.status(), StatusCode::OK);
-    let body_get = to_bytes(resp_get.into_body(), usize::MAX).await.unwrap();
-    let json_get: DescribeResponse = serde_json::from_slice(&body_get).unwrap();
-    assert_eq!(json_get.id, "cand_desc_fallback");
-    assert!(json_get.description.contains("dungeon"));
-    assert!(json_get.description.contains("crypt") || json_get.description.contains("stone"));
+    assert_eq!(resp_get.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-    // 2. POST /api/staging/{id}/describe with empty body
+    // 2. POST /api/staging/{id}/describe with empty body -> 503 SERVICE_UNAVAILABLE
     let req_post_empty = Request::builder()
         .uri("/api/staging/cand_desc_fallback/describe")
         .method("POST")
@@ -1932,16 +2186,69 @@ async fn test_describe_candidate_fallback_when_no_api_key() {
         .unwrap();
 
     let resp_post_empty = app.oneshot(req_post_empty).await.unwrap();
-    assert_eq!(resp_post_empty.status(), StatusCode::OK);
-    let body_post_empty = to_bytes(resp_post_empty.into_body(), usize::MAX).await.unwrap();
-    let json_post_empty: DescribeResponse = serde_json::from_slice(&body_post_empty).unwrap();
-    assert_eq!(json_post_empty.id, "cand_desc_fallback");
-    assert!(!json_post_empty.description.is_empty());
+    assert_eq!(resp_post_empty.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+#[tokio::test]
+async fn test_describe_candidate_passes_candidate_title_and_merged_tags() {
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let generator = Arc::new(CapturingDescriptionGen::default());
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
+    state.theme_suggestions_cache.write().await.insert(
+        "cand_desc_title".to_string(),
+        vec!["crypt".to_string(), "flooded".to_string()],
+    );
+    let app = create_router(state);
+
+    let cand = Candidate::with_now(
+        "cand_desc_title",
+        Source::Reddit,
+        "cand_desc_title.png",
+        (1024, 1024),
+    )
+    .with_title("Flooded Stone Dungeon Crypt [50x50]");
+    storage
+        .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
+        .unwrap();
+
+    let payload = json!({
+        "tags": ["stone", "Crypt", "  "]
+    });
+
+    let req = Request::builder()
+        .uri("/api/staging/cand_desc_title/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let calls = generator.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "generator should be called exactly once");
+    assert_eq!(
+        calls[0].1.as_deref(),
+        Some("Flooded Stone Dungeon Crypt [50x50]"),
+        "describe must forward the candidate title, not theme suggestions"
+    );
+    assert_eq!(
+        calls[0].0,
+        vec!["crypt", "flooded", "stone"],
+        "describe must normalize and merge cached themes with payload tags"
+    );
 }
 
 #[tokio::test]
 async fn test_describe_candidate_with_payload_themes_and_tags() {
-    let (app, storage, _dir) = setup_test_app();
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let mock_desc = "Dark underground cave with sharp stalagmites and glowing crystals.";
+    let mock_gen = Arc::new(MockDescriptionGen(Ok(mock_desc.to_string())));
+    let state = AppState::new(storage.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(mock_gen))));
+    let app = create_router(state);
 
     let cand = Candidate::with_now(
         "cand_desc_payload",
@@ -1973,7 +2280,6 @@ async fn test_describe_candidate_with_payload_themes_and_tags() {
     assert!(json.description.contains("cave"));
     assert!(json.description.contains("stalagmites"));
 }
-
 #[tokio::test]
 async fn test_describe_candidate_with_mock_openrouter() {
     use axum::routing::post;
@@ -2066,7 +2372,7 @@ async fn test_describe_candidate_offline_fallback() {
         "tags": ["crypt", "stone", "water"]
     });
 
-    // 1. With no API key: OpenRouter configured with empty key
+    // 1. With no API key: OpenRouter configured with empty key -> strictly 503 SERVICE_UNAVAILABLE
     let dir1 = tempdir().unwrap();
     let storage1 = Arc::new(FilesystemStorage::new(dir1.path()));
     storage1
@@ -2088,14 +2394,9 @@ async fn test_describe_candidate_offline_fallback() {
         .unwrap();
 
     let resp1 = app1.oneshot(req1).await.unwrap();
-    assert_eq!(resp1.status(), StatusCode::OK); // Assert 200 OK (no 500 error)
-    let body1 = to_bytes(resp1.into_body(), usize::MAX).await.unwrap();
-    let json1: DescribeResponse = serde_json::from_slice(&body1).unwrap();
-    assert_eq!(json1.id, "cand_offline_desc");
-    assert!(!json1.description.is_empty());
-    assert!(json1.description.contains("dungeon"));
+    assert_eq!(resp1.status(), StatusCode::SERVICE_UNAVAILABLE); // Strict error propagation (no silent fallback)
 
-    // 2. Offline / unreachable OpenRouter endpoint (server offline, no 500 error)
+    // 2. Offline / unreachable OpenRouter endpoint -> strictly 502 BAD_GATEWAY
     let dir2 = tempdir().unwrap();
     let storage2 = Arc::new(FilesystemStorage::new(dir2.path()));
     storage2
@@ -2117,12 +2418,7 @@ async fn test_describe_candidate_offline_fallback() {
         .unwrap();
 
     let resp2 = app2.oneshot(req2).await.unwrap();
-    assert_eq!(resp2.status(), StatusCode::OK); // Assert 200 OK with deterministic fallback
-    let body2 = to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
-    let json2: DescribeResponse = serde_json::from_slice(&body2).unwrap();
-    assert_eq!(json2.id, "cand_offline_desc");
-    assert!(!json2.description.is_empty());
-    assert!(json2.description.contains("dungeon"));
+    assert_eq!(resp2.status(), StatusCode::BAD_GATEWAY); // Strict error propagation (no silent fallback)
 }
 
 #[tokio::test]
@@ -2264,51 +2560,19 @@ async fn test_curate_candidate_auto_description_fallback_offline() {
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
-    // Verify status is 200 OK
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["status"], "ok");
+    // Vision failure without description must fail curation with 502 Bad Gateway
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 
-    // Staging removed
-    assert_eq!(storage.list_staging().unwrap().len(), 0);
+    // Staging candidate must NOT be removed or committed
+    assert_eq!(storage.list_staging().unwrap().len(), 1);
 
-    // Verify manifest.json receives fallback description and status is 200 OK
+    // Curated manifest must NOT exist on disk
     let manifest_path = dir
         .path()
         .join("curated")
         .join("cand_curate_auto_offline")
         .join("manifest.json");
-    assert!(manifest_path.is_file());
-    let manifest_str = std::fs::read_to_string(&manifest_path).unwrap();
-    assert!(manifest_str.contains("\"description\""));
-    assert!(manifest_str.contains("dungeon"));
-
-    let desc = json["curated"]["description"].as_str().unwrap();
-    assert!(!desc.is_empty());
-    assert!(desc.contains("dungeon"));
-
-    let curated_list = storage.list_curated(None).unwrap();
-    assert_eq!(curated_list.len(), 1);
-    assert_eq!(curated_list[0].description.as_deref(), Some(desc));
-
-    // Verify companion <id>_lora1024 companion files do NOT exist on disk and storage dynamically returns caption with fallback description
-    let lora_txt_path = dir
-        .path()
-        .join("curated")
-        .join("cand_curate_auto_offline")
-        .join("cand_curate_auto_offline_lora1024.txt");
-    assert!(!lora_txt_path.exists());
-    let lora_png_path = dir
-        .path()
-        .join("curated")
-        .join("cand_curate_auto_offline")
-        .join("cand_curate_auto_offline_lora1024.png");
-    assert!(!lora_png_path.exists());
-    let lora_str = storage
-        .get_curated_lora_caption(&Theme::Dungeon, "cand_curate_auto_offline")
-        .unwrap();
-    assert!(lora_str.contains("dungeon"));
+    assert!(!manifest_path.exists());
 }
 
 #[tokio::test]
@@ -2370,7 +2634,102 @@ async fn test_legacy_manifest_without_description_deserialization() {
     assert!(legacy_item.is_some(), "Legacy curated item must be returned by GET /api/curated");
     let legacy_item = legacy_item.unwrap();
     assert_eq!(legacy_item.id, legacy_id);
-    assert_eq!(legacy_item.themes, vec!["dungeon"]);
+    assert_eq!(legacy_item.tags, vec!["dungeon", "corridor", "torches"]);
+    assert_eq!(legacy_item.primary_theme(), "dungeon");
+}
+
+#[tokio::test]
+async fn test_api_post_curate_delegates_to_curation_workflow_and_zero_store_scans() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use curator::services::curation::{CurationWorkflow, CurationWorkflowError};
+
+    struct SpyWorkflow {
+        curate_calls: AtomicUsize,
+        reject_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CurationWorkflow for SpyWorkflow {
+        async fn curate(
+            &self,
+            candidate_id: &str,
+            tags: Vec<String>,
+            _layers: Option<Vec<curator::domain::Layer>>,
+            description: Option<String>,
+        ) -> Result<CuratedMap, CurationWorkflowError> {
+            self.curate_calls.fetch_add(1, Ordering::SeqCst);
+            let map = CuratedMap::with_now(
+                candidate_id,
+                Vec::<String>::new(),
+                tags,
+                (1000, 1000),
+            )
+            .with_description(description.unwrap_or_else(|| "Spy description".into()));
+            Ok(map)
+        }
+
+        async fn reject(
+            &self,
+            _candidate_id: &str,
+            _reason: curator::domain::RejectionReason,
+            _notes: Option<&str>,
+        ) -> Result<(), CurationWorkflowError> {
+            self.reject_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let spy = Arc::new(SpyWorkflow {
+        curate_calls: AtomicUsize::new(0),
+        reject_calls: AtomicUsize::new(0),
+    });
+
+    let state = AppState::new(storage.clone()).with_curation_service(spy.clone());
+    let app = create_router(state);
+
+    let curate_payload = json!({
+        "id": "cand_spy_test",
+        "themes": ["dungeon"],
+        "tags": ["crypt"]
+    });
+
+    let req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(curate_payload.to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let res_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(res_json["status"], "ok");
+    assert_eq!(res_json["curated"]["id"], "cand_spy_test");
+
+    // Verified: exactly 1 call to CurationWorkflow::curate
+    assert_eq!(spy.curate_calls.load(Ordering::SeqCst), 1);
+    // Verified: zero calls to storage list_staging / list_curated by route handler
+    assert_eq!(storage.list_staging().unwrap().len(), 0);
+    assert_eq!(storage.list_curated(None).unwrap().len(), 0);
+
+    // Also verify reject delegates to CurationWorkflow
+    let reject_payload = json!({
+        "id": "cand_spy_test",
+        "reason": "BlurryLowRes",
+        "notes": "Too blurry"
+    });
+    let req_reject = Request::builder()
+        .uri("/api/reject")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(reject_payload.to_string()))
+        .unwrap();
+    let resp_reject = app.oneshot(req_reject).await.unwrap();
+    assert_eq!(resp_reject.status(), StatusCode::OK);
+    assert_eq!(spy.reject_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

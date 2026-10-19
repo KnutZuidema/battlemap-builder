@@ -44,11 +44,11 @@ Curate Decision Modal (#curate-decision-modal)
     │
     └── Step 3: Vision Description Generation (Gemini 3.5 Flash Lite)
           ├── Online: POST /api/staging/:id/describe ──► Rich 40-90 word physical description
-          └── Offline: Deterministic fallback ──► CaptionGenerator synthesized description
+          └── Vision unavailable: request fails explicitly (ADR-0005) ──► no synthesized fallback
     │
     ▼
 POST /api/curate
-    ├── Success: atomic move to data/curated/<id>/, persist description & companions, load next
+    ├── Success: atomic move to data/curated/<id>/, persist description & metadata, load next
     └── Error: danger toast, candidate preserved in staging
 ```
 
@@ -116,11 +116,11 @@ Curator features an automated vision description workflow powered by Google Gemi
      - **NO art style meta-prompts**: Strictly forbids phrases like `"digital art"`, `"hand-painted"`, `"photorealistic"`.
      - **NO game mechanics**: Strictly forbids statistics, grid square counts, or rule system references.
    - **Output Format**: Dense, evocative 40–90 word description in plain text only (no markdown, no bullets, no commentary).
-   - **User Prompt (`build_description_user_prompt`)**: Combines accepted themes and tags with strict instructions to guide the model's focus onto the identified architectural features.
-4. **Offline Resilience & Fallback Guarantees**:
-   - If OpenRouter is offline, the API key is missing or invalid, or an upstream timeout occurs, `POST /api/staging/:id/describe` falls back deterministically to `CaptionGenerator::generate_with_theme_str(primary_theme, &tags, candidate.title)`.
-   - The endpoint **never returns a 500 Internal Server Error** due to offline AI services; it returns `200 OK` with a valid, deterministic description.
-   - During curation (`POST /api/curate`), if no explicit description is supplied while offline, Curator automatically generates and persists the deterministic fallback description into `manifest.json`.
+   - **User Prompt (`build_description_user_prompt`)**: Combines the candidate `title` (when present) and its `tags` with strict instructions to guide the model's focus onto the identified architectural features.
+4. **Failure Propagation & Section Fallback (ADR-0005)**:
+   - **Map-level physical description is strict**: there is no deterministic caption fallback. `POST /api/staging/:id/describe` and `POST /api/curated/:id/describe` propagate vision failures as HTTP errors: `503 Service Unavailable` when the vision engine is unconfigured (missing/invalid `OPENROUTER_API_KEY` or disabled) and `502 Bad Gateway` when the upstream provider fails or returns an empty description.
+   - During curation (`POST /api/curate`), an omitted map-level description is generated through the same strict path; if vision is unavailable, curation fails with the propagated error instead of persisting a synthesized description.
+   - **Per-section captions are best-effort**: for multi-section maps, each 16×16 section is described independently and falls back to the deterministic `CaptionGenerator` when its vision call fails or its crop is unavailable, so a single failed section never blocks curation or regridding. Single-section maps reuse the map-level description verbatim.
 
 ### 2.4. Keyboard Event Routing & Trapping
 
@@ -132,7 +132,7 @@ While `#curate-decision-modal` is active:
 ### 2.5. Submission & State Handling
 
 Upon completion, `submitDecisionCuration()` dispatches `POST /api/curate`:
-- **Payload**: `{ id: candidate.id, themes: acceptedThemes, tags: candidate.tags, description: generatedDescription, layers: candidate.layers }`.
+- **Payload**: `{ id: candidate.id, tags: acceptedTags, description: generatedDescription, layers: candidate.layers }` (tags-only; the legacy `themes` field is still accepted for compatibility but is never sent by the UI).
 - **On Success**:
   - Persists `description` to `manifest.json` and primary layer caption.
   - Removes the candidate from staging queue and local memory image cache.
@@ -169,7 +169,7 @@ data/
 │       └── 1.png
 ├── curated/
 │   └── <candidate_id>/
-│       ├── manifest.json            # Contains themes, tags, dimensions, grid, sections, and description
+│       ├── manifest.json            # Contains tags, dimensions, grid, sections, and description (legacy "themes" is read-only compatibility)
 │       ├── 0_ground.png             # Deterministically named layer file
 │       └── 1_upper_1.png
 └── rejections.jsonl
@@ -182,12 +182,11 @@ data/
   - **Manifest**: The `description` string is persisted directly in `data/curated/<id>/manifest.json`.
   - **Primary Layer Caption**: The primary layer (Ground role) `caption` field matches and retains the curated description.
   - **Dynamic LoRA Dataset Export**: LoRA dataset export dynamically crops and Lanczos3-resamples each 16×16 MapSection on demand from the Ground layer into `{theme}/{id}_c{col}_r{row}_lora1024.png` (exact 1024×1024, zero padding bars) and `{theme}/{id}_c{col}_r{row}_lora1024.txt` companion captions with per-section physical descriptions.
-  - **Backward Compatibility & Legacy Deserialization**: Legacy `manifest.json` files lacking the `"description"` field deserialize cleanly (with `description: None`), and `GET /api/curated` automatically ensures caption compatibility without errors.
+  - **Backward Compatibility & Legacy Deserialization**: Legacy `manifest.json` files lacking the `"description"` field deserialize cleanly (with `description: None`). `GET /api/curated` is a pure read: it returns persisted manifests as-is and never synthesizes or rewrites captions. The only handlers registered on `/api/curated/{id}` are `PATCH` and `DELETE`; updates happen exclusively through `PATCH /api/curated/{id}`.
 - **Reference Provider Prompt Keyword Scoring & Section Cropping (`ReferenceProvider`)**:
   - Curated map sections and physical descriptions are directly leveraged in the benchmark and generation pipeline for few-shot orthographic perspective conditioning.
   - `ReferenceProvider::score_curated_section_for_prompt` scores keyword overlap between generation prompts and `(CuratedMap, MapSection)` pairs:
-    - **Theme match**: +2 points per matching theme.
-    - **Tag match**: +1 point per matching tag.
+    - **Tag match**: +2 points per matching tag (legacy themes are stored as tags, so they score identically).
     - **Section description match**: +1 point per matching word in `section.description`.
   - The highest scoring `(CuratedMap, MapSection)` pair is selected, and its exact `16 * cell_size_px` Grid Cell box is cropped from the Ground layer and Lanczos3-resampled.
   - Theme-only resolution selects the most recently curated map and its center-most 16×16 section.

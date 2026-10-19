@@ -81,18 +81,11 @@ async fn test_api_curated_listing_with_and_without_theme_filtering() {
     let list_all: Vec<CuratedMap> = serde_json::from_slice(&body_all).unwrap();
     assert_eq!(list_all.len(), 4);
 
-    // Verify fields and companion caption populated on first layer
+    // Verify fields on returned maps (pure reads preserve metadata without synthetic caption mutation)
     for map in &list_all {
         assert!(!map.id.is_empty());
-        assert!(!map.themes.is_empty());
+        assert!(!map.tags.is_empty());
         assert!(!map.layers.is_empty());
-        assert!(
-            map.layers[0].caption.is_some(),
-            "Expected companion caption populated on layer 0 for map '{}'",
-            map.id
-        );
-        let caption = map.layers[0].caption.as_ref().unwrap();
-        assert!(caption.contains("ttrpg battlemap"));
     }
 
     // 2. GET /api/curated?theme=dungeon returns only the 2 dungeon maps

@@ -8,7 +8,6 @@ use axum::{
     },
     Json,
 };
-use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -17,43 +16,16 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{
-    crop_section_box, synthesize_sections, BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata,
-    Candidate, CandidateLayer, CaptionGenerator, CuratedMap, CuratedMapUpdate, CustomPrompt,
-    LayerRole, PurgeStagingResult, RedditHarvestRequest, RejectionReason, StorageStats, Theme,
+    BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
+    normalize_tags, CuratedMap, CuratedMapUpdate, CustomPrompt, LayerRole, PurgeStagingResult,
+    RedditHarvestRequest, RejectionReason, StorageStats, Theme,
 };
 use crate::ports::storage::StorageError;
 use crate::ports::cost_tracker::CostStats;
+use crate::services::sections::{describe_map_sections, SectionDescriptionContext};
 use crate::services::{IngestionSummary, RedditIngestionService};
 use crate::adapters::clean_tags;
-/// Inspects bytes and optional filename to determine image MIME type.
-pub fn detect_image_mime(bytes: &[u8], filename: Option<&str>) -> &'static str {
-    if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
-        return "image/png";
-    }
-    if bytes.len() >= 3 && &bytes[0..3] == b"\xFF\xD8\xFF" {
-        return "image/jpeg";
-    }
-    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return "image/webp";
-    }
-    if bytes.len() >= 6 && (&bytes[0..6] == b"GIF87a" || &bytes[0..6] == b"GIF89a") {
-        return "image/gif";
-    }
-
-    if let Some(name) = filename {
-        if let Some(ext) = std::path::Path::new(name).extension().and_then(|e| e.to_str()) {
-            match ext.to_lowercase().as_str() {
-                "jpg" | "jpeg" => return "image/jpeg",
-                "webp" => return "image/webp",
-                "gif" => return "image/gif",
-                "png" => return "image/png",
-                _ => {}
-            }
-        }
-    }
-
-    "image/png"
-}
+pub use crate::services::description::detect_image_mime;
 
 /// System status response payload.
 #[derive(Debug, Serialize, Deserialize)]
@@ -171,70 +143,48 @@ pub async fn patch_curated(
             ));
         }
 
-        let section_origins = new_grid.section_origins(ground_w, ground_h);
-        let effective_themes = update.themes.as_ref().unwrap_or(&current_map.themes);
         let effective_tags = update.tags.as_ref().unwrap_or(&current_map.tags);
-        let primary_theme = effective_themes.first().map(|s| s.as_str()).unwrap_or("dungeon");
         let effective_desc = update.description.as_deref().or(current_map.description.as_deref());
 
-        // Vision descriptions are generated per section only when the grid yields several
-        // sections; a single section reuses the map description instead.
-        let mut section_descriptions: HashMap<(u32, u32), String> = HashMap::new();
-        if section_origins.len() > 1 {
-            for &(col, row) in &section_origins {
-                let section_png = ground_img.as_ref().and_then(|img| {
-                    crop_section_box(img, &new_grid, col, row).and_then(|cropped| {
-                        let mut bytes = Vec::new();
-                        cropped
-                            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
-                            .ok()
-                            .map(|_| bytes)
-                    })
-                });
-
-                let sec_desc = if let (Some(adapter), Some(sec_bytes)) = (state.openrouter_client(), section_png) {
-                    match adapter
-                        .generate_battlemap_description(&sec_bytes, "image/png", effective_themes, effective_tags)
-                        .await
-                    {
-                        Ok(d) if !d.trim().is_empty() => d,
-                        _ => CaptionGenerator::generate_with_theme_str(
-                            primary_theme,
-                            effective_tags,
-                            effective_desc,
-                        ),
-                    }
-                } else {
-                    CaptionGenerator::generate_with_theme_str(
-                        primary_theme,
-                        effective_tags,
-                        effective_desc,
-                    )
-                };
-
-                section_descriptions.insert((col, row), sec_desc);
+        // Resolving the map-level Physical Description is strict: it is generated when absent,
+        // and single-section maps reuse it verbatim for their sole Map Section.
+        let map_description = if let Some(desc) = effective_desc {
+            desc.to_string()
+        } else {
+            let bytes = ground_bytes.as_deref().ok_or_else(|| {
+                ApiError::not_found(format!("Ground layer image for '{id}' not found"))
+            })?;
+            let generated = state
+                .description_service
+                .describe(
+                    bytes,
+                    ground_layer.as_ref().map(|l| l.filename.as_str()),
+                    effective_tags,
+                    None,
+                )
+                .await?;
+            if update.description.is_none() {
+                update.description = Some(generated.clone());
             }
-        }
+            generated
+        };
 
-        update.sections = Some(synthesize_sections(
-            &section_origins,
-            || {
-                effective_desc.map(str::to_string).unwrap_or_else(|| {
-                    CaptionGenerator::generate_with_theme_str(primary_theme, effective_tags, None)
-                })
-            },
-            |col, row| {
-                section_descriptions
-                    .remove(&(col, row))
-                    .unwrap_or_else(|| {
-                        CaptionGenerator::generate_with_theme_str(
-                            primary_theme,
-                            effective_tags,
-                            effective_desc,
-                        )
-                    })
-            },
-        ));
+        // Section descriptions share one implementation with curation: vision per crop with a
+        // deterministic per-section fallback, reusing the map description for single sections.
+        update.sections = Some(
+            describe_map_sections(
+                &state.description_service,
+                SectionDescriptionContext {
+                    grid: &new_grid,
+                    ground_image: ground_img.as_ref(),
+                    ground_dimensions: (ground_w, ground_h),
+                    tags: effective_tags,
+                    title: None,
+                    map_description: &map_description,
+                },
+            )
+            .await,
+        );
     }
 
     let updated = state.storage.update_curated(&id, update)?;
@@ -608,13 +558,13 @@ pub async fn get_curated_image_or_layer(
 pub struct CurateRequest {
     pub id: String,
     #[serde(default)]
-    pub themes: Vec<String>,
+    pub themes: Option<Vec<String>>,
     #[serde(default)]
     pub theme: Option<String>,
     #[serde(default)]
     pub rating: Option<u8>,
     #[serde(default)]
-    pub tags: Vec<String>,
+    pub tags: Option<Vec<String>>,
     #[serde(default)]
     pub layers: Option<Vec<CandidateLayer>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -622,20 +572,23 @@ pub struct CurateRequest {
 }
 
 impl CurateRequest {
-    pub fn resolved_themes(&self) -> Vec<String> {
-        let mut list = self.themes.clone();
-        if list.is_empty() {
-            if let Some(t) = &self.theme {
-                if !t.trim().is_empty() {
-                    let normalized = t
+    pub fn resolved_tags(&self) -> Vec<String> {
+        let mut raw: Vec<String> = self.themes.clone().unwrap_or_default();
+
+        if let Some(theme) = &self.theme {
+            let trimmed = theme.trim();
+            if !trimmed.is_empty() {
+                raw.push(
+                    trimmed
                         .parse::<Theme>()
                         .map(|th| th.as_str().to_string())
-                        .unwrap_or_else(|_| t.clone());
-                    list.push(normalized);
-                }
+                        .unwrap_or_else(|_| trimmed.to_string()),
+                );
             }
         }
-        list
+
+        raw.extend(self.tags.clone().unwrap_or_default());
+        normalize_tags(raw)
     }
 }
 
@@ -661,218 +614,28 @@ pub async fn post_curate(
         return Err(ApiError::bad_request("Candidate ID cannot be empty"));
     }
 
-    let themes = payload.resolved_themes();
-    if themes.is_empty() || themes.iter().all(|t| t.trim().is_empty()) {
-        return Err(ApiError::bad_request("At least 1 theme label is required"));
+    let resolved_tags = payload.resolved_tags();
+    if resolved_tags.is_empty() {
+        return Err(ApiError::bad_request("At least 1 tag is required"));
     }
-    // Inspect candidate in staging to preserve dimensions and validate layers
-    let candidates = state.storage.list_staging()?;
-    let candidate = candidates
-        .iter()
-        .find(|c| c.id == payload.id)
-        .ok_or_else(|| ApiError::not_found(format!("Candidate '{}' not found in staging", payload.id)))?;
-
-    let dimensions = candidate.dimensions;
-
-    // Validate layers
-    let layers_to_check: Vec<CandidateLayer> = if let Some(req_layers) = &payload.layers {
-        req_layers.clone()
-    } else {
-        candidate.resolved_layers()
-    };
-
-    if let Some(unassigned_layer) = layers_to_check.iter().find(|l| l.role.is_unassigned()) {
-        return Err(ApiError::bad_request(format!(
-            "Cannot curate bundle: layer {} is Unassigned",
-            unassigned_layer.index
-        )));
-    }
-
-    let included_layers: Vec<&CandidateLayer> = layers_to_check
-        .iter()
-        .filter(|l| l.role.is_included())
-        .collect();
-
-    if included_layers.is_empty() {
-        return Err(ApiError::bad_request("At least 1 layer must be included"));
-    }
-
-    // Validate 16x16 full grid cell curation gate on Ground layer
-    let (ground_w, ground_h) = layers_to_check
-        .iter()
-        .find(|l| l.role == LayerRole::Ground)
-        .or_else(|| layers_to_check.iter().find(|l| l.index == 0))
-        .map(|l| l.dimensions)
-        .filter(|&(w, h)| w > 0 && h > 0)
-        .unwrap_or(dimensions);
-
-    if !candidate.grid.is_curation_eligible(ground_w, ground_h) {
-        let (cols, rows) = candidate.grid.lattice_dimensions(ground_w, ground_h);
-        return Err(ApiError::bad_request(format!(
-            "Candidate Ground layer yields fewer than 16×16 full Grid Cells ({}×{} cells); minimum 16×16 required for curation",
-            cols, rows
-        )));
-    }
-
-    // If request provided layers, update them in staging before curation
-    if let Some(layers) = payload.layers {
-        state.storage.update_staging_layers(&payload.id, layers)?;
-    }
-    let primary_theme = themes
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("dungeon");
-
-    let fallback_description = || {
-        CaptionGenerator::generate_with_theme_str(
-            primary_theme,
-            &payload.tags,
-            candidate.title.as_deref(),
+    let curated = state
+        .curation_service
+        .curate(
+            &payload.id,
+            resolved_tags,
+            payload.layers,
+            payload.description,
         )
-    };
-
-    let description = if let Some(desc) = payload
-        .description
-        .as_ref()
-        .map(|d| d.trim())
-        .filter(|d| !d.is_empty())
-    {
-        desc.to_string()
-    } else if let Some(adapter) = state.openrouter_client() {
-        match state.storage.get_staging_image(&payload.id) {
-            Ok(bytes) => {
-                let filename = candidate.resolved_filename();
-                let mime = detect_image_mime(&bytes, Some(&filename));
-                match adapter
-                    .generate_battlemap_description(&bytes, mime, &themes, &payload.tags)
-                    .await
-                {
-                    Ok(desc) if !desc.trim().is_empty() => desc,
-                    Ok(_) => fallback_description(),
-                    Err(err) => {
-                        tracing::warn!(
-                            candidate_id = %payload.id,
-                            error = %err,
-                            "Auto-generating description on curate failed; falling back to caption generator"
-                        );
-                        fallback_description()
-                    }
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    candidate_id = %payload.id,
-                    error = %err,
-                    "Reading candidate image for description generation failed; falling back to caption generator"
-                );
-                fallback_description()
-            }
-        }
-    } else {
-        tracing::info!(
-            candidate_id = %payload.id,
-            "OpenRouter client not configured; falling back to caption generator"
-        );
-        fallback_description()
-    };
-
-    let section_origins = candidate.grid.section_origins(ground_w, ground_h);
-
-    // Vision descriptions are generated per section only when the grid yields several sections;
-    // a single section reuses the already computed map description instead.
-    let mut section_descriptions: HashMap<(u32, u32), String> = HashMap::new();
-    if section_origins.len() > 1 {
-        let ground_layer_idx = layers_to_check
-            .iter()
-            .find(|l| l.role == LayerRole::Ground)
-            .map(|l| l.index)
-            .unwrap_or(0);
-
-        let ground_img = state
-            .storage
-            .get_staging_layer_image(&payload.id, ground_layer_idx)
-            .or_else(|_| state.storage.get_staging_image(&payload.id))
-            .ok()
-            .and_then(|bytes| image::load_from_memory(&bytes).ok());
-
-        for &(col, row) in &section_origins {
-            let section_png = ground_img.as_ref().and_then(|img| {
-                crop_section_box(img, &candidate.grid, col, row).and_then(|cropped| {
-                    let mut bytes = Vec::new();
-                    cropped
-                        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
-                        .ok()
-                        .map(|_| bytes)
-                })
-            });
-
-            let sec_desc = if let (Some(adapter), Some(sec_bytes)) = (state.openrouter_client(), section_png) {
-                match adapter
-                    .generate_battlemap_description(&sec_bytes, "image/png", &themes, &payload.tags)
-                    .await
-                {
-                    Ok(d) if !d.trim().is_empty() => d,
-                    _ => CaptionGenerator::generate_with_theme_str(
-                        primary_theme,
-                        &payload.tags,
-                        candidate.title.as_deref(),
-                    ),
-                }
-            } else {
-                CaptionGenerator::generate_with_theme_str(
-                    primary_theme,
-                    &payload.tags,
-                    candidate.title.as_deref(),
-                )
-            };
-
-            section_descriptions.insert((col, row), sec_desc);
-        }
-    }
-
-    let sections = synthesize_sections(
-        &section_origins,
-        || description.clone(),
-        |col, row| {
-            section_descriptions
-                .remove(&(col, row))
-                .unwrap_or_else(|| {
-                    CaptionGenerator::generate_with_theme_str(
-                        primary_theme,
-                        &payload.tags,
-                        candidate.title.as_deref(),
-                    )
-                })
-        },
-    );
-
-    let curated = CuratedMap::with_now(
-        &payload.id,
-        themes,
-        payload.tags,
-        dimensions,
-    )
-    .with_description(description)
-    .with_sections(sections);
-
-    state.storage.curate_staging(&curated)?;
-
-    // Read back curated map with populated layers if available
-    let curated_result = state
-        .storage
-        .list_curated(None)
-        .ok()
-        .and_then(|list| list.into_iter().find(|m| m.id == payload.id))
-        .unwrap_or(curated);
+        .await?;
 
     tracing::info!(
-        id = %payload.id,
-        themes = ?curated_result.themes,
+        id = %curated.id,
+        tags = ?curated.tags,
         "Curated candidate image"
     );
     Ok(Json(CurateResponse {
         status: "ok",
-        curated: curated_result,
+        curated,
     }))
 }
 
@@ -1131,9 +894,9 @@ pub async fn post_describe_candidate(
     // 2. Read primary image bytes (from candidate layer 0 or candidate primary image)
     let bytes = state.storage.get_staging_image(&id)?;
     let filename = candidate.resolved_filename();
-    let mime = detect_image_mime(&bytes, Some(&filename));
 
-    // 3. Resolve themes and tags (prefer payload themes/tags, fallback to candidate tags/title)
+    // 3. Resolve themes and tags (prefer payload themes/tags, fallback to cached suggestions).
+    // Themes and tags share one normalized tag vocabulary in the vision prompt.
     let mut themes = req.themes.unwrap_or_default();
     if themes.is_empty() {
         let cache = state.theme_suggestions_cache.read().await;
@@ -1141,54 +904,17 @@ pub async fn post_describe_candidate(
             themes = cached.clone();
         }
     }
-    let primary_theme = themes
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("dungeon");
+    let tags = normalize_tags(themes.into_iter().chain(req.tags.unwrap_or_default()));
 
-    let tags = req.tags.unwrap_or_default();
-
-    // 4. Invoke OpenRouter vision model if available, falling back gracefully to CaptionGenerator
-    let description = match state.openrouter_client() {
-        Some(adapter) => {
-            match adapter
-                .generate_battlemap_description(&bytes, mime, &themes, &tags)
-                .await
-            {
-                Ok(desc) if !desc.trim().is_empty() => desc,
-                Ok(_) => {
-                    CaptionGenerator::generate_with_theme_str(
-                        primary_theme,
-                        &tags,
-                        candidate.title.as_deref(),
-                    )
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        candidate_id = %id,
-                        error = %err,
-                        "OpenRouter description generation failed; falling back to caption generator"
-                    );
-                    CaptionGenerator::generate_with_theme_str(
-                        primary_theme,
-                        &tags,
-                        candidate.title.as_deref(),
-                    )
-                }
-            }
-        }
-        None => {
-            tracing::info!(
-                candidate_id = %id,
-                "OpenRouter client not configured; falling back to caption generator"
-            );
-            CaptionGenerator::generate_with_theme_str(
-                primary_theme,
-                &tags,
-                candidate.title.as_deref(),
-            )
-        }
-    };
+    let description = state
+        .description_service
+        .describe(
+            &bytes,
+            Some(&filename),
+            &tags,
+            candidate.title.as_deref(),
+        )
+        .await?;
 
     Ok(Json(DescribeResponse { id, description }))
 }
@@ -1238,12 +964,11 @@ pub async fn post_curated_describe(
             .find(|l| l.role == LayerRole::Ground || l.index == 0)
             .map(|l| l.filename.as_str())
     });
-    let mime = detect_image_mime(&bytes, filename);
 
     let mut themes = req.themes.unwrap_or_default();
     if themes.is_empty() {
         if let Some(m) = &curated_map {
-            themes = m.themes.clone();
+            themes = m.tags.clone();
         }
     }
     if themes.is_empty() {
@@ -1252,60 +977,20 @@ pub async fn post_curated_describe(
             themes = cached.clone();
         }
     }
-    let primary_theme = themes
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("dungeon");
-
-    let mut tags = req.tags.unwrap_or_default();
-    if tags.is_empty() {
+    let mut requested_tags = req.tags.unwrap_or_default();
+    if requested_tags.is_empty() {
         if let Some(m) = &curated_map {
-            tags = m.tags.clone();
+            requested_tags = m.tags.clone();
         }
     }
+    let tags = normalize_tags(themes.into_iter().chain(requested_tags));
 
-    let title = curated_map.as_ref().and_then(|m| m.description.clone());
-
-    let description = match state.openrouter_client() {
-        Some(adapter) => {
-            match adapter
-                .generate_battlemap_description(&bytes, mime, &themes, &tags)
-                .await
-            {
-                Ok(desc) if !desc.trim().is_empty() => desc,
-                Ok(_) => {
-                    CaptionGenerator::generate_with_theme_str(
-                        primary_theme,
-                        &tags,
-                        title.as_deref(),
-                    )
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        curated_id = %id,
-                        error = %err,
-                        "OpenRouter description generation failed; falling back to caption generator"
-                    );
-                    CaptionGenerator::generate_with_theme_str(
-                        primary_theme,
-                        &tags,
-                        title.as_deref(),
-                    )
-                }
-            }
-        }
-        None => {
-            tracing::info!(
-                curated_id = %id,
-                "OpenRouter client not configured; falling back to caption generator"
-            );
-            CaptionGenerator::generate_with_theme_str(
-                primary_theme,
-                &tags,
-                title.as_deref(),
-            )
-        }
-    };
+    // `CuratedMap` has no standalone title field, so no title is forwarded. The stored
+    // description is generation output and is never an input to its own regeneration.
+    let description = state
+        .description_service
+        .describe(&bytes, filename, &tags, None)
+        .await?;
 
     Ok(Json(DescribeResponse { id, description }))
 }
@@ -1339,8 +1024,9 @@ pub async fn post_reject(
     let reason = payload.reason.unwrap_or_default();
 
     state
-        .storage
-        .reject_staging(&payload.id, reason, payload.notes.as_deref())?;
+        .curation_service
+        .reject(&payload.id, reason, payload.notes.as_deref())
+        .await?;
 
     tracing::info!(
         id = %payload.id,

@@ -316,10 +316,9 @@ pub fn detect_theme_for_prompt(prompt: &str) -> Option<Theme> {
 
     best_theme
 }
-/// Scores keyword overlap between a prompt and a curated map's themes, tags, and section description:
-/// - Map `themes`: +2 per match
-/// - Map `tags`: +1 per match
-/// - Section `Physical Description` (`section.description`): +1 per matching word (split on non-alphanumeric, length >= 2).
+/// Scores keyword overlap between a prompt and a curated map's unified tags and section description:
+/// - +2 per matching tag (legacy themes are folded into tags, so they score identically).
+/// - +1 per matching word in the section `Physical Description` (split on non-alphanumeric, length >= 2).
 pub fn score_curated_section_for_prompt(
     map: &CuratedMap,
     section: &MapSection,
@@ -333,16 +332,11 @@ pub fn score_curated_section_for_prompt(
         .collect();
 
     let mut score = 0usize;
-    for theme in &map.themes {
-        let th_lower = theme.to_lowercase();
-        if prompt_words.contains(th_lower.as_str()) || prompt_lower.contains(&th_lower) {
-            score += 2;
-        }
-    }
     for tag in &map.tags {
         let tag_lower = tag.to_lowercase();
-        if prompt_words.contains(tag_lower.as_str()) || prompt_lower.contains(&tag_lower) {
-            score += 1;
+        let matches = prompt_words.contains(tag_lower.as_str()) || prompt_lower.contains(&tag_lower);
+        if matches {
+            score += 2;
         }
     }
     let desc_lower = section.description.to_lowercase();
@@ -829,6 +823,63 @@ mod tests {
     }
 
     #[test]
+    fn test_score_curated_section_for_prompt_includes_description() {
+        let map = CuratedMap::new(
+            "map-no-desc",
+            vec!["dungeon".to_string()],
+            vec!["stone".to_string()],
+            (1024, 1024),
+            Utc::now(),
+        );
+
+        let prompt = "Stone dungeon crypt with carved limestone sarcophagus and burning braziers";
+        let undescribed_section = MapSection::new(0, 0, "");
+        let base_score = score_curated_section_for_prompt(&map, &undescribed_section, prompt);
+        // Unified tags: "dungeon" tag (+2) + "stone" tag (+2) = 4
+        assert_eq!(base_score, 4);
+
+        let described_section = MapSection::new(
+            0,
+            0,
+            "Ancient crypt with carved limestone sarcophagus, burning braziers, and iron gates.",
+        );
+        let score_with_desc = score_curated_section_for_prompt(&map, &described_section, prompt);
+        assert!(score_with_desc > base_score);
+        // base_score (4) + 8 overlapping words ("crypt", "with", "carved", "limestone", "sarcophagus", "and", "burning", "braziers")
+        assert_eq!(score_with_desc, 12);
+    }
+
+    #[test]
+    fn test_score_curated_section_for_prompt_unified_tags_score_equally() {
+        let map = CuratedMap::new(
+            "map-unified-tags",
+            vec!["dungeon".to_string()],
+            vec!["cavern".to_string(), "crypt".to_string()],
+            (1024, 1024),
+            Utc::now(),
+        );
+        let section = MapSection::new(0, 0, "");
+
+        // Each matched tag earns +2 regardless of whether it was initialized via themes or tags
+        assert_eq!(
+            score_curated_section_for_prompt(&map, &section, "dungeon entrance"),
+            2
+        );
+        assert_eq!(
+            score_curated_section_for_prompt(&map, &section, "cavern entrance"),
+            2
+        );
+        assert_eq!(
+            score_curated_section_for_prompt(&map, &section, "crypt entrance"),
+            2
+        );
+        assert_eq!(
+            score_curated_section_for_prompt(&map, &section, "dungeon cavern crypt"),
+            6
+        );
+    }
+
+    #[test]
     fn test_prompt_keyword_overlap_prioritizes_description_match() {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
@@ -893,11 +944,11 @@ mod tests {
         let bridge_score_for_altar =
             score_curated_section_for_prompt(&map, &bridge_section, altar_prompt);
 
-        // "dungeon" theme (+2) + "stone" tag (+1) = 3 base score
+        // "dungeon" tag (+2) + "stone" tag (+2) = 4 base score
         // Section words matching: "with", "obsidian", "altar", "and", "skull", "offerings" = 6
-        assert_eq!(altar_score, 9);
-        // Bridge section matches theme (+2), tag (+1), and word "with" (+1) = 4
-        assert_eq!(bridge_score_for_altar, 4);
+        assert_eq!(altar_score, 10);
+        // Bridge section matches "dungeon" (+2) and "stone" (+2) tags, plus the word "with" (+1) = 5
+        assert_eq!(bridge_score_for_altar, 5);
         assert!(altar_score > bridge_score_for_altar);
 
         // Prompt focusing on bridge elements

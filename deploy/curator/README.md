@@ -184,6 +184,28 @@ Once port-forwarding is established:
 
 ---
 
+### 4.3. Publishing and Deploying from a Local Machine
+
+The root `justfile` runs the CD pipeline from your machine: **every deployment uses an image published to GHCR**, because that registry is where the cluster nodes pull from. Nothing is built into a local container; the nodes pull the published tag.
+
+```bash
+just curator-login          # one-time GHCR login using the gh CLI token (write:packages)
+just curator-deploy         # publish this commit (linux/arm64) + roll the cluster onto it
+just curator-publish        # publish only: build + push, no rollout
+just curator-rollout <tag>  # roll the cluster onto an already published tag
+just port-forward           # forwarded access to the running service on localhost:3002
+just cluster status         # any deploy/curator/justfile recipe: status, logs, tail-logs, delete
+```
+
+- **Tag**: `curator-publish`, `curator-rollout` and `curator-deploy` default to `CURATOR_IMAGE_TAG`, which defaults to the current commit (`git rev-parse HEAD`) — the same immutable `${{ github.sha }}` scheme CD deploys. `CURATOR_IMAGE_TAG=latest just curator-rollout` rolls onto the released tag.
+- **Platform**: the nodes are Hetzner `cax11` (arm64) and CI publishes `linux/arm64` only, so that is the default here too (`CURATOR_PLATFORMS` overrides). The Dockerfile cross-compiles that leg natively on an amd64 machine — no qemu involved.
+- **Guards**: `curator-rollout` reads the tag back from GHCR first and refuses to touch the cluster when it is missing/unreadable or carries no `linux/arm64` leg; `curator-publish` verifies the pushed index contains every platform it was asked for.
+- **Rollout**: identical to the CD step — `kubectl set image -f deploy/curator/deployment.yaml curator=ghcr.io/knutzuidema/curator:<tag> --local -o yaml | kubectl apply -f -`, then `kubectl rollout status deployment/curator -n curator --timeout=180s`. Cluster prerequisites (namespace, PVC, `curator-secrets`, `ghcr-secret`) come from §2.
+- **Private package**: `ghcr.io/knutzuidema/curator` needs credentials, hence `curator-login` (or `docker login ghcr.io -u <user> -p <PAT with read:packages>`). Pods use the existing `ghcr-secret`.
+- **Watching the result**: `just port-forward` plus http://localhost:3002/ (§4.1–4.2), or `just cluster tail-logs`.
+
+---
+
 ## 5. Operations & Troubleshooting
 
 The `deploy/curator/justfile` provides standard commands for day-to-day cluster operations.

@@ -557,11 +557,10 @@ impl GridConfig {
     /// Computes the zero-indexed top-left grid cell coordinate origins `(col, row)`
     /// for overlapping 16×16 Map Sections evenly spaced across the full grid lattice.
     pub fn section_origins(&self, width: u32, height: u32) -> Vec<(u32, u32)> {
-        let (cols, rows) = self.lattice_dimensions(width, height);
-        if cols < 16 || rows < 16 {
+        let Some((kx, ky)) = self.section_counts(width, height) else {
             return Vec::new();
-        }
-        let (kx, ky) = (cols.div_ceil(16), rows.div_ceil(16));
+        };
+        let (cols, rows) = self.lattice_dimensions(width, height);
         let col_origins: Vec<u32> = if kx == 1 {
             vec![0]
         } else {
@@ -587,9 +586,64 @@ impl GridConfig {
 
     /// Whether the candidate meets the minimum 16×16 full grid cells threshold required for curation.
     pub fn is_curation_eligible(&self, width: u32, height: u32) -> bool {
-        let (cols, rows) = self.lattice_dimensions(width, height);
-        cols >= 16 && rows >= 16
+        self.section_counts(width, height).is_some()
     }
+}
+
+/// Crops the exact `16 × 16` Grid Cell Map Section box at `(col, row)` from `img`, aligned to
+/// `grid` (`x = offset_x + col * cell_size_px`, `y = offset_y + row * cell_size_px`, side length
+/// `16 * cell_size_px`).
+///
+/// Returns `None` when the box does not fit inside the image, so callers never rescale, magnify,
+/// or center-crop a partial box: an unresolvable section is skipped instead of distorting scale.
+pub fn crop_section_box(
+    img: &image::DynamicImage,
+    grid: &GridConfig,
+    col: u32,
+    row: u32,
+) -> Option<image::DynamicImage> {
+    let cell_size = if grid.cell_size_px > 0 {
+        grid.cell_size_px
+    } else {
+        GridConfig::DEFAULT_CELL_SIZE
+    };
+    let box_size = 16 * cell_size;
+    let x = grid.offset_x.saturating_add(col.saturating_mul(cell_size));
+    let y = grid.offset_y.saturating_add(row.saturating_mul(cell_size));
+
+    if x < img.width() && y < img.height() && box_size <= img.width() - x && box_size <= img.height() - y
+    {
+        Some(img.crop_imm(x, y, box_size, box_size))
+    } else {
+        None
+    }
+}
+
+/// Builds the Map Section list for a curated map from its grid section origins.
+///
+/// Policy: an empty origin list yields no sections; a single origin yields one `(0, 0)` Map
+/// Section reusing `single_description`; multiple origins yield one Map Section per origin, each
+/// described by `describe_section`. Callers keep vision and caption generation in the closures.
+pub fn synthesize_sections<F>(
+    origins: &[(u32, u32)],
+    single_description: impl FnOnce() -> String,
+    mut describe_section: F,
+) -> Vec<MapSection>
+where
+    F: FnMut(u32, u32) -> String,
+{
+    if origins.is_empty() {
+        return Vec::new();
+    }
+    if origins.len() == 1 {
+        return vec![MapSection::new(0, 0, single_description())];
+    }
+
+    let mut sections = Vec::with_capacity(origins.len());
+    for &(col, row) in origins {
+        sections.push(MapSection::new(col, row, describe_section(col, row)));
+    }
+    sections
 }
 
 #[derive(Deserialize)]
@@ -2972,5 +3026,53 @@ mod tests {
             grid.section_origins(2560, 1024),
             vec![(0, 0), (12, 0), (24, 0)]
         );
+    }
+
+    #[test]
+    fn test_crop_section_box_exact_box_or_none() {
+        let grid = GridConfig::new(16, 0, 0); // 16 * 16 = 256px per section
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::new(512, 512));
+
+        // In-bounds boxes crop the exact 256x256 pixel box.
+        let top_left = crop_section_box(&img, &grid, 0, 0).expect("top-left box fits");
+        assert_eq!((top_left.width(), top_left.height()), (256, 256));
+        let bottom_right = crop_section_box(&img, &grid, 16, 16).expect("bottom-right box fits");
+        assert_eq!((bottom_right.width(), bottom_right.height()), (256, 256));
+
+        // Out-of-bounds boxes are unresolvable rather than rescaled or center-cropped:
+        // (17, 0) starts at x = 272, so its 256px box overruns the 512px image width.
+        assert!(crop_section_box(&img, &grid, 17, 0).is_none());
+        assert!(crop_section_box(&img, &grid, 0, 17).is_none());
+    }
+
+    #[test]
+    fn test_synthesize_sections_single_reuses_description_and_multi_describes() {
+        // Empty origins produce no sections.
+        assert!(synthesize_sections(&[], || "unused".to_string(), |_, _| "unused".to_string())
+            .is_empty());
+
+        // A single origin yields one (0, 0) section reusing the map description.
+        let single = synthesize_sections(
+            &[(0, 0)],
+            || "Reused map description".to_string(),
+            |_, _| panic!("single origin must not call the describer"),
+        );
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].col, 0);
+        assert_eq!(single[0].row, 0);
+        assert_eq!(single[0].description, "Reused map description");
+
+        // Multiple origins yield one section per origin, described individually.
+        let origins = [(0, 0), (16, 0), (0, 16), (16, 16)];
+        let multi = synthesize_sections(
+            &origins,
+            || panic!("multi origin must not reuse the map description"),
+            |col, row| format!("section {col},{row}"),
+        );
+        assert_eq!(multi.len(), 4);
+        for (section, (col, row)) in multi.iter().zip(origins) {
+            assert_eq!((section.col, section.row), (col, row));
+            assert_eq!(section.description, format!("section {col},{row}"));
+        }
     }
 }

@@ -1,6 +1,6 @@
 use image::DynamicImage;
 
-use crate::domain::{CaptionGenerator, GridConfig, MapSection};
+use crate::domain::{crop_section_box, synthesize_sections, CaptionGenerator, GridConfig, MapSection};
 use crate::services::description::DescriptionService;
 
 /// Shared inputs for deriving per-MapSection descriptions from a Ground layer image.
@@ -20,26 +20,16 @@ pub struct SectionDescriptionContext<'a> {
 }
 
 /// Crops one 16×16 grid-cell Map Section from the Ground layer and encodes it as PNG.
-pub fn crop_section_png(
+///
+/// Cropping policy (bounds checks, exact box) lives in [`crop_section_box`]; a section whose
+/// box does not fit is unresolvable and yields `None` rather than a rescaled crop.
+fn crop_section_png(
     image: &DynamicImage,
     grid: &GridConfig,
     col: u32,
     row: u32,
 ) -> Option<Vec<u8>> {
-    let cell = grid.cell_size_px;
-    if cell == 0 {
-        return None;
-    }
-    let x = grid.offset_x.checked_add(col.checked_mul(cell)?)?;
-    let y = grid.offset_y.checked_add(row.checked_mul(cell)?)?;
-    let width = cell.checked_mul(16)?;
-    let height = cell.checked_mul(16)?;
-
-    if x.checked_add(width)? > image.width() || y.checked_add(height)? > image.height() {
-        return None;
-    }
-
-    let cropped = image.crop_imm(x, y, width, height);
+    let cropped = crop_section_box(image, grid, col, row)?;
     let mut bytes = Vec::new();
     cropped
         .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
@@ -47,7 +37,8 @@ pub fn crop_section_png(
         .map(|_| bytes)
 }
 
-/// Derives descriptions for every Map Section of a multi-section map.
+/// Derives descriptions for every Map Section of a map, delegating section policy to
+/// [`synthesize_sections`].
 ///
 /// Single-section maps (and grids that yield no full section window) reuse the map-level
 /// physical description verbatim. Multi-section maps ask the vision `DescriptionService`
@@ -69,16 +60,17 @@ pub async fn describe_map_sections(
     let (ground_w, ground_h) = ground_dimensions;
     let section_origins = grid.section_origins(ground_w, ground_h);
     if section_origins.len() <= 1 {
-        return vec![MapSection::new(0, 0, map_description)];
+        return synthesize_sections(&section_origins, || map_description.to_string(), |_, _| {
+            map_description.to_string()
+        });
     }
 
     let primary_theme = tags.first().map(String::as_str).unwrap_or("dungeon");
     let fallback = || CaptionGenerator::generate_with_theme_str(primary_theme, tags, title);
 
-    let mut sections = Vec::with_capacity(section_origins.len());
-    for (col, row) in section_origins {
-        let section_png =
-            ground_image.and_then(|image| crop_section_png(image, grid, col, row));
+    let mut section_descriptions = std::collections::HashMap::with_capacity(section_origins.len());
+    for &(col, row) in &section_origins {
+        let section_png = ground_image.and_then(|image| crop_section_png(image, grid, col, row));
 
         let description = match section_png {
             Some(bytes) => match description_service
@@ -106,8 +98,16 @@ pub async fn describe_map_sections(
             }
         };
 
-        sections.push(MapSection::new(col, row, description));
+        section_descriptions.insert((col, row), description);
     }
 
-    sections
+    synthesize_sections(
+        &section_origins,
+        || map_description.to_string(),
+        |col, row| {
+            section_descriptions
+                .remove(&(col, row))
+                .unwrap_or_else(|| fallback())
+        },
+    )
 }

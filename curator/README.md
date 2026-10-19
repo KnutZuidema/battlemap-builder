@@ -61,7 +61,9 @@ Before any curation decision modal opens, Curator validates the candidate's laye
 2. **No unassigned layers**: If any included layer has role `unassigned` (or missing role), curation is blocked with a danger toast:
    > *"Cannot curate: layer X is Unassigned. Please assign a role."*
    The unassigned layer card is automatically scrolled into view and focused in the filmstrip deck, and role labeling mode (`1-6`) is activated.
-3. **Modal opening**: Only when all layer validations pass does `#curate-decision-modal` open.
+3. **16×16 Grid Cell curation gate**: The Ground layer must span at least 16×16 full Grid Cells under the candidate's persisted Grid Configuration. Otherwise curation is blocked with a danger toast:
+   > *"Map has only N×M full Grid Cells; at least 16×16 required for curation"*
+4. **Modal opening**: Only when all layer validations pass does `#curate-decision-modal` open.
 
 ### 2.2. Interactive Curate Decision Modal
 
@@ -186,9 +188,9 @@ data/
   - `ReferenceProvider::score_curated_section_for_prompt` scores keyword overlap between generation prompts and `(CuratedMap, MapSection)` pairs:
     - **Tag match**: +2 points per matching tag (legacy themes are stored as tags, so they score identically).
     - **Section description match**: +1 point per matching word in `section.description`.
-  - `ReferenceProvider::score_curated_map_for_prompt` scores a whole map by synthesizing a section from `map.description`, so map-level and section-level queries share one scoring rule.
-  - The highest scoring `(CuratedMap, MapSection)` pair is selected, and its exact 16×16 Grid Cell box is cropped from the Ground layer and Lanczos3-resampled.
-  - Tag-only resolution selects the most recently curated map and its center-most 16×16 section.
+  - The highest scoring `(CuratedMap, MapSection)` pair is selected, and its exact `16 * cell_size_px` Grid Cell box is cropped from the Ground layer and Lanczos3-resampled.
+  - Theme-only resolution selects the most recently curated map and its center-most 16×16 section.
+  - Sections are never rescaled: when the exact box does not fit the loaded image the section is **unresolvable**, the reference conditioning path falls back to the static reference, and the LoRA ZIP export logs a warning and skips that section instead of center-cropping or magnifying it.
 - **Deterministic Layer Filenames**: Layers are saved with standardized names: `<index>_<role>[_<elevation>].<ext>` (e.g. `0_ground.png`, `1_upper_1.png`, `2_basement_-1.png`).
 - **Atomic Operations**: Files are written and moved atomically (`atomic_write`, `atomic_move`), ensuring crash-safe state updates.
 - **Backward Compatibility**: API routes serve curated images by both direct ID (`/api/image/curated/<id>`) and legacy theme routes (`/api/image/curated/<theme>/<id>`).

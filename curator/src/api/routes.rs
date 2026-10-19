@@ -17,8 +17,8 @@ use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{
     BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
-    normalize_tags, CuratedMap, CuratedMapUpdate, CustomPrompt, LayerRole, MapSection,
-    PurgeStagingResult, RedditHarvestRequest, RejectionReason, StorageStats, Theme,
+    normalize_tags, CuratedMap, CuratedMapUpdate, CustomPrompt, LayerRole, PurgeStagingResult,
+    RedditHarvestRequest, RejectionReason, StorageStats, Theme,
 };
 use crate::ports::storage::StorageError;
 use crate::ports::cost_tracker::CostStats;
@@ -143,54 +143,35 @@ pub async fn patch_curated(
             ));
         }
 
-        let section_origins = new_grid.section_origins(ground_w, ground_h);
         let effective_tags = update.tags.as_ref().unwrap_or(&current_map.tags);
         let effective_desc = update.description.as_deref().or(current_map.description.as_deref());
 
-        let new_sections: Vec<MapSection> = if section_origins.len() <= 1 {
-            // A single section is the map's Physical Description: resolving it is strict.
-            let desc = if let Some(d) = effective_desc {
-                d.to_string()
-            } else {
-                let bytes = ground_bytes.as_deref().ok_or_else(|| {
-                    ApiError::not_found(format!("Ground layer image for '{id}' not found"))
-                })?;
-                let generated = state
-                    .description_service
-                    .describe(
-                        bytes,
-                        ground_layer.as_ref().map(|l| l.filename.as_str()),
-                        effective_tags,
-                        None,
-                    )
-                    .await?;
-                if update.description.is_none() {
-                    update.description = Some(generated.clone());
-                }
-                generated
-            };
-            vec![MapSection::new(0, 0, desc)]
+        // Resolving the map-level Physical Description is strict: it is generated when absent,
+        // and single-section maps reuse it verbatim for their sole Map Section.
+        let map_description = if let Some(desc) = effective_desc {
+            desc.to_string()
         } else {
-            // Multi-section maps still need a strict map-level Physical Description when
-            // none exists; section crops may then fall back deterministically per section.
-            let mut map_description = effective_desc.map(str::to_string);
-            if map_description.is_none() {
-                let bytes = ground_bytes.as_deref().ok_or_else(|| {
-                    ApiError::not_found(format!("Ground layer image for '{id}' not found"))
-                })?;
-                let generated = state
-                    .description_service
-                    .describe(
-                        bytes,
-                        ground_layer.as_ref().map(|l| l.filename.as_str()),
-                        effective_tags,
-                        None,
-                    )
-                    .await?;
+            let bytes = ground_bytes.as_deref().ok_or_else(|| {
+                ApiError::not_found(format!("Ground layer image for '{id}' not found"))
+            })?;
+            let generated = state
+                .description_service
+                .describe(
+                    bytes,
+                    ground_layer.as_ref().map(|l| l.filename.as_str()),
+                    effective_tags,
+                    None,
+                )
+                .await?;
+            if update.description.is_none() {
                 update.description = Some(generated.clone());
-                map_description = Some(generated);
             }
+            generated
+        };
 
+        // Section descriptions share one implementation with curation: vision per crop with a
+        // deterministic per-section fallback, reusing the map description for single sections.
+        update.sections = Some(
             describe_map_sections(
                 &state.description_service,
                 SectionDescriptionContext {
@@ -199,13 +180,11 @@ pub async fn patch_curated(
                     ground_dimensions: (ground_w, ground_h),
                     tags: effective_tags,
                     title: None,
-                    map_description: map_description.as_deref().unwrap_or_default(),
+                    map_description: &map_description,
                 },
             )
-            .await
-        };
-
-        update.sections = Some(new_sections);
+            .await,
+        );
     }
 
     let updated = state.storage.update_curated(&id, update)?;

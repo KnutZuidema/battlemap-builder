@@ -5,7 +5,7 @@ pub mod ingestion;
 pub mod reference_provider;
 pub mod sections;
 pub use description::*;
-pub use sections::{crop_section_png, describe_map_sections, SectionDescriptionContext};
+pub use sections::{describe_map_sections, SectionDescriptionContext};
 pub use curation::*;
 
 pub use benchmark::*;
@@ -14,8 +14,7 @@ pub use ingestion::{
     RedditIngestionService, SkipReason,
 };
 pub use reference_provider::{
-    crop_section_image, detect_theme_for_prompt, preprocess_reference_image,
-    preprocess_section_reference_image, score_curated_map_for_prompt,
+    detect_theme_for_prompt, preprocess_reference_image, preprocess_section_reference_image,
     score_curated_section_for_prompt, select_center_most_section, static_reference_for_theme,
     ReferenceProvenance, ReferenceProvider, ReferenceProviderError, ReferenceResolution,
     StaticReferenceDef, STATIC_REFERENCES,

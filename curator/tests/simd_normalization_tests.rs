@@ -188,12 +188,14 @@ fn test_full_curation_workflow_bundle_lora_files() {
     let storage = FilesystemStorage::new(dir.path());
 
     // 1. Create a staged multi-layer bundle with a real image for layer 0
-    let test_png = create_colored_png(800, 600, [180, 100, 50, 255]);
+    // 1200x1200 spans 18x18 full Grid Cells at the default 64px cell size, so the ground
+    // layer is curation-eligible and its first exact 16x16 Grid Cell section resolves.
+    let test_png = create_colored_png(1200, 1200, [180, 100, 50, 255]);
     let candidate = Candidate::with_now(
         "crypt_bundle_1",
         Source::Reddit,
         "0.png",
-        (800, 600),
+        (1200, 1200),
     )
     .with_title("Ancient Stone Crypt [30x30] with Sarcophagus and Torches")
     .with_layers(vec![CandidateLayer::new(
@@ -201,7 +203,7 @@ fn test_full_curation_workflow_bundle_lora_files() {
         "0.png",
         LayerRole::Ground,
         Some(0),
-        (800, 600),
+        (1200, 1200),
     )]);
 
     storage
@@ -216,7 +218,7 @@ fn test_full_curation_workflow_bundle_lora_files() {
         "crypt_bundle_1",
         Theme::Dungeon,
         vec!["crypt".into(), "stone".into()],
-        (800, 600),
+        (1200, 1200),
     );
 
     storage.curate_staging(&curated).unwrap();
@@ -259,12 +261,14 @@ fn test_full_curation_workflow_flat_candidate_lora_files() {
     let storage = FilesystemStorage::new(dir.path());
 
     // 1. Create a flat candidate in staging
-    let test_png = create_colored_png(1200, 800, [50, 120, 200, 255]);
+    // 1200x1200 spans 18x18 full Grid Cells at the default 64px cell size, so the curated
+    // map is eligible and its first exact 16x16 Grid Cell section resolves.
+    let test_png = create_colored_png(1200, 1200, [50, 120, 200, 255]);
     let candidate = Candidate::with_now(
         "tavern_map_42",
         Source::Reddit,
         "tavern_map_42.png",
-        (1200, 800),
+        (1200, 1200),
     )
     .with_title("Cozy Tavern with Hearth Fireplace and Wooden Tables [No Grid]");
 
@@ -275,7 +279,7 @@ fn test_full_curation_workflow_flat_candidate_lora_files() {
         "tavern_map_42",
         Theme::Tavern,
         vec!["cozy".into()],
-        (1200, 800),
+        (1200, 1200),
     );
 
     storage.curate_staging(&curated).unwrap();

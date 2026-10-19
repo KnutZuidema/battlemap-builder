@@ -1444,8 +1444,10 @@ async fn test_api_benchmark_reference_conditioning_curated_prioritization_and_pe
         (1024, 1024),
         Utc::now(),
     );
+    // 1024x1024 matches the map's declared dimensions and default 64px grid so the exact
+    // 16x16 Grid Cell section box resolves without rescaling.
     let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
-        ImageBuffer::from_pixel(256, 256, Rgb([80, 120, 160]));
+        ImageBuffer::from_pixel(1024, 1024, Rgb([80, 120, 160]));
     let mut png_bytes = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
         .unwrap();

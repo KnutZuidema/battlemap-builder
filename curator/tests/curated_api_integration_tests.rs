@@ -60,8 +60,10 @@ fn curate_test_map(
     tags: Vec<String>,
     desc: Option<&str>,
 ) -> CuratedMap {
-    let png = create_test_png(200, 200);
-    let mut map = CuratedMap::with_now(id, theme, tags, (200, 200));
+    // 1024x1024 with the default 64px grid spans exactly 16x16 Grid Cells, so the single
+    // (0, 0) Map Section resolves to the exact 1024x1024 box for dataset export.
+    let png = create_test_png(1024, 1024);
+    let mut map = CuratedMap::with_now(id, theme, tags, (1024, 1024));
     if let Some(d) = desc {
         map = map.with_description(d);
     }

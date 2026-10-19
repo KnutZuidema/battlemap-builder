@@ -3,8 +3,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    normalize_tags, validate_layers_for_curation, CuratedMap, Layer, LayerRole, MapSection,
-    RejectionReason,
+    normalize_tags, validate_layers_for_curation, CuratedMap, Layer, LayerRole, RejectionReason,
 };
 use crate::ports::curation_store::CurationStore;
 use crate::ports::storage::StorageError;
@@ -163,33 +162,32 @@ impl CurationWorkflow for CurationService {
         }
 
         // 6. Derive overlapping 16×16 Map Sections with crop-specific descriptions.
-        //    Multi-section maps get a vision description per Ground-layer crop (with a
-        //    deterministic per-section caption fallback); single-section maps reuse the
-        //    strict map-level physical description verbatim.
-        let section_origins = candidate.grid.section_origins(ground_w, ground_h);
-        let sections = if section_origins.len() <= 1 {
-            vec![MapSection::new(0, 0, final_description.clone())]
-        } else {
-            let bytes = match ground_bytes {
-                Some(bytes) => bytes,
-                None => self
-                    .store
-                    .get_staging_layer_bytes(trimmed_id, ground_layer_index)?,
-            };
-            let ground_image = image::load_from_memory(&bytes).ok();
-            describe_map_sections(
-                &self.description_service,
-                SectionDescriptionContext {
-                    grid: &candidate.grid,
-                    ground_image: ground_image.as_ref(),
-                    ground_dimensions: (ground_w, ground_h),
-                    tags: &clean_tags,
-                    title: candidate.title.as_deref(),
-                    map_description: &final_description,
-                },
-            )
-            .await
+        //    `describe_map_sections` owns the section policy: multi-section maps get a
+        //    vision description per Ground-layer crop (with a deterministic per-section
+        //    caption fallback); single-section maps reuse the strict map-level physical
+        //    description verbatim.
+        let ground_bytes = match ground_bytes {
+            Some(bytes) => Some(bytes),
+            None => self
+                .store
+                .get_staging_layer_bytes(trimmed_id, ground_layer_index)
+                .ok(),
         };
+        let ground_image = ground_bytes
+            .as_ref()
+            .and_then(|bytes| image::load_from_memory(bytes).ok());
+        let sections = describe_map_sections(
+            &self.description_service,
+            SectionDescriptionContext {
+                grid: &candidate.grid,
+                ground_image: ground_image.as_ref(),
+                ground_dimensions: (ground_w, ground_h),
+                tags: &clean_tags,
+                title: candidate.title.as_deref(),
+                map_description: &final_description,
+            },
+        )
+        .await;
 
         // 7. Construct CuratedMap for atomic commit (bypassing staging manifest disk rewrites)
         let map_to_commit = CuratedMap::with_now(

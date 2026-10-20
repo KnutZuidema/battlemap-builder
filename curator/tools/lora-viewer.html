@@ -1286,14 +1286,18 @@
     dragging = { id: event.pointerId, x: event.clientX, y: event.clientY, ox: view.x, oy: view.y };
     dragMoved = false;
     els.stage.classList.add("dragging");
-    els.stage.setPointerCapture(event.pointerId);
+    // Pointer capture is taken on the first real movement, not here: capturing on pointerdown
+    // retargets the compatibility click to the stage, which swallows clicks on section markers.
   });
 
   els.stage.addEventListener("pointermove", (event) => {
     if (!dragging || dragging.id !== event.pointerId) return;
     const dx = event.clientX - dragging.x;
     const dy = event.clientY - dragging.y;
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragMoved = true;
+    if (!dragMoved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+      dragMoved = true;
+      try { els.stage.setPointerCapture(event.pointerId); } catch { /* capture is best-effort */ }
+    }
     view.x = dragging.ox + dx;
     view.y = dragging.oy + dy;
     view.fit = false;
@@ -1308,8 +1312,9 @@
   els.stage.addEventListener("pointerup", endDrag);
   els.stage.addEventListener("pointercancel", endDrag);
 
-  els.stage.addEventListener("dblclick", () => {
+  els.stage.addEventListener("dblclick", (event) => {
     if (!document.body.classList.contains("has-data")) return;
+    if (event.target.closest?.(".ov-marker")) return; // double-clicking a section must not zoom
     if (Math.abs(view.scale - 1) < 0.01) fitToStage();
     else zoomCentered(1);
   });

@@ -734,7 +734,7 @@
     overviewCanvas = null;
     overviewCache.clear();
     overviewBuilds.clear();
-    els.ovMarkers.replaceChildren();
+    renderMarkers(null);
     els.mainImg.classList.remove("hidden");
     els.mainImg.removeAttribute("src");
     els.canvasLayer.style.width = "0";
@@ -982,7 +982,7 @@
         setStatus(`Building map overview… ${++done}/${sections.length}`);
       }
 
-      const built = { canvas, sections, cols, rows };
+      const built = { canvas, sections, cols, rows, mapKey: key };
       overviewCache.set(key, built);
       trimOverviewCache();
       return built;
@@ -1024,47 +1024,65 @@
       fitToStage();
     }
     if (token !== renderToken) return;
-    setStatus(`Map overview · ${built.cols}×${built.rows} cells · ${built.sections.length} sections`);
+    setStatus(`Map overview · ${built.cols}×${built.rows} cells · ${built.sections.length} sections · click to select, Enter to open`);
     els.hudSize.textContent =
       `overview ${built.cols}×${built.rows} cells · ${built.sections.length} sections · ${CELL_PX}px cells`;
   }
 
+  let markerNodes = new Map();  // sample key -> button
+  let markerHostKey = null;     // map whose markers are currently in the DOM
+
+  // The marker DOM is rebuilt only when the displayed map changes: replacing the nodes on every
+  // selection would detach the element mid-gesture and break double-click (and hover).
   function renderMarkers(built) {
-    if (!built) { els.ovMarkers.replaceChildren(); return; }
-
-    const current = state.filtered[state.index];
-    const present = new Set(built.sections.map((s) => `${s.col},${s.row}`));
-    const colOrigins = [...new Set(built.sections.map((s) => s.col))].sort((a, b) => a - b);
-    const rowOrigins = [...new Set(built.sections.map((s) => s.row))].sort((a, b) => a - b);
-
-    const nodes = [];
-    for (const row of rowOrigins) {
-      for (const col of colOrigins) {
-        const box = { left: `${col * CELL_PX}px`, top: `${row * CELL_PX}px`, width: `${GRID_CELLS * CELL_PX}px`, height: `${GRID_CELLS * CELL_PX}px` };
-        const label = document.createElement("span");
-        label.textContent = `c${col} r${row}`;
-
-        if (!present.has(`${col},${row}`)) {
-          const hole = document.createElement("div");
-          hole.className = "ov-marker missing";
-          Object.assign(hole.style, box);
-          hole.append(label);
-          nodes.push(hole);
-          continue;
-        }
-
-        const section = built.sections.find((s) => s.col === col && s.row === row);
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = `ov-marker${section === current ? " current" : ""}`;
-        button.dataset.sampleKey = section.key;
-        button.title = `Open ${section.id} c${col} r${row}`;
-        Object.assign(button.style, box);
-        button.append(label);
-        nodes.push(button);
-      }
+    if (!built) {
+      els.ovMarkers.replaceChildren();
+      markerNodes = new Map();
+      markerHostKey = null;
+      return;
     }
-    els.ovMarkers.replaceChildren(...nodes);
+
+    if (markerHostKey !== built.mapKey) {
+      const present = new Set(built.sections.map((s) => `${s.col},${s.row}`));
+      const colOrigins = [...new Set(built.sections.map((s) => s.col))].sort((a, b) => a - b);
+      const rowOrigins = [...new Set(built.sections.map((s) => s.row))].sort((a, b) => a - b);
+
+      const nodes = [];
+      markerNodes = new Map();
+
+      for (const row of rowOrigins) {
+        for (const col of colOrigins) {
+          const box = { left: `${col * CELL_PX}px`, top: `${row * CELL_PX}px`, width: `${GRID_CELLS * CELL_PX}px`, height: `${GRID_CELLS * CELL_PX}px` };
+          const label = document.createElement("span");
+          label.textContent = `c${col} r${row}`;
+
+          if (!present.has(`${col},${row}`)) {
+            const hole = document.createElement("div");
+            hole.className = "ov-marker missing";
+            Object.assign(hole.style, box);
+            hole.append(label);
+            nodes.push(hole);
+            continue;
+          }
+
+          const section = built.sections.find((s) => s.col === col && s.row === row);
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "ov-marker";
+          button.dataset.sampleKey = section.key;
+          button.title = `Select ${section.id} c${col} r${row} — double-click or Enter to open`;
+          Object.assign(button.style, box);
+          button.append(label);
+          markerNodes.set(section.key, button);
+          nodes.push(button);
+        }
+      }
+      els.ovMarkers.replaceChildren(...nodes);
+      markerHostKey = built.mapKey;
+    }
+
+    const currentKey = state.filtered[state.index]?.key;
+    for (const [key, button] of markerNodes) button.classList.toggle("current", key === currentKey);
   }
 
   function setOverview(on) {
@@ -1086,6 +1104,27 @@
   function toggleOverview(force) {
     if (!state.filtered.length) return;
     setOverview(force ?? !state.overview);
+  }
+
+  // Selects a section by sample key, clearing the search/theme filter if it hides the section.
+  function selectSection(key) {
+    if (!key) return;
+    stopPlayback();
+    let index = state.filtered.findIndex((s) => s.key === key);
+    if (index < 0) {
+      els.search.value = "";
+      state.query = "";
+      if (state.theme !== "all") { state.theme = "all"; els.themeFilter.value = "all"; }
+      applyFilters({ keepKey: key });
+      index = state.filtered.findIndex((s) => s.key === key);
+    }
+    go(index < 0 ? 0 : index);
+  }
+
+  // Leaves the overview, showing the currently selected section's crop.
+  function openSelected() {
+    if (!state.overview) return;
+    setOverview(false);
   }
 
   function renderMeta(sample) {
@@ -1500,24 +1539,17 @@
     go(Number(button.dataset.index));
   });
 
+  // Clicking a section box selects it (detail panel, filmstrip and HUD follow) without leaving the
+  // overview; Enter or a double-click opens the section crop.
   els.ovMarkers.addEventListener("click", (event) => {
     const marker = event.target.closest(".ov-marker");
     if (!marker || marker.classList.contains("missing") || dragMoved) return;
-    const key = marker.dataset.sampleKey;
-    if (!key) return;
+    selectSection(marker.dataset.sampleKey);
+  });
 
-    stopPlayback();
-    let index = state.filtered.findIndex((s) => s.key === key);
-    if (index < 0) {
-      // The section is filtered out by the current search/theme: clear them and jump anyway.
-      els.search.value = "";
-      state.query = "";
-      if (state.theme !== "all") { state.theme = "all"; els.themeFilter.value = "all"; }
-      applyFilters({ keepKey: key });
-      index = state.filtered.findIndex((s) => s.key === key);
-    }
-    setOverview(false);
-    go(index < 0 ? 0 : index);
+  els.ovMarkers.addEventListener("dblclick", (event) => {
+    if (!event.target.closest(".ov-marker")) return;
+    openSelected();
   });
 
   document.addEventListener("keydown", (event) => {
@@ -1567,7 +1599,11 @@
       case "f": case "F": case "0": fitToStage(); break;
       case "1": zoomCentered(1); break;
       case "m": case "M": toggleOverview(); break;
-      case "Escape": case "Enter":
+      case "Enter":
+        if (!state.overview) return;
+        openSelected();
+        break;
+      case "Escape":
         if (!state.overview) return;
         setOverview(false);
         break;

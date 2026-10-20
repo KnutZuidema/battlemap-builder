@@ -244,8 +244,9 @@ via `DecompressionStream`); nothing is uploaded and no network access is used.
   (1024 px per section) and `GridConfig::section_origins` places the last origin at `cells − 16`, so the full
   lattice is `max(col) + 16` × `max(row) + 16` cells: drawing each crop at `(col, row) × 64 px` stitches the map
   back together (overlapping sections simply overdraw, lattice holes skipped by the export render dashed).
-  The current section is highlighted, clicking any box opens that section's crop (clearing the search first if it
-  was filtered out), and `M`/`Escape`/`Enter` return to the section image. Built canvases are cached per map (LRU 3).
+  The current section is highlighted and clicking any box selects that section — the detail panel, filmstrip and HUD
+  follow — without leaving the overview (the search is cleared first if it hid the section). `Enter` or a
+  double-click opens the selected crop, `M`/`Escape` leave the overview. Built canvases are cached per map (LRU 3).
 - **Filtering**: theme dropdown (built from the archive's theme folders) plus a search box matching map id, theme,
   section coordinates, and full caption text.
 - **Inspection**: `G` overlays the 64 px cell lattice (16×16 cells on a section crop, the whole map in overview;

@@ -412,16 +412,6 @@ impl ReferenceProvider {
         self
     }
 
-    /// Underlying catalog repository reference.
-    pub fn catalog(&self) -> &Arc<dyn CatalogRepository + Send + Sync> {
-        &self.catalog
-    }
-
-    /// Underlying blob storage reference.
-    pub fn blobs(&self) -> &Arc<dyn BlobStorage + Send + Sync> {
-        &self.blobs
-    }
-
     /// Resolves reference image for a given theme:
     /// 1. Queries curated maps in the catalog for the theme.
     /// 2. If a map is found, selects the most recently curated map.
@@ -691,8 +681,20 @@ mod tests {
             .save_curated(map)
             .await
             .expect("curated map saves");
+        // The Ground-layer address is spelled out here instead of going through
+        // `curated_ground_blob_key`: sharing the derivation with `load_ground_bytes` would make the
+        // fixture and the reader agree on whatever key production produces, hiding a wrong
+        // index/role/elevation.
         blobs
-            .write_blob(&curated_ground_blob_key(map), image_bytes)
+            .write_blob(
+                &BlobKey::CuratedLayer {
+                    id: map.id.clone(),
+                    index: 0,
+                    role: LayerRole::Ground,
+                    elevation: Some(0),
+                },
+                image_bytes,
+            )
             .await
             .expect("ground layer blob saves");
     }

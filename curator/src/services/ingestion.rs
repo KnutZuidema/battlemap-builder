@@ -7,7 +7,7 @@ pub use crate::adapters::reddit::BackoffConfig;
 use crate::adapters::reddit::{
     parse_rate_limit_delay, unescape_xml_entities, DEFAULT_USER_AGENT,
 };
-use crate::domain::{RedditHarvestQuery, RedditPost};
+use crate::domain::{Candidate, GridConfig, RedditHarvestQuery, RedditPost};
 use crate::ports::blob_storage::{BlobKey, BlobStorage};
 use crate::ports::catalog_repository::CatalogRepository;
 use crate::ports::harvester::{HarvesterError, RedditHarvester};
@@ -53,7 +53,6 @@ pub enum SkipReason {
     InvalidMediaIndex,
     NotGridless,
     DownloadFailed,
-    Duplicate,
 }
 
 /// Progress event emitted during Reddit harvesting pipeline execution.
@@ -204,14 +203,6 @@ impl<H, C, B> RedditIngestionService<H, C, B> {
 
     pub fn harvester(&self) -> &H {
         &self.harvester
-    }
-
-    pub fn catalog(&self) -> &C {
-        &self.catalog
-    }
-
-    pub fn blobs(&self) -> &B {
-        &self.blobs
     }
 
     pub fn http_client(&self) -> &reqwest::Client {
@@ -674,6 +665,40 @@ impl<H: RedditHarvester, C: CatalogRepository, B: BlobStorage> RedditIngestionSe
         }
     }
 
+    /// Normalizes a freshly assembled candidate exactly as the first persistence of a staging
+    /// bundle always did: layer dimensions are measured from the downloaded bytes whenever the
+    /// media metadata carried no usable width/height, candidate dimensions fall back to the first
+    /// layer, and the grid is auto-seeded from the parsed lattice while the candidate still carries
+    /// the default grid. Only ever applied to a genuinely new candidate (the deduplication check
+    /// ran first), so a later save of the same candidate keeps whatever grid it was given.
+    fn normalize_new_candidate(post: &RedditPost, layer_bytes: &[Vec<u8>]) -> Candidate {
+        let mut candidate = post.to_bundle_candidate();
+        let candidate_dimensions = candidate.dimensions;
+        for (index, bytes) in layer_bytes.iter().enumerate() {
+            let Some(layer) = candidate.layers.get_mut(index) else {
+                break;
+            };
+            if layer.dimensions == (0, 0) {
+                layer.dimensions = image::load_from_memory(bytes)
+                    .map(|img| (img.width(), img.height()))
+                    .unwrap_or(candidate_dimensions);
+            }
+        }
+        if candidate.dimensions == (0, 0) {
+            if let Some(first) = candidate.layers.first() {
+                candidate.dimensions = first.dimensions;
+            }
+        }
+        if candidate.grid == GridConfig::default() {
+            if let Some(parsed) = candidate.parsed_dimensions {
+                if candidate.dimensions != (0, 0) {
+                    candidate.grid = GridConfig::auto_seed(parsed, candidate.dimensions);
+                }
+            }
+        }
+        candidate
+    }
+
     async fn ingest_post_filtered_inner<Hook>(
         &self,
         post: &RedditPost,
@@ -745,22 +770,28 @@ impl<H: RedditHarvester, C: CatalogRepository, B: BlobStorage> RedditIngestionSe
             }
         }
 
-        // 4. Assemble candidate bundle
-        let candidate = post.to_bundle_candidate();
+        // 4. Assemble the candidate bundle, normalized the way the first persistence of a staging
+        //    bundle always was
+        let candidate = Self::normalize_new_candidate(post, &layer_bytes_list);
 
-        // 5. Persist the staged candidate and one blob per layer in index order
-        self.catalog.save_candidate(&candidate).await?;
+        // 5. Write one blob per layer in index order, then the manifest last: a candidate must
+        //    never become discoverable in the catalog before the images it describes, or a failed
+        //    blob write would leave it visible and permanently skipped as already in staging
+        let mut written_keys: Vec<BlobKey> = Vec::with_capacity(layer_bytes_list.len());
         for (index, bytes) in layer_bytes_list.iter().enumerate() {
-            self.blobs
-                .write_blob(
-                    &BlobKey::StagingLayer {
-                        id: candidate.id.clone(),
-                        index,
-                    },
-                    bytes,
-                )
-                .await?;
+            let key = BlobKey::StagingLayer {
+                id: candidate.id.clone(),
+                index,
+            };
+            if let Err(err) = self.blobs.write_blob(&key, bytes).await {
+                for written in &written_keys {
+                    let _ = self.blobs.delete_blob(written).await;
+                }
+                return Err(err.into());
+            }
+            written_keys.push(key);
         }
+        self.catalog.save_candidate(&candidate).await?;
 
         info!(
             post_id = %post.id,

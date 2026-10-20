@@ -8,19 +8,19 @@ use crate::ports::storage_error::StorageError;
 /// Strongly-typed address of a stored blob.
 ///
 /// Each variant is the single source of truth for one location in the storage layout
-/// (`staging/{id}/{index}.png`, flat `curated/{id}/` bundles per ADR-0003, LoRA companions,
-/// and dataset export archives), so no caller ever hand-builds a path string.
+/// (`staging/{id}/{index}.png`, flat `curated/{id}/` bundles per ADR-0003, and dataset export
+/// archives), so no caller ever hand-builds a path string.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BlobKey {
     /// Staging bundle layer `staging/{id}/{index}.png`.
     StagingLayer { id: String, index: usize },
     /// Curated bundle layer inside the flat `curated/{id}/` directory.
     CuratedLayer { id: String, index: usize, role: LayerRole, elevation: Option<i8> },
-    /// Normalized LoRA conditioning image companion of a curated map.
-    CuratedLoraImage { id: String },
-    /// Caption companion of a curated map's LoRA conditioning image.
-    CuratedLoraCaption { id: String },
-    /// ZIP archive containing an exported dataset.
+    /// ZIP archive containing an exported dataset, stored at `exports/{name}.zip`.
+    ///
+    /// `name` is the bare archive name and MUST NOT carry a file extension: [`BlobKey::to_path`]
+    /// always appends exactly one `.zip`, so no two distinct names can collide on one path and
+    /// `name` is the single source of truth for the archive's identity.
     ExportArchive { name: String },
     /// Directory prefix `staging/` (id=None) or `staging/{id}/`.
     StagingDir { id: Option<String> },
@@ -37,15 +37,7 @@ impl BlobKey {
                 "curated/{id}/{}",
                 Layer::format_filename(*index, *role, *elevation, "png")
             ),
-            BlobKey::CuratedLoraImage { id } => format!("curated/{id}_lora1024.png"),
-            BlobKey::CuratedLoraCaption { id } => format!("curated/{id}_lora1024.txt"),
-            BlobKey::ExportArchive { name } => {
-                if name.ends_with(".zip") {
-                    format!("exports/{name}")
-                } else {
-                    format!("exports/{name}.zip")
-                }
-            }
+            BlobKey::ExportArchive { name } => format!("exports/{name}.zip"),
             BlobKey::StagingDir { id } => directory_prefix("staging", id.as_deref()),
             BlobKey::CuratedDir { id } => directory_prefix("curated", id.as_deref()),
         }

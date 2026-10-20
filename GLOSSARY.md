@@ -127,3 +127,11 @@ _Avoid_: Caption, alt text, lore summary, meta-prompt
 **Map Section**:
 A 16×16 Grid Cell sub-region of a Curated Map aligned to its Grid Configuration and paired with its own Physical Description for reference conditioning and LoRA dataset export.
 _Avoid_: Training crop, tile, slice, patch, chunk
+
+**Trigger Phrase**:
+The fixed head of every exported LoRA caption (`TRIGGER_PHRASE` in `curator/src/domain/caption.rs`), applied exactly once at caption generation and never stored inside a Physical Description.
+_Avoid_: Caption prefix, caption tag, keyword, style tag
+
+**Training Dataset**:
+The exported set of `lora-dataset.zip` samples a Training Run consumes: one exact 1024×1024 crop (`64px = 1 Grid Cell`, zero letterbox bars) per Map Section, each captioned with the Trigger Phrase and that section's Physical Description.
+_Avoid_: LoRA dataset, training set, dataset ZIP, export

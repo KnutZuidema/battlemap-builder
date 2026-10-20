@@ -121,7 +121,7 @@
     transform-origin: 0 0;
     will-change: transform;
   }
-  .canvas-layer img {
+  .canvas-layer img, .canvas-layer canvas {
     display: block;
     max-width: none;
     image-rendering: auto;
@@ -138,6 +138,44 @@
       repeating-linear-gradient(to bottom, rgba(34, 211, 238, 0.38) 0 var(--lw), transparent var(--lw) 64px);
   }
   body.show-grid .grid-overlay { display: block; }
+
+  /* Whole-map overview: every MapSection box, click-through to the section crop.
+     Border and label sizes are divided by the viewport scale so they stay constant on screen. */
+  .ov-markers { position: absolute; inset: 0; pointer-events: none; }
+  .ov-marker {
+    position: absolute;
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-start;
+    padding: 0;
+    border: var(--mlw, 2px) solid rgba(34, 211, 238, 0.8);
+    border-radius: calc(var(--mlw, 2px) * 2);
+    background: rgba(34, 211, 238, 0.07);
+    color: var(--fg);
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: var(--mfs, 13px);
+    line-height: 1;
+    text-align: left;
+    cursor: pointer;
+    overflow: hidden;
+    pointer-events: auto;
+  }
+  .ov-marker span {
+    display: inline-block;
+    padding: calc(var(--mfs, 13px) * 0.25) calc(var(--mfs, 13px) * 0.5);
+    background: rgba(11, 15, 23, 0.72);
+    border-bottom-right-radius: calc(var(--mlw, 2px) * 2);
+  }
+  .ov-marker:hover { background: rgba(34, 211, 238, 0.2); border-color: #a5f3fc; }
+  .ov-marker.current { border-color: var(--amber); background: rgba(245, 158, 11, 0.14); }
+  .ov-marker.current span { background: rgba(120, 70, 0, 0.72); }
+  .ov-marker.missing {
+    border-style: dashed;
+    border-color: rgba(255, 255, 255, 0.28);
+    background: none;
+    pointer-events: none;
+  }
+  body:not(.overview) .ov-markers { display: none; }
 
   .stage-hud {
     position: absolute;
@@ -327,6 +365,7 @@
   <input type="search" id="search" placeholder="Search id / caption / c r…" spellcheck="false" />
   <span class="spacer"></span>
   <span class="status" id="status">No dataset loaded</span>
+  <button class="btn icon" id="btn-overview" title="Whole map with every section marked (M)">Overview</button>
   <button class="btn icon" id="btn-grid" title="Toggle 64px grid (G)">Grid</button>
   <button class="btn icon" id="btn-fit" title="Fit to window (0)">Fit</button>
   <button class="btn icon" id="btn-100" title="Actual pixels (1)">1:1</button>
@@ -344,6 +383,7 @@
     <div class="canvas-layer" id="canvas-layer">
       <img id="main-img" alt="" draggable="false" />
       <div class="grid-overlay" id="grid-overlay"></div>
+      <div class="ov-markers" id="ov-markers"></div>
     </div>
     <div class="stage-error hidden" id="stage-error"></div>
     <div class="stage-hud">
@@ -360,6 +400,7 @@
       <div class="meta-row">
         <span class="chip amber" id="meta-theme">–</span>
         <span class="chip" id="meta-section">–</span>
+        <span class="chip hidden" id="meta-overview">Map overview</span>
       </div>
       <div class="sample-id" id="meta-id">–</div>
       <div class="sample-sub" id="meta-sub">No sample selected</div>
@@ -387,10 +428,20 @@
   // Kohya / AI-Toolkit caption prefix written by curator/src/domain/caption.rs.
   const CAPTION_PREFIX_TOKENS = 5;
   const GRID_CELLS = 16;          // LoRA sections are 16x16 grid cells.
+  const CELL_PX = 64;             // Overview scale: 16 cells per 1024px section crop.
   const THUMB_PX = 192;
   const URL_CACHE_MAX = 32;
   const TEXT_CONCURRENCY = 16;
   const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp"]);
+
+  // Viewport controls mirror curator/src/ui/assets/app.js (WASD pan, [ ] zoom, F fit).
+  const MIN_ZOOM = 0.1;
+  const MAX_ZOOM = 5.0;
+  const PAN_SPEED = 700;          // pixels per second
+  const ZOOM_SPEED = 2.0;         // zoom factor per second while [ or ] is held
+  const ZOOM_STEP = 1.2;          // per -/+ press
+  const INV_SQRT2 = 0.70710678;
+  const OVERVIEW_CACHE_MAX = 3;
 
   const $ = (id) => document.getElementById(id);
   const els = {
@@ -398,6 +449,9 @@
     canvasLayer: $("canvas-layer"),
     mainImg: $("main-img"),
     gridOverlay: $("grid-overlay"),
+    ovMarkers: $("ov-markers"),
+    metaOverview: $("meta-overview"),
+    btnOverview: $("btn-overview"),
     stageError: $("stage-error"),
     hudPos: $("hud-pos"),
     hudSize: $("hud-size"),
@@ -429,6 +483,7 @@
     query: "",
     playing: false,
     playTimer: 0,
+    overview: false,
   };
 
   let uid = 0;
@@ -574,6 +629,7 @@
         key: `${++uid}:${entry.name}`,
         zip: zipName,
         theme,
+        mapKey: `${theme}/${id}`,
         id,
         col,
         row,
@@ -670,6 +726,16 @@
     }
     thumbCache.clear();
     thumbQueue.length = 0;
+    state.overview = false;
+    document.body.classList.remove("overview");
+    els.btnOverview.classList.remove("active");
+    els.metaOverview.classList.add("hidden");
+    overviewCanvas?.remove();
+    overviewCanvas = null;
+    overviewCache.clear();
+    overviewBuilds.clear();
+    els.ovMarkers.replaceChildren();
+    els.mainImg.classList.remove("hidden");
     els.mainImg.removeAttribute("src");
     els.canvasLayer.style.width = "0";
     els.canvasLayer.style.height = "0";
@@ -820,6 +886,17 @@
     els.hudPos.textContent = `${index + 1} / ${state.filtered.length}`;
     els.stageError.classList.add("hidden");
 
+    if (state.overview && sample.col !== null && mapSections(sample).length) {
+      els.mainImg.classList.add("hidden");
+      showOverview(sample, token);
+      return;
+    }
+
+    if (overviewCanvas) overviewCanvas.classList.add("hidden");
+    renderMarkers(null);
+    els.mainImg.classList.remove("hidden");
+    if (els.mainImg.naturalWidth && syncContentBox()) fitToStage();
+
     imageUrl(sample).then((url) => {
       if (token !== renderToken) return;
       els.mainImg.src = url;
@@ -834,6 +911,181 @@
       const neighbour = state.filtered[index + offset];
       if (neighbour) imageUrl(neighbour).catch(() => {});
     }
+  }
+
+  // ======================================================================
+  // Whole-map overview
+  //
+  // The export stores 16x16-cell crops of one map at a uniform scale (1024px per section), and
+  // `GridConfig::section_origins` puts the last origin at `cells - 16`, so the full lattice is
+  // `max(col) + 16` by `max(row) + 16` cells. Drawing every crop at `(col, row) * CELL_PX`
+  // therefore reconstructs the whole map, with overlapping sections simply overdrawing.
+  // ======================================================================
+
+  let overviewCanvas = null;          // currently mounted canvas element
+  const overviewCache = new Map();    // mapKey -> { canvas, sections, cols, rows }
+  const overviewBuilds = new Map();   // mapKey -> Promise (dedupes concurrent builds)
+
+  function mapSections(sample) {
+    return state.samples.filter((s) => s.mapKey === sample.mapKey && s.col !== null);
+  }
+
+  function cachedOverview(key) {
+    const entry = overviewCache.get(key);
+    if (!entry) return null;
+    overviewCache.delete(key);
+    overviewCache.set(key, entry); // refresh LRU order
+    return entry;
+  }
+
+  function trimOverviewCache() {
+    while (overviewCache.size > OVERVIEW_CACHE_MAX) {
+      let victim = null;
+      for (const [key, entry] of overviewCache) {
+        if (entry.canvas === overviewCanvas) continue; // never evict what is on screen
+        victim = key;
+        break;
+      }
+      if (!victim) return;
+      overviewCache.get(victim).canvas.remove();
+      overviewCache.delete(victim);
+    }
+  }
+
+  async function buildOverview(sample) {
+    const key = sample.mapKey;
+    const cached = cachedOverview(key);
+    if (cached) return cached;
+
+    const inFlight = overviewBuilds.get(key);
+    if (inFlight) return inFlight;
+
+    const build = (async () => {
+      const sections = mapSections(sample);
+      const cols = Math.max(...sections.map((s) => s.col)) + GRID_CELLS;
+      const rows = Math.max(...sections.map((s) => s.row)) + GRID_CELLS;
+      const canvas = document.createElement("canvas");
+      canvas.width = cols * CELL_PX;
+      canvas.height = rows * CELL_PX;
+      canvas.className = "ov-canvas";
+
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#0b0f17";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      let done = 0;
+      for (const section of sections) {
+        const bytes = await entryBytes(section.img);
+        const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
+        ctx.drawImage(bitmap, section.col * CELL_PX, section.row * CELL_PX, GRID_CELLS * CELL_PX, GRID_CELLS * CELL_PX);
+        bitmap.close?.();
+        setStatus(`Building map overview… ${++done}/${sections.length}`);
+      }
+
+      const built = { canvas, sections, cols, rows };
+      overviewCache.set(key, built);
+      trimOverviewCache();
+      return built;
+    })().finally(() => overviewBuilds.delete(key));
+
+    overviewBuilds.set(key, build);
+    return build;
+  }
+
+  function showOverview(sample, token) {
+    const cached = cachedOverview(sample.mapKey);
+    if (cached) {
+      mountOverview(cached, token);
+      return;
+    }
+    setStatus(`Building map overview for ${sample.id}…`);
+    buildOverview(sample)
+      .then((built) => { if (token === renderToken) mountOverview(built, token); })
+      .catch((err) => {
+        if (token !== renderToken) return;
+        els.stageError.textContent = `Cannot build overview for ${sample.id}: ${err.message}`;
+        els.stageError.classList.remove("hidden");
+      });
+  }
+
+  function mountOverview(built, token) {
+    const changed = overviewCanvas !== built.canvas;
+    if (changed) {
+      // Cached canvases stay detached until mounted; the previous one goes back to being detached.
+      overviewCanvas?.remove();
+      els.canvasLayer.insertBefore(built.canvas, els.gridOverlay);
+      overviewCanvas = built.canvas;
+    }
+    overviewCanvas.classList.remove("hidden");
+    renderMarkers(built);
+
+    if (changed) {
+      syncContentBox();
+      fitToStage();
+    }
+    if (token !== renderToken) return;
+    setStatus(`Map overview · ${built.cols}×${built.rows} cells · ${built.sections.length} sections`);
+    els.hudSize.textContent =
+      `overview ${built.cols}×${built.rows} cells · ${built.sections.length} sections · ${CELL_PX}px cells`;
+  }
+
+  function renderMarkers(built) {
+    if (!built) { els.ovMarkers.replaceChildren(); return; }
+
+    const current = state.filtered[state.index];
+    const present = new Set(built.sections.map((s) => `${s.col},${s.row}`));
+    const colOrigins = [...new Set(built.sections.map((s) => s.col))].sort((a, b) => a - b);
+    const rowOrigins = [...new Set(built.sections.map((s) => s.row))].sort((a, b) => a - b);
+
+    const nodes = [];
+    for (const row of rowOrigins) {
+      for (const col of colOrigins) {
+        const box = { left: `${col * CELL_PX}px`, top: `${row * CELL_PX}px`, width: `${GRID_CELLS * CELL_PX}px`, height: `${GRID_CELLS * CELL_PX}px` };
+        const label = document.createElement("span");
+        label.textContent = `c${col} r${row}`;
+
+        if (!present.has(`${col},${row}`)) {
+          const hole = document.createElement("div");
+          hole.className = "ov-marker missing";
+          Object.assign(hole.style, box);
+          hole.append(label);
+          nodes.push(hole);
+          continue;
+        }
+
+        const section = built.sections.find((s) => s.col === col && s.row === row);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `ov-marker${section === current ? " current" : ""}`;
+        button.dataset.sampleKey = section.key;
+        button.title = `Open ${section.id} c${col} r${row}`;
+        Object.assign(button.style, box);
+        button.append(label);
+        nodes.push(button);
+      }
+    }
+    els.ovMarkers.replaceChildren(...nodes);
+  }
+
+  function setOverview(on) {
+    if (state.overview === on) return;
+    state.overview = on;
+    stopPanLoop();
+    stopZoomLoop();
+    document.body.classList.toggle("overview", on);
+    els.btnOverview.classList.toggle("active", on);
+    els.metaOverview.classList.toggle("hidden", !on);
+    if (!on) {
+      overviewCanvas?.classList.add("hidden");
+      renderMarkers(null);
+      setStatus("Map overview closed");
+    }
+    if (state.filtered.length) show(state.index);
+  }
+
+  function toggleOverview(force) {
+    if (!state.filtered.length) return;
+    setOverview(force ?? !state.overview);
   }
 
   function renderMeta(sample) {
@@ -957,26 +1209,34 @@
 
   const view = { scale: 1, x: 0, y: 0, fit: true };
 
+  function contentSize() {
+    if (state.overview && overviewCanvas) return { w: overviewCanvas.width, h: overviewCanvas.height };
+    return { w: els.mainImg.naturalWidth || 1024, h: els.mainImg.naturalHeight || 1024 };
+  }
+
   function applyTransform() {
     els.canvasLayer.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
+    // Grid lines, section borders and marker labels are divided by the scale so they stay
+    // constant on screen at any zoom.
     els.gridOverlay.style.setProperty("--lw", `${(1 / view.scale).toFixed(3)}px`);
+    els.ovMarkers.style.setProperty("--mlw", `${(2 / view.scale).toFixed(3)}px`);
+    els.ovMarkers.style.setProperty("--mfs", `${(13 / view.scale).toFixed(3)}px`);
     els.hudZoom.textContent = `${Math.round(view.scale * 100)}%`;
   }
 
   function fitToStage() {
-    const iw = els.mainImg.naturalWidth || 1024;
-    const ih = els.mainImg.naturalHeight || 1024;
+    const { w, h } = contentSize();
     const cw = els.stage.clientWidth;
     const ch = els.stage.clientHeight;
-    view.scale = Math.min(cw / iw, ch / ih) * 0.96;
-    view.x = (cw - iw * view.scale) / 2;
-    view.y = (ch - ih * view.scale) / 2;
+    view.scale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.min(cw / w, ch / h) * 0.96));
+    view.x = (cw - w * view.scale) / 2;
+    view.y = (ch - h * view.scale) / 2;
     view.fit = true;
     applyTransform();
   }
 
   function zoomAt(scale, cx, cy) {
-    const next = Math.max(0.05, Math.min(16, scale));
+    const next = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, scale));
     const k = next / view.scale;
     view.x = cx - (cx - view.x) * k;
     view.y = cy - (cy - view.y) * k;
@@ -989,19 +1249,25 @@
     zoomAt(scale, els.stage.clientWidth / 2, els.stage.clientHeight / 2);
   }
 
-  function syncImageBox() {
-    const iw = els.mainImg.naturalWidth || 1024;
-    const ih = els.mainImg.naturalHeight || 1024;
-    els.canvasLayer.style.width = `${iw}px`;
-    els.canvasLayer.style.height = `${ih}px`;
-    els.gridOverlay.style.width = `${iw}px`;
-    els.gridOverlay.style.height = `${ih}px`;
-    els.hudSize.textContent = `${iw}×${ih} · ${GRID_CELLS}×${GRID_CELLS} grid (${Math.round(iw / GRID_CELLS)}px cells)`;
+  let contentDims = { w: 0, h: 0 };
+
+  // Sizes the transform layer to the active content. Returns true when the dimensions changed,
+  // so callers only re-fit the viewport when they actually have to (zoom survives navigation).
+  function syncContentBox() {
+    const { w, h } = contentSize();
+    const changed = contentDims.w !== w || contentDims.h !== h;
+    contentDims = { w, h };
+    els.canvasLayer.style.width = `${w}px`;
+    els.canvasLayer.style.height = `${h}px`;
+    els.gridOverlay.style.width = `${w}px`;
+    els.gridOverlay.style.height = `${h}px`;
+    els.hudSize.textContent = `${w}×${h} · ${GRID_CELLS}×${GRID_CELLS} grid (${Math.round(w / GRID_CELLS)}px cells)`;
+    return changed;
   }
 
   els.mainImg.addEventListener("load", () => {
-    syncImageBox();
-    fitToStage();
+    if (state.overview) return;
+    if (syncContentBox()) fitToStage();
   });
 
   els.stage.addEventListener("wheel", (event) => {
@@ -1013,18 +1279,23 @@
   }, { passive: false });
 
   let dragging = null;
+  let dragMoved = false;
 
   els.stage.addEventListener("pointerdown", (event) => {
     if (event.button !== 0 || !document.body.classList.contains("has-data")) return;
     dragging = { id: event.pointerId, x: event.clientX, y: event.clientY, ox: view.x, oy: view.y };
+    dragMoved = false;
     els.stage.classList.add("dragging");
     els.stage.setPointerCapture(event.pointerId);
   });
 
   els.stage.addEventListener("pointermove", (event) => {
     if (!dragging || dragging.id !== event.pointerId) return;
-    view.x = dragging.ox + (event.clientX - dragging.x);
-    view.y = dragging.oy + (event.clientY - dragging.y);
+    const dx = event.clientX - dragging.x;
+    const dy = event.clientY - dragging.y;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragMoved = true;
+    view.x = dragging.ox + dx;
+    view.y = dragging.oy + dy;
     view.fit = false;
     applyTransform();
   });
@@ -1049,6 +1320,86 @@
     const on = force ?? !document.body.classList.contains("show-grid");
     document.body.classList.toggle("show-grid", on);
     els.btnGrid.classList.toggle("active", on);
+  }
+
+  // ======================================================================
+  // WASD pan / [ ] zoom (same speeds and semantics as the curator viewport)
+  // ======================================================================
+
+  const panKeys = { w: false, a: false, s: false, d: false };
+  const zoomKeys = { in: false, out: false };
+  let panFrame = 0;
+  let panLast = 0;
+  let zoomFrame = 0;
+  let zoomLast = 0;
+
+  function panLoop(timestamp) {
+    if (!panLast) panLast = timestamp;
+    const dt = Math.min((timestamp - panLast) / 1000, 0.1);
+    panLast = timestamp;
+
+    let moveX = 0;
+    let moveY = 0;
+    if (panKeys.w) moveY += 1;
+    if (panKeys.s) moveY -= 1;
+    if (panKeys.a) moveX += 1;
+    if (panKeys.d) moveX -= 1;
+
+    if (moveX || moveY) {
+      if (moveX && moveY) { moveX *= INV_SQRT2; moveY *= INV_SQRT2; }
+      view.x += moveX * PAN_SPEED * dt;
+      view.y += moveY * PAN_SPEED * dt;
+      view.fit = false;
+      applyTransform();
+      panFrame = requestAnimationFrame(panLoop);
+    } else {
+      panFrame = 0;
+      panLast = 0;
+    }
+  }
+
+  function startPanLoop() {
+    if (panFrame) return;
+    panLast = performance.now();
+    panFrame = requestAnimationFrame(panLoop);
+  }
+
+  function stopPanLoop() {
+    if (panFrame) cancelAnimationFrame(panFrame);
+    panFrame = 0;
+    panLast = 0;
+    panKeys.w = panKeys.a = panKeys.s = panKeys.d = false;
+  }
+
+  function zoomLoop(timestamp) {
+    if (!zoomLast) zoomLast = timestamp;
+    const dt = Math.min((timestamp - zoomLast) / 1000, 0.1);
+    zoomLast = timestamp;
+
+    if (zoomKeys.in || zoomKeys.out) {
+      let factor = 1;
+      if (zoomKeys.in && !zoomKeys.out) factor = Math.pow(ZOOM_SPEED, dt);
+      else if (zoomKeys.out && !zoomKeys.in) factor = Math.pow(1 / ZOOM_SPEED, dt);
+
+      if (factor !== 1) zoomCentered(view.scale * factor);
+      zoomFrame = requestAnimationFrame(zoomLoop);
+    } else {
+      zoomFrame = 0;
+      zoomLast = 0;
+    }
+  }
+
+  function startZoomLoop() {
+    if (zoomFrame) return;
+    zoomLast = performance.now();
+    zoomFrame = requestAnimationFrame(zoomLoop);
+  }
+
+  function stopZoomLoop() {
+    if (zoomFrame) cancelAnimationFrame(zoomFrame);
+    zoomFrame = 0;
+    zoomLast = 0;
+    zoomKeys.in = zoomKeys.out = false;
   }
 
   // ======================================================================
@@ -1118,6 +1469,7 @@
     els.fileInput.value = "";
   });
   els.btnClear.addEventListener("click", clearAll);
+  els.btnOverview.addEventListener("click", () => toggleOverview());
   els.btnGrid.addEventListener("click", () => toggleGrid());
   els.btnFit.addEventListener("click", fitToStage);
   els.btn100.addEventListener("click", () => zoomCentered(1));
@@ -1143,6 +1495,26 @@
     go(Number(button.dataset.index));
   });
 
+  els.ovMarkers.addEventListener("click", (event) => {
+    const marker = event.target.closest(".ov-marker");
+    if (!marker || marker.classList.contains("missing") || dragMoved) return;
+    const key = marker.dataset.sampleKey;
+    if (!key) return;
+
+    stopPlayback();
+    let index = state.filtered.findIndex((s) => s.key === key);
+    if (index < 0) {
+      // The section is filtered out by the current search/theme: clear them and jump anyway.
+      els.search.value = "";
+      state.query = "";
+      if (state.theme !== "all") { state.theme = "all"; els.themeFilter.value = "all"; }
+      applyFilters({ keepKey: key });
+      index = state.filtered.findIndex((s) => s.key === key);
+    }
+    setOverview(false);
+    go(index < 0 ? 0 : index);
+  });
+
   document.addEventListener("keydown", (event) => {
     const target = event.target;
     if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement) {
@@ -1151,22 +1523,73 @@
     }
     if (!document.body.classList.contains("has-data")) return;
 
+    const key = event.key.toLowerCase();
+    const plain = !event.ctrlKey && !event.metaKey && !event.altKey;
+
+    // Pan: WASD, continuous while held.
+    if (plain && (key === "w" || key === "a" || key === "s" || key === "d")) {
+      if (!panKeys[key]) { panKeys[key] = true; startPanLoop(); }
+      event.preventDefault();
+      return;
+    }
+
+    // Zoom: [ and ] continuous, - and + stepped.
+    if (plain && !event.shiftKey) {
+      if (event.key === "]" || event.code === "BracketRight") {
+        zoomKeys.in = true;
+        startZoomLoop();
+        event.preventDefault();
+        return;
+      }
+      if (event.key === "[" || event.code === "BracketLeft") {
+        zoomKeys.out = true;
+        startZoomLoop();
+        event.preventDefault();
+        return;
+      }
+    }
+    if (event.key === "+" || event.key === "=") { zoomCentered(view.scale * ZOOM_STEP); event.preventDefault(); return; }
+    if (event.key === "-" || event.key === "_") { zoomCentered(view.scale / ZOOM_STEP); event.preventDefault(); return; }
+
     switch (event.key) {
-      case "ArrowRight": case "d": case "j": stopPlayback(); step(1); break;
-      case "ArrowLeft": case "a": case "k": stopPlayback(); step(-1); break;
+      case "ArrowRight": case "j": case "J": stopPlayback(); step(1); break;
+      case "ArrowLeft": case "k": case "K": stopPlayback(); step(-1); break;
       case "ArrowDown": case "PageDown": stopPlayback(); step(10); break;
       case "ArrowUp": case "PageUp": stopPlayback(); step(-10); break;
       case "Home": stopPlayback(); go(0); break;
       case "End": stopPlayback(); go(state.filtered.length - 1); break;
       case "g": case "G": toggleGrid(); break;
-      case "0": fitToStage(); break;
+      case "f": case "F": case "0": fitToStage(); break;
       case "1": zoomCentered(1); break;
+      case "m": case "M": toggleOverview(); break;
+      case "Escape": case "Enter":
+        if (!state.overview) return;
+        setOverview(false);
+        break;
       case " ": togglePlayback(); break;
-      case "c": copyCaption(); break;
+      case "c": case "C": copyCaption(); break;
       default: return;
     }
     event.preventDefault();
   });
+
+  document.addEventListener("keyup", (event) => {
+    const key = event.key.toLowerCase();
+    if (key === "w" || key === "a" || key === "s" || key === "d") {
+      panKeys[key] = false;
+      if (!panKeys.w && !panKeys.a && !panKeys.s && !panKeys.d) stopPanLoop();
+    }
+    if (event.key === "]" || event.code === "BracketRight") {
+      zoomKeys.in = false;
+      if (!zoomKeys.in && !zoomKeys.out) stopZoomLoop();
+    }
+    if (event.key === "[" || event.code === "BracketLeft") {
+      zoomKeys.out = false;
+      if (!zoomKeys.in && !zoomKeys.out) stopZoomLoop();
+    }
+  });
+
+  window.addEventListener("blur", () => { stopPanLoop(); stopZoomLoop(); });
 
   let dragDepth = 0;
   window.addEventListener("dragenter", (event) => {
@@ -1186,7 +1609,10 @@
     if (event.dataTransfer?.files?.length) await loadFiles(event.dataTransfer.files);
   });
 
-  window.LoraViewer = { state, loadFiles, clearAll, go, show, applyFilters, toggleGrid, fitToStage };
+  window.LoraViewer = {
+    state, loadFiles, clearAll, go, show, applyFilters, toggleGrid, fitToStage,
+    toggleOverview, setOverview, buildOverview, overviewCache,
+  };
 })();
 </script>
 </body>

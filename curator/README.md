@@ -233,12 +233,23 @@ archives — or pick them via **Load ZIP…**. Archives are parsed in the browse
 via `DecompressionStream`); nothing is uploaded and no network access is used.
 
 - **Samples**: every `<theme>/<id>_c<col>_r<row>_lora1024.png` is paired with its `.txt` companion caption.
-- **Flipping**: `←`/`→` (or `a`/`d`, `j`/`k`) step one sample, `↑`/`↓`/`PageUp`/`PageDown` step ten, `Home`/`End`
-  jump to the ends, `Space` toggles a 1.4 s slideshow, and the filmstrip below the stage jumps directly.
+- **Flipping**: `←`/`→` (or `j`/`k`) step one sample, `↑`/`↓`/`PageUp`/`PageDown` step ten, `Home`/`End` jump to
+  the ends, `Space` toggles a 1.4 s slideshow, and the filmstrip below the stage jumps directly.
+- **Viewport**: same controls and speeds as the curator viewport (`curator/src/ui/assets/app.js`): `W`/`A`/`S`/`D`
+  pan continuously at 700 px/s (diagonals normalized), `[`/`]` zoom continuously at 2×/s, `-`/`+` step 1.2×,
+  `F`/`0` fit, `1` shows actual pixels, wheel zooms at the cursor, drag pans, double-click toggles fit/1:1.
+  Zoom is clamped to 10%–500% and survives sample navigation.
+- **Map overview (`M` or the Overview button)**: reconstructs the whole map the current section came from and marks
+  every section box with its `c{col} r{row}` cell origin. The export stores 16×16-cell crops at a uniform scale
+  (1024 px per section) and `GridConfig::section_origins` places the last origin at `cells − 16`, so the full
+  lattice is `max(col) + 16` × `max(row) + 16` cells: drawing each crop at `(col, row) × 64 px` stitches the map
+  back together (overlapping sections simply overdraw, lattice holes skipped by the export render dashed).
+  The current section is highlighted, clicking any box opens that section's crop (clearing the search first if it
+  was filtered out), and `M`/`Escape`/`Enter` return to the section image. Built canvases are cached per map (LRU 3).
 - **Filtering**: theme dropdown (built from the archive's theme folders) plus a search box matching map id, theme,
   section coordinates, and full caption text.
-- **Inspection**: `G` overlays the 16×16 section lattice (1024 px / 16 = 64 px cells, line width held at 1 px
-  regardless of zoom), `0` fits the stage, `1` shows actual pixels, wheel zooms at the cursor, drag pans,
-  double-click toggles fit/1:1, and `c` copies the current caption.
+- **Inspection**: `G` overlays the 64 px cell lattice (16×16 cells on a section crop, the whole map in overview;
+  line and marker borders/labels are divided by the zoom so they stay 1 screen pixel thin), and `c` copies the
+  current caption.
 - **Loading**: image bytes stay in the archive and are inflated on demand (LRU-capped object URLs, neighbours
   prefetched); captions are read eagerly at load so search covers the whole dataset.

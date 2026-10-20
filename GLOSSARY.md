@@ -129,9 +129,23 @@ A 16×16 Grid Cell sub-region of a Curated Map aligned to its Grid Configuration
 _Avoid_: Training crop, tile, slice, patch, chunk
 
 **Trigger Phrase**:
-The fixed head of every exported LoRA caption (`TRIGGER_PHRASE` in `curator/src/domain/caption.rs`), applied exactly once at caption generation and never stored inside a Physical Description.
-_Avoid_: Caption prefix, caption tag, keyword, style tag
+The fixed, distinctive head of every LoRA caption and inference prompt, applied exactly once and never stored inside a Physical Description, to which a LoRA Adapter's learned orthographic conventions bind.
+_Avoid_: Caption prefix, caption tag, keyword, style tag, activation word
 
 **Training Dataset**:
-The exported set of `lora-dataset.zip` samples a Training Run consumes: one exact 1024×1024 crop (`64px = 1 Grid Cell`, zero letterbox bars) per Map Section, each captioned with the Trigger Phrase and that section's Physical Description.
+The set of Ground-layer Map Sections a Training Run consumes: one exact 1024×1024 crop (`64px = 1 Grid Cell`, zero letterbox bars) per Map Section, each captioned with the Trigger Phrase and that section's Physical Description.
 _Avoid_: LoRA dataset, training set, dataset ZIP, export
+
+## Fine-Tuning & Model Adaptation
+
+**Base Model**:
+An open-weight foundation image generation model onto which a LoRA Adapter is trained and applied during inference.
+_Avoid_: Checkpoint, backbone, foundation model, pretrained model
+
+**LoRA Adapter**:
+A trained low-rank weight artifact derived from Curated Map Sections that specializes a Base Model to render gridless 2D orthographic Battlemaps with Poché Walls at 1 Grid Cell = 64px scale.
+_Avoid_: LoRA weights, fine-tune, custom model, adapter file
+
+**Training Run**:
+A single execution of the fine-tuning pipeline against a Training Dataset and hyperparameter configuration that produces a LoRA Adapter.
+_Avoid_: Fine-tuning job, training session, epoch run

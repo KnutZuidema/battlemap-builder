@@ -3611,6 +3611,150 @@ kbd {
     box-shadow: 0 4px 14px rgba(14, 165, 233, 0.5);
 }
 
+/* LoRA Training Dataset Readiness Audit (Issue #184) */
+.btn-readiness {
+    gap: 0.4rem;
+}
+
+.btn-readiness.is-ready {
+    border-color: rgba(16, 185, 129, 0.45);
+    color: #6ee7b7;
+}
+
+.btn-readiness.has-issues {
+    border-color: rgba(245, 158, 11, 0.45);
+    color: #fcd34d;
+}
+
+.readiness-card {
+    max-width: 720px;
+}
+
+.readiness-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    font-weight: 800;
+    font-size: 0.95rem;
+    background: rgba(148, 163, 184, 0.15);
+    color: var(--text-secondary);
+}
+
+.readiness-icon.is-ready {
+    background: rgba(16, 185, 129, 0.15);
+    color: #6ee7b7;
+}
+
+.readiness-icon.has-issues {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fcd34d;
+}
+
+.readiness-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.75rem;
+    margin: 0.75rem 0 1rem;
+}
+
+.readiness-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.6rem 0.75rem;
+    background: rgba(148, 163, 184, 0.06);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+}
+
+.readiness-stat-label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+}
+
+.readiness-stat-value {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.readiness-issues {
+    max-height: 320px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.readiness-clean {
+    padding: 0.85rem 1rem;
+    border-radius: 8px;
+    background: rgba(16, 185, 129, 0.08);
+    border: 1px solid rgba(16, 185, 129, 0.25);
+    color: #a7f3d0;
+    font-size: 0.85rem;
+}
+
+.readiness-map-issue {
+    border: 1px solid rgba(245, 158, 11, 0.22);
+    border-radius: 8px;
+    background: rgba(245, 158, 11, 0.05);
+    padding: 0.65rem 0.8rem;
+}
+
+.readiness-map-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.35rem;
+}
+
+.readiness-map-id {
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.readiness-map-theme {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+}
+
+.readiness-map-count {
+    margin-left: auto;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.readiness-issue-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.readiness-issue-code {
+    display: inline-block;
+    padding: 1px 6px;
+    margin-right: 0.35rem;
+    border-radius: 6px;
+    background: rgba(245, 158, 11, 0.14);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    color: #fcd34d;
+    font-size: 0.7rem;
+}
+
 /* Cards Grid & Area */
 .library-scroll-container {
     flex: 1;

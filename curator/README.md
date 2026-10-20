@@ -178,7 +178,8 @@ data/
 - **Description Persistence**:
   - **Manifest**: The `description` string is persisted directly in `data/curated/<id>/manifest.json`.
   - **Primary Layer Caption**: The primary layer (Ground role) `caption` field matches and retains the curated description.
-  - **Dynamic LoRA Dataset Export**: LoRA dataset export dynamically crops and Lanczos3-resamples each 16×16 MapSection on demand from the Ground layer into `{theme}/{id}_c{col}_r{row}_lora1024.png` (exact 1024×1024, zero padding bars) and `{theme}/{id}_c{col}_r{row}_lora1024.txt` companion captions with per-section physical descriptions.
+  - **Dynamic LoRA Dataset Export**: LoRA dataset export dynamically crops and Lanczos3-resamples each 16×16 MapSection on demand from the Ground layer into `{theme}/{id}_c{col}_r{row}_lora1024.png` (exact 1024×1024, zero padding bars) and `{theme}/{id}_c{col}_r{row}_lora1024.txt` companion captions: the `Trigger Phrase` (`TRIGGER_PHRASE`) followed by that section's `Physical Description` — its own cached one, otherwise the map-level one. The Trigger Phrase is applied exactly once, at caption generation, and never stored inside a `Physical Description`.
+  - **Perspective-Neutral Section Descriptions**: a Map Section's `description` is generated per crop by vision; when that call fails or the crop is unavailable, the section reuses the map-level `Physical Description` instead of a synthesized caption, so a `Physical Description` never carries camera, perspective, art-style or grid directives (ADR-0002, ADR-0007).
   - **Backward Compatibility & Legacy Deserialization**: Legacy `manifest.json` files lacking the `"description"` field deserialize cleanly (with `description: None`). `GET /api/curated` is a pure read: it returns persisted manifests as-is and never synthesizes or rewrites captions. The only handlers registered on `/api/curated/{id}` are `PATCH` and `DELETE`; updates happen exclusively through `PATCH /api/curated/{id}`.
 - **Reference Provider Prompt Keyword Scoring & Section Cropping (`ReferenceProvider`)**:
   - Curated map sections and physical descriptions are directly leveraged in the benchmark and generation pipeline for few-shot orthographic perspective conditioning.
@@ -251,3 +252,50 @@ via `DecompressionStream`); nothing is uploaded and no network access is used.
   current caption.
 - **Loading**: image bytes stay in the archive and are inflated on demand (LRU-capped object URLs, neighbours
   prefetched); captions are read eagerly at load so search covers the whole dataset.
+
+## 8. Training Dataset Readiness Audit (`GET /api/dataset/readiness`)
+
+`lora-dataset.zip` only ships samples a `Training Run` can consume, so the curated store is audited
+against that contract before a dataset leaves the machine. The audit decodes each curated map's Ground
+layer, plans its samples through the exact same policy the ZIP export uses, and reports every defect
+with the operator-facing detail needed to fix it.
+
+```
+GET /api/dataset/readiness            # whole curated store
+GET /api/dataset/readiness?theme=cave # one theme, i.e. exactly the ZIP folder scope
+```
+
+```json
+{
+  "ready": false,
+  "maps_total": 3, "maps_ready": 1,
+  "sections_total": 6, "sections_ready": 4,
+  "maps": [
+    { "id": "contaminated_legacy", "theme": "cave", "sections": 1, "ready_sections": 0,
+      "issues": [{ "code": "physical_description_not_neutral",
+                   "detail": "Map Section (0, 0) description holds camera, perspective, art-style or grid directives: \"…\"" }] }
+  ]
+}
+```
+
+An empty store is **not** a ready dataset (`ready: false`): there is nothing to train on.
+
+### Issue codes and remediation
+
+| Code | Meaning | Fix |
+| :--- | :--- | :--- |
+| `ground_layer_missing` | No Ground layer image could be read from the bundle | Restore `0_ground.png` in `data/curated/<id>/` |
+| `ground_image_unreadable` | The Ground layer bytes do not decode as an image | Re-ingest the map; an export would skip it entirely |
+| `grid_below_minimum` | The persisted Grid Configuration yields no full 16×16 Grid Cell window | Recalibrate the grid (`PATCH /api/curated/{id}` with a `grid` that fits the Ground layer) |
+| `section_unresolvable` | A Map Section's exact `16 * cell_size_px` box does not fit the Ground layer | Regrid, or re-curate the map; the export skips that section |
+| `physical_description_missing` | The section (and the map) resolve to no `Physical Description`, so its caption would carry only the Trigger Phrase, themes and tags | `POST /api/curated/{id}/describe`, then `PATCH` the description |
+| `physical_description_not_neutral` | The stored description holds camera, perspective, art-style or grid directives instead of physical prose | Regenerate the description, then `PATCH /api/curated/{id}` with a `grid` so section descriptions are recomputed per crop |
+
+The embedded UI exposes the same audit as **Dataset Readiness** in the Dataset Library toolbar: the
+button turns emerald (`Dataset Ready · N sections`) or amber (`Dataset Issues · ready/total maps`) and
+the modal lists the aggregate counts plus every flagged map and issue. The audit mirrors the library's
+active theme tag, so the report always describes the scope an export from that view would ship.
+
+Legacy bundles curated before ADR-0007 carry no `sections` and no `description`: their full-grid lattice
+still exports (one 16×16 window per lattice) but their captions have no `Physical Description`, which the
+audit reports as `physical_description_missing`.

@@ -17,8 +17,8 @@ use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{
     BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
-    normalize_tags, CuratedMap, CuratedMapUpdate, CustomPrompt, LayerRole, PurgeStagingResult,
-    RedditHarvestRequest, RejectionReason, StorageStats, Theme,
+    normalize_tags, CuratedMap, CuratedMapUpdate, CustomPrompt, DatasetReadiness, LayerRole,
+    PurgeStagingResult, RedditHarvestRequest, RejectionReason, StorageStats, Theme,
 };
 use crate::ports::storage::StorageError;
 use crate::ports::cost_tracker::CostStats;
@@ -269,6 +269,26 @@ pub async fn get_dataset_export(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(response)
+}
+
+/// GET /api/dataset/readiness - Audit the curated store against the LoRA dataset contract.
+pub async fn get_dataset_readiness(
+    State(state): State<AppState>,
+    Query(query): Query<ThemeQuery>,
+) -> Result<Json<DatasetReadiness>, ApiError> {
+    let theme = parse_optional_theme(query.theme.as_deref())?;
+    let report = state.storage.audit_dataset_readiness(theme.as_ref())?;
+
+    tracing::info!(
+        ready = report.ready,
+        maps_ready = report.maps_ready,
+        maps_total = report.maps_total,
+        sections_ready = report.sections_ready,
+        sections_total = report.sections_total,
+        "Audited LoRA dataset readiness"
+    );
+
+    Ok(Json(report))
 }
 
 /// Request payload for exporting selected curated maps to a LoRA dataset ZIP archive.

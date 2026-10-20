@@ -8,16 +8,61 @@ use chrono::{DateTime, Utc};
 use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
 
 use crate::domain::{
-    crop_section_box, infer_bundle_layer_roles, normalize_tags, synthesize_sections,
-    validate_layers_for_curation, BenchmarkMetadata, Candidate, CaptionGenerator, CuratedMap,
-    CuratedMapUpdate, DirectoryStats, GridConfig, Layer, LayerRole, MapSection, PurgeStagingResult,
-    RedditSidecarMetadata, RejectionReason, RejectionRecord, Source, StorageStats, Theme,
-    ThemeStorageStats,
+    crop_section_box, infer_bundle_layer_roles, is_perspective_neutral, normalize_tags,
+    sample_description, synthesize_map_sections, validate_layers_for_curation,
+    BenchmarkMetadata, Candidate, CaptionGenerator, CuratedMap, CuratedMapUpdate, DatasetIssue,
+    DatasetIssueCode, DatasetReadiness, DirectoryStats, GridConfig, Layer, LayerRole,
+    MapDatasetReadiness, MapSection, PurgeStagingResult, RedditSidecarMetadata, RejectionReason,
+    RejectionRecord, Source,
+    StorageStats, Theme, ThemeStorageStats,
 };
 use crate::ports::curation_store::CurationStore;
 use crate::ports::storage::{StorageError, StorageRepository};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// One planned LoRA dataset sample: a `Map Section` box, the `Physical Description` it is
+/// captioned with (resolved once through [`sample_description`]), and any defect that makes the
+/// sample unfit for a `Training Run`.
+struct DatasetSamplePlan {
+    col: u32,
+    row: u32,
+    description: Option<String>,
+    issues: Vec<DatasetIssue>,
+}
+
+impl DatasetSamplePlan {
+    fn is_ready(&self) -> bool {
+        self.issues.is_empty()
+    }
+}
+
+/// Builds the readiness report of a single curated map.
+fn map_readiness(
+    map: &CuratedMap,
+    sections: usize,
+    ready_sections: usize,
+    issues: Vec<DatasetIssue>,
+) -> MapDatasetReadiness {
+    MapDatasetReadiness {
+        id: map.id.clone(),
+        theme: map.primary_theme().to_string(),
+        sections,
+        ready_sections,
+        issues,
+    }
+}
+
+/// Renders a description for an issue detail without dumping an entire paragraph into the report.
+fn describe_for_issue(text: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX_CHARS {
+        return trimmed.to_string();
+    }
+    let head: String = trimmed.chars().take(MAX_CHARS).collect();
+    format!("{head}…")
+}
 
 /// Filesystem-backed storage adapter implementing the `StorageRepository` port.
 /// Manages staging, curated thematic directories, and rejection logs.
@@ -648,6 +693,93 @@ impl FilesystemStorage {
         None
     }
 
+    /// Enumerates the LoRA dataset samples a curated map contributes, resolving every section's
+    /// `Physical Description` through the one shared policy used by both the ZIP export and the
+    /// readiness audit.
+    ///
+    /// Maps persisted before Map Sections existed fall back to the map's full-grid lattice with
+    /// the map-level `Physical Description` reused for every section. Defects are reported instead
+    /// of raised: the export logs them and skips only the affected sections.
+    fn plan_dataset_samples(
+        map: &CuratedMap,
+        image: &image::DynamicImage,
+    ) -> (Vec<DatasetSamplePlan>, Vec<DatasetIssue>) {
+        let mut issues = Vec::new();
+
+        let synthesized_sections;
+        let sections: &[MapSection] = if !map.sections.is_empty() {
+            &map.sections
+        } else {
+            let origins = map.grid.section_origins(image.width(), image.height());
+            if origins.is_empty() {
+                issues.push(DatasetIssue::new(
+                    DatasetIssueCode::GridBelowMinimum,
+                    format!(
+                        "{}px grid yields no full 16×16 Grid Cell window in a {}×{} Ground layer",
+                        map.grid.cell_size_px,
+                        image.width(),
+                        image.height()
+                    ),
+                ));
+                return (Vec::new(), issues);
+            }
+            synthesized_sections = synthesize_map_sections(&origins, map.description.as_deref());
+            &synthesized_sections
+        };
+
+        let mut samples = Vec::with_capacity(sections.len());
+        for section in sections {
+            let mut section_issues = Vec::new();
+
+            if crop_section_box(image, &map.grid, section.col, section.row).is_none() {
+                section_issues.push(DatasetIssue::new(
+                    DatasetIssueCode::SectionUnresolvable,
+                    format!(
+                        "Map Section ({}, {}) does not fit inside the {}×{} Ground layer",
+                        section.col,
+                        section.row,
+                        image.width(),
+                        image.height()
+                    ),
+                ));
+            }
+
+            let description = sample_description(section, map.description.as_deref());
+            match description {
+                Some(text) if !is_perspective_neutral(text) => {
+                    section_issues.push(DatasetIssue::new(
+                        DatasetIssueCode::PhysicalDescriptionNotNeutral,
+                        format!(
+                            "Map Section ({}, {}) description holds camera, perspective, art-style or grid directives: \"{}\"",
+                            section.col,
+                            section.row,
+                            describe_for_issue(text)
+                        ),
+                    ));
+                }
+                None => {
+                    section_issues.push(DatasetIssue::new(
+                        DatasetIssueCode::PhysicalDescriptionMissing,
+                        format!(
+                            "Map Section ({}, {}) resolves to no Physical Description",
+                            section.col, section.row
+                        ),
+                    ));
+                }
+                _ => {}
+            }
+
+            samples.push(DatasetSamplePlan {
+                col: section.col,
+                row: section.row,
+                description: description.map(str::to_string),
+                issues: section_issues,
+            });
+        }
+
+        (samples, issues)
+    }
+
     /// Package a collection of curated maps' 16x16 sections into a LoRA training ZIP archive.
     fn create_lora_zip(&self, curated_maps: &[CuratedMap]) -> Result<Vec<u8>, StorageError> {
         let mut buffer = std::io::Cursor::new(Vec::new());
@@ -675,73 +807,52 @@ impl FilesystemStorage {
                     }
                 };
 
-                let effective_sections: Vec<MapSection> = if !map.sections.is_empty() {
-                    map.sections.clone()
-                } else {
-                    let origins = map
-                        .grid
-                        .section_origins(dynamic_img.width(), dynamic_img.height());
-                    synthesize_sections(
-                        &origins,
-                        || {
-                            map.description.clone().unwrap_or_else(|| {
-                                CaptionGenerator::generate_with_theme_str(
-                                    theme_str,
-                                    &map.tags,
-                                    None,
-                                )
-                            })
-                        },
-                        |_, _| {
-                            CaptionGenerator::generate_with_theme_str(
-                                theme_str,
-                                &map.tags,
-                                map.description.as_deref(),
-                            )
-                        },
-                    )
-                };
+                let (samples, plan_issues) = Self::plan_dataset_samples(map, &dynamic_img);
+                for issue in &plan_issues {
+                    tracing::warn!(
+                        "LoRA dataset issue for '{}': {} ({})",
+                        map.id,
+                        issue.detail,
+                        issue.code.as_str()
+                    );
+                }
 
-                for section in effective_sections {
+                for sample in samples {
                     let image_bytes = match Self::crop_and_resample_section(
                         &dynamic_img,
                         &map.grid,
-                        section.col,
-                        section.row,
+                        sample.col,
+                        sample.row,
                     ) {
                         Ok(bytes) => bytes,
                         Err(e) => {
                             tracing::warn!(
                                 "Failed to crop/resample section ({}, {}) for '{}': {e}",
-                                section.col,
-                                section.row,
+                                sample.col,
+                                sample.row,
                                 map.id
                             );
                             continue;
                         }
                     };
 
-                    let desc_opt = if !section.description.trim().is_empty() {
-                        Some(section.description.as_str())
-                    } else {
-                        map.description.as_deref().filter(|s| !s.trim().is_empty())
-                    };
+                    // The Trigger Phrase heads every caption and is applied exactly once, here.
                     let caption_text = CaptionGenerator::generate_with_theme_str(
                         theme_str,
                         &map.tags,
-                        desc_opt,
+                        sample.description.as_deref(),
                     );
 
                     let img_filename = format!(
                         "{theme_str}/{}_c{}_r{}_lora1024.png",
-                        map.id, section.col, section.row
+                        map.id, sample.col, sample.row
                     );
                     zip.start_file(&img_filename, options)?;
                     zip.write_all(&image_bytes)?;
 
                     let txt_filename = format!(
                         "{theme_str}/{}_c{}_r{}_lora1024.txt",
-                        map.id, section.col, section.row
+                        map.id, sample.col, sample.row
                     );
                     zip.start_file(&txt_filename, options)?;
                     zip.write_all(caption_text.as_bytes())?;
@@ -752,6 +863,66 @@ impl FilesystemStorage {
         }
 
         Ok(buffer.into_inner())
+    }
+
+    /// Audits one curated map against the LoRA dataset contract by decoding its Ground layer and
+    /// planning its samples exactly like [`Self::create_lora_zip`] does.
+    fn audit_map_readiness(&self, map: &CuratedMap) -> MapDatasetReadiness {
+        let ground_bytes = match self.get_curated_ground_image_bytes(map) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                return map_readiness(
+                    map,
+                    0,
+                    0,
+                    vec![DatasetIssue::new(
+                        DatasetIssueCode::GroundLayerMissing,
+                        err.to_string(),
+                    )],
+                )
+            }
+        };
+
+        let image = match image::load_from_memory(&ground_bytes) {
+            Ok(image) => image,
+            Err(err) => {
+                return map_readiness(
+                    map,
+                    0,
+                    0,
+                    vec![DatasetIssue::new(
+                        DatasetIssueCode::GroundImageUnreadable,
+                        err.to_string(),
+                    )],
+                )
+            }
+        };
+
+        let (samples, mut issues) = Self::plan_dataset_samples(map, &image);
+        let sections = samples.len();
+        let ready_sections = samples
+            .iter()
+            .filter(|sample| sample.is_ready())
+            .count();
+        for sample in samples {
+            issues.extend(sample.issues);
+        }
+
+        map_readiness(map, sections, ready_sections, issues)
+    }
+
+    /// Audits the curated store against the LoRA dataset export contract, mirroring exactly what
+    /// the dataset ZIP ships per Map Section.
+    fn audit_dataset_readiness(
+        &self,
+        theme: Option<&Theme>,
+    ) -> Result<DatasetReadiness, StorageError> {
+        let curated_maps = self.list_curated(theme)?;
+        let reports = curated_maps
+            .iter()
+            .map(|map| self.audit_map_readiness(map))
+            .collect();
+        Ok(DatasetReadiness::from_maps(reports))
     }
 
     /// Locate primary curated image by ID.
@@ -1899,6 +2070,13 @@ impl StorageRepository for FilesystemStorage {
         self.create_lora_zip(&curated_maps)
     }
 
+    fn audit_dataset_readiness(
+        &self,
+        theme: Option<&Theme>,
+    ) -> Result<DatasetReadiness, StorageError> {
+        FilesystemStorage::audit_dataset_readiness(self, theme)
+    }
+
     fn export_selected_lora_dataset(&self, ids: &[String]) -> Result<Vec<u8>, StorageError> {
         let all_maps = self.list_curated(None)?;
         let mut selected_maps = Vec::new();
@@ -2276,23 +2454,7 @@ impl StorageRepository for FilesystemStorage {
                 .filter(|&(w, h)| w > 0 && h > 0)
                 .unwrap_or(map.dimensions);
             let origins = map.grid.section_origins(ground_w, ground_h);
-            let primary_theme = map.primary_theme();
-            let sections = synthesize_sections(
-                &origins,
-                || {
-                    map.description.clone().unwrap_or_else(|| {
-                        CaptionGenerator::generate_with_theme_str(primary_theme, &map.tags, None)
-                    })
-                },
-                |_, _| {
-                    CaptionGenerator::generate_with_theme_str(
-                        primary_theme,
-                        &map.tags,
-                        map.description.as_deref(),
-                    )
-                },
-            );
-            map.sections = sections;
+            map.sections = synthesize_map_sections(&origins, map.description.as_deref());
         }
 
         let description_changed = old_description != map.description;
@@ -2546,27 +2708,8 @@ impl StorageRepository for FilesystemStorage {
             if stored_map.sections.is_empty() {
                 let (gw, gh) = stored_map.dimensions;
                 let origins = stored_map.grid.section_origins(gw, gh);
-                let primary_theme = stored_map.primary_theme();
-                let sections = synthesize_sections(
-                    &origins,
-                    || {
-                        stored_map.description.clone().unwrap_or_else(|| {
-                            CaptionGenerator::generate_with_theme_str(
-                                primary_theme,
-                                &stored_map.tags,
-                                None,
-                            )
-                        })
-                    },
-                    |_, _| {
-                        CaptionGenerator::generate_with_theme_str(
-                            primary_theme,
-                            &stored_map.tags,
-                            stored_map.description.as_deref(),
-                        )
-                    },
-                );
-                stored_map.sections = sections;
+                stored_map.sections =
+                    synthesize_map_sections(&origins, stored_map.description.as_deref());
             }
             let curated_json = serde_json::to_string_pretty(&stored_map)?;
             Self::atomic_write(
@@ -2643,27 +2786,8 @@ impl StorageRepository for FilesystemStorage {
         if stored_map.sections.is_empty() {
             let (gw, gh) = stored_map.dimensions;
             let origins = stored_map.grid.section_origins(gw, gh);
-            let primary_theme = stored_map.primary_theme();
-            let sections = synthesize_sections(
-                &origins,
-                || {
-                    stored_map.description.clone().unwrap_or_else(|| {
-                        CaptionGenerator::generate_with_theme_str(
-                            primary_theme,
-                            &stored_map.tags,
-                            None,
-                        )
-                    })
-                },
-                |_, _| {
-                    CaptionGenerator::generate_with_theme_str(
-                        primary_theme,
-                        &stored_map.tags,
-                        stored_map.description.as_deref(),
-                    )
-                },
-            );
-            stored_map.sections = sections;
+            stored_map.sections =
+                synthesize_map_sections(&origins, stored_map.description.as_deref());
         }
         let mut layer = stored_map
             .layers

@@ -6,7 +6,7 @@ use tempfile::tempdir;
 use curator::adapters::{FilesystemStorage, SimdImageProcessor};
 use curator::domain::{
     Candidate, CandidateLayer, CaptionGenerator, CuratedMap, LayerRole, Source, Theme,
-    LORA_CAPTION_PREFIX,
+    TRIGGER_PHRASE,
 };
 use curator::ports::{
     ImageProcessor, ResizeStrategy, StorageRepository, LORA_TARGET_SIZE, PADDING_COLOR_RGBA,
@@ -153,7 +153,7 @@ fn test_caption_generator_format_adherence() {
     let caption_dungeon = CaptionGenerator::generate(&Theme::Dungeon, &[], None);
     assert_eq!(
         caption_dungeon,
-        format!("{LORA_CAPTION_PREFIX}, dungeon")
+        format!("{TRIGGER_PHRASE}, dungeon")
     );
 
     // 2. Tavern with tags and prompt architectural features
@@ -162,7 +162,7 @@ fn test_caption_generator_format_adherence() {
         &["rustic".into(), "fireplace".into()],
         Some("Fantasy tavern common room with wooden tables, bar counter and timber walls."),
     );
-    assert!(caption_tavern.starts_with(LORA_CAPTION_PREFIX));
+    assert!(caption_tavern.starts_with(TRIGGER_PHRASE));
     assert!(caption_tavern.contains("tavern"));
     assert!(caption_tavern.contains("fireplace"));
     assert!(caption_tavern.contains("rustic"));
@@ -249,7 +249,7 @@ fn test_full_curation_workflow_bundle_lora_files() {
     let caption = storage
         .get_curated_lora_caption(&Theme::Dungeon, "crypt_bundle_1")
         .expect("retrieve lora caption");
-    assert!(caption.starts_with(LORA_CAPTION_PREFIX));
+    assert!(caption.starts_with(TRIGGER_PHRASE));
     assert!(caption.contains("dungeon"));
     assert!(caption.contains("sarcophagus"));
     assert!(caption.contains("torches"));
@@ -301,7 +301,7 @@ fn test_full_curation_workflow_flat_candidate_lora_files() {
     let lora_txt = storage
         .get_curated_lora_caption(&Theme::Tavern, "tavern_map_42")
         .unwrap();
-    assert!(lora_txt.starts_with(LORA_CAPTION_PREFIX));
+    assert!(lora_txt.starts_with(TRIGGER_PHRASE));
     assert!(lora_txt.contains("tavern"));
     assert!(lora_txt.contains("fireplace"));
     assert!(lora_txt.contains("wooden tables"));

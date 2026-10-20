@@ -57,6 +57,9 @@
         purgeModalOpen: false,
         isPurging: false,
         storageStats: null,
+        // LoRA Training Dataset Readiness audit (Issue #184)
+        datasetReadinessModalOpen: false,
+        isAuditingDataset: false,
         // Harvesting parameters
         harvestSort: "hot",
         harvestTime: "all",
@@ -202,6 +205,8 @@
     let librarySearchInput, libraryTagPills, libraryGrid, libraryEmpty, libraryFilterEmpty, libraryCountBadge;
     let librarySortSelect, libraryDensityGroup, libraryFacetFilters;
     let btnExportLora, btnExportLabel, btnRefreshLibrary, btnSwitchToTriage, btnClearLibraryFilters;
+    let btnDatasetReadiness, datasetReadinessLabel;
+    let datasetReadinessModal, datasetReadinessSummary, datasetReadinessIssues, datasetReadinessIcon;
 
     // Curate Decision Modal DOM Elements (Issue #102)
     let curateDecisionModal;
@@ -422,6 +427,12 @@
         btnRefreshLibrary = document.getElementById("btn-refresh-library");
         btnSwitchToTriage = document.getElementById("btn-switch-to-triage");
         btnClearLibraryFilters = document.getElementById("btn-clear-library-filters");
+        btnDatasetReadiness = document.getElementById("btn-dataset-readiness");
+        datasetReadinessLabel = document.getElementById("dataset-readiness-label");
+        datasetReadinessModal = document.getElementById("dataset-readiness-modal");
+        datasetReadinessSummary = document.getElementById("dataset-readiness-summary");
+        datasetReadinessIssues = document.getElementById("dataset-readiness-issues");
+        datasetReadinessIcon = document.getElementById("dataset-readiness-icon");
 
         // Curate Decision Modal Elements (Issue #102)
         curateDecisionModal = document.getElementById("curate-decision-modal");
@@ -4656,33 +4667,30 @@
         return card;
     }
 
+    /** Active library tag when it is a theme the dataset endpoints can scope to, else null. */
+    function datasetScopeTheme() {
+        const tag = (state.libraryActiveTag || "").toLowerCase();
+        return CANONICAL_THEMES.includes(tag) ? tag : null;
+    }
+
+    /** Theme query for the current library tag filter, mirroring the export scope exactly. */
+    function datasetScopeQuery() {
+        const theme = datasetScopeTheme();
+        return theme ? `?theme=${encodeURIComponent(theme)}` : "";
+    }
+
     async function exportLoraDataset() {
         if (state.isExporting) return;
         state.isExporting = true;
         if (btnExportLora) btnExportLora.disabled = true;
         if (btnExportLabel) btnExportLabel.textContent = "Packaging ZIP...";
 
-        const CANONICAL_THEMES = [
-            "dungeon",
-            "cave",
-            "tavern",
-            "wilderness",
-            "ruins",
-            "urban",
-            "scifi",
-            "building",
-        ];
-
         const tag = state.libraryActiveTag || "all";
         const tagLabel = tag === "all" ? "all maps" : tag;
         showToast(`Packaging LoRA dataset ZIP archive (${tagLabel})...`, "info");
 
         try {
-            const normalizedTag = (tag || "").toLowerCase();
-            const isCanonical = CANONICAL_THEMES.includes(normalizedTag);
-            const url = isCanonical
-                ? `/api/dataset/export?theme=${encodeURIComponent(normalizedTag)}`
-                : "/api/dataset/export";
+            const url = `/api/dataset/export${datasetScopeQuery()}`;
             const res = await fetch(url);
             if (!res.ok) {
                 throw new Error(`Export failed (HTTP ${res.status}: ${res.statusText})`);
@@ -4708,6 +4716,130 @@
             if (btnExportLora) btnExportLora.disabled = false;
             if (btnExportLabel) btnExportLabel.textContent = "Export LoRA Dataset";
         }
+    }
+
+    // ==========================================================================
+    // LoRA Training Dataset Readiness Audit (Issue #184)
+    // ==========================================================================
+
+    const DATASET_ISSUE_LABELS = {
+        ground_layer_missing: "Ground layer missing",
+        ground_image_unreadable: "Ground layer unreadable",
+        grid_below_minimum: "Grid below 16×16 cells",
+        section_unresolvable: "Map Section unresolvable",
+        physical_description_missing: "Physical Description missing",
+        physical_description_not_neutral: "Physical Description not neutral",
+    };
+
+    function datasetIssueLabel(code) {
+        return DATASET_ISSUE_LABELS[code] || code;
+    }
+
+    function renderDatasetReadinessLabel(report) {
+        if (!datasetReadinessLabel || !btnDatasetReadiness) return;
+        const total = (report && report.maps_total) || 0;
+        if (!report || total === 0) {
+            datasetReadinessLabel.textContent = "Dataset Readiness";
+            btnDatasetReadiness.classList.remove("is-ready", "has-issues");
+            btnDatasetReadiness.title = "Audit curated maps against the LoRA Training Dataset contract (16×16 Map Sections, Trigger Phrase captions)";
+            return;
+        }
+        const ready = Boolean(report.ready);
+        datasetReadinessLabel.textContent = ready
+            ? `Dataset Ready · ${report.sections_total} sections`
+            : `Dataset Issues · ${report.maps_ready}/${total} maps`;
+        btnDatasetReadiness.classList.toggle("is-ready", ready);
+        btnDatasetReadiness.classList.toggle("has-issues", !ready);
+        btnDatasetReadiness.title = ready
+            ? `All ${total} curated map(s) contribute ${report.sections_total} clean 16×16 Map Sections`
+            : `${total - report.maps_ready} of ${total} curated map(s) have dataset issues`;
+    }
+
+    function renderDatasetReadinessReport(report) {
+        if (!datasetReadinessSummary || !datasetReadinessIssues) return;
+        renderDatasetReadinessLabel(report);
+
+        if (datasetReadinessIcon) {
+            datasetReadinessIcon.textContent = report && report.ready ? "✓" : "!";
+            datasetReadinessIcon.className = report && report.ready
+                ? "readiness-icon is-ready"
+                : "readiness-icon has-issues";
+        }
+
+        const total = (report && report.maps_total) || 0;
+        const sections = (report && report.sections_total) || 0;
+        const readyMaps = (report && report.maps_ready) || 0;
+        const readySections = (report && report.sections_ready) || 0;
+        const scope = datasetScopeTheme() || "all themes";
+
+        const stats = [
+            ["Maps ready", `${readyMaps} / ${total}`],
+            ["Map Sections ready", `${readySections} / ${sections}`],
+            ["Scope", scope],
+        ];
+        datasetReadinessSummary.innerHTML = stats
+            .map(([label, value]) => `<div class="readiness-stat"><span class="readiness-stat-label">${escapeHtml(label)}</span><span class="readiness-stat-value mono">${escapeHtml(value)}</span></div>`)
+            .join("");
+
+        const flagged = ((report && report.maps) || []).filter(map => (map.issues || []).length > 0);
+        if (flagged.length === 0) {
+            datasetReadinessIssues.innerHTML = '<div class="readiness-clean">No issues: every curated map in scope exports clean 16×16 Map Section samples.</div>';
+            return;
+        }
+
+        datasetReadinessIssues.innerHTML = flagged
+            .map(map => {
+                const rows = map.issues
+                    .map(issue => `<li><span class="readiness-issue-code mono">${escapeHtml(datasetIssueLabel(issue.code))}</span> ${escapeHtml(issue.detail)}</li>`)
+                    .join("");
+                const counts = `${map.ready_sections} / ${map.sections} sections ready`;
+                return `<div class="readiness-map-issue"><div class="readiness-map-head"><span class="readiness-map-id mono">${escapeHtml(map.id)}</span><span class="readiness-map-theme">${escapeHtml(map.theme)}</span><span class="readiness-map-count mono">${escapeHtml(counts)}</span></div><ul class="readiness-issue-list">${rows}</ul></div>`;
+            })
+            .join("");
+    }
+
+    async function fetchDatasetReadiness() {
+        if (state.isAuditingDataset) return;
+        state.isAuditingDataset = true;
+        if (btnDatasetReadiness) btnDatasetReadiness.disabled = true;
+        try {
+            const res = await fetch(`/api/dataset/readiness${datasetScopeQuery()}`);
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                throw new Error(errData.error || `HTTP ${res.status}`);
+            }
+            renderDatasetReadinessReport(await res.json());
+        } catch (err) {
+            showToast(`Dataset audit failed: ${err.message}`, "danger");
+        } finally {
+            state.isAuditingDataset = false;
+            if (btnDatasetReadiness) btnDatasetReadiness.disabled = false;
+        }
+    }
+
+    function openDatasetReadinessModal() {
+        stopPanLoop();
+        stopZoomLoop();
+        state.datasetReadinessModalOpen = true;
+        datasetReadinessModal?.classList.remove("hidden");
+        fetchDatasetReadiness();
+    }
+
+    function closeDatasetReadinessModal() {
+        stopPanLoop();
+        stopZoomLoop();
+        state.datasetReadinessModalOpen = false;
+        datasetReadinessModal?.classList.add("hidden");
+    }
+
+    function setupDatasetReadinessControls() {
+        btnDatasetReadiness?.addEventListener("click", () => openDatasetReadinessModal());
+        document.getElementById("btn-close-readiness-modal")?.addEventListener("click", () => closeDatasetReadinessModal());
+        document.getElementById("btn-dismiss-readiness")?.addEventListener("click", () => closeDatasetReadinessModal());
+        document.getElementById("btn-refresh-readiness")?.addEventListener("click", () => fetchDatasetReadiness());
+        datasetReadinessModal?.addEventListener("click", (e) => {
+            if (e.target === datasetReadinessModal) closeDatasetReadinessModal();
+        });
     }
 
     // ==========================================================================
@@ -6887,6 +7019,7 @@
         });
         setupDrawerControls();
         setupStorageControls();
+        setupDatasetReadinessControls();
         setupLibraryControls();
         setupFullscreenControls();
         setupInspectorDrawerControls();
@@ -6947,6 +7080,11 @@
             }
             if (state.labelingMode) {
                 exitLabelingMode();
+                e.preventDefault();
+                return;
+            }
+            if (state.datasetReadinessModalOpen) {
+                closeDatasetReadinessModal();
                 e.preventDefault();
                 return;
             }

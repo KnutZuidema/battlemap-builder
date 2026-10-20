@@ -1,5 +1,5 @@
 use crate::domain::{
-    BenchmarkMetadata, Candidate, CuratedMap, CuratedMapUpdate, Layer,
+    BenchmarkMetadata, Candidate, CuratedMap, CuratedMapUpdate, DatasetReadiness, Layer,
     PurgeStagingResult, RedditSidecarMetadata, RejectionReason, StorageStats, Theme,
 };
 use thiserror::Error;
@@ -161,6 +161,19 @@ pub trait StorageRepository: CurationStore + Send + Sync {
         let _ = ids;
         Err(StorageError::InvalidData(
             "export_selected_lora_dataset not implemented".into(),
+        ))
+    }
+
+    /// Audit the curated store against the LoRA dataset export contract: every 16×16 Map Section
+    /// must resolve to an exact, unrescaled crop and carry a perspective-neutral `Physical
+    /// Description`, so `lora-dataset.zip` ships only samples a `Training Run` can consume.
+    fn audit_dataset_readiness(
+        &self,
+        theme: Option<&Theme>,
+    ) -> Result<DatasetReadiness, StorageError> {
+        let _ = theme;
+        Err(StorageError::InvalidData(
+            "audit_dataset_readiness not implemented".into(),
         ))
     }
 
@@ -418,6 +431,13 @@ impl<T: ?Sized + StorageRepository> StorageRepository for std::sync::Arc<T> {
     }
     fn export_selected_lora_dataset(&self, ids: &[String]) -> Result<Vec<u8>, StorageError> {
         (**self).export_selected_lora_dataset(ids)
+    }
+
+    fn audit_dataset_readiness(
+        &self,
+        theme: Option<&Theme>,
+    ) -> Result<DatasetReadiness, StorageError> {
+        (**self).audit_dataset_readiness(theme)
     }
 
     fn get_curated_layer_image_by_id(

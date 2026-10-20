@@ -34,6 +34,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/dataset/export", get(get_dataset_export))
         .route("/api/dataset/export-selected", post(post_dataset_export_selected))
+        .route("/api/dataset/readiness", get(get_dataset_readiness))
         .route("/api/image/staging/{id}", get(get_staging_image))
         .route("/api/image/staging/{id}/{layer_index}", get(get_staging_layer_image))
         .route("/api/image/curated/{id}", get(get_curated_image_by_id))

@@ -107,7 +107,7 @@ pub async fn describe_map_sections(
         |col, row| {
             section_descriptions
                 .remove(&(col, row))
-                .unwrap_or_else(|| fallback())
+                .unwrap_or_else(&fallback)
         },
     )
 }

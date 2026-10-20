@@ -1391,7 +1391,7 @@ impl FilesystemStorage {
                     .unwrap_or("png");
                 let layer_filename = format!("0.{ext}");
                 let rel_filename = image_path
-                    .strip_prefix(&self.staging_dir())
+                    .strip_prefix(self.staging_dir())
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|_| format!("{id}.{ext}"));
                 let cand = Candidate::new(

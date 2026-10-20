@@ -13,15 +13,30 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
-use curator::adapters::{FilesystemStorage, OpenRouterAdapter};
+use curator::adapters::{
+    FilesystemStorage, InMemoryBlobStorage, InMemoryCatalogRepository, OpenRouterAdapter,
+};
 use curator::domain::{
     BenchmarkArchetype, BenchmarkMetadata, GenerationRequest, ModelApiType,
     ALL_BENCHMARK_MODELS, MODEL_GEMINI_31_FLASH, MODEL_GEMINI_31_FLASH_LITE, MODEL_MUSE,
     MODEL_SEEDREAM_50_FLASH,
 };
+use curator::ports::blob_storage::BlobStorage;
+use curator::ports::catalog_repository::CatalogRepository;
 use curator::ports::model_engine::{ModelEngine, ModelEngineError};
 use curator::ports::storage::StorageRepository;
 use curator::services::BenchmarkService;
+
+/// Fresh in-memory catalog and blob ports for reference resolution under test.
+fn reference_ports() -> (
+    Arc<dyn CatalogRepository + Send + Sync>,
+    Arc<dyn BlobStorage + Send + Sync>,
+) {
+    (
+        Arc::new(InMemoryCatalogRepository::new()),
+        Arc::new(InMemoryBlobStorage::new()),
+    )
+}
 
 const TEST_PNG_BASE64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
@@ -283,7 +298,8 @@ async fn test_benchmark_persistence_to_staging_generated() {
 
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
-    let service = BenchmarkService::new(adapter, storage.clone());
+    let (catalog, blobs) = reference_ports();
+    let service = BenchmarkService::new(adapter, storage.clone(), catalog, blobs);
 
     // Run single benchmark with persistence
     let bench_result = service
@@ -346,7 +362,8 @@ async fn test_benchmark_suite_execution_and_persistence() {
 
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
-    let service = BenchmarkService::new(adapter, storage.clone());
+    let (catalog, blobs) = reference_ports();
+    let service = BenchmarkService::new(adapter, storage.clone(), catalog, blobs);
 
     let models = vec![MODEL_GEMINI_31_FLASH.to_string(), MODEL_MUSE.to_string()];
     let archetypes = [

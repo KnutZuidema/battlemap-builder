@@ -7,15 +7,30 @@ use serde_json::{json, Value};
 use tempfile::tempdir;
 use tower::ServiceExt;
 
-use curator::adapters::{FilesystemStorage, OpenRouterAdapter};
+use curator::adapters::{
+    FilesystemStorage, InMemoryBlobStorage, InMemoryCatalogRepository, OpenRouterAdapter,
+};
 use curator::api::{create_router, AppState, DescribeResponse, SuggestThemesResponse};
 use curator::domain::{
     Candidate, CandidateLayer, CuratedLayer, CuratedMap, CuratedMapUpdate, GridConfig, LayerRole,
     RejectionReason, Source, Theme,
 };
+use curator::ports::blob_storage::BlobStorage;
+use curator::ports::catalog_repository::CatalogRepository;
 use curator::ports::storage::StorageRepository;
 use async_trait::async_trait;
 use curator::services::description::{DescriptionError, DescriptionGenerator, DescriptionService};
+
+/// Fresh in-memory catalog and blob ports: these tests exercise curated and description routes.
+fn in_memory_ports() -> (
+    Arc<dyn CatalogRepository + Send + Sync>,
+    Arc<dyn BlobStorage + Send + Sync>,
+) {
+    (
+        Arc::new(InMemoryCatalogRepository::new()),
+        Arc::new(InMemoryBlobStorage::new()),
+    )
+}
 
 struct MockCuratedGen(Result<String, DescriptionError>);
 
@@ -43,12 +58,13 @@ fn create_test_png(width: u32, height: u32) -> Vec<u8> {
 fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
     let adapter = Arc::new(OpenRouterAdapter::with_config(
         "",
         "http://127.0.0.1:1".to_string(),
         1,
     ));
-    let state = AppState::new(storage.clone()).with_openrouter(adapter);
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter);
     let router = create_router(state);
     (router, storage, dir)
 }
@@ -523,10 +539,11 @@ async fn test_curated_describe_strictly_fails_when_unconfigured() {
 async fn test_curated_describe_never_sends_description_as_title_and_merges_tags() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
     let generator = Arc::new(RecordingDescriptionGen::new(Ok(
         "Rustic wooden tavern with roaring fireplace.".to_string(),
     )));
-    let state = AppState::new(storage.clone())
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
     let app = create_router(state);
 
@@ -570,10 +587,11 @@ async fn test_curated_describe_never_sends_description_as_title_and_merges_tags(
 async fn test_curated_describe_merges_requested_themes_and_tags() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
     let generator = Arc::new(RecordingDescriptionGen::new(Ok(
         "Merged description.".to_string(),
     )));
-    let state = AppState::new(storage.clone())
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
     let app = create_router(state);
 
@@ -616,9 +634,10 @@ async fn test_curated_describe_merges_requested_themes_and_tags() {
 async fn test_curated_describe_success_with_service() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
     let mock_desc = "Rustic wooden tavern with roaring fireplace and sturdy oak tables.";
     let mock_gen = Arc::new(MockCuratedGen(Ok(mock_desc.to_string())));
-    let state = AppState::new(storage.clone())
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(Some(mock_gen))));
     let app = create_router(state);
 
@@ -741,7 +760,8 @@ async fn test_get_curated_layer_image_by_id() {
 async fn test_patch_curated_regrid_strictly_fails_when_vision_unconfigured() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let state = AppState::new(storage.clone())
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(None)));
     let app = create_router(state);
 
@@ -778,10 +798,11 @@ async fn test_patch_curated_regrid_strictly_fails_when_vision_unconfigured() {
 async fn test_patch_curated_regrid_strictly_fails_when_vision_errors() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
     let generator = Arc::new(RecordingDescriptionGen::new(Err(
         DescriptionError::GenerationFailed("upstream 500".into()),
     )));
-    let state = AppState::new(storage.clone())
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
     let app = create_router(state);
 
@@ -811,9 +832,10 @@ async fn test_patch_curated_regrid_strictly_fails_when_vision_errors() {
 async fn test_patch_curated_regrid_persists_vision_description_without_description_title() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
     let generated = "Vision-generated subterranean vault with flooded channels";
     let generator = Arc::new(RecordingDescriptionGen::new(Ok(generated.to_string())));
-    let state = AppState::new(storage.clone())
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
     let app = create_router(state);
 

@@ -7,18 +7,32 @@ use serde_json::Value;
 use tempfile::tempdir;
 use tower::ServiceExt;
 
-use curator::adapters::FilesystemStorage;
+use curator::adapters::{FilesystemStorage, InMemoryBlobStorage, InMemoryCatalogRepository};
 use curator::api::{create_router, AppState};
 use curator::domain::{
     BenchmarkMetadata, Candidate, CuratedMap, PurgeStagingResult, RedditSidecarMetadata,
     RejectionReason, Source, StorageStats, Theme,
 };
+use curator::ports::blob_storage::BlobStorage;
+use curator::ports::catalog_repository::CatalogRepository;
 use curator::ports::storage::StorageRepository;
+
+/// Fresh in-memory catalog and blob ports: these tests exercise the storage management routes.
+fn in_memory_ports() -> (
+    Arc<dyn CatalogRepository + Send + Sync>,
+    Arc<dyn BlobStorage + Send + Sync>,
+) {
+    (
+        Arc::new(InMemoryCatalogRepository::new()),
+        Arc::new(InMemoryBlobStorage::new()),
+    )
+}
 
 fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let state = AppState::new(storage.clone());
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(storage.clone(), catalog, blobs);
     let router = create_router(state);
     (router, storage, dir)
 }

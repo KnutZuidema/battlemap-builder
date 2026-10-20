@@ -8,9 +8,14 @@ use tempfile::tempdir;
 use tower::ServiceExt;
 
 use async_trait::async_trait;
-use curator::adapters::{FileCostLedger, FilesystemStorage, OpenRouterAdapter};
+use curator::adapters::{
+    FileCostLedger, FilesystemBlobStorage, FilesystemCatalogRepository, FilesystemStorage,
+    OpenRouterAdapter,
+};
 use curator::api::{create_router, AppState, DescribeResponse, SuggestThemesResponse};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use curator::ports::blob_storage::BlobStorage;
+use curator::ports::catalog_repository::CatalogRepository;
 use curator::ports::cost_tracker::{CostTracker, GenerationCostRecord};
 use curator::domain::{
     Candidate, CandidateLayer, CuratedMap, GridConfig, HarvestedMedia, LayerRole, ParsedTags,
@@ -80,13 +85,28 @@ impl DescriptionGenerator for CapturingDescriptionGen {
     }
 }
 
+/// Filesystem-backed catalog and blob ports sharing `dir` with the legacy storage repository.
+fn filesystem_ports(
+    dir: &tempfile::TempDir,
+) -> (
+    Arc<dyn CatalogRepository + Send + Sync>,
+    Arc<dyn BlobStorage + Send + Sync>,
+) {
+    (
+        Arc::new(FilesystemCatalogRepository::new(dir.path())),
+        Arc::new(FilesystemBlobStorage::new(dir.path())),
+    )
+}
+
 fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = filesystem_ports(&dir);
     let desc_service = Arc::new(DescriptionService::new(Some(Arc::new(
         TaggedMockDescriptionGen,
     ))));
-    let state = AppState::new(storage.clone()).with_description_service(desc_service);
+    let state =
+        AppState::new(storage.clone(), catalog, blobs).with_description_service(desc_service);
     let router = create_router(state);
     (router, storage, dir)
 }
@@ -868,10 +888,11 @@ async fn test_api_harvest_reddit_json_response() {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = filesystem_ports(&dir);
     let harvester = Arc::new(MockHarvester {
         posts: vec![post_gridless, post_gridded],
     });
-    let state = AppState::with_harvester(storage.clone(), harvester);
+    let state = AppState::with_harvester(storage.clone(), harvester, catalog, blobs);
     let app = create_router(state);
 
     // 3. Post harvest request with gridless_only: true
@@ -949,8 +970,9 @@ async fn test_api_harvest_reddit_sse_streaming() {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = filesystem_ports(&dir);
     let harvester = Arc::new(MockHarvester { posts: vec![post] });
-    let state = AppState::with_harvester(storage.clone(), harvester);
+    let state = AppState::with_harvester(storage.clone(), harvester, catalog, blobs);
     let app = create_router(state);
 
     // 3. Post harvest request with Accept: text/event-stream
@@ -1007,9 +1029,10 @@ async fn test_api_harvest_reddit_sse_streaming() {
 async fn test_api_cost_stats_and_reset_session() {
     let dir = tempdir().expect("tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = filesystem_ports(&dir);
     let ledger_path = dir.path().join("telemetry").join("cost_ledger.json");
     let ledger = Arc::new(FileCostLedger::new(&ledger_path));
-    let state = AppState::with_cost_tracker(storage.clone(), ledger.clone());
+    let state = AppState::with_cost_tracker(storage.clone(), ledger.clone(), catalog, blobs);
     let app = create_router(state);
 
     // 1. Initial GET /api/cost/stats should be zeroed
@@ -1186,6 +1209,7 @@ fn setup_benchmark_test_app_with_recorder() -> (
 ) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = filesystem_ports(&dir);
     let ledger_path = dir.path().join("telemetry/cost_ledger.json");
     let ledger = Arc::new(FileCostLedger::new(&ledger_path));
     let (engine_struct, captured) = MockBenchmarkEngine::new();
@@ -1194,8 +1218,11 @@ fn setup_benchmark_test_app_with_recorder() -> (
         engine,
         storage.clone(),
         ledger.clone(),
+        catalog.clone(),
+        blobs.clone(),
     ));
-    let state = AppState::with_benchmark_service(storage.clone(), benchmark_service, ledger.clone());
+    let state =
+        AppState::with_benchmark_service(storage.clone(), benchmark_service, ledger.clone(), catalog, blobs);
     let router = create_router(state);
     (router, storage, ledger, dir, captured)
 }
@@ -2014,12 +2041,13 @@ async fn test_suggest_themes_with_model_and_caching() {
 
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = filesystem_ports(&dir);
     let adapter = Arc::new(OpenRouterAdapter::with_config(
         "test_key",
         format!("http://127.0.0.1:{}", addr.port()),
         2,
     ));
-    let state = AppState::new(storage.clone()).with_openrouter(adapter);
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter);
     let app = create_router(state);
 
     let cand = Candidate::with_now("cand_cached_1", Source::Manual, "cand_cached_1.png", (1024, 1024));
@@ -2100,12 +2128,13 @@ async fn test_suggest_themes_fallback_on_model_error() {
 
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = filesystem_ports(&dir);
     let adapter = Arc::new(OpenRouterAdapter::with_config(
         "test_key",
         format!("http://127.0.0.1:{}", addr.port()),
         2,
     ));
-    let state = AppState::new(storage.clone()).with_openrouter(adapter);
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter);
     let app = create_router(state);
 
     let cand = Candidate::with_now("cand_err_1", Source::Manual, "cand_err_1.png", (1024, 1024));
@@ -2148,12 +2177,13 @@ async fn test_suggest_themes_empty_candidate_id_returns_bad_request() {
 async fn test_describe_candidate_fallback_when_no_api_key() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = filesystem_ports(&dir);
     let adapter_no_key = Arc::new(OpenRouterAdapter::with_config(
         "",
         "http://127.0.0.1:1".to_string(),
         1,
     ));
-    let state = AppState::new(storage.clone()).with_openrouter(adapter_no_key);
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter_no_key);
     let app = create_router(state);
 
     let cand = Candidate::with_now(
@@ -2192,8 +2222,9 @@ async fn test_describe_candidate_fallback_when_no_api_key() {
 async fn test_describe_candidate_passes_candidate_title_and_merged_tags() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = filesystem_ports(&dir);
     let generator = Arc::new(CapturingDescriptionGen::default());
-    let state = AppState::new(storage.clone())
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
     state.theme_suggestions_cache.write().await.insert(
         "cand_desc_title".to_string(),
@@ -2244,9 +2275,10 @@ async fn test_describe_candidate_passes_candidate_title_and_merged_tags() {
 async fn test_describe_candidate_with_payload_themes_and_tags() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = filesystem_ports(&dir);
     let mock_desc = "Dark underground cave with sharp stalagmites and glowing crystals.";
     let mock_gen = Arc::new(MockDescriptionGen(Ok(mock_desc.to_string())));
-    let state = AppState::new(storage.clone())
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(Some(mock_gen))));
     let app = create_router(state);
 
@@ -2318,6 +2350,7 @@ async fn test_describe_candidate_with_mock_openrouter() {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = filesystem_ports(&dir);
     let cand = Candidate::with_now("cand_mock_ai", Source::Manual, "cand_mock_ai.png", (1024, 1024));
     storage.save_staging(&cand, &create_test_png()).unwrap();
 
@@ -2326,7 +2359,7 @@ async fn test_describe_candidate_with_mock_openrouter() {
         format!("http://127.0.0.1:{}", addr.port()),
         2,
     ));
-    let state = AppState::new(storage.clone()).with_openrouter(adapter);
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter);
     let app = create_router(state);
 
     let req = Request::builder()
@@ -2394,6 +2427,7 @@ async fn test_describe_candidate_sends_image_mime_for_path_shaped_filename() {
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = filesystem_ports(&dir);
     // An empty filename makes persistence assign the production `<id>/<layer>` shape.
     let cand = Candidate::with_now("cand_mock_path", Source::Reddit, "", (1024, 1024));
     storage.save_staging(&cand, &create_test_png()).unwrap();
@@ -2408,7 +2442,7 @@ async fn test_describe_candidate_sends_image_mime_for_path_shaped_filename() {
         format!("http://127.0.0.1:{}", addr.port()),
         2,
     ));
-    let state = AppState::new(storage.clone()).with_openrouter(adapter);
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter);
     let app = create_router(state);
 
     let req = Request::builder()
@@ -2461,7 +2495,8 @@ async fn test_describe_candidate_offline_fallback() {
         "http://127.0.0.1:1".to_string(),
         1,
     ));
-    let state1 = AppState::new(storage1).with_openrouter(adapter_no_key);
+    let (catalog1, blobs1) = filesystem_ports(&dir1);
+    let state1 = AppState::new(storage1, catalog1, blobs1).with_openrouter(adapter_no_key);
     let app1 = create_router(state1);
 
     let req1 = Request::builder()
@@ -2485,7 +2520,8 @@ async fn test_describe_candidate_offline_fallback() {
         "http://127.0.0.1:1".to_string(),
         1,
     ));
-    let state2 = AppState::new(storage2).with_openrouter(adapter_offline);
+    let (catalog2, blobs2) = filesystem_ports(&dir2);
+    let state2 = AppState::new(storage2, catalog2, blobs2).with_openrouter(adapter_offline);
     let app2 = create_router(state2);
 
     let req2 = Request::builder()
@@ -2607,12 +2643,13 @@ async fn test_curate_candidate_with_explicit_description_persistence() {
 async fn test_curate_candidate_auto_description_fallback_offline() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = filesystem_ports(&dir);
     let adapter = Arc::new(OpenRouterAdapter::with_config(
         "sk-test-key",
         "http://127.0.0.1:1".to_string(),
         1,
     ));
-    let state = AppState::new(storage.clone()).with_openrouter(adapter);
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter);
     let app = create_router(state);
     let cand = Candidate::with_now(
         "cand_curate_auto_offline",
@@ -2759,12 +2796,13 @@ async fn test_api_post_curate_delegates_to_curation_workflow_and_zero_store_scan
 
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = filesystem_ports(&dir);
     let spy = Arc::new(SpyWorkflow {
         curate_calls: AtomicUsize::new(0),
         reject_calls: AtomicUsize::new(0),
     });
 
-    let state = AppState::new(storage.clone()).with_curation_service(spy.clone());
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_curation_service(spy.clone());
     let app = create_router(state);
 
     let curate_payload = json!({

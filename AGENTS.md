@@ -113,6 +113,10 @@ Always execute commands from the project root directory `/home/knut/projects/Bat
 |**Run Curator Service**|`cargo run --manifest-path curator/Cargo.toml`|Starts Curator Axum web service on port `3002`|
 |**Deploy Curator Locally**|`just curator-deploy`|Publishes the arm64 Curator image for the current commit to `ghcr.io/knutzuidema/curator:<commit>` and rolls the cluster onto that exact tag; `just curator-publish` publishes without rolling, `just curator-rollout <tag>` rolls an already published tag (see `deploy/curator/README.md` §4.3)|
 
+### Curator build cache (machine-local, one per worktree)
+
+Curator compiles share a single cargo target dir across every worktree of this repo (`~/.omp/targets/curator`, override with `CURATOR_SHARED_TARGET_DIR`). `.githooks/post-checkout` writes an untracked `.cargo/config.toml` pointing there whenever that shared directory exists, so a new worktree reuses the compiled dependency tree instead of rebuilding it and keeping its own multi-GB `curator/target`. Machines without the shared directory, and CI, are unaffected; delete `.cargo/config.toml` to opt a checkout out. The primary checkout is not created by `git worktree add` — the next `git checkout` provisions it, or run `sh .githooks/post-checkout` once by hand.
+
 ---
 
 ## 6. Core Features & Implementation Details

@@ -1002,18 +1002,22 @@ impl FilesystemStorage {
     /// Idempotent startup migration that converts legacy flat staging/curated files
     /// (including sibling `{post_id}_0`, `{post_id}_1` Reddit items) into uniform `<id>/`
     /// bundle directories containing `manifest.json` and indexed layer images.
+    ///
+    /// Legacy staging subfolders (`staging/reddit/`, `staging/generated/`) are flattened as well:
+    /// every bundle directory found there is moved up to `staging/{id}/`, so the flat-only
+    /// catalog repositories see candidates staged before the port cutover, and the now-redundant
+    /// subfolders are removed.
     #[allow(clippy::type_complexity)]
     pub fn migrate_legacy_storage(&self) -> Result<(), StorageError> {
         let staging = self.staging_dir();
         if staging.is_dir() {
             self.migrate_staging_directory(&staging)?;
-            let reddit_dir = staging.join("reddit");
-            if reddit_dir.is_dir() {
-                self.migrate_staging_directory(&reddit_dir)?;
-            }
-            let generated_dir = staging.join("generated");
-            if generated_dir.is_dir() {
-                self.migrate_staging_directory(&generated_dir)?;
+            for subfolder in ["reddit", "generated"] {
+                let legacy_dir = staging.join(subfolder);
+                if legacy_dir.is_dir() {
+                    self.migrate_staging_directory(&legacy_dir)?;
+                    self.flatten_staging_subfolder_bundles(&legacy_dir)?;
+                }
             }
         }
 
@@ -1065,6 +1069,39 @@ impl FilesystemStorage {
             }
         }
 
+        Ok(())
+    }
+
+    /// Moves every legacy bundle directory (`<id>/manifest.json`) inside a staging subfolder up to
+    /// the flat `staging/<id>/` layout read by the catalog repositories, then drops the subfolder
+    /// once it holds no bundle directories.
+    ///
+    /// Idempotent and never clobbering: a bundle whose flat counterpart already exists is left
+    /// untouched instead of being merged into it, so nothing is ever half-moved.
+    fn flatten_staging_subfolder_bundles(&self, legacy_dir: &Path) -> Result<(), StorageError> {
+        let staging = self.staging_dir();
+        let entries: Vec<PathBuf> = std::fs::read_dir(legacy_dir)?
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+
+        for source in entries {
+            if !source.is_dir() || !source.join("manifest.json").is_file() {
+                continue;
+            }
+            let id = match source.file_name().and_then(|name| name.to_str()) {
+                Some(id) if !id.starts_with('.') => id.to_string(),
+                _ => continue,
+            };
+            let target = staging.join(&id);
+            if target.exists() {
+                continue;
+            }
+            Self::atomic_move(&source, &target)?;
+        }
+
+        // Only succeeds while the subfolder holds no bundles (moved or not); leftovers keep it.
+        let _ = std::fs::remove_dir(legacy_dir);
         Ok(())
     }
 
@@ -4358,17 +4395,16 @@ mod tests {
         let storage = FilesystemStorage::new(dir.path());
 
         // Verify flat files have been removed
-        assert!(!staging_reddit.join("legacy_post_0.png").exists());
-        assert!(!staging_reddit.join("legacy_post_0.json").exists());
-        assert!(!staging_reddit.join("legacy_post_1.png").exists());
-        assert!(!staging_reddit.join("legacy_post_1.json").exists());
         assert!(!staging_root.join("standalone_map.png").exists());
         assert!(!staging_root.join("standalone_map.json").exists());
+        // The legacy staging/reddit/ subfolder is dropped once its bundles move up to staging/
+        assert!(!staging_reddit.exists());
         assert!(!curated_dungeon.join("legacy_dungeon_flat.png").exists());
         assert!(!curated_dungeon.join("legacy_dungeon_flat.json").exists());
 
-        // Verify Reddit sibling files were regrouped into uniform bundle directory: staging/reddit/legacy_post/
-        let reddit_bundle = staging_reddit.join("legacy_post");
+        // Verify Reddit sibling files were regrouped into the uniform bundle directory
+        // staging/legacy_post/ (flattened out of the legacy staging/reddit/ subfolder)
+        let reddit_bundle = staging_root.join("legacy_post");
         assert!(reddit_bundle.is_dir());
         assert!(reddit_bundle.join("manifest.json").is_file());
         assert_eq!(

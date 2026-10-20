@@ -43,6 +43,8 @@
         drawerOpen: false,
         isSubmitting: false,
         isHarvesting: false,
+        // Candidate ids whose curation request is still in flight server-side.
+        pendingCurationIds: new Set(),
 
         // Benchmark Drawer & Budget Guardrails
         benchmarkDrawerOpen: false,
@@ -997,7 +999,11 @@
                 throw new Error(`HTTP ${res.status}`);
             }
             const data = await res.json();
-            state.candidates = Array.isArray(data) ? data : [];
+            // A candidate whose curation request is still in flight is already gone from the
+            // reviewer's local queue; do not resurrect it from the server's staging listing.
+            state.candidates = (Array.isArray(data) ? data : []).filter(
+                (c) => !state.pendingCurationIds.has(c.id)
+            );
 
             if (state.candidates.length > 0) {
                 loadCandidate(0);
@@ -2365,7 +2371,15 @@
         }
     }
 
-    async function submitDecisionCuration() {
+    /**
+     * Submits the curate decision without blocking the triage loop.
+     *
+     * The server finishes the curation — strict map-level description generation included —
+     * after this function returns, so the queue advances immediately and the outcome arrives
+     * as a toast once the response lands. A failed curation puts the candidate back into the
+     * local queue: nothing was committed, so it is still listed in staging.
+     */
+    function submitDecisionCuration() {
         if (decisionState.acceptedTags.length === 0) {
             triggerDecisionShake();
             return;
@@ -2378,51 +2392,71 @@
         const descriptionValue = decisionDescriptionInput ? decisionDescriptionInput.value.trim() : "";
         closeCurateDecisionModal();
 
-        state.isSubmitting = true;
-        btnCurate.disabled = true;
+        const payload = {
+            id: candidate.id,
+            tags: acceptedTags,
+            layers: candidate.layers && candidate.layers.length > 0 ? candidate.layers : undefined,
+            description: descriptionValue || undefined,
+        };
 
-        try {
-            const payload = {
-                id: candidate.id,
-                tags: acceptedTags,
-                layers: candidate.layers && candidate.layers.length > 0 ? candidate.layers : undefined,
-                description: descriptionValue || undefined,
-            };
-            const res = await fetch("/api/curate", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
+        // Optimistically drop the candidate from the local queue and memory cache, then move on:
+        // description generation must never stall the reviewer.
+        const removedIndex = state.currentIndex;
+        state.imageCache.delete(candidate.id);
+        if (candidate.layers) {
+            candidate.layers.forEach((_, idx) => {
+                state.imageCache.delete(`${candidate.id}_layer_${idx}`);
             });
-
-            if (!res.ok) {
-                const errJson = await res.json().catch(() => ({}));
-                throw new Error(errJson.message || `HTTP ${res.status}`);
-            }
-
-            showToast(`Candidate #${candidate.id} curated`, "success");
-
-            // Remove curated item from local queue and memory cache
-            state.imageCache.delete(candidate.id);
-            if (candidate.layers) {
-                candidate.layers.forEach((_, idx) => {
-                    state.imageCache.delete(`${candidate.id}_layer_${idx}`);
-                });
-            }
-            state.candidates.splice(state.currentIndex, 1);
-
-            // Maintain index within remaining bounds
-            if (state.currentIndex >= state.candidates.length) {
-                state.currentIndex = state.candidates.length - 1;
-            }
-
-            loadCandidate(state.currentIndex);
-            fetchStatus();
-        } catch (err) {
-            showToast(`Curate failed: ${err.message}`, "danger");
-        } finally {
-            state.isSubmitting = false;
-            btnCurate.disabled = false;
         }
+        state.candidates.splice(removedIndex, 1);
+
+        // Maintain index within remaining bounds
+        if (state.currentIndex >= state.candidates.length) {
+            state.currentIndex = state.candidates.length - 1;
+        }
+
+        loadCandidate(state.currentIndex);
+        state.pendingCurationIds.add(candidate.id);
+
+        fetch("/api/curate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        })
+            .then(async (res) => {
+                if (!res.ok) {
+                    const errJson = await res.json().catch(() => ({}));
+                    throw new Error(errJson.error || errJson.message || `HTTP ${res.status}`);
+                }
+                showToast(`Candidate #${candidate.id} curated`, "success");
+            })
+            .catch((err) => {
+                restoreUncuratedCandidate(candidate, removedIndex);
+                showToast(`Curate failed for #${candidate.id}: ${err.message}`, "danger");
+            })
+            .finally(() => {
+                state.pendingCurationIds.delete(candidate.id);
+                fetchStatus();
+            });
+    }
+
+    /**
+     * Puts a candidate whose curation request failed back into the local review queue at the
+     * position it was curated from. The candidate is still present in staging, so without this
+     * the reviewer's queue would silently disagree with the server.
+     */
+    function restoreUncuratedCandidate(candidate, removedIndex) {
+        if (state.candidates.some((c) => c.id === candidate.id)) {
+            return; // Queue was refetched meanwhile and already lists the candidate.
+        }
+        const insertAt = Math.min(Math.max(removedIndex, 0), state.candidates.length);
+        state.candidates.splice(insertAt, 0, candidate);
+        if (state.currentIndex < 0) {
+            state.currentIndex = insertAt;
+        } else if (state.currentIndex >= insertAt) {
+            state.currentIndex += 1;
+        }
+        loadCandidate(state.currentIndex);
     }
 
     async function curateCurrentCandidate() {

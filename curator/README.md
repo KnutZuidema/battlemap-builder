@@ -131,17 +131,14 @@ While `#curate-decision-modal` is active:
 
 ### 2.5. Submission & State Handling
 
-Upon completion, `submitDecisionCuration()` dispatches `POST /api/curate`:
+Upon completion, `submitDecisionCuration()` dispatches `POST /api/curate` **without awaiting the response**, so the triage loop never stalls on vision description generation:
 - **Payload**: `{ id: candidate.id, tags: acceptedTags, description: generatedDescription, layers: candidate.layers }` (tags-only; the legacy `themes` field is still accepted for compatibility but is never sent by the UI).
-- **On Success**:
-  - Persists `description` to `manifest.json` and primary layer caption.
-  - Removes the candidate from staging queue and local memory image cache.
-  - Updates staging and curated count indicators via `/api/status`.
-  - Loads the next candidate in sequence.
-  - Closes the decision modal.
-- **On Error**:
-  - Displays a danger notification toast.
-  - Preserves the candidate in the staging queue without data loss.
+- **Optimistic advance**: the decision modal closes and the candidate is dropped from the local queue and the in-memory image cache *before* the request is sent; the next candidate loads immediately and the id is recorded in `state.pendingCurationIds`, so a staging refetch (harvest completion, manual refresh) cannot resurrect an in-flight candidate.
+- **On Success** (2xx response received later): success toast `Candidate #<id> curated`, and staging/curated counts are refreshed via `/api/status`.
+- **On Error** (non-2xx response or network failure): `restoreUncuratedCandidate()` puts the candidate back into the local queue at the position it was curated from, and a danger toast reports `Curate failed for #<id>: <server error>`.
+  - Error bodies are `{ "error": "<message>" }`; the toast surfaces that message instead of a bare status code.
+  - No data is lost: nothing was committed, and the candidate is still listed in staging.
+- **Server-side caveat**: `POST /api/curate` still generates descriptions to completion before responding — the strict map-level path (ADR-0005) and the atomic commit are unchanged. The UI merely stops waiting for it, so refreshing or closing the page mid-flight aborts the request and leaves the candidate in staging.
 ---
 
 ## 3. Dynamic Themes & Star Rating Removal

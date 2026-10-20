@@ -107,11 +107,20 @@ pub fn detect_image_mime(bytes: &[u8], filename: Option<&str>) -> &'static str {
     "image/png"
 }
 
-/// Resolves an image MIME type given a MIME string, filename, or raw magic bytes.
+/// Resolves an image MIME type given a MIME string, a filename or stored relative path,
+/// or raw magic bytes.
+///
+/// Only an actual `image/*` MIME type is taken verbatim. Stored candidates carry a relative
+/// path such as `1x93tdb_1/0.png`, which merely contains a slash but is a filename: taking it
+/// verbatim produces `data:1x93tdb_1/0.png;base64,…` and upstream providers reject the request.
+/// Those values are resolved by magic bytes, then by extension.
 pub fn resolve_mime_type(mime_or_filename: &str, bytes: &[u8]) -> String {
     let trimmed = mime_or_filename.trim();
-    if trimmed.contains('/') {
-        return trimmed.to_string();
+    let lowered = trimmed.to_ascii_lowercase();
+    if let Some(subtype) = lowered.strip_prefix("image/") {
+        if !subtype.is_empty() && !subtype.contains('/') {
+            return lowered;
+        }
     }
     detect_image_mime(bytes, Some(trimmed)).to_string()
 }
@@ -192,9 +201,18 @@ mod tests {
     async fn test_resolve_mime_type() {
         assert_eq!(resolve_mime_type("image/jpeg", b""), "image/jpeg");
         assert_eq!(resolve_mime_type("image/webp", b""), "image/webp");
+        assert_eq!(resolve_mime_type("IMAGE/PNG", b""), "image/png");
         assert_eq!(resolve_mime_type("foo.jpg", b""), "image/jpeg");
         assert_eq!(resolve_mime_type("foo.png", b""), "image/png");
         assert_eq!(resolve_mime_type("unknown", b"\x89PNG\r\n\x1a\n"), "image/png");
         assert_eq!(resolve_mime_type("unknown", b"\xFF\xD8\xFF"), "image/jpeg");
+        // Stored candidates pass a relative path: it contains a slash but is not a MIME type.
+        assert_eq!(resolve_mime_type("1x93tdb_1/0.png", b""), "image/png");
+        assert_eq!(resolve_mime_type("staging/1x93tdb_1/0.jpg", b""), "image/jpeg");
+        assert_eq!(
+            resolve_mime_type("1x93tdb_1/0.png", b"\xFF\xD8\xFF"),
+            "image/jpeg",
+            "magic bytes stay authoritative for path-shaped filenames"
+        );
     }
 }

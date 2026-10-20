@@ -2357,6 +2357,84 @@ async fn test_describe_candidate_with_mock_openrouter() {
     server_task.abort();
 }
 
+/// Stored candidates carry a relative path (`<id>/0.png`) as their filename. Passing that path
+/// straight through as the data-URL MIME type makes upstream providers reject the request with
+/// `mimeType parameter with value cand_mock_path/0.png, which is not supported` (502 Bad Gateway).
+#[tokio::test]
+async fn test_describe_candidate_sends_image_mime_for_path_shaped_filename() {
+    use axum::routing::post;
+    use tokio::net::TcpListener;
+
+    let recorded_request = Arc::new(std::sync::Mutex::new(None));
+    let recorded_req_clone = recorded_request.clone();
+
+    let mock_app = axum::Router::new().route(
+        "/chat/completions",
+        post(move |axum::Json(body): axum::Json<Value>| {
+            *recorded_req_clone.lock().unwrap() = Some(body.clone());
+            async move {
+                axum::Json(json!({
+                    "id": "gen-desc-path",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "Flooded crypt with shattered flagstones and toppled pillars."
+                        }
+                    }]
+                }))
+            }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, mock_app).await.unwrap();
+    });
+
+    let dir = tempdir().unwrap();
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    // An empty filename makes persistence assign the production `<id>/<layer>` shape.
+    let cand = Candidate::with_now("cand_mock_path", Source::Reddit, "", (1024, 1024));
+    storage.save_staging(&cand, &create_test_png()).unwrap();
+    assert_eq!(
+        storage.get_staging_candidate("cand_mock_path").unwrap().resolved_filename(),
+        "cand_mock_path/0.png",
+        "regression precondition: stored filename is a relative path, not a MIME type"
+    );
+
+    let adapter = Arc::new(OpenRouterAdapter::with_config(
+        "sk-test-key",
+        format!("http://127.0.0.1:{}", addr.port()),
+        2,
+    ));
+    let state = AppState::new(storage.clone()).with_openrouter(adapter);
+    let app = create_router(state);
+
+    let req = Request::builder()
+        .uri("/api/staging/cand_mock_path/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "tags": ["crypt"] }).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let recorded = recorded_request.lock().unwrap();
+    let req_body = recorded.as_ref().expect("Mock OpenRouter should have received a request");
+    let image_url = req_body["messages"][1]["content"][1]["image_url"]["url"]
+        .as_str()
+        .expect("describe request must attach the candidate image");
+    assert!(
+        image_url.starts_with("data:image/png;base64,"),
+        "image data URL must declare a real image MIME type, got: {}",
+        &image_url[..image_url.find(',').unwrap_or(image_url.len()).min(64)]
+    );
+
+    server_task.abort();
+}
+
 #[tokio::test]
 async fn test_describe_candidate_offline_fallback() {
     let cand = Candidate::with_now(

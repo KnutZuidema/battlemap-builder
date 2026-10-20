@@ -177,14 +177,12 @@ fn parse_curated_filename(file: &str) -> Option<(usize, LayerRole, Option<i8>)> 
             if let Some(level) = slug.strip_prefix("upper_") {
                 let level = parse_canonical_usize(level)?;
                 (LayerRole::UpperFloor, Some(i8::try_from(level).ok()?))
-            } else if let Some(level) = slug.strip_prefix("basement_") {
-                let level = parse_canonical_usize(level)?;
+            } else {
+                let level = parse_canonical_usize(slug.strip_prefix("basement_")?)?;
                 (
                     LayerRole::Basement,
                     Some(i8::try_from(level).ok()?.checked_neg()?),
                 )
-            } else {
-                return None;
             }
         }
     };

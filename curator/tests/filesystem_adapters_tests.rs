@@ -163,12 +163,17 @@ async fn blob_dir_prefixes_do_not_match_siblings() {
         .unwrap();
     assert_eq!(all_curated, vec![map_1.clone(), map_2.clone()]);
 
-    // Non-directory prefixes match by path prefix.
-    let exports = storage
+    // Prefixes match on the canonical path: an exact key is its own prefix.
+    let exports = storage.list_prefix(&archive).await.unwrap();
+    assert_eq!(exports, vec![archive.clone()]);
+
+    // Prefixes are not matched against the archive name: `bat.zip` is not a prefix of
+    // `batch.zip`, so `ExportArchive { name: "bat" }` matches nothing.
+    let name_prefix = storage
         .list_prefix(&BlobKey::ExportArchive { name: "bat".into() })
         .await
         .unwrap();
-    assert_eq!(exports, vec![archive.clone()]);
+    assert!(name_prefix.is_empty());
 
     let missing = storage
         .list_prefix(&BlobKey::StagingDir { id: Some("absent".into()) })

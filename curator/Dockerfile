@@ -34,9 +34,13 @@ COPY curator/ ./curator/
 
 WORKDIR /app/curator
 
-# Build release binary with embedded assets (native compilation or cross-linking)
+# Build release binary with embedded assets (native compilation or cross-linking).
+# Cargo's target dir lives in a BuildKit cache mount as well: the compiled dependency
+# tree survives across builds (every worktree and every machine sharing the builder), so
+# a rebuild after a source change only recompiles the curator crate itself.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/curator/target \
     if [ "$TARGETARCH" = "arm64" ]; then \
         CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
         cargo build --release --target aarch64-unknown-linux-gnu --bin curator && \

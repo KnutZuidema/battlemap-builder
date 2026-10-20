@@ -2,8 +2,13 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use curator::adapters::{FileCostLedger, FilesystemStorage, RedditCrawler};
+use curator::adapters::{
+    FileCostLedger, FilesystemBlobStorage, FilesystemCatalogRepository, FilesystemStorage,
+    RedditCrawler,
+};
 use curator::api::{create_router, AppState};
+use curator::ports::blob_storage::BlobStorage;
+use curator::ports::catalog_repository::CatalogRepository;
 use curator::ports::storage::StorageRepository;
 use tracing_subscriber::EnvFilter;
 
@@ -99,6 +104,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!(error = %err, "Failed to migrate legacy storage on startup");
     }
     let storage: Arc<dyn StorageRepository + Send + Sync> = Arc::new(fs_storage);
+    let catalog: Arc<dyn CatalogRepository + Send + Sync> =
+        Arc::new(FilesystemCatalogRepository::new(&data_dir));
+    let blobs: Arc<dyn BlobStorage + Send + Sync> =
+        Arc::new(FilesystemBlobStorage::new(&data_dir));
 
     let cost_ledger_path = data_dir.join("telemetry/cost_ledger.json");
     tracing::info!(
@@ -123,7 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let state = AppState::with_all(storage, Arc::new(crawler), cost_tracker);
+    let state = AppState::with_all(storage, Arc::new(crawler), cost_tracker, catalog, blobs);
     let app = create_router(state);
 
     tracing::info!(

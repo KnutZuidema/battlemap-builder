@@ -231,7 +231,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
-    use crate::domain::{Candidate, CaptionGenerator, Source};
+    use crate::domain::{is_perspective_neutral, Candidate, Source};
     use crate::services::description::DescriptionGenerator;
 
     struct MockDescriptionGenerator {
@@ -563,7 +563,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_curate_multi_section_section_failure_uses_deterministic_fallback() {
+    async fn test_curate_multi_section_failure_reuses_neutral_map_description() {
         let (cand, ground_png) = two_section_candidate();
         let store = Arc::new(
             MockCurationStore::new(Some(cand)).with_layer_bytes(0, ground_png),
@@ -587,14 +587,23 @@ mod tests {
 
         assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
         assert_eq!(result.sections.len(), 2);
-        let expected =
-            CaptionGenerator::generate_with_theme_str("dungeon", &result.tags, None);
+        // A Map Section is a window onto the same encounter space, so a failed crop description
+        // reuses the map-level `Physical Description`. Synthesizing a caption here would bake the
+        // Trigger Phrase and camera directives into a `Physical Description` (ADR-0002, ADR-0007).
         assert!(
             result
                 .sections
                 .iter()
-                .all(|section| section.description == expected),
-            "Every failed section must use the deterministic caption fallback: {:?}",
+                .all(|section| section.description == "Map-level physical description"),
+            "Every failed section must reuse the neutral map-level description: {:?}",
+            result.sections
+        );
+        assert!(
+            result
+                .sections
+                .iter()
+                .all(|section| is_perspective_neutral(&section.description)),
+            "No persisted section description may carry caption or camera directives: {:?}",
             result.sections
         );
 

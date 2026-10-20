@@ -646,6 +646,26 @@ where
     sections
 }
 
+/// Builds the Map Section list for a curated map from its grid section origins, reusing the
+/// map-level `Physical Description` verbatim for every section.
+///
+/// This is the fallback used when a section's own crop description is unavailable (vision
+/// failure, missing crop, or a manifest persisted before sections existed). A Map Section is a
+/// window onto the same encounter space as the map, so the map-level description is an honest,
+/// perspective-neutral description for it; synthesizing a LoRA caption here instead would leak
+/// the `Trigger Phrase` and camera directives into a `Physical Description` (ADR-0002, ADR-0007).
+pub fn synthesize_map_sections(
+    origins: &[(u32, u32)],
+    map_description: Option<&str>,
+) -> Vec<MapSection> {
+    let description = map_description.unwrap_or_default().to_string();
+    synthesize_sections(
+        origins,
+        || description.clone(),
+        |_, _| description.clone(),
+    )
+}
+
 #[derive(Deserialize)]
 struct GridConfigHelper {
     #[serde(default = "default_cell_size_px")]

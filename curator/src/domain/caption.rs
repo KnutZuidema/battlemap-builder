@@ -6,8 +6,11 @@ use std::sync::LazyLock;
 
 use crate::domain::{Candidate, CuratedMap, Theme};
 
-/// Standard fixed prefix for Kohya / AI-Toolkit LoRA battlemap training.
-pub const LORA_CAPTION_PREFIX: &str =
+/// The Dungeon Forge `Trigger Phrase`: the fixed head of every exported LoRA caption.
+///
+/// Every caption is `"{TRIGGER_PHRASE}, {theme}, {details}"`, so the phrase is applied exactly
+/// once and only here — it is never stored inside a `Physical Description` (ADR-0002, ADR-0007).
+pub const TRIGGER_PHRASE: &str =
     "ttrpg battlemap, flat 2D plan view, perpendicular orthographic camera, poché cut walls, strictly gridless";
 
 /// Known architectural feature patterns to detect in candidate prompts, titles, or tags.
@@ -130,10 +133,10 @@ impl CaptionGenerator {
 
         // 5. Build final Kohya / AI-Toolkit caption
         if tokens.is_empty() {
-            format!("{LORA_CAPTION_PREFIX}, {theme_str}")
+            format!("{TRIGGER_PHRASE}, {theme_str}")
         } else {
             let details = tokens.join(", ");
-            format!("{LORA_CAPTION_PREFIX}, {theme_str}, {details}")
+            format!("{TRIGGER_PHRASE}, {theme_str}, {details}")
         }
     }
 
@@ -225,13 +228,29 @@ mod tests {
             Some("[50x50] Crystal Spire [No Grid]"),
         );
 
-        assert!(caption.starts_with(LORA_CAPTION_PREFIX));
+        assert!(caption.starts_with(TRIGGER_PHRASE));
         assert!(caption.contains("dungeon"));
         assert!(caption.contains("boss-room"));
         assert!(caption.contains("crystal spire"));
         // Redundant words should not appear
         assert!(!caption.contains("50x50"));
         assert!(!caption.contains("no grid"));
+    }
+
+    #[test]
+    fn test_caption_applies_trigger_phrase_exactly_once_for_legacy_descriptions() {
+        // Manifests curated before Map Section descriptions existed stored a whole caption in the
+        // section description field. Re-captioning such a legacy description must not duplicate
+        // the Trigger Phrase.
+        let legacy = format!("{TRIGGER_PHRASE}, dungeon, obsidian altar, iron braziers");
+        let caption =
+            CaptionGenerator::generate_with_description("dungeon", &["crypt".into()], Some(&legacy));
+
+        assert!(caption.starts_with(TRIGGER_PHRASE), "{caption}");
+        assert_eq!(caption.matches(TRIGGER_PHRASE).count(), 1, "{caption}");
+        // "orthographic" survives only inside the single applied Trigger Phrase.
+        assert_eq!(caption.matches("orthographic").count(), 1, "{caption}");
+        assert!(caption.contains("obsidian altar"), "{caption}");
     }
 
     #[test]
@@ -251,7 +270,7 @@ mod tests {
         let description = "Ancient crypt with carved limestone sarcophagus, burning braziers, and solid timber doors.";
         let caption = CaptionGenerator::generate_with_description("dungeon", &tags, Some(description));
 
-        assert!(caption.starts_with(LORA_CAPTION_PREFIX));
+        assert!(caption.starts_with(TRIGGER_PHRASE));
         assert!(caption.contains("dungeon"));
         assert!(caption.contains("boss-room"));
         assert!(caption.contains("sarcophagus"));
@@ -275,7 +294,7 @@ mod tests {
 
         // 1. Map without description and no candidate
         let cap_plain = CaptionGenerator::generate_for_curated(&map, None);
-        assert!(cap_plain.starts_with(LORA_CAPTION_PREFIX));
+        assert!(cap_plain.starts_with(TRIGGER_PHRASE));
         assert!(cap_plain.contains("dungeon"));
         assert!(cap_plain.contains("crypt"));
 

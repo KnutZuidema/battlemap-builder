@@ -93,6 +93,7 @@ Battlemap Builder/
     │   ├── services/          # Benchmark & Reference conditioning services
     │   └── ui/                # Embedded triage SPA assets (HTML, CSS, JS)
     ├── tests/                 # Integration tests (api_integration_tests.rs, etc.)
+    ├── tools/                 # Local dev tooling (lora-viewer.html: offline LoRA ZIP reviewer)
     └── README.md              # Curator documentation and runbook
 ```
 

@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tempfile::tempdir;
 use tokio::net::TcpListener;
 use async_trait::async_trait;
 use axum::routing::get;
@@ -8,14 +9,20 @@ use axum::Router;
 use chrono::Utc;
 
 use curator::adapters::reddit::BackoffConfig;
-use curator::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
+use curator::adapters::{
+    FilesystemBlobStorage, FilesystemCatalogRepository, FilesystemStorage, InMemoryBlobStorage,
+    InMemoryCatalogRepository,
+};
 use curator::domain::{
-    CuratedMap, HarvestedMedia, LayerRole, ParsedTags, RedditHarvestQuery, RedditPost,
+    CuratedMap, GridConfig, HarvestedMedia, LayerRole, ParsedTags, RedditHarvestQuery, RedditPost,
     RejectionReason, Source, Theme,
 };
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::{CatalogRepository, CandidateFilter};
 use curator::ports::harvester::{HarvesterError, RedditHarvester};
+use curator::ports::storage_error::StorageError;
+use curator::services::curation::{CurationService, CurationWorkflow};
+use curator::services::description::{DescriptionError, DescriptionGenerator, DescriptionService};
 use curator::services::{
     IngestionOutcome, IngestionProgress, RedditIngestionService, SkipReason,
 };
@@ -28,11 +35,109 @@ fn in_memory_ports() -> (Arc<InMemoryCatalogRepository>, Arc<InMemoryBlobStorage
     )
 }
 
+/// Constant description generator: curation needs *a* physical description, never a live model.
+struct ConstantDescriptionGen;
+
+#[async_trait]
+impl DescriptionGenerator for ConstantDescriptionGen {
+    async fn generate_description(
+        &self,
+        _image_bytes: &[u8],
+        _filename: Option<&str>,
+        _tags: &[String],
+        _title: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        Ok("Constant test description".to_string())
+    }
+}
+
+/// Production curation workflow backed by the filesystem store, which shares `dir` with the
+/// filesystem ports. Curation and rejection are only reproducible through the real store: the
+/// in-memory doubles implement neither `CurationStore` nor the staging-to-curated move.
+fn curation_service(dir: &tempfile::TempDir) -> CurationService {
+    CurationService::new(
+        Arc::new(FilesystemStorage::new(dir.path())),
+        Arc::new(DescriptionService::new(Some(Arc::new(
+            ConstantDescriptionGen,
+        )))),
+    )
+}
+
+/// Spawns a one-route mock image server serving `png_bytes` and returns the served URL.
+async fn spawn_image_server(path: &str, png_bytes: Vec<u8>) -> String {
+    let app = Router::new().route(
+        path,
+        get(move || {
+            let data = png_bytes.clone();
+            async move { (axum::http::StatusCode::OK, [("content-type", "image/png")], data) }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    format!("http://{addr}{path}")
+}
+
 /// Canonical staging layer address written by the ingestion pipeline.
 fn staging_layer(id: &str, index: usize) -> BlobKey {
     BlobKey::StagingLayer {
         id: id.to_string(),
         index,
+    }
+}
+
+/// [`BlobStorage`] double over an in-memory store whose writes fail from `fail_writes_from` on.
+struct FlakyBlobStorage {
+    inner: InMemoryBlobStorage,
+    fail_writes_from: AtomicUsize,
+    write_calls: AtomicUsize,
+}
+
+impl FlakyBlobStorage {
+    fn failing_from(write_index: usize) -> Self {
+        Self {
+            inner: InMemoryBlobStorage::new(),
+            fail_writes_from: AtomicUsize::new(write_index),
+            write_calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// Lets every later write through, simulating the transient failure going away.
+    fn stop_failing(&self) {
+        self.fail_writes_from.store(usize::MAX, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl BlobStorage for FlakyBlobStorage {
+    async fn read_blob(&self, key: &BlobKey) -> Result<Vec<u8>, StorageError> {
+        self.inner.read_blob(key).await
+    }
+
+    async fn write_blob(&self, key: &BlobKey, bytes: &[u8]) -> Result<(), StorageError> {
+        let call = self.write_calls.fetch_add(1, Ordering::SeqCst);
+        if call >= self.fail_writes_from.load(Ordering::SeqCst) {
+            return Err(StorageError::InvalidData(
+                "simulated blob write failure".into(),
+            ));
+        }
+        self.inner.write_blob(key, bytes).await
+    }
+
+    async fn delete_blob(&self, key: &BlobKey) -> Result<(), StorageError> {
+        self.inner.delete_blob(key).await
+    }
+
+    async fn exists_blob(&self, key: &BlobKey) -> Result<bool, StorageError> {
+        self.inner.exists_blob(key).await
+    }
+
+    async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
+        self.inner.list_prefix(prefix).await
     }
 }
 
@@ -58,13 +163,18 @@ impl RedditHarvester for MockHarvester {
     }
 }
 
-/// Helper to generate a minimal valid 1x1 PNG image.
-fn create_test_png() -> Vec<u8> {
-    let img = image::RgbaImage::new(1, 1);
+/// Helper to generate a valid PNG image of the given size.
+fn create_test_png_sized(width: u32, height: u32) -> Vec<u8> {
+    let img = image::RgbaImage::new(width, height);
     let mut bytes = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut bytes);
     img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
     bytes
+}
+
+/// Helper to generate a minimal valid 1x1 PNG image.
+fn create_test_png() -> Vec<u8> {
+    create_test_png_sized(1, 1)
 }
 
 #[tokio::test]
@@ -186,40 +296,27 @@ async fn test_ingestion_deduplication_against_curated() {
 
 #[tokio::test]
 async fn test_end_to_end_ingestion_download_and_staging_persistence() {
-    // 1. Spawn a mock image server
-    let png_bytes = create_test_png();
-    let png_clone = png_bytes.clone();
+    // 1. Spawn a mock image server serving a 512x512 map
+    let png_bytes = create_test_png_sized(512, 512);
+    let image_url = spawn_image_server("/image.png", png_bytes.clone()).await;
 
-    let app = Router::new().route(
-        "/image.png",
-        get(move || {
-            let data = png_clone.clone();
-            async move { (axum::http::StatusCode::OK, [("content-type", "image/png")], data) }
-        }),
-    );
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    let image_url = format!("http://{addr}/image.png");
-
-    // 2. Setup ports and harvester
-    let (catalog, blobs) = in_memory_ports();
+    // 2. Filesystem-backed ports sharing one root with the production curation store, so step 8
+    //    moves the candidate through the real staging-to-curated implementation
+    let dir = tempdir().unwrap();
+    let catalog = Arc::new(FilesystemCatalogRepository::new(dir.path()));
+    let blobs = Arc::new(FilesystemBlobStorage::new(dir.path()));
 
     let post = RedditPost {
         id: "harvest_1".into(),
         name: "t3_harvest_1".into(),
-        title: "[50x50] Crystal Spire [No Grid]".into(),
+        title: "[32x32] Crystal Spire [No Grid]".into(),
         author: "spire_architect".into(),
         permalink: "https://www.reddit.com/r/battlemaps/comments/harvest_1/crystal_spire/".into(),
         url: image_url.clone(),
         score: 320,
         created_utc: Utc::now(),
-        media: vec![HarvestedMedia::new(image_url.clone())],
-        tags: ParsedTags::parse_title("[50x50] Crystal Spire [No Grid]"),
+        media: vec![HarvestedMedia::new(image_url.clone()).with_dimensions(512, 512)],
+        tags: ParsedTags::parse_title("[32x32] Crystal Spire [No Grid]"),
     };
 
     let harvester = MockHarvester::new(vec![post.clone()]);
@@ -247,11 +344,15 @@ async fn test_end_to_end_ingestion_download_and_staging_persistence() {
     assert!(candidate.source_url.as_deref().unwrap().contains(&image_url));
     assert_eq!(
         candidate.title.as_deref(),
-        Some("[50x50] Crystal Spire [No Grid]")
+        Some("[32x32] Crystal Spire [No Grid]")
     );
     assert_eq!(candidate.author.as_deref(), Some("spire_architect"));
     assert_eq!(candidate.parsed_gridless, Some(true));
-    assert_eq!(candidate.parsed_dimensions, Some((50, 50)));
+    assert_eq!(candidate.parsed_dimensions, Some((32, 32)));
+    assert_eq!(candidate.dimensions, (512, 512));
+    // The first persistence derives the grid from the parsed lattice: the default 64 px grid would
+    // leave only 8x8 cells and fail curation's 16x16 gate.
+    assert_eq!(candidate.grid, GridConfig::new(16, 0, 0));
     assert!(candidate.created_at <= Utc::now());
 
     // 6. Verify the staging listing discovers the staged candidate
@@ -263,7 +364,7 @@ async fn test_end_to_end_ingestion_download_and_staging_persistence() {
     let cand = &staged_candidates[0];
     assert_eq!(cand.id, "harvest_1");
     assert_eq!(cand.source, Source::Reddit);
-    assert_eq!(cand.dimensions, (50, 50));
+    assert_eq!(cand.dimensions, (512, 512));
     assert_eq!(cand.parsed_gridless, Some(true));
     assert_eq!(cand.author.as_deref(), Some("spire_architect"));
 
@@ -273,31 +374,38 @@ async fn test_end_to_end_ingestion_download_and_staging_persistence() {
     assert_eq!(second_summary.downloaded, 0);
     assert_eq!(second_summary.skipped, 1);
 
-    // 8. Curate the candidate: the curated map replaces its staging artifacts
-    let curated = CuratedMap::with_now(
-        "harvest_1",
-        Theme::SciFi,
-        vec!["crystal".into(), "spire".into()],
-        (50, 50),
-    );
-    catalog.save_curated(&curated).await.unwrap();
-    catalog.delete_candidate("harvest_1").await.unwrap();
-    blobs.delete_blob(&image_key).await.unwrap();
+    // 8. Curate through the production workflow: the curated map replaces its staging artifacts
+    let curated = curation_service(&dir)
+        .curate(
+            "harvest_1",
+            vec!["sci-fi".into(), "crystal".into()],
+            None,
+            Some("Crystal spire chamber".into()),
+        )
+        .await
+        .unwrap();
 
+    assert_eq!(curated.id, "harvest_1");
+    assert_eq!(curated.grid, GridConfig::new(16, 0, 0));
+    assert_eq!(curated.dimensions, (512, 512));
     assert!(
         catalog.get_candidate("harvest_1").await.is_err(),
         "candidate moved out of staging"
     );
-    assert!(!blobs.exists_blob(&image_key).await.unwrap(), "layer moved from staging");
+    assert!(
+        !blobs.exists_blob(&image_key).await.unwrap(),
+        "layer moved out of staging"
+    );
     assert!(catalog.get_curated("harvest_1").await.is_ok());
 
+    // The curated Ground blob holds the bytes this ingestion downloaded, moved (not re-written)
+    // by the curation store.
     let curated_key = BlobKey::CuratedLayer {
         id: "harvest_1".into(),
         index: 0,
         role: LayerRole::Ground,
         elevation: Some(0),
     };
-    blobs.write_blob(&curated_key, &png_bytes).await.unwrap();
     let curated_bytes = blobs.read_blob(&curated_key).await.unwrap();
     assert_eq!(curated_bytes, png_bytes);
 
@@ -313,27 +421,158 @@ async fn test_end_to_end_ingestion_download_and_staging_persistence() {
 }
 
 #[tokio::test]
+async fn test_ingestion_auto_seeds_grid_from_parsed_lattice() {
+    // A 512x512 map titled `[32x32]` must stage with the 16 px grid its lattice implies: the
+    // default 64 px grid leaves only 8x8 cells and fails curation's 16x16 eligibility gate.
+    let png_bytes = create_test_png_sized(512, 512);
+    let image_url = spawn_image_server("/seeded.png", png_bytes).await;
+    let (catalog, blobs) = in_memory_ports();
+
+    let post = RedditPost {
+        id: "seeded_map".into(),
+        name: "t3_seeded_map".into(),
+        title: "[32x32] Sunken Vault".into(),
+        author: "vault_keeper".into(),
+        permalink: "/r/battlemaps/comments/seeded_map/".into(),
+        url: image_url.clone(),
+        score: 210,
+        created_utc: Utc::now(),
+        media: vec![HarvestedMedia::new(image_url.clone()).with_dimensions(512, 512)],
+        tags: ParsedTags::parse_title("[32x32] Sunken Vault"),
+    };
+
+    let harvester = MockHarvester::new(vec![post.clone()]);
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+
+    let summary = service.ingest_post(&post).await.unwrap();
+    assert_eq!(summary.downloaded, 1);
+
+    let candidate = catalog.get_candidate("seeded_map").await.unwrap();
+    assert_eq!(candidate.dimensions, (512, 512));
+    assert_eq!(candidate.grid, GridConfig::new(16, 0, 0));
+    assert!(candidate.grid.is_curation_eligible(512, 512));
+
+    // Only the first persistence seeds the grid: an explicitly set grid survives a later save
+    let mut regridded = candidate.clone();
+    regridded.grid = GridConfig::new(48, 3, 5);
+    catalog.save_candidate(&regridded).await.unwrap();
+    assert_eq!(
+        catalog.get_candidate("seeded_map").await.unwrap().grid,
+        GridConfig::new(48, 3, 5)
+    );
+}
+
+#[tokio::test]
+async fn test_ingestion_backfills_dimensions_from_downloaded_bytes() {
+    // A post whose payload carries neither media width/height nor parsed grid dimensions still
+    // persists the measured image size, otherwise curation's 16x16 gate sees a (0, 0) map.
+    let png_bytes = create_test_png_sized(320, 200);
+    let image_url = spawn_image_server("/unmeasured.png", png_bytes).await;
+    let (catalog, blobs) = in_memory_ports();
+
+    let post = RedditPost {
+        id: "unmeasured_map".into(),
+        name: "t3_unmeasured_map".into(),
+        title: "Ancient Ruins".into(),
+        author: "ruin_walker".into(),
+        permalink: "/r/battlemaps/comments/unmeasured_map/".into(),
+        url: image_url.clone(),
+        score: 90,
+        created_utc: Utc::now(),
+        media: vec![HarvestedMedia::new(image_url.clone())],
+        tags: ParsedTags::parse_title("Ancient Ruins"),
+    };
+
+    let harvester = MockHarvester::new(vec![post.clone()]);
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+
+    let summary = service.ingest_post(&post).await.unwrap();
+    assert_eq!(summary.downloaded, 1);
+
+    let candidate = catalog.get_candidate("unmeasured_map").await.unwrap();
+    assert_eq!(candidate.layers[0].dimensions, (320, 200));
+    assert_eq!(candidate.dimensions, (320, 200));
+    // Without a parsed lattice there is nothing to seed from: the default grid stands.
+    assert_eq!(candidate.grid, GridConfig::default());
+}
+
+#[tokio::test]
+async fn test_ingestion_blob_write_failure_leaves_no_candidate() {
+    // Layer blobs are written before the manifest: a candidate visible in the catalog without the
+    // images it describes would be skipped as already in staging on every later harvest.
+    let png_bytes = create_test_png();
+    let image_url = spawn_image_server("/flaky.png", png_bytes.clone()).await;
+
+    let catalog = Arc::new(InMemoryCatalogRepository::new());
+    let blobs = Arc::new(FlakyBlobStorage::failing_from(1));
+
+    let post = RedditPost {
+        id: "flaky_map".into(),
+        name: "t3_flaky_map".into(),
+        title: "[20x20] Flaky Keep [Gridless]".into(),
+        author: "keep_builder".into(),
+        permalink: "/r/battlemaps/comments/flaky_map/".into(),
+        url: image_url.clone(),
+        score: 140,
+        created_utc: Utc::now(),
+        media: vec![
+            HarvestedMedia::new(image_url.clone()),
+            HarvestedMedia::new(image_url.clone()),
+        ],
+        tags: ParsedTags::parse_title("[20x20] Flaky Keep [Gridless]"),
+    };
+
+    let harvester = MockHarvester::new(vec![post.clone()]);
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+
+    let summary = service
+        .ingest_posts(std::slice::from_ref(&post))
+        .await
+        .unwrap();
+    assert_eq!(summary.downloaded, 0);
+    assert_eq!(summary.skipped, 1);
+
+    // Layer 0 was already written when layer 1 failed: it is rolled back, and no manifest is left
+    assert!(
+        catalog.get_candidate("flaky_map").await.is_err(),
+        "no candidate without the layers it describes"
+    );
+    assert!(
+        !blobs
+            .exists_blob(&staging_layer("flaky_map", 0))
+            .await
+            .unwrap(),
+        "partially written blobs are rolled back"
+    );
+    assert!(!blobs
+        .exists_blob(&staging_layer("flaky_map", 1))
+        .await
+        .unwrap());
+
+    // The post stays re-ingestable instead of being skipped as already in staging
+    blobs.stop_failing();
+    let retry = service.ingest_post(&post).await.unwrap();
+    assert_eq!(retry.downloaded, 1);
+    assert!(catalog.get_candidate("flaky_map").await.is_ok());
+    assert_eq!(
+        blobs
+            .read_blob(&staging_layer("flaky_map", 1))
+            .await
+            .unwrap(),
+        png_bytes
+    );
+}
+
+#[tokio::test]
 async fn test_multi_image_gallery_ingestion() {
     let png_bytes = create_test_png();
-    let png_clone = png_bytes.clone();
+    let img_url = spawn_image_server("/gallery.png", png_bytes.clone()).await;
 
-    let app = Router::new().route(
-        "/gallery.png",
-        get(move || {
-            let data = png_clone.clone();
-            async move { (axum::http::StatusCode::OK, [("content-type", "image/png")], data) }
-        }),
-    );
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    let img_url = format!("http://{addr}/gallery.png");
-
-    let (catalog, blobs) = in_memory_ports();
+    // Filesystem-backed ports sharing one root with the production curation store, so the
+    // rejection below purges the staging bundle through the real implementation
+    let dir = tempdir().unwrap();
+    let catalog = Arc::new(FilesystemCatalogRepository::new(dir.path()));
+    let blobs = Arc::new(FilesystemBlobStorage::new(dir.path()));
 
     let gallery_post = RedditPost {
         id: "gallery_post".into(),
@@ -407,12 +646,26 @@ async fn test_multi_image_gallery_ingestion() {
         }
     );
 
-    // Reject gallery_post
-    catalog
-        .log_rejection("gallery_post", RejectionReason::BlurryLowRes, Some("Blurry variant"))
+    // Reject gallery_post through the production curation workflow: the staging bundle and its
+    // layer blobs are purged, not merely recorded in the rejection log
+    curation_service(&dir)
+        .reject(
+            "gallery_post",
+            RejectionReason::BlurryLowRes,
+            Some("Blurry variant"),
+        )
         .await
         .unwrap();
 
+    assert!(
+        !dir.path().join("staging").join("gallery_post").exists(),
+        "rejected candidate leaves no staging bundle behind"
+    );
+    assert!(catalog.get_candidate("gallery_post").await.is_err());
+    assert!(!blobs
+        .exists_blob(&staging_layer("gallery_post", 0))
+        .await
+        .unwrap());
     assert!(catalog.is_rejected("gallery_post").await.unwrap());
 
     // Subsequent harvest skips because rejected

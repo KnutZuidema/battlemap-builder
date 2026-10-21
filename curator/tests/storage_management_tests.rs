@@ -10,10 +10,10 @@ use tower::ServiceExt;
 use curator::adapters::{FilesystemStorage, InMemoryBlobStorage, InMemoryCatalogRepository};
 use curator::api::{create_router, AppState};
 use curator::domain::{
-    BenchmarkMetadata, Candidate, CuratedMap, PurgeStagingResult, RedditSidecarMetadata,
-    RejectionReason, Source, StorageStats, Theme,
+    BenchmarkMetadata, Candidate, CuratedLayer, CuratedMap, LayerRole, PurgeStagingResult,
+    RedditSidecarMetadata, RejectionReason, Source, StorageStats, Theme,
 };
-use curator::ports::blob_storage::BlobStorage;
+use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::CatalogRepository;
 use curator::ports::storage::StorageRepository;
 
@@ -28,13 +28,76 @@ fn in_memory_ports() -> (
     )
 }
 
-fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
+/// Router plus the filesystem repository and the in-memory catalog/blob ports it is paired with.
+///
+/// The storage maintenance routes were cut over to the ports, so a test targeting them seeds the
+/// ports; the filesystem repository keeps serving the routes that still read `state.storage`.
+fn setup_test_app() -> (
+    axum::Router,
+    Arc<FilesystemStorage>,
+    Arc<dyn CatalogRepository + Send + Sync>,
+    Arc<dyn BlobStorage + Send + Sync>,
+    tempfile::TempDir,
+) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(storage.clone(), catalog, blobs);
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone());
     let router = create_router(state);
-    (router, storage, dir)
+    (router, storage, catalog, blobs, dir)
+}
+
+/// Blob key of a curated map's `Ground` layer, resolved exactly like the storage maintenance
+/// service resolves the bytes it accounts for.
+fn curated_ground_key(map: &CuratedMap) -> BlobKey {
+    match map
+        .layers
+        .iter()
+        .find(|layer| layer.role == LayerRole::Ground)
+        .or_else(|| map.layers.first())
+    {
+        Some(layer) => BlobKey::CuratedLayer {
+            id: map.id.clone(),
+            index: layer.index,
+            role: layer.role,
+            elevation: layer.elevation,
+        },
+        None => BlobKey::CuratedLayer {
+            id: map.id.clone(),
+            index: 0,
+            role: LayerRole::Ground,
+            elevation: Some(0),
+        },
+    }
+}
+
+/// Seeds a curated map into the ports the cut-over storage routes read: the catalog entry with
+/// the implicit Ground layer [`FilesystemStorage::save_curated`] synthesizes, plus the Ground
+/// layer blob the curated byte accounting sums.
+async fn seed_curated_ports(
+    catalog: &Arc<dyn CatalogRepository + Send + Sync>,
+    blobs: &Arc<dyn BlobStorage + Send + Sync>,
+    map: &CuratedMap,
+    ground_png: &[u8],
+) {
+    let mut stored = map.clone();
+    if stored.layers.is_empty() {
+        stored.layers = vec![CuratedLayer::new(
+            0,
+            CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), "png"),
+            LayerRole::Ground,
+            Some(0),
+            stored.dimensions,
+        )];
+    }
+    catalog
+        .save_curated(&stored)
+        .await
+        .expect("save curated map in the catalog");
+    blobs
+        .write_blob(&curated_ground_key(&stored), ground_png)
+        .await
+        .expect("write curated Ground layer blob");
 }
 
 fn create_test_png(width: u32, height: u32) -> Vec<u8> {
@@ -375,7 +438,7 @@ fn test_purge_staging_resets_staging_and_preserves_curated_rejected_telemetry() 
 
 #[tokio::test]
 async fn test_api_storage_stats_and_purge_endpoints() {
-    let (app, storage, dir) = setup_test_app();
+    let (app, _storage, catalog, blobs, dir) = setup_test_app();
 
     // 1. Initial GET /api/storage/stats should return empty stats
     let req = Request::builder()
@@ -401,10 +464,20 @@ async fn test_api_storage_stats_and_purge_endpoints() {
     assert_eq!(stats_json["total_bytes"], 0);
     assert_eq!(stats_json["total_files"], 0);
 
-    // 2. Populate data
+    // 2. Populate the ports the cut-over storage routes read: one staged candidate with its layer
+    //    blob, one curated map with its Ground layer blob, and one rejection record.
     let cand1 = Candidate::with_now("api_c1", Source::Reddit, "c1.png", (1024, 768));
-    storage
-        .save_staging(&cand1, b"\x89PNG\r\n\x1a\napi-test-candidate-1")
+    catalog.save_candidate(&cand1).await.unwrap();
+    let staging_payload = b"\x89PNG\r\n\x1a\napi-test-candidate-1";
+    blobs
+        .write_blob(
+            &BlobKey::StagingLayer {
+                id: "api_c1".to_string(),
+                index: 0,
+            },
+            staging_payload,
+        )
+        .await
         .unwrap();
 
     let dungeon_map = CuratedMap::with_now(
@@ -413,12 +486,12 @@ async fn test_api_storage_stats_and_purge_endpoints() {
         vec!["dungeon".into()],
         (1024, 768),
     );
-    storage
-        .save_curated(&dungeon_map, b"\x89PNG\r\n\x1a\napi-curated-map")
-        .unwrap();
+    let curated_payload = b"\x89PNG\r\n\x1a\napi-curated-map";
+    seed_curated_ports(&catalog, &blobs, &dungeon_map, curated_payload).await;
 
-    storage
-        .reject_candidate("api_rej_1", RejectionReason::GridBurnedIn, None)
+    catalog
+        .log_rejection("api_rej_1", RejectionReason::GridBurnedIn, None)
+        .await
         .unwrap();
 
     // 3. GET /api/storage/stats with populated data
@@ -434,10 +507,32 @@ async fn test_api_storage_stats_and_purge_endpoints() {
     let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let stats_json: Value = serde_json::from_slice(&body_bytes).unwrap();
 
-    assert!(stats_json["staging"]["bytes"].as_u64().unwrap() > 0);
-    assert_eq!(stats_json["staging"]["file_count"], 2); // 1 png + manifest
-    assert!(stats_json["curated"]["bytes"].as_u64().unwrap() > 0);
-    assert_eq!(stats_json["rejected"]["file_count"], 1);
+    // Port-based accounting counts blob-addressed files: the staging bundle's layer blob is one
+    // file, while its manifest is catalog metadata rather than a blob.
+    assert_eq!(stats_json["staging"]["bytes"], staging_payload.len() as u64);
+    assert_eq!(stats_json["staging"]["file_count"], 1);
+    assert_eq!(stats_json["curated"]["bytes"], curated_payload.len() as u64);
+    assert_eq!(stats_json["curated"]["file_count"], 1);
+    // The rejection log and the telemetry ledger are not blob-addressed, so no port reports their
+    // footprint: both areas keep their response shape and stay structurally zero (see the PR body).
+    assert_eq!(stats_json["rejected"]["bytes"], 0);
+    assert_eq!(stats_json["rejected"]["file_count"], 0);
+    assert_eq!(stats_json["telemetry"]["bytes"], 0);
+    assert_eq!(stats_json["telemetry"]["file_count"], 0);
+    assert_eq!(
+        stats_json["total_bytes"],
+        stats_json["staging"]["bytes"].as_u64().unwrap()
+            + stats_json["curated"]["bytes"].as_u64().unwrap()
+            + stats_json["rejected"]["bytes"].as_u64().unwrap()
+            + stats_json["telemetry"]["bytes"].as_u64().unwrap()
+    );
+    assert_eq!(
+        stats_json["total_files"],
+        stats_json["staging"]["file_count"].as_u64().unwrap()
+            + stats_json["curated"]["file_count"].as_u64().unwrap()
+            + stats_json["rejected"]["file_count"].as_u64().unwrap()
+            + stats_json["telemetry"]["file_count"].as_u64().unwrap()
+    );
 
     // Verify /api/status shows 1 staging candidate
     let req = Request::builder()
@@ -464,8 +559,11 @@ async fn test_api_storage_stats_and_purge_endpoints() {
     let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let purge_json: Value = serde_json::from_slice(&body_bytes).unwrap();
 
-    assert_eq!(purge_json["purged_files"], 2);
-    assert!(purge_json["reclaimed_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(purge_json["purged_files"], 1);
+    assert_eq!(
+        purge_json["reclaimed_bytes"],
+        staging_payload.len() as u64
+    );
     assert_eq!(purge_json["remaining_staging_files"], 0);
 
     // 5. Verify /api/status has 0 staging candidates, but curated remains 1
@@ -480,7 +578,10 @@ async fn test_api_storage_stats_and_purge_endpoints() {
     assert_eq!(status_json["staging_count"], 0);
     assert_eq!(status_json["curated_count"], 1);
 
-    // 6. Verify GET /api/staging returns empty array
+    // 6. Verify GET /api/staging returns empty array. That listing still reads the filesystem
+    //    repository (cutting it over is issue #174's territory) and this test seeds only the ports
+    //    the storage routes read, so it lists nothing; the drained port-backed view of the staging
+    //    area is asserted through /api/status above and /api/storage/stats below.
     let req = Request::builder()
         .uri("/api/staging")
         .method("GET")
@@ -502,8 +603,9 @@ async fn test_api_storage_stats_and_purge_endpoints() {
     let stats_json: Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(stats_json["staging"]["bytes"], 0);
     assert_eq!(stats_json["staging"]["file_count"], 0);
-    assert!(stats_json["curated"]["bytes"].as_u64().unwrap() > 0);
-    assert_eq!(stats_json["rejected"]["file_count"], 1);
+    assert_eq!(stats_json["curated"]["bytes"], curated_payload.len() as u64);
+    assert_eq!(stats_json["curated"]["file_count"], 1);
+    assert_eq!(stats_json["rejected"]["file_count"], 0);
 
     let _ = dir;
 }

@@ -11,8 +11,8 @@ use zip::ZipArchive;
 
 use curator::adapters::{FilesystemStorage, InMemoryBlobStorage, InMemoryCatalogRepository};
 use curator::api::{create_router, AppState};
-use curator::domain::{Candidate, CuratedMap, GridConfig, MapSection, Source, Theme};
-use curator::ports::blob_storage::BlobStorage;
+use curator::domain::{Candidate, CuratedMap, CuratedLayer, GridConfig, LayerRole, MapSection, Source, Theme};
+use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::CatalogRepository;
 use curator::ports::storage::StorageRepository;
 use image::GenericImageView;
@@ -28,13 +28,75 @@ fn in_memory_ports() -> (
     )
 }
 
-fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
+/// Router plus the filesystem repository and the in-memory catalog/blob ports it is paired with.
+///
+/// The dataset routes were cut over to the ports, so a test targeting them seeds the ports; the
+/// filesystem repository keeps serving the routes that still read `state.storage`.
+fn setup_test_app() -> (
+    axum::Router,
+    Arc<FilesystemStorage>,
+    Arc<dyn CatalogRepository + Send + Sync>,
+    Arc<dyn BlobStorage + Send + Sync>,
+    tempfile::TempDir,
+) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(storage.clone(), catalog, blobs);
+    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone());
     let router = create_router(state);
-    (router, storage, dir)
+    (router, storage, catalog, blobs, dir)
+}
+
+/// Blob key of a curated map's `Ground` layer, resolved exactly like the dataset export service.
+fn curated_ground_key(map: &CuratedMap) -> BlobKey {
+    match map
+        .layers
+        .iter()
+        .find(|layer| layer.role == LayerRole::Ground)
+        .or_else(|| map.layers.first())
+    {
+        Some(layer) => BlobKey::CuratedLayer {
+            id: map.id.clone(),
+            index: layer.index,
+            role: layer.role,
+            elevation: layer.elevation,
+        },
+        None => BlobKey::CuratedLayer {
+            id: map.id.clone(),
+            index: 0,
+            role: LayerRole::Ground,
+            elevation: Some(0),
+        },
+    }
+}
+
+/// Seeds a curated map into the ports the cut-over dataset routes read: the catalog entry with
+/// the implicit Ground layer [`FilesystemStorage::save_curated`] synthesizes, plus the Ground
+/// layer blob under the key both the export and the readiness audit resolve.
+async fn seed_curated_ports(
+    catalog: &Arc<dyn CatalogRepository + Send + Sync>,
+    blobs: &Arc<dyn BlobStorage + Send + Sync>,
+    map: &CuratedMap,
+    ground_png: &[u8],
+) {
+    let mut stored = map.clone();
+    if stored.layers.is_empty() {
+        stored.layers = vec![CuratedLayer::new(
+            0,
+            CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), "png"),
+            LayerRole::Ground,
+            Some(0),
+            stored.dimensions,
+        )];
+    }
+    catalog
+        .save_curated(&stored)
+        .await
+        .expect("save curated map in the catalog");
+    blobs
+        .write_blob(&curated_ground_key(&stored), ground_png)
+        .await
+        .expect("write curated Ground layer blob");
 }
 
 fn create_test_png(width: u32, height: u32) -> Vec<u8> {
@@ -47,7 +109,7 @@ fn create_test_png(width: u32, height: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_api_curated_listing_with_and_without_theme_filtering() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, storage, ..) = setup_test_app();
     let png_bytes = create_test_png(64, 64);
 
     // Save curated maps in different themes
@@ -221,7 +283,7 @@ fn test_storage_export_lora_dataset_paired_png_and_txt() {
 
 #[tokio::test]
 async fn test_api_dataset_export_headers_and_stream() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, _storage, catalog, blobs, _dir) = setup_test_app();
     // 1024x1024 matches the map's declared dimensions and default 64px grid so the exact
     // 16x16 Grid Cell section box resolves.
     let png_bytes = create_test_png(1024, 1024);
@@ -232,7 +294,7 @@ async fn test_api_dataset_export_headers_and_stream() {
         vec!["sarcophagus".into()],
         (1024, 1024),
     );
-    storage.save_curated(&map, &png_bytes).unwrap();
+    seed_curated_ports(&catalog, &blobs, &map, &png_bytes).await;
 
     let req = Request::builder()
         .uri("/api/dataset/export")
@@ -264,7 +326,7 @@ async fn test_api_dataset_export_headers_and_stream() {
 
 #[tokio::test]
 async fn test_empty_theme_export_handling() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, storage, ..) = setup_test_app();
 
     // 1. Direct adapter call on empty storage
     let empty_zip = storage.export_lora_dataset(Some(&Theme::SciFi)).unwrap();
@@ -299,7 +361,7 @@ async fn test_empty_theme_export_handling() {
 
 #[tokio::test]
 async fn test_curation_does_not_write_lora_files_to_disk() {
-    let (_app, storage, dir) = setup_test_app();
+    let (_app, storage, _, _, dir) = setup_test_app();
     let png_bytes = create_test_png(1024, 1024);
 
     let cand = Candidate::with_now(
@@ -342,7 +404,7 @@ async fn test_curation_does_not_write_lora_files_to_disk() {
 
 #[tokio::test]
 async fn test_multisection_map_export_produces_four_distinct_pairs_with_per_section_descriptions() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, _storage, catalog, blobs, _dir) = setup_test_app();
     let png_bytes = create_test_png(2048, 2048);
 
     let sections = vec![
@@ -361,7 +423,7 @@ async fn test_multisection_map_export_produces_four_distinct_pairs_with_per_sect
     .with_grid(GridConfig::new(64, 0, 0))
     .with_sections(sections);
 
-    storage.save_curated(&multi_map, &png_bytes).unwrap();
+    seed_curated_ports(&catalog, &blobs, &multi_map, &png_bytes).await;
 
     // GET /api/dataset/export?theme=dungeon
     let req = Request::builder()
@@ -426,7 +488,7 @@ async fn test_multisection_map_export_produces_four_distinct_pairs_with_per_sect
 
 #[tokio::test]
 async fn test_post_export_selected_multisection_and_custom_grid() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, _storage, catalog, blobs, _dir) = setup_test_app();
     let png_bytes = create_test_png(2048, 2048);
 
     let multi_map = CuratedMap::with_now(
@@ -438,7 +500,7 @@ async fn test_post_export_selected_multisection_and_custom_grid() {
     .with_grid(GridConfig::new(64, 0, 0))
     .with_description("Sprawling underground cavern network");
 
-    storage.save_curated(&multi_map, &png_bytes).unwrap();
+    seed_curated_ports(&catalog, &blobs, &multi_map, &png_bytes).await;
 
     let req = Request::builder()
         .uri("/api/dataset/export-selected")

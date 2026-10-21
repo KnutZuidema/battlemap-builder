@@ -269,8 +269,20 @@ async fn test_audit_dataset_readiness_reports_every_section_issue_code() {
     assert!(!report.ready, "{report:?}");
     assert_eq!(report.maps_total, 3);
     assert_eq!(report.maps_ready, 1);
-    assert_eq!(report.sections_total, 8);
+    // A map whose Ground blob cannot be read reports no inspectable Map Section — its sole issue
+    // is `GroundLayerMissing` — so the summary counts the clean map's 4 plus the dirty map's 3.
+    assert_eq!(report.sections_total, 7);
     assert_eq!(report.sections_ready, 4);
+    assert_eq!(
+        report.sections_total,
+        report.maps.iter().map(|map| map.sections).sum::<usize>(),
+        "the summary must agree with the per-map counts"
+    );
+    assert_eq!(
+        report.sections_ready,
+        report.maps.iter().map(|map| map.ready_sections).sum::<usize>(),
+        "the summary must agree with the per-map counts"
+    );
 
     let clean_report = report
         .maps

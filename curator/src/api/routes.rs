@@ -1093,7 +1093,11 @@ pub async fn post_harvest_reddit(
 
     let query = payload.to_query();
     let gridless_only = payload.gridless_only;
-    let service = RedditIngestionService::new(state.harvester.clone(), state.storage.clone());
+    let service = RedditIngestionService::new(
+        state.harvester.clone(),
+        state.catalog.clone(),
+        state.blobs.clone(),
+    );
 
     tracing::info!(
         subreddit = %query.subreddit,

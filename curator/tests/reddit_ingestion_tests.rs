@@ -8,17 +8,138 @@ use axum::routing::get;
 use axum::Router;
 use chrono::Utc;
 
-use curator::adapters::filesystem_storage::FilesystemStorage;
 use curator::adapters::reddit::BackoffConfig;
+use curator::adapters::{
+    FilesystemBlobStorage, FilesystemCatalogRepository, FilesystemStorage, InMemoryBlobStorage,
+    InMemoryCatalogRepository,
+};
 use curator::domain::{
-    CuratedMap, HarvestedMedia, LayerRole, ParsedTags, RedditHarvestQuery, RedditPost,
+    CuratedMap, GridConfig, HarvestedMedia, LayerRole, ParsedTags, RedditHarvestQuery, RedditPost,
     RejectionReason, Source, Theme,
 };
+use curator::ports::blob_storage::{BlobKey, BlobStorage};
+use curator::ports::catalog_repository::{CatalogRepository, CandidateFilter};
 use curator::ports::harvester::{HarvesterError, RedditHarvester};
-use curator::ports::storage::StorageRepository;
+use curator::ports::storage_error::StorageError;
+use curator::services::curation::{CurationService, CurationWorkflow};
+use curator::services::description::{DescriptionError, DescriptionGenerator, DescriptionService};
 use curator::services::{
     IngestionOutcome, IngestionProgress, RedditIngestionService, SkipReason,
 };
+
+/// Fresh in-memory catalog and blob ports: no filesystem access, no temp dirs.
+fn in_memory_ports() -> (Arc<InMemoryCatalogRepository>, Arc<InMemoryBlobStorage>) {
+    (
+        Arc::new(InMemoryCatalogRepository::new()),
+        Arc::new(InMemoryBlobStorage::new()),
+    )
+}
+
+/// Constant description generator: curation needs *a* physical description, never a live model.
+struct ConstantDescriptionGen;
+
+#[async_trait]
+impl DescriptionGenerator for ConstantDescriptionGen {
+    async fn generate_description(
+        &self,
+        _image_bytes: &[u8],
+        _filename: Option<&str>,
+        _tags: &[String],
+        _title: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        Ok("Constant test description".to_string())
+    }
+}
+
+/// Production curation workflow backed by the filesystem store, which shares `dir` with the
+/// filesystem ports. Curation and rejection are only reproducible through the real store: the
+/// in-memory doubles implement neither `CurationStore` nor the staging-to-curated move.
+fn curation_service(dir: &tempfile::TempDir) -> CurationService {
+    CurationService::new(
+        Arc::new(FilesystemStorage::new(dir.path())),
+        Arc::new(DescriptionService::new(Some(Arc::new(
+            ConstantDescriptionGen,
+        )))),
+    )
+}
+
+/// Spawns a one-route mock image server serving `png_bytes` and returns the served URL.
+async fn spawn_image_server(path: &str, png_bytes: Vec<u8>) -> String {
+    let app = Router::new().route(
+        path,
+        get(move || {
+            let data = png_bytes.clone();
+            async move { (axum::http::StatusCode::OK, [("content-type", "image/png")], data) }
+        }),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    format!("http://{addr}{path}")
+}
+
+/// Canonical staging layer address written by the ingestion pipeline.
+fn staging_layer(id: &str, index: usize) -> BlobKey {
+    BlobKey::StagingLayer {
+        id: id.to_string(),
+        index,
+    }
+}
+
+/// [`BlobStorage`] double over an in-memory store whose writes fail from `fail_writes_from` on.
+struct FlakyBlobStorage {
+    inner: InMemoryBlobStorage,
+    fail_writes_from: AtomicUsize,
+    write_calls: AtomicUsize,
+}
+
+impl FlakyBlobStorage {
+    fn failing_from(write_index: usize) -> Self {
+        Self {
+            inner: InMemoryBlobStorage::new(),
+            fail_writes_from: AtomicUsize::new(write_index),
+            write_calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// Lets every later write through, simulating the transient failure going away.
+    fn stop_failing(&self) {
+        self.fail_writes_from.store(usize::MAX, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl BlobStorage for FlakyBlobStorage {
+    async fn read_blob(&self, key: &BlobKey) -> Result<Vec<u8>, StorageError> {
+        self.inner.read_blob(key).await
+    }
+
+    async fn write_blob(&self, key: &BlobKey, bytes: &[u8]) -> Result<(), StorageError> {
+        let call = self.write_calls.fetch_add(1, Ordering::SeqCst);
+        if call >= self.fail_writes_from.load(Ordering::SeqCst) {
+            return Err(StorageError::InvalidData(
+                "simulated blob write failure".into(),
+            ));
+        }
+        self.inner.write_blob(key, bytes).await
+    }
+
+    async fn delete_blob(&self, key: &BlobKey) -> Result<(), StorageError> {
+        self.inner.delete_blob(key).await
+    }
+
+    async fn exists_blob(&self, key: &BlobKey) -> Result<bool, StorageError> {
+        self.inner.exists_blob(key).await
+    }
+
+    async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
+        self.inner.list_prefix(prefix).await
+    }
+}
 
 /// Mock harvester that returns pre-configured Reddit posts.
 #[derive(Clone, Default)]
@@ -42,23 +163,28 @@ impl RedditHarvester for MockHarvester {
     }
 }
 
-/// Helper to generate a minimal valid 1x1 PNG image.
-fn create_test_png() -> Vec<u8> {
-    let img = image::RgbaImage::new(1, 1);
+/// Helper to generate a valid PNG image of the given size.
+fn create_test_png_sized(width: u32, height: u32) -> Vec<u8> {
+    let img = image::RgbaImage::new(width, height);
     let mut bytes = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut bytes);
     img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
     bytes
 }
 
+/// Helper to generate a minimal valid 1x1 PNG image.
+fn create_test_png() -> Vec<u8> {
+    create_test_png_sized(1, 1)
+}
+
 #[tokio::test]
 async fn test_ingestion_deduplication_against_rejections() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
 
     // Log a rejection for post_rejected
-    storage
+    catalog
         .log_rejection("post_rejected", RejectionReason::GridBurnedIn, Some("Visible grid"))
+        .await
         .unwrap();
 
     let post = RedditPost {
@@ -75,7 +201,7 @@ async fn test_ingestion_deduplication_against_rejections() {
     };
 
     let harvester = MockHarvester::new(vec![post.clone()]);
-    let service = RedditIngestionService::new(harvester, storage.clone());
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
 
     let outcome = service.ingest_media(&post, 0).await.unwrap();
     assert_eq!(
@@ -94,10 +220,9 @@ async fn test_ingestion_deduplication_against_rejections() {
 
 #[tokio::test]
 async fn test_ingestion_deduplication_against_staging() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
 
-    // Pre-populate an item in staging/reddit
+    // Pre-populate the candidate and its layer blob in staging
     let post = RedditPost {
         id: "staged_map".into(),
         name: "t3_staged_map".into(),
@@ -111,11 +236,14 @@ async fn test_ingestion_deduplication_against_staging() {
         tags: ParsedTags::parse_title("[40x40] Castle Courtyard [No Grid]"),
     };
 
-    let sidecar = post.to_sidecar_metadata(0).unwrap();
-    storage.save_staging_reddit(&sidecar, &create_test_png()).unwrap();
+    catalog.save_candidate(&post.to_bundle_candidate()).await.unwrap();
+    blobs
+        .write_blob(&staging_layer("staged_map", 0), &create_test_png())
+        .await
+        .unwrap();
 
     let harvester = MockHarvester::new(vec![post.clone()]);
-    let service = RedditIngestionService::new(harvester, storage.clone());
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
 
     let outcome = service.ingest_media(&post, 0).await.unwrap();
     assert_eq!(
@@ -129,8 +257,7 @@ async fn test_ingestion_deduplication_against_staging() {
 
 #[tokio::test]
 async fn test_ingestion_deduplication_against_curated() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
 
     // Save a curated map
     let curated = CuratedMap::with_now(
@@ -139,7 +266,7 @@ async fn test_ingestion_deduplication_against_curated() {
         vec!["dungeon".into()],
         (30, 30),
     );
-    storage.save_curated(&curated, &create_test_png()).unwrap();
+    catalog.save_curated(&curated).await.unwrap();
 
     let post = RedditPost {
         id: "curated_map_1".into(),
@@ -155,7 +282,7 @@ async fn test_ingestion_deduplication_against_curated() {
     };
 
     let harvester = MockHarvester::new(vec![post.clone()]);
-    let service = RedditIngestionService::new(harvester, storage.clone());
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
 
     let outcome = service.ingest_media(&post, 0).await.unwrap();
     assert_eq!(
@@ -169,45 +296,31 @@ async fn test_ingestion_deduplication_against_curated() {
 
 #[tokio::test]
 async fn test_end_to_end_ingestion_download_and_staging_persistence() {
-    // 1. Spawn a mock image server
-    let png_bytes = create_test_png();
-    let png_clone = png_bytes.clone();
+    // 1. Spawn a mock image server serving a 512x512 map
+    let png_bytes = create_test_png_sized(512, 512);
+    let image_url = spawn_image_server("/image.png", png_bytes.clone()).await;
 
-    let app = Router::new().route(
-        "/image.png",
-        get(move || {
-            let data = png_clone.clone();
-            async move { (axum::http::StatusCode::OK, [("content-type", "image/png")], data) }
-        }),
-    );
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    let image_url = format!("http://{addr}/image.png");
-
-    // 2. Setup storage and harvester
+    // 2. Filesystem-backed ports sharing one root with the production curation store, so step 8
+    //    moves the candidate through the real staging-to-curated implementation
     let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let catalog = Arc::new(FilesystemCatalogRepository::new(dir.path()));
+    let blobs = Arc::new(FilesystemBlobStorage::new(dir.path()));
 
     let post = RedditPost {
         id: "harvest_1".into(),
         name: "t3_harvest_1".into(),
-        title: "[50x50] Crystal Spire [No Grid]".into(),
+        title: "[32x32] Crystal Spire [No Grid]".into(),
         author: "spire_architect".into(),
         permalink: "https://www.reddit.com/r/battlemaps/comments/harvest_1/crystal_spire/".into(),
         url: image_url.clone(),
         score: 320,
         created_utc: Utc::now(),
-        media: vec![HarvestedMedia::new(image_url.clone())],
-        tags: ParsedTags::parse_title("[50x50] Crystal Spire [No Grid]"),
+        media: vec![HarvestedMedia::new(image_url.clone()).with_dimensions(512, 512)],
+        tags: ParsedTags::parse_title("[32x32] Crystal Spire [No Grid]"),
     };
 
     let harvester = MockHarvester::new(vec![post.clone()]);
-    let service = RedditIngestionService::new(harvester, storage.clone());
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
 
     // 3. Run ingest_posts
     let summary = service.ingest_posts(&[post.clone()]).await.unwrap();
@@ -215,45 +328,43 @@ async fn test_end_to_end_ingestion_download_and_staging_persistence() {
     assert_eq!(summary.downloaded, 1);
     assert_eq!(summary.skipped, 0);
 
-    // 4. Verify files on disk in staging/reddit/
-    let reddit_staging = storage.staging_dir().join("reddit");
-    let bundle_dir = reddit_staging.join("harvest_1");
-    let image_file = if bundle_dir.join("0.png").is_file() {
-        bundle_dir.join("0.png")
-    } else {
-        reddit_staging.join("harvest_1.png")
-    };
-    let sidecar_file = if bundle_dir.join("manifest.json").is_file() {
-        bundle_dir.join("manifest.json")
-    } else {
-        reddit_staging.join("harvest_1.json")
-    };
-
-    assert!(image_file.is_file(), "image file must exist");
-    assert!(sidecar_file.is_file(), "sidecar json must exist");
-    let saved_bytes = std::fs::read(&image_file).unwrap();
+    // 4. Verify the layer blob landed at the uniform staging/{id}/{index}.png address
+    let image_key = staging_layer("harvest_1", 0);
+    assert!(
+        blobs.exists_blob(&image_key).await.unwrap(),
+        "layer blob must exist"
+    );
+    let saved_bytes = blobs.read_blob(&image_key).await.unwrap();
     assert_eq!(saved_bytes, png_bytes);
 
-    // 5. Verify sidecar JSON matches Issue #25 schema
-    let sidecar_content = std::fs::read_to_string(&sidecar_file).unwrap();
-    let sidecar_value: serde_json::Value = serde_json::from_str(&sidecar_content).unwrap();
+    // 5. Verify the staged candidate metadata carries the Issue #25 sidecar fields
+    let candidate = catalog.get_candidate("harvest_1").await.unwrap();
+    assert_eq!(candidate.id, "harvest_1");
+    assert_eq!(candidate.source, Source::Reddit);
+    assert!(candidate.source_url.as_deref().unwrap().contains(&image_url));
+    assert_eq!(
+        candidate.title.as_deref(),
+        Some("[32x32] Crystal Spire [No Grid]")
+    );
+    assert_eq!(candidate.author.as_deref(), Some("spire_architect"));
+    assert_eq!(candidate.parsed_gridless, Some(true));
+    assert_eq!(candidate.parsed_dimensions, Some((32, 32)));
+    assert_eq!(candidate.dimensions, (512, 512));
+    // The first persistence derives the grid from the parsed lattice: the default 64 px grid would
+    // leave only 8x8 cells and fail curation's 16x16 gate.
+    assert_eq!(candidate.grid, GridConfig::new(16, 0, 0));
+    assert!(candidate.created_at <= Utc::now());
 
-    assert_eq!(sidecar_value["id"], "harvest_1");
-    assert_eq!(sidecar_value["source"], "reddit");
-    assert!(sidecar_value["source_url"].as_str().unwrap().contains(&image_url));
-    assert_eq!(sidecar_value["title"], "[50x50] Crystal Spire [No Grid]");
-    assert_eq!(sidecar_value["author"], "spire_architect");
-    assert_eq!(sidecar_value["parsed_gridless"], true);
-    assert_eq!(sidecar_value["parsed_dimensions"], serde_json::json!([50, 50]));
-    assert!(sidecar_value["created_at"].is_string());
-
-    // 6. Verify list_staging() discovers and deserializes the staged candidate
-    let staged_candidates = storage.list_staging().unwrap();
+    // 6. Verify the staging listing discovers the staged candidate
+    let staged_candidates = catalog
+        .list_candidates(&CandidateFilter::default())
+        .await
+        .unwrap();
     assert_eq!(staged_candidates.len(), 1);
     let cand = &staged_candidates[0];
     assert_eq!(cand.id, "harvest_1");
     assert_eq!(cand.source, Source::Reddit);
-    assert_eq!(cand.dimensions, (50, 50));
+    assert_eq!(cand.dimensions, (512, 512));
     assert_eq!(cand.parsed_gridless, Some(true));
     assert_eq!(cand.author.as_deref(), Some("spire_architect"));
 
@@ -263,20 +374,39 @@ async fn test_end_to_end_ingestion_download_and_staging_persistence() {
     assert_eq!(second_summary.downloaded, 0);
     assert_eq!(second_summary.skipped, 1);
 
-    // 8. Verify curate_staging moves the candidate from staging/reddit to curated/
-    let curated = CuratedMap::with_now(
-        "harvest_1",
-        Theme::SciFi,
-        vec!["crystal".into(), "spire".into()],
-        (50, 50),
+    // 8. Curate through the production workflow: the curated map replaces its staging artifacts
+    let curated = curation_service(&dir)
+        .curate(
+            "harvest_1",
+            vec!["sci-fi".into(), "crystal".into()],
+            None,
+            Some("Crystal spire chamber".into()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(curated.id, "harvest_1");
+    assert_eq!(curated.grid, GridConfig::new(16, 0, 0));
+    assert_eq!(curated.dimensions, (512, 512));
+    assert!(
+        catalog.get_candidate("harvest_1").await.is_err(),
+        "candidate moved out of staging"
     );
-    storage.curate_staging(&curated).unwrap();
+    assert!(
+        !blobs.exists_blob(&image_key).await.unwrap(),
+        "layer moved out of staging"
+    );
+    assert!(catalog.get_curated("harvest_1").await.is_ok());
 
-    assert!(!image_file.exists(), "image moved from staging");
-    assert!(!sidecar_file.exists(), "sidecar deleted from staging");
-    assert!(storage.is_curated("harvest_1").unwrap());
-
-    let curated_bytes = storage.get_curated_image(&Theme::SciFi, "harvest_1").unwrap();
+    // The curated Ground blob holds the bytes this ingestion downloaded, moved (not re-written)
+    // by the curation store.
+    let curated_key = BlobKey::CuratedLayer {
+        id: "harvest_1".into(),
+        index: 0,
+        role: LayerRole::Ground,
+        elevation: Some(0),
+    };
+    let curated_bytes = blobs.read_blob(&curated_key).await.unwrap();
     assert_eq!(curated_bytes, png_bytes);
 
     // 9. Third harvest now skips due to AlreadyCurated
@@ -291,28 +421,158 @@ async fn test_end_to_end_ingestion_download_and_staging_persistence() {
 }
 
 #[tokio::test]
+async fn test_ingestion_auto_seeds_grid_from_parsed_lattice() {
+    // A 512x512 map titled `[32x32]` must stage with the 16 px grid its lattice implies: the
+    // default 64 px grid leaves only 8x8 cells and fails curation's 16x16 eligibility gate.
+    let png_bytes = create_test_png_sized(512, 512);
+    let image_url = spawn_image_server("/seeded.png", png_bytes).await;
+    let (catalog, blobs) = in_memory_ports();
+
+    let post = RedditPost {
+        id: "seeded_map".into(),
+        name: "t3_seeded_map".into(),
+        title: "[32x32] Sunken Vault".into(),
+        author: "vault_keeper".into(),
+        permalink: "/r/battlemaps/comments/seeded_map/".into(),
+        url: image_url.clone(),
+        score: 210,
+        created_utc: Utc::now(),
+        media: vec![HarvestedMedia::new(image_url.clone()).with_dimensions(512, 512)],
+        tags: ParsedTags::parse_title("[32x32] Sunken Vault"),
+    };
+
+    let harvester = MockHarvester::new(vec![post.clone()]);
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+
+    let summary = service.ingest_post(&post).await.unwrap();
+    assert_eq!(summary.downloaded, 1);
+
+    let candidate = catalog.get_candidate("seeded_map").await.unwrap();
+    assert_eq!(candidate.dimensions, (512, 512));
+    assert_eq!(candidate.grid, GridConfig::new(16, 0, 0));
+    assert!(candidate.grid.is_curation_eligible(512, 512));
+
+    // Only the first persistence seeds the grid: an explicitly set grid survives a later save
+    let mut regridded = candidate.clone();
+    regridded.grid = GridConfig::new(48, 3, 5);
+    catalog.save_candidate(&regridded).await.unwrap();
+    assert_eq!(
+        catalog.get_candidate("seeded_map").await.unwrap().grid,
+        GridConfig::new(48, 3, 5)
+    );
+}
+
+#[tokio::test]
+async fn test_ingestion_backfills_dimensions_from_downloaded_bytes() {
+    // A post whose payload carries neither media width/height nor parsed grid dimensions still
+    // persists the measured image size, otherwise curation's 16x16 gate sees a (0, 0) map.
+    let png_bytes = create_test_png_sized(320, 200);
+    let image_url = spawn_image_server("/unmeasured.png", png_bytes).await;
+    let (catalog, blobs) = in_memory_ports();
+
+    let post = RedditPost {
+        id: "unmeasured_map".into(),
+        name: "t3_unmeasured_map".into(),
+        title: "Ancient Ruins".into(),
+        author: "ruin_walker".into(),
+        permalink: "/r/battlemaps/comments/unmeasured_map/".into(),
+        url: image_url.clone(),
+        score: 90,
+        created_utc: Utc::now(),
+        media: vec![HarvestedMedia::new(image_url.clone())],
+        tags: ParsedTags::parse_title("Ancient Ruins"),
+    };
+
+    let harvester = MockHarvester::new(vec![post.clone()]);
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+
+    let summary = service.ingest_post(&post).await.unwrap();
+    assert_eq!(summary.downloaded, 1);
+
+    let candidate = catalog.get_candidate("unmeasured_map").await.unwrap();
+    assert_eq!(candidate.layers[0].dimensions, (320, 200));
+    assert_eq!(candidate.dimensions, (320, 200));
+    // Without a parsed lattice there is nothing to seed from: the default grid stands.
+    assert_eq!(candidate.grid, GridConfig::default());
+}
+
+#[tokio::test]
+async fn test_ingestion_blob_write_failure_leaves_no_candidate() {
+    // Layer blobs are written before the manifest: a candidate visible in the catalog without the
+    // images it describes would be skipped as already in staging on every later harvest.
+    let png_bytes = create_test_png();
+    let image_url = spawn_image_server("/flaky.png", png_bytes.clone()).await;
+
+    let catalog = Arc::new(InMemoryCatalogRepository::new());
+    let blobs = Arc::new(FlakyBlobStorage::failing_from(1));
+
+    let post = RedditPost {
+        id: "flaky_map".into(),
+        name: "t3_flaky_map".into(),
+        title: "[20x20] Flaky Keep [Gridless]".into(),
+        author: "keep_builder".into(),
+        permalink: "/r/battlemaps/comments/flaky_map/".into(),
+        url: image_url.clone(),
+        score: 140,
+        created_utc: Utc::now(),
+        media: vec![
+            HarvestedMedia::new(image_url.clone()),
+            HarvestedMedia::new(image_url.clone()),
+        ],
+        tags: ParsedTags::parse_title("[20x20] Flaky Keep [Gridless]"),
+    };
+
+    let harvester = MockHarvester::new(vec![post.clone()]);
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+
+    let summary = service
+        .ingest_posts(std::slice::from_ref(&post))
+        .await
+        .unwrap();
+    assert_eq!(summary.downloaded, 0);
+    assert_eq!(summary.skipped, 1);
+
+    // Layer 0 was already written when layer 1 failed: it is rolled back, and no manifest is left
+    assert!(
+        catalog.get_candidate("flaky_map").await.is_err(),
+        "no candidate without the layers it describes"
+    );
+    assert!(
+        !blobs
+            .exists_blob(&staging_layer("flaky_map", 0))
+            .await
+            .unwrap(),
+        "partially written blobs are rolled back"
+    );
+    assert!(!blobs
+        .exists_blob(&staging_layer("flaky_map", 1))
+        .await
+        .unwrap());
+
+    // The post stays re-ingestable instead of being skipped as already in staging
+    blobs.stop_failing();
+    let retry = service.ingest_post(&post).await.unwrap();
+    assert_eq!(retry.downloaded, 1);
+    assert!(catalog.get_candidate("flaky_map").await.is_ok());
+    assert_eq!(
+        blobs
+            .read_blob(&staging_layer("flaky_map", 1))
+            .await
+            .unwrap(),
+        png_bytes
+    );
+}
+
+#[tokio::test]
 async fn test_multi_image_gallery_ingestion() {
     let png_bytes = create_test_png();
-    let png_clone = png_bytes.clone();
+    let img_url = spawn_image_server("/gallery.png", png_bytes.clone()).await;
 
-    let app = Router::new().route(
-        "/gallery.png",
-        get(move || {
-            let data = png_clone.clone();
-            async move { (axum::http::StatusCode::OK, [("content-type", "image/png")], data) }
-        }),
-    );
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    let img_url = format!("http://{addr}/gallery.png");
-
+    // Filesystem-backed ports sharing one root with the production curation store, so the
+    // rejection below purges the staging bundle through the real implementation
     let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let catalog = Arc::new(FilesystemCatalogRepository::new(dir.path()));
+    let blobs = Arc::new(FilesystemBlobStorage::new(dir.path()));
 
     let gallery_post = RedditPost {
         id: "gallery_post".into(),
@@ -331,21 +591,26 @@ async fn test_multi_image_gallery_ingestion() {
     };
 
     let harvester = MockHarvester::new(vec![gallery_post.clone()]);
-    let service = RedditIngestionService::new(harvester, storage.clone());
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
 
     let summary = service.ingest_post(&gallery_post).await.unwrap();
     assert_eq!(summary.processed, 1);
     assert_eq!(summary.downloaded, 1);
     assert_eq!(summary.skipped, 0);
 
-    let reddit_staging = storage.staging_dir().join("reddit");
-    let bundle_dir = reddit_staging.join("gallery_post");
-    assert!(bundle_dir.join("0.png").is_file());
-    assert!(bundle_dir.join("1.png").is_file());
-    assert!(bundle_dir.join("manifest.json").is_file());
+    // Every gallery layer landed at the uniform staging/{id}/{index}.png address
+    for index in 0..2 {
+        let key = staging_layer("gallery_post", index);
+        assert!(blobs.exists_blob(&key).await.unwrap(), "layer {index} exists");
+        assert_eq!(blobs.read_blob(&key).await.unwrap(), png_bytes);
+    }
+    assert!(!blobs.exists_blob(&staging_layer("gallery_post", 2)).await.unwrap());
 
     // Verify staged candidate metadata and layers
-    let staged = storage.list_staging().unwrap();
+    let staged = catalog
+        .list_candidates(&CandidateFilter::default())
+        .await
+        .unwrap();
     assert_eq!(staged.len(), 1);
     let cand = &staged[0];
     assert_eq!(cand.id, "gallery_post");
@@ -381,13 +646,27 @@ async fn test_multi_image_gallery_ingestion() {
         }
     );
 
-    // Reject gallery_post
-    storage
-        .reject_staging("gallery_post", RejectionReason::BlurryLowRes, Some("Blurry variant"))
+    // Reject gallery_post through the production curation workflow: the staging bundle and its
+    // layer blobs are purged, not merely recorded in the rejection log
+    curation_service(&dir)
+        .reject(
+            "gallery_post",
+            RejectionReason::BlurryLowRes,
+            Some("Blurry variant"),
+        )
+        .await
         .unwrap();
 
-    assert!(!bundle_dir.exists());
-    assert!(storage.is_rejected("gallery_post").unwrap());
+    assert!(
+        !dir.path().join("staging").join("gallery_post").exists(),
+        "rejected candidate leaves no staging bundle behind"
+    );
+    assert!(catalog.get_candidate("gallery_post").await.is_err());
+    assert!(!blobs
+        .exists_blob(&staging_layer("gallery_post", 0))
+        .await
+        .unwrap());
+    assert!(catalog.is_rejected("gallery_post").await.unwrap());
 
     // Subsequent harvest skips because rejected
     let re_outcome_rej = service.ingest_media(&gallery_post, 0).await.unwrap();
@@ -402,8 +681,7 @@ async fn test_multi_image_gallery_ingestion() {
 
 #[tokio::test]
 async fn test_split_post_deduplication() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
 
     // Case 1: Split child gallery_split_0 exists in staging
     let split_child_post = RedditPost {
@@ -425,13 +703,16 @@ async fn test_split_post_deduplication() {
     // Pre-populate split child "gallery_split_0" into staging
     let child_sidecar = split_child_post.to_sidecar_metadata(0).unwrap();
     assert_eq!(child_sidecar.id, "gallery_split_0");
-    storage
-        .save_staging_reddit(&child_sidecar, &create_test_png())
+    let child_candidate = child_sidecar.to_candidate();
+    catalog.save_candidate(&child_candidate).await.unwrap();
+    blobs
+        .write_blob(&staging_layer("gallery_split_0", 0), &create_test_png())
+        .await
         .unwrap();
-    assert!(storage.is_in_staging("gallery_split_0").unwrap());
+    assert!(catalog.get_candidate("gallery_split_0").await.is_ok());
 
     let harvester = MockHarvester::new(vec![split_child_post.clone()]);
-    let service = RedditIngestionService::new(harvester, storage.clone());
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
 
     // Harvest should skip gallery_split because child gallery_split_0 is already in staging
     let summary = service.ingest_post(&split_child_post).await.unwrap();
@@ -448,15 +729,16 @@ async fn test_split_post_deduplication() {
         }
     );
 
-    // Case 2: Split child rejected in rejections.json
-    storage
+    // Case 2: Split child rejected in the rejection log
+    catalog
         .log_rejection(
             "gallery_rejected_0",
             RejectionReason::GridBurnedIn,
             Some("Burned grid on layer 0"),
         )
+        .await
         .unwrap();
-    assert!(storage.is_rejected("gallery_rejected_0").unwrap());
+    assert!(catalog.is_rejected("gallery_rejected_0").await.unwrap());
 
     let split_rejected_post = RedditPost {
         id: "gallery_rejected".into(),
@@ -493,8 +775,8 @@ async fn test_split_post_deduplication() {
         vec!["dungeon".into()],
         (25, 25),
     );
-    storage.save_curated(&curated, &create_test_png()).unwrap();
-    assert!(storage.is_curated("gallery_curated_0").unwrap());
+    catalog.save_curated(&curated).await.unwrap();
+    assert!(catalog.get_curated("gallery_curated_0").await.is_ok());
 
     let split_curated_post = RedditPost {
         id: "gallery_curated".into(),
@@ -543,8 +825,7 @@ async fn test_ingest_query_filtered_gridless_only() {
     });
     let image_url = format!("http://{addr}/image.png");
 
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
 
     let post_gridless = RedditPost {
         id: "gridless_1".into(),
@@ -586,7 +867,7 @@ async fn test_ingest_query_filtered_gridless_only() {
     };
 
     let harvester = MockHarvester::new(vec![post_gridless, post_gridded, post_unknown]);
-    let service = RedditIngestionService::new(harvester, storage.clone());
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
 
     let query = RedditHarvestQuery::default();
     let summary = service.ingest_query_filtered(&query, true).await.unwrap();
@@ -596,9 +877,9 @@ async fn test_ingest_query_filtered_gridless_only() {
     assert_eq!(summary.skipped, 2);
 
     // Only gridless candidate should be in staging
-    assert!(storage.is_in_staging("gridless_1").unwrap());
-    assert!(!storage.is_in_staging("gridded_1").unwrap());
-    assert!(!storage.is_in_staging("unknown_1").unwrap());
+    assert!(catalog.get_candidate("gridless_1").await.is_ok());
+    assert!(catalog.get_candidate("gridded_1").await.is_err());
+    assert!(catalog.get_candidate("unknown_1").await.is_err());
 }
 
 #[tokio::test]
@@ -619,8 +900,7 @@ async fn test_ingest_query_progress_events() {
     });
     let image_url = format!("http://{addr}/image.png");
 
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
 
     let post1 = RedditPost {
         id: "prog_1".into(),
@@ -649,7 +929,7 @@ async fn test_ingest_query_progress_events() {
     };
 
     let harvester = MockHarvester::new(vec![post1, post2]);
-    let service = RedditIngestionService::new(harvester, storage.clone());
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
 
     let query = RedditHarvestQuery::default();
     let mut events: Vec<IngestionProgress> = Vec::new();
@@ -711,8 +991,7 @@ async fn test_media_download_429_backoff_and_recovery() {
     });
 
     let image_url = format!("http://{addr}/recoverable.png");
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
 
     let post = RedditPost {
         id: "recover_post".into(),
@@ -729,7 +1008,7 @@ async fn test_media_download_429_backoff_and_recovery() {
 
     let harvester = MockHarvester::new(vec![post.clone()]);
     let backoff = BackoffConfig::new(Duration::from_millis(5), 3, 1.5);
-    let service = RedditIngestionService::new(harvester, storage.clone()).with_backoff(backoff);
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone()).with_backoff(backoff);
 
     assert_eq!(service.backoff().max_retries, 3);
 
@@ -738,10 +1017,11 @@ async fn test_media_download_429_backoff_and_recovery() {
     assert_eq!(summary.downloaded, 1);
     assert_eq!(summary.skipped, 0);
 
-    // Verify file exists on disk
-    let staged_bundle = storage.staging_dir().join("reddit").join("recover_post");
-    let staged_file = storage.staging_dir().join("reddit").join("recover_post.png");
-    assert!(staged_bundle.join("0.png").is_file() || staged_file.is_file());
+    // Verify the recovered layer was persisted
+    assert!(blobs
+        .exists_blob(&staging_layer("recover_post", 0))
+        .await
+        .unwrap());
     assert_eq!(counter.load(Ordering::SeqCst), 3);
 }
 
@@ -789,8 +1069,7 @@ async fn test_media_download_429_exhausted_retries_continues_batch() {
 
     let fail_url = format!("http://{addr}/always_429.png");
     let ok_url = format!("http://{addr}/ok.png");
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
 
     let post1_fail = RedditPost {
         id: "post_1_fail".into(),
@@ -820,7 +1099,7 @@ async fn test_media_download_429_exhausted_retries_continues_batch() {
 
     let harvester = MockHarvester::new(vec![post1_fail.clone(), post2_ok.clone()]);
     let backoff = BackoffConfig::new(Duration::from_millis(5), 2, 1.5);
-    let service = RedditIngestionService::new(harvester, storage.clone()).with_backoff(backoff);
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone()).with_backoff(backoff);
 
     // First verify ingest_media for post1_fail directly returns SkipReason::DownloadFailed
     let outcome = service.ingest_media(&post1_fail, 0).await.unwrap();
@@ -843,12 +1122,16 @@ async fn test_media_download_429_exhausted_retries_continues_batch() {
     assert_eq!(summary.skipped, 1);
 
     // Staging must NOT have post_1_fail, but MUST have post_2_ok
-    let reddit_staging = storage.staging_dir().join("reddit");
-    assert!(!reddit_staging.join("post_1_fail").exists());
-    assert!(!reddit_staging.join("post_1_fail.png").exists());
-    assert!(!reddit_staging.join("post_1_fail.json").exists());
-    assert!(reddit_staging.join("post_2_ok").join("0.png").is_file() || reddit_staging.join("post_2_ok.png").is_file());
-    assert!(reddit_staging.join("post_2_ok").join("manifest.json").is_file() || reddit_staging.join("post_2_ok.json").is_file());
+    assert!(catalog.get_candidate("post_1_fail").await.is_err());
+    assert!(!blobs
+        .exists_blob(&staging_layer("post_1_fail", 0))
+        .await
+        .unwrap());
+    assert!(catalog.get_candidate("post_2_ok").await.is_ok());
+    assert!(blobs
+        .exists_blob(&staging_layer("post_2_ok", 0))
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -888,8 +1171,7 @@ async fn test_rate_limit_progress_events_emitted_during_backoff() {
     });
 
     let image_url = format!("http://{addr}/rate_limit_progress.png");
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
 
     let post = RedditPost {
         id: "rl_post".into(),
@@ -906,7 +1188,7 @@ async fn test_rate_limit_progress_events_emitted_during_backoff() {
 
     let harvester = MockHarvester::new(vec![post]);
     let backoff = BackoffConfig::new(Duration::from_millis(5), 3, 2.0);
-    let service = RedditIngestionService::new(harvester, storage).with_backoff(backoff);
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone()).with_backoff(backoff);
 
     let query = RedditHarvestQuery::default();
     let mut events: Vec<IngestionProgress> = Vec::new();
@@ -936,10 +1218,9 @@ async fn test_rate_limit_progress_events_emitted_during_backoff() {
 
 #[test]
 fn test_reddit_ingestion_service_backoff_config() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
     let harvester = MockHarvester::default();
-    let service = RedditIngestionService::new(harvester, storage.clone());
+    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
 
     assert_eq!(service.backoff().initial_delay, Duration::from_secs(3));
     assert_eq!(service.backoff().max_retries, 5);

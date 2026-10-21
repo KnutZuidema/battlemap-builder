@@ -12,6 +12,8 @@ use crate::domain::{
     build_battlemap_prompt, generate_benchmark_id, BatchBenchmarkItem, BenchmarkArchetype,
     BenchmarkMetadata, BenchmarkResult, GenerationRequest, ALL_BENCHMARK_MODELS,
 };
+use crate::ports::blob_storage::BlobStorage;
+use crate::ports::catalog_repository::CatalogRepository;
 use crate::ports::cost_tracker::{CostTracker, CostTrackerError, GenerationCostRecord};
 use crate::ports::model_engine::{ModelEngine, ModelEngineError};
 use crate::ports::storage::{StorageError, StorageRepository};
@@ -70,8 +72,10 @@ impl BenchmarkService {
     pub fn new(
         engine: Arc<dyn ModelEngine + Send + Sync>,
         storage: Arc<dyn StorageRepository + Send + Sync>,
+        catalog: Arc<dyn CatalogRepository + Send + Sync>,
+        blobs: Arc<dyn BlobStorage + Send + Sync>,
     ) -> Self {
-        let reference_provider = ReferenceProvider::new(storage.clone());
+        let reference_provider = ReferenceProvider::new(catalog, blobs);
         Self {
             engine,
             storage,
@@ -86,8 +90,10 @@ impl BenchmarkService {
         engine: Arc<dyn ModelEngine + Send + Sync>,
         storage: Arc<dyn StorageRepository + Send + Sync>,
         cost_tracker: Arc<dyn CostTracker + Send + Sync>,
+        catalog: Arc<dyn CatalogRepository + Send + Sync>,
+        blobs: Arc<dyn BlobStorage + Send + Sync>,
     ) -> Self {
-        let reference_provider = ReferenceProvider::new(storage.clone());
+        let reference_provider = ReferenceProvider::new(catalog, blobs);
         Self {
             engine,
             storage,
@@ -120,7 +126,7 @@ impl BenchmarkService {
     }
 
     /// Resolve reference image for a given batch item if reference conditioning is enabled.
-    pub fn resolve_reference_for_item(
+    pub async fn resolve_reference_for_item(
         &self,
         item: &BatchBenchmarkItem,
     ) -> Option<ReferenceResolution> {
@@ -135,11 +141,13 @@ impl BenchmarkService {
         {
             self.reference_provider
                 .resolve_reference_for_theme(&archetype.default_theme())
+                .await
                 .ok()
                 .flatten()
         } else {
             self.reference_provider
                 .resolve_reference_for_prompt(&item.prompt)
+                .await
                 .ok()
                 .flatten()
         }
@@ -180,7 +188,11 @@ impl BenchmarkService {
 
         if self.reference_conditioning_enabled {
             let theme = archetype.default_theme();
-            if let Ok(Some(resolution)) = self.reference_provider.resolve_reference_for_theme(&theme) {
+            if let Ok(Some(resolution)) = self
+                .reference_provider
+                .resolve_reference_for_theme(&theme)
+                .await
+            {
                 info!(
                     provenance = ?resolution.provenance,
                     "Applying visual reference conditioning to benchmark request"
@@ -297,6 +309,7 @@ impl BenchmarkService {
                 if let Ok(Some(resolution)) = self
                     .reference_provider
                     .resolve_reference_for_prompt(&item.prompt)
+                    .await
                 {
                     info!(
                         provenance = ?resolution.provenance,
@@ -406,7 +419,7 @@ impl BenchmarkService {
                     completed,
                     total,
                     current_spend,
-                    message: if let Some(ref_res) = self.resolve_reference_for_item(item) {
+                    message: if let Some(ref_res) = self.resolve_reference_for_item(item).await {
                         match ref_res.provenance {
                             ReferenceProvenance::Curated { id, .. } => {
                                 format!(
@@ -537,10 +550,22 @@ pub fn persist_generated_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
     use crate::domain::GenerationResponse;
     use crate::ports::storage::StorageRepository;
     use async_trait::async_trait;
     use tempfile::TempDir;
+
+    /// Fresh in-memory catalog and blob ports for the services under test.
+    fn reference_ports() -> (
+        Arc<dyn CatalogRepository + Send + Sync>,
+        Arc<dyn BlobStorage + Send + Sync>,
+    ) {
+        (
+            Arc::new(InMemoryCatalogRepository::new()),
+            Arc::new(InMemoryBlobStorage::new()),
+        )
+    }
 
     struct RecordingMockEngine {
         dummy_png: Vec<u8>,
@@ -679,7 +704,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let engine = Arc::new(MockEngine::new());
-        let service = BenchmarkService::new(engine, storage.clone());
+        let (catalog, blobs) = reference_ports();
+        let service = BenchmarkService::new(engine, storage.clone(), catalog, blobs);
 
         let result = service
             .run_and_persist("meta/muse-image", &BenchmarkArchetype::StoneCrypt)
@@ -724,8 +750,9 @@ mod tests {
         let cost_tracker: Arc<dyn CostTracker + Send + Sync> =
             Arc::new(FileCostLedger::new(&ledger_path));
 
+        let (catalog, blobs) = reference_ports();
         let service =
-            BenchmarkService::with_cost_tracker(engine, storage, cost_tracker.clone());
+            BenchmarkService::with_cost_tracker(engine, storage, cost_tracker.clone(), catalog, blobs);
 
         let result = service
             .run_and_persist("meta/muse-image", &BenchmarkArchetype::StoneCrypt)
@@ -750,7 +777,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let engine = Arc::new(MockEngine::new());
-        let service = BenchmarkService::new(engine, storage.clone());
+        let (catalog, blobs) = reference_ports();
+        let service = BenchmarkService::new(engine, storage.clone(), catalog, blobs);
 
         let models = vec!["meta/muse-image".to_string()];
         let items = vec![
@@ -784,7 +812,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let engine = Arc::new(MockEngine::new());
-        let service = BenchmarkService::new(engine, storage.clone());
+        let (catalog, blobs) = reference_ports();
+        let service = BenchmarkService::new(engine, storage.clone(), catalog, blobs);
 
         let models = vec!["meta/muse-image".to_string(), "google/gemini-3.1-flash-image".to_string()];
         let items = vec![
@@ -819,7 +848,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let (engine, captured_requests) = RecordingMockEngine::new();
-        let service = BenchmarkService::new(Arc::new(engine), storage);
+        let (catalog, blobs) = reference_ports();
+        let service = BenchmarkService::new(Arc::new(engine), storage, catalog, blobs);
 
         let result = service
             .run_archetype("meta/muse-image", &BenchmarkArchetype::StoneCrypt)
@@ -859,13 +889,15 @@ mod tests {
     async fn test_benchmark_service_visual_reference_curated_prioritization() {
         use chrono::Utc;
         use crate::adapters::FilesystemStorage;
-        use crate::domain::{CuratedMap, Theme};
+        use crate::domain::{CuratedMap, LayerRole, Theme};
+        use crate::ports::blob_storage::BlobKey;
         use image::{ImageBuffer, Rgb};
 
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
+        let (catalog, blobs) = reference_ports();
 
-        // Save a 5-star curated map in the Dungeon theme
+        // Save a curated map and its ground-layer blob in the Dungeon theme
         let map = CuratedMap::new(
             "curated-crypt-champion",
             Theme::Dungeon,
@@ -880,10 +912,22 @@ mod tests {
         let mut png_bytes = Vec::new();
         img.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
             .unwrap();
-        storage.save_curated(&map, &png_bytes).unwrap();
+        catalog.save_curated(&map).await.unwrap();
+        blobs
+            .write_blob(
+                &BlobKey::CuratedLayer {
+                    id: "curated-crypt-champion".to_string(),
+                    index: 0,
+                    role: LayerRole::Ground,
+                    elevation: Some(0),
+                },
+                &png_bytes,
+            )
+            .await
+            .unwrap();
 
         let (engine, captured_requests) = RecordingMockEngine::new();
-        let service = BenchmarkService::new(Arc::new(engine), storage);
+        let service = BenchmarkService::new(Arc::new(engine), storage, catalog, blobs);
 
         let result = service
             .run_archetype("meta/muse-image", &BenchmarkArchetype::StoneCrypt)
@@ -918,7 +962,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let (engine, captured_requests) = RecordingMockEngine::new();
-        let service = BenchmarkService::new(Arc::new(engine), storage);
+        let (catalog, blobs) = reference_ports();
+        let service = BenchmarkService::new(Arc::new(engine), storage, catalog, blobs);
 
         // 1. Custom prompt matching Tavern
         let tavern_item = BatchBenchmarkItem::new(
@@ -961,7 +1006,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let (engine, captured_requests) = RecordingMockEngine::new();
-        let service = BenchmarkService::new(Arc::new(engine), storage)
+        let (catalog, blobs) = reference_ports();
+        let service = BenchmarkService::new(Arc::new(engine), storage, catalog, blobs)
             .with_reference_conditioning(false);
 
         assert!(!service.reference_conditioning_enabled());

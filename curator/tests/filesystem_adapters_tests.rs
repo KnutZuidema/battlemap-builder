@@ -5,11 +5,14 @@ use std::sync::Arc;
 
 use curator::adapters::filesystem_blob_storage::FilesystemBlobStorage;
 use curator::adapters::filesystem_catalog_repository::FilesystemCatalogRepository;
+use curator::adapters::filesystem_storage::FilesystemStorage;
 use curator::domain::{
-    Candidate, CuratedMap, LayerRole, RejectionReason, RejectionRecord, Source, Theme,
+    BenchmarkMetadata, Candidate, CuratedMap, LayerRole, RejectionReason, RejectionRecord, Source,
+    Theme,
 };
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
+use curator::ports::storage::StorageRepository;
 use curator::ports::storage_error::StorageError;
 use tempfile::tempdir;
 
@@ -41,6 +44,54 @@ fn curated_ids(maps: Vec<CuratedMap>) -> Vec<String> {
 fn write_file(path: &Path, bytes: &[u8]) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, bytes).unwrap();
+}
+
+/// Recursively collects `(relative path, bytes)` for every file under `root`, sorted by path, so
+/// two snapshots of a tree compare structurally as well as byte-for-byte.
+fn snapshot_dir(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut snapshot = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in std::fs::read_dir(&current).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let relative = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                snapshot.push((relative, std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    snapshot.sort();
+    snapshot
+}
+
+fn candidate_manifest(id: &str, source: Source) -> Vec<u8> {
+    serde_json::to_string_pretty(&candidate(id, source, None))
+        .unwrap()
+        .into_bytes()
+}
+
+/// The raw `BenchmarkMetadata` manifest that the legacy `save_staging_generated` writer drops at
+/// `staging/generated/{id}/manifest.json` (it is NOT a `Candidate` document).
+fn benchmark_manifest(id: &str) -> Vec<u8> {
+    let metadata = BenchmarkMetadata::new(
+        id,
+        "openai/dall-e-3",
+        "cavern",
+        "A moody cavern battlemap",
+        Some(120),
+        Some(1024),
+        1500,
+        0.04,
+    );
+    serde_json::to_string_pretty(&metadata)
+        .unwrap()
+        .into_bytes()
 }
 
 fn blob_keys() -> Vec<BlobKey> {
@@ -505,4 +556,139 @@ async fn catalog_repository_is_usable_as_trait_object() {
         .await
         .unwrap();
     assert_eq!(storage.get_candidate("cand-1").await.unwrap().id, "cand-1");
+}
+
+/// Legacy `staging/{reddit,generated}/{id}/` bundles written before the port cutover must be
+/// flattened into `staging/{id}/` at startup, otherwise the flat-only catalog never sees them and
+/// ingestion deduplication re-downloads posts that are already staged.
+#[tokio::test]
+async fn startup_migration_flattens_legacy_staging_bundles_for_dedup() {
+    let dir = tempdir().unwrap();
+    let legacy_reddit = dir.path().join("staging/reddit/legacy_crypt");
+    let legacy_generated = dir.path().join("staging/generated/gen_crypt");
+    write_file(&legacy_reddit.join("0.png"), b"legacy-reddit-layer");
+    write_file(&legacy_reddit.join("manifest.json"), &candidate_manifest("legacy_crypt", Source::Reddit));
+    write_file(&legacy_generated.join("0.png"), b"legacy-generated-layer");
+    write_file(
+        &legacy_generated.join("manifest.json"),
+        &benchmark_manifest("gen_crypt"),
+    );
+
+    // The constructor runs the startup migration; run it again to prove it is safe on every boot.
+    let storage = FilesystemStorage::new(dir.path());
+    storage.migrate_legacy_storage().unwrap();
+
+    // The legacy bundle directories and their now-empty subfolders are gone.
+    assert!(!legacy_reddit.exists());
+    assert!(!legacy_generated.exists());
+    assert!(!dir.path().join("staging/reddit").exists());
+    assert!(!dir.path().join("staging/generated").exists());
+
+    // Their bytes survive at the uniform `staging/{id}/` location.
+    let flat_reddit = dir.path().join("staging/legacy_crypt");
+    let flat_generated = dir.path().join("staging/gen_crypt");
+    assert!(flat_reddit.join("manifest.json").is_file());
+    assert!(flat_generated.join("manifest.json").is_file());
+    assert_eq!(
+        std::fs::read(flat_reddit.join("0.png")).unwrap(),
+        b"legacy-reddit-layer"
+    );
+    assert_eq!(
+        std::fs::read(flat_generated.join("0.png")).unwrap(),
+        b"legacy-generated-layer"
+    );
+
+    // The monolith still resolves both flattened bundles: `parse_candidate_json` parses a
+    // `Candidate` document directly and falls back to `BenchmarkMetadata::to_candidate()` for the
+    // raw benchmark manifest that the legacy `save_staging_generated` writer left behind.
+    let monolith = FilesystemStorage::new(dir.path());
+    let staged_ids = candidate_ids(monolith.list_staging().expect("list staging succeeds"));
+    assert!(staged_ids.contains(&"legacy_crypt".to_string()));
+    assert!(staged_ids.contains(&"gen_crypt".to_string()));
+
+    // The strict catalog deserializes `Candidate` manifests only, so the raw `BenchmarkMetadata`
+    // manifest now at `staging/gen_crypt/manifest.json` is deliberately NOT listed. #176 replaces
+    // the generated-candidate writer with `catalog.save_candidate` + `blobs.write_blob`, and legacy
+    // manifest awareness must not leak into this long-lived adapter.
+    let catalog = FilesystemCatalogRepository::new(dir.path());
+    assert_eq!(
+        catalog.get_candidate("legacy_crypt").await.unwrap().id,
+        "legacy_crypt"
+    );
+    assert!(matches!(
+        catalog.get_candidate("gen_crypt").await,
+        Err(StorageError::InvalidData(_))
+    ));
+    assert_eq!(
+        candidate_ids(
+            catalog
+                .list_candidates(&CandidateFilter::default())
+                .await
+                .unwrap()
+        ),
+        vec!["legacy_crypt".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn startup_migration_never_clobbers_an_existing_flat_bundle() {
+    let dir = tempdir().unwrap();
+    let flat = dir.path().join("staging/shared_id");
+    let legacy = dir.path().join("staging/reddit/shared_id");
+    let manifest = candidate_manifest("shared_id", Source::Reddit);
+    write_file(&flat.join("0.png"), b"flat-bundle-layer");
+    write_file(&flat.join("manifest.json"), &manifest);
+    write_file(&legacy.join("0.png"), b"legacy-bundle-layer");
+    write_file(&legacy.join("manifest.json"), &manifest);
+
+    let storage = FilesystemStorage::new(dir.path());
+    storage.migrate_legacy_storage().unwrap();
+
+    // The pre-existing flat bundle wins and is untouched; the legacy copy is not merged into it
+    // and is left fully intact rather than half-moved.
+    assert_eq!(
+        std::fs::read(flat.join("0.png")).unwrap(),
+        b"flat-bundle-layer"
+    );
+    assert!(flat.join("manifest.json").is_file());
+    assert_eq!(
+        std::fs::read(legacy.join("0.png")).unwrap(),
+        b"legacy-bundle-layer"
+    );
+    assert!(legacy.join("manifest.json").is_file());
+
+    // Only the flat bundle is catalogued, so the id is listed exactly once.
+    let catalog = FilesystemCatalogRepository::new(dir.path());
+    assert_eq!(
+        catalog.get_candidate("shared_id").await.unwrap().id,
+        "shared_id"
+    );
+    assert_eq!(
+        catalog
+            .list_candidates(&CandidateFilter::default())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn startup_migration_flattening_is_idempotent() {
+    let dir = tempdir().unwrap();
+    let legacy = dir.path().join("staging/reddit/legacy_crypt");
+    write_file(&legacy.join("0.png"), b"legacy-reddit-layer");
+    write_file(
+        &legacy.join("manifest.json"),
+        &candidate_manifest("legacy_crypt", Source::Reddit),
+    );
+
+    let storage = FilesystemStorage::new(dir.path());
+    let after_first_run = snapshot_dir(dir.path());
+
+    storage.migrate_legacy_storage().unwrap();
+    storage.migrate_legacy_storage().unwrap();
+
+    assert_eq!(snapshot_dir(dir.path()), after_first_run);
+    assert!(dir.path().join("staging/legacy_crypt/manifest.json").is_file());
 }

@@ -1,8 +1,9 @@
 //! Virtuous cycle reference provider: resolves visual conditioning images for battlemap generation.
 //!
-//! Prioritizes 5-star and top-rated curated battlemaps from `StorageRepository` matching the prompt's
-//! theme, falling back to curated static reference images (`data/battlemap-reference-*.jpeg`)
-//! when no high-rating curated maps are available.
+//! Prioritizes top-rated curated battlemaps from the [`CatalogRepository`] matching the prompt's
+//! theme, reading their ground layer bytes through the [`BlobStorage`] port and falling back to
+//! curated static reference images (`data/battlemap-reference-*.jpeg`) when no curated maps are
+//! available.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,7 +19,9 @@ use tracing::{info, warn};
 use crate::domain::{
     crop_section_box, CuratedMap, GridConfig, LayerRole, MapSection, ReferenceImage, Theme,
 };
-use crate::ports::storage::{StorageError, StorageRepository};
+use crate::ports::blob_storage::{BlobKey, BlobStorage};
+use crate::ports::catalog_repository::{CatalogRepository, CuratedFilter};
+use crate::ports::storage_error::StorageError;
 
 // Embedded fallback reference image bytes so resolution succeeds reliably in any environment
 const STATIC_BYTES_REF_1: &[u8] = include_bytes!("../../../data/battlemap-reference-1.jpeg");
@@ -353,19 +356,51 @@ pub fn score_curated_section_for_prompt(
     score
 }
 
+/// Blob key of the curated map's `Ground` layer image, falling back to its first layer.
+///
+/// Mirrors the layer resolution of the storage repository, so the provider reads exactly the
+/// image the catalog's `layers` metadata describes.
+fn curated_ground_blob_key(map: &CuratedMap) -> BlobKey {
+    let layer = map
+        .layers
+        .iter()
+        .find(|l| l.role == LayerRole::Ground)
+        .or_else(|| map.layers.first());
+
+    match layer {
+        Some(layer) => BlobKey::CuratedLayer {
+            id: map.id.clone(),
+            index: layer.index,
+            role: layer.role,
+            elevation: layer.elevation,
+        },
+        None => BlobKey::CuratedLayer {
+            id: map.id.clone(),
+            index: 0,
+            role: LayerRole::Ground,
+            elevation: Some(0),
+        },
+    }
+}
+
 /// Service providing visual reference conditioning images for few-shot benchmark generation.
 #[derive(Clone)]
 pub struct ReferenceProvider {
-    storage: Arc<dyn StorageRepository + Send + Sync>,
+    catalog: Arc<dyn CatalogRepository + Send + Sync>,
+    blobs: Arc<dyn BlobStorage + Send + Sync>,
     static_cache: Arc<RwLock<HashMap<String, Vec<u8>>>>,
     target_size: u32,
 }
 
 impl ReferenceProvider {
-    /// Creates a new `ReferenceProvider` backed by the given storage repository.
-    pub fn new(storage: Arc<dyn StorageRepository + Send + Sync>) -> Self {
+    /// Creates a new `ReferenceProvider` backed by the given catalog and blob storage ports.
+    pub fn new(
+        catalog: Arc<dyn CatalogRepository + Send + Sync>,
+        blobs: Arc<dyn BlobStorage + Send + Sync>,
+    ) -> Self {
         Self {
-            storage,
+            catalog,
+            blobs,
             static_cache: Arc::new(RwLock::new(HashMap::new())),
             target_size: 512,
         }
@@ -377,21 +412,22 @@ impl ReferenceProvider {
         self
     }
 
-    /// Underlying storage repository reference.
-    pub fn storage(&self) -> &Arc<dyn StorageRepository + Send + Sync> {
-        &self.storage
-    }
-
     /// Resolves reference image for a given theme:
-    /// 1. Queries curated maps in storage for the theme.
+    /// 1. Queries curated maps in the catalog for the theme.
     /// 2. If a map is found, selects the most recently curated map.
     /// 3. Otherwise, falls back to the static reference image for the theme.
-    pub fn resolve_reference_for_theme(
+    pub async fn resolve_reference_for_theme(
         &self,
         theme: &Theme,
     ) -> Result<Option<ReferenceResolution>, ReferenceProviderError> {
-        // 1. Query curated maps in storage
-        let curated_maps = self.storage.list_curated(Some(theme))?;
+        // 1. Query curated maps in the catalog
+        let curated_maps = self
+            .catalog
+            .list_curated(&CuratedFilter {
+                theme: Some(*theme),
+                ..Default::default()
+            })
+            .await?;
 
         // 2. Select top curated map (tie-breaking on curated_at, most recent first)
         let top_curated = curated_maps
@@ -401,7 +437,7 @@ impl ReferenceProvider {
         // 3. If found, load bytes and preprocess center-most section
         if let Some(map) = top_curated {
             let section = select_center_most_section(&map);
-            match self.storage.get_curated_ground_image_bytes(&map) {
+            match self.load_ground_bytes(&map).await {
                 Ok(raw_bytes) => {
                     match preprocess_section_reference_image(
                         &raw_bytes,
@@ -463,11 +499,11 @@ impl ReferenceProvider {
 
     /// Resolves reference image by scoring (CuratedMap, MapSection) pairs on prompt keyword overlap,
     /// tie-breaking on curated_at (most recent first). Falls back to static reference if none match.
-    pub fn resolve_reference_for_prompt(
+    pub async fn resolve_reference_for_prompt(
         &self,
         prompt: &str,
     ) -> Result<Option<ReferenceResolution>, ReferenceProviderError> {
-        let curated_maps = self.storage.list_curated(None)?;
+        let curated_maps = self.catalog.list_curated(&CuratedFilter::default()).await?;
 
         let mut section_candidates: Vec<(usize, CuratedMap, MapSection)> = Vec::new();
 
@@ -500,7 +536,7 @@ impl ReferenceProvider {
 
         if let Some((_, map, section)) = top_match {
             let primary_theme = map.theme().unwrap_or(Theme::Dungeon);
-            match self.storage.get_curated_ground_image_bytes(&map) {
+            match self.load_ground_bytes(&map).await {
                 Ok(raw_bytes) => {
                     match preprocess_section_reference_image(
                         &raw_bytes,
@@ -565,6 +601,11 @@ impl ReferenceProvider {
         }
     }
 
+    /// Loads the raw bytes of a curated map's `Ground` layer, falling back to its first layer.
+    async fn load_ground_bytes(&self, map: &CuratedMap) -> Result<Vec<u8>, StorageError> {
+        self.blobs.read_blob(&curated_ground_blob_key(map)).await
+    }
+
     /// Retrieves preprocessed bytes for a static reference definition with in-memory caching.
     fn get_static_reference_bytes(
         &self,
@@ -616,10 +657,9 @@ impl ReferenceProvider {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use crate::adapters::FilesystemStorage;
+    use crate::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
     use crate::domain::{CuratedLayer, CuratedMap};
     use image::{ImageBuffer, Rgb};
-    use tempfile::TempDir;
 
     fn create_test_image_bytes(width: u32, height: u32, color: [u8; 3]) -> Vec<u8> {
         let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
@@ -628,6 +668,35 @@ mod tests {
         img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
             .expect("image write succeeds");
         bytes
+    }
+
+    /// Persists `map` into the in-memory catalog together with its ground-image blob.
+    async fn seed_curated_map(
+        catalog: &InMemoryCatalogRepository,
+        blobs: &InMemoryBlobStorage,
+        map: &CuratedMap,
+        image_bytes: &[u8],
+    ) {
+        catalog
+            .save_curated(map)
+            .await
+            .expect("curated map saves");
+        // The Ground-layer address is spelled out here instead of going through
+        // `curated_ground_blob_key`: sharing the derivation with `load_ground_bytes` would make the
+        // fixture and the reader agree on whatever key production produces, hiding a wrong
+        // index/role/elevation.
+        blobs
+            .write_blob(
+                &BlobKey::CuratedLayer {
+                    id: map.id.clone(),
+                    index: 0,
+                    role: LayerRole::Ground,
+                    elevation: Some(0),
+                },
+                image_bytes,
+            )
+            .await
+            .expect("ground layer blob saves");
     }
 
     #[test]
@@ -679,14 +748,15 @@ mod tests {
         assert_eq!(detect_theme_for_prompt("completely unrelated text 12345"), None);
     }
 
-    #[test]
-    fn test_static_fallback_when_storage_empty() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
-        let provider = ReferenceProvider::new(storage);
+    #[tokio::test]
+    async fn test_static_fallback_when_storage_empty() {
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let blobs = Arc::new(InMemoryBlobStorage::new());
+        let provider = ReferenceProvider::new(catalog, blobs);
 
         let resolution = provider
             .resolve_reference_for_theme(&Theme::Dungeon)
+            .await
             .expect("resolution succeeds")
             .expect("reference exists");
 
@@ -711,11 +781,11 @@ mod tests {
         assert_eq!(decoded.height(), 512);
     }
 
-    #[test]
-    fn test_curated_map_recency_prioritization() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
-        let provider = ReferenceProvider::new(storage.clone());
+    #[tokio::test]
+    async fn test_curated_map_recency_prioritization() {
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let blobs = Arc::new(InMemoryBlobStorage::new());
+        let provider = ReferenceProvider::new(catalog.clone(), blobs.clone());
 
         let older_time = Utc::now() - chrono::Duration::hours(2);
         let newer_time = Utc::now();
@@ -728,7 +798,7 @@ mod tests {
             older_time,
         );
         let img_bytes = create_test_image_bytes(1024, 1024, [0, 255, 0]);
-        storage.save_curated(&map_older, &img_bytes).unwrap();
+        seed_curated_map(&catalog, &blobs, &map_older, &img_bytes).await;
 
         let map_newer = CuratedMap::new(
             "curated-dungeon-newer",
@@ -737,10 +807,11 @@ mod tests {
             (1024, 1024),
             newer_time,
         );
-        storage.save_curated(&map_newer, &img_bytes).unwrap();
+        seed_curated_map(&catalog, &blobs, &map_newer, &img_bytes).await;
 
         let res = provider
             .resolve_reference_for_theme(&Theme::Dungeon)
+            .await
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -752,11 +823,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_prompt_keyword_overlap_prioritization() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
-        let provider = ReferenceProvider::new(storage.clone());
+    #[tokio::test]
+    async fn test_prompt_keyword_overlap_prioritization() {
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let blobs = Arc::new(InMemoryBlobStorage::new());
+        let provider = ReferenceProvider::new(catalog.clone(), blobs.clone());
 
         // Map A: 1 overlap with prompt ("dungeon")
         let map_a = CuratedMap::new(
@@ -767,7 +838,7 @@ mod tests {
             Utc::now() - chrono::Duration::hours(1),
         );
         let img_bytes = create_test_image_bytes(1024, 1024, [0, 0, 255]);
-        storage.save_curated(&map_a, &img_bytes).unwrap();
+        seed_curated_map(&catalog, &blobs, &map_a, &img_bytes).await;
 
         // Map B: 3 overlaps with prompt ("dungeon", "crypt", "sarcophagus")
         let map_b = CuratedMap::new(
@@ -777,10 +848,14 @@ mod tests {
             (1024, 1024),
             Utc::now() - chrono::Duration::hours(2),
         );
-        storage.save_curated(&map_b, &img_bytes).unwrap();
+        seed_curated_map(&catalog, &blobs, &map_b, &img_bytes).await;
 
         let prompt = "Stone dungeon crypt with central sarcophagus and iron gate";
-        let res = provider.resolve_reference_for_prompt(prompt).unwrap().unwrap();
+        let res = provider
+            .resolve_reference_for_prompt(prompt)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             res.provenance,
             ReferenceProvenance::Curated {
@@ -790,11 +865,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_curated_map_unmatched_prompt_falls_back_to_static() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
-        let provider = ReferenceProvider::new(storage.clone());
+    #[tokio::test]
+    async fn test_curated_map_unmatched_prompt_falls_back_to_static() {
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let blobs = Arc::new(InMemoryBlobStorage::new());
+        let provider = ReferenceProvider::new(catalog.clone(), blobs.clone());
 
         // Storage only has dungeon maps
         let map_dungeon = CuratedMap::new(
@@ -805,11 +880,12 @@ mod tests {
             Utc::now(),
         );
         let img_bytes = create_test_image_bytes(1024, 1024, [100, 100, 100]);
-        storage.save_curated(&map_dungeon, &img_bytes).unwrap();
+        seed_curated_map(&catalog, &blobs, &map_dungeon, &img_bytes).await;
 
         // Prompt is about wilderness
         let res = provider
             .resolve_reference_for_prompt("Forest river crossing with wooden bridge")
+            .await
             .unwrap()
             .unwrap();
 
@@ -879,11 +955,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_prompt_keyword_overlap_prioritizes_description_match() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
-        let provider = ReferenceProvider::new(storage.clone());
+    #[tokio::test]
+    async fn test_prompt_keyword_overlap_prioritizes_description_match() {
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let blobs = Arc::new(InMemoryBlobStorage::new());
+        let provider = ReferenceProvider::new(catalog.clone(), blobs.clone());
 
         // Map A: Newer, but only generic theme ("dungeon")
         let map_a = CuratedMap::new(
@@ -894,7 +970,7 @@ mod tests {
             Utc::now(),
         );
         let img_bytes = create_test_image_bytes(1024, 1024, [0, 0, 255]);
-        storage.save_curated(&map_a, &img_bytes).unwrap();
+        seed_curated_map(&catalog, &blobs, &map_a, &img_bytes).await;
 
         // Map B: Older, but rich description matching specific prompt elements ("altar", "obsidian", "braziers")
         let map_b = CuratedMap::new(
@@ -904,10 +980,14 @@ mod tests {
             (1024, 1024),
             Utc::now() - chrono::Duration::hours(5),
         ).with_description("Dark sacrificial chamber with obsidian altar, glowing runes, and twin iron braziers.");
-        storage.save_curated(&map_b, &img_bytes).unwrap();
+        seed_curated_map(&catalog, &blobs, &map_b, &img_bytes).await;
 
         let prompt = "Dark dungeon with obsidian altar and flaming braziers";
-        let res = provider.resolve_reference_for_prompt(prompt).unwrap().unwrap();
+        let res = provider
+            .resolve_reference_for_prompt(prompt)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             res.provenance,
             ReferenceProvenance::Curated {
@@ -1061,11 +1141,11 @@ mod tests {
         assert_eq!(rgb_br.get_pixel(255, 255).0, [255, 255, 0]);
     }
 
-    #[test]
-    fn test_multi_section_map_resolution_altar_vs_bridge() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
-        let provider = ReferenceProvider::new(storage.clone());
+    #[tokio::test]
+    async fn test_multi_section_map_resolution_altar_vs_bridge() {
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let blobs = Arc::new(InMemoryBlobStorage::new());
+        let provider = ReferenceProvider::new(catalog.clone(), blobs.clone());
 
         // Create a 512x256 image with 2 sections (cell_size_px = 16):
         // Section 0 at (col 0, row 0): Red [255, 0, 0] (pixels 0..256 x 0..256)
@@ -1109,12 +1189,13 @@ mod tests {
         .with_grid(grid)
         .with_sections(sections);
 
-        storage.save_curated(&map, &png_bytes).unwrap();
+        seed_curated_map(&catalog, &blobs, &map, &png_bytes).await;
 
         // 1. Resolve for prompt matching the altar section
         let altar_prompt = "Obsidian altar with glowing sacrificial runes in dungeon";
         let altar_res = provider
             .resolve_reference_for_prompt(altar_prompt)
+            .await
             .unwrap()
             .expect("should resolve altar section");
 
@@ -1153,6 +1234,7 @@ mod tests {
         let bridge_prompt = "Rickety wooden rope bridge spanning deep chasm";
         let bridge_res = provider
             .resolve_reference_for_prompt(bridge_prompt)
+            .await
             .unwrap()
             .expect("should resolve bridge section");
 
@@ -1188,11 +1270,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_resolve_reference_for_theme_selects_center_most_section() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
-        let provider = ReferenceProvider::new(storage.clone());
+    #[tokio::test]
+    async fn test_resolve_reference_for_theme_selects_center_most_section() {
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let blobs = Arc::new(InMemoryBlobStorage::new());
+        let provider = ReferenceProvider::new(catalog.clone(), blobs.clone());
 
         // Create 768x256 image with 3 horizontal sections (48x16 lattice, cell_size_px = 16):
         // Section (0, 0): Red [255, 0, 0] (0..256 x 0..256)
@@ -1236,10 +1318,11 @@ mod tests {
         .with_grid(grid)
         .with_sections(sections);
 
-        storage.save_curated(&map, &png_bytes).unwrap();
+        seed_curated_map(&catalog, &blobs, &map, &png_bytes).await;
 
         let res = provider
             .resolve_reference_for_theme(&Theme::Cave)
+            .await
             .unwrap()
             .expect("should resolve center-most section");
 

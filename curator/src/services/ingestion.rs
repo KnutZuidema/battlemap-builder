@@ -7,9 +7,11 @@ pub use crate::adapters::reddit::BackoffConfig;
 use crate::adapters::reddit::{
     parse_rate_limit_delay, unescape_xml_entities, DEFAULT_USER_AGENT,
 };
-use crate::domain::{RedditHarvestQuery, RedditPost};
+use crate::domain::{Candidate, GridConfig, RedditHarvestQuery, RedditPost};
+use crate::ports::blob_storage::{BlobKey, BlobStorage};
+use crate::ports::catalog_repository::CatalogRepository;
 use crate::ports::harvester::{HarvesterError, RedditHarvester};
-use crate::ports::storage::{StorageError, StorageRepository};
+use crate::ports::storage_error::StorageError;
 /// Summary of an ingestion execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct IngestionSummary {
@@ -51,7 +53,6 @@ pub enum SkipReason {
     InvalidMediaIndex,
     NotGridless,
     DownloadFailed,
-    Duplicate,
 }
 
 /// Progress event emitted during Reddit harvesting pipeline execution.
@@ -140,24 +141,26 @@ pub fn candidate_id_for_post(post_id: &str, media_index: usize, total_media: usi
 }
 
 /// Service orchestrating Reddit crawling, deduplication checks, image downloading,
-/// and persisting staged candidates with companion sidecar metadata.
+/// and persisting staged candidates with companion layer blobs.
 #[derive(Debug, Clone)]
-pub struct RedditIngestionService<H, S> {
+pub struct RedditIngestionService<H, C, B> {
     harvester: H,
-    storage: S,
+    catalog: C,
+    blobs: B,
     http_client: reqwest::Client,
     backoff: BackoffConfig,
 }
 
-impl<H, S> RedditIngestionService<H, S> {
-    pub fn new(harvester: H, storage: S) -> Self {
+impl<H, C, B> RedditIngestionService<H, C, B> {
+    pub fn new(harvester: H, catalog: C, blobs: B) -> Self {
         let http_client = reqwest::Client::builder()
             .user_agent(DEFAULT_USER_AGENT)
             .build()
             .unwrap_or_default();
         Self {
             harvester,
-            storage,
+            catalog,
+            blobs,
             http_client,
             backoff: Self::backoff_from_env(),
         }
@@ -187,8 +190,8 @@ impl<H, S> RedditIngestionService<H, S> {
         backoff
     }
 
-    pub fn with_http_client(harvester: H, storage: S, http_client: reqwest::Client) -> Self {
-        let mut service = Self::new(harvester, storage);
+    pub fn with_http_client(harvester: H, catalog: C, blobs: B, http_client: reqwest::Client) -> Self {
+        let mut service = Self::new(harvester, catalog, blobs);
         service.http_client = http_client;
         service
     }
@@ -202,10 +205,6 @@ impl<H, S> RedditIngestionService<H, S> {
         &self.harvester
     }
 
-    pub fn storage(&self) -> &S {
-        &self.storage
-    }
-
     pub fn http_client(&self) -> &reqwest::Client {
         &self.http_client
     }
@@ -216,7 +215,7 @@ impl<H, S> RedditIngestionService<H, S> {
 }
 
 
-impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
+impl<H: RedditHarvester, C: CatalogRepository, B: BlobStorage> RedditIngestionService<H, C, B> {
     /// Ingest battlemaps matching a Reddit query.
     pub async fn ingest_query(
         &self,
@@ -532,50 +531,43 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
         .await
     }
 
-    fn check_deduplication(&self, post: &RedditPost) -> Result<Option<SkipReason>, StorageError> {
+    async fn check_deduplication(&self, post: &RedditPost) -> Result<Option<SkipReason>, StorageError> {
         let child_0 = format!("{}_0", post.id);
 
         // 1. Check if post or any split child was rejected
-        if self.storage.is_rejected(&post.id)? || self.storage.is_rejected(&child_0)? {
+        if self.catalog.is_rejected(&post.id).await? || self.catalog.is_rejected(&child_0).await? {
             return Ok(Some(SkipReason::Rejected));
         }
         for idx in 1..post.media.len() {
             let child = format!("{}_{idx}", post.id);
-            if self.storage.is_rejected(&child)? {
+            if self.catalog.is_rejected(&child).await? {
                 return Ok(Some(SkipReason::Rejected));
             }
         }
 
         // 2. Check if post or any split child is in staging
-        if self.storage.is_in_staging(&post.id)? || self.storage.is_in_staging(&child_0)? {
+        if self.catalog.get_candidate(&post.id).await.is_ok()
+            || self.catalog.get_candidate(&child_0).await.is_ok()
+        {
             return Ok(Some(SkipReason::AlreadyInStaging));
         }
         for idx in 1..post.media.len() {
             let child = format!("{}_{idx}", post.id);
-            if self.storage.is_in_staging(&child)? {
+            if self.catalog.get_candidate(&child).await.is_ok() {
                 return Ok(Some(SkipReason::AlreadyInStaging));
             }
         }
 
         // 3. Check if post or any split child is in curated
-        if self.storage.is_curated(&post.id)? || self.storage.is_curated(&child_0)? {
+        if self.catalog.get_curated(&post.id).await.is_ok()
+            || self.catalog.get_curated(&child_0).await.is_ok()
+        {
             return Ok(Some(SkipReason::AlreadyCurated));
         }
         for idx in 1..post.media.len() {
             let child = format!("{}_{idx}", post.id);
-            if self.storage.is_curated(&child)? {
+            if self.catalog.get_curated(&child).await.is_ok() {
                 return Ok(Some(SkipReason::AlreadyCurated));
-            }
-        }
-
-        // 4. Fallback duplicate check
-        if self.storage.is_duplicate(&post.id)? || self.storage.is_duplicate(&child_0)? {
-            return Ok(Some(SkipReason::Duplicate));
-        }
-        for idx in 1..post.media.len() {
-            let child = format!("{}_{idx}", post.id);
-            if self.storage.is_duplicate(&child)? {
-                return Ok(Some(SkipReason::Duplicate));
             }
         }
 
@@ -673,6 +665,40 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
         }
     }
 
+    /// Normalizes a freshly assembled candidate exactly as the first persistence of a staging
+    /// bundle always did: layer dimensions are measured from the downloaded bytes whenever the
+    /// media metadata carried no usable width/height, candidate dimensions fall back to the first
+    /// layer, and the grid is auto-seeded from the parsed lattice while the candidate still carries
+    /// the default grid. Only ever applied to a genuinely new candidate (the deduplication check
+    /// ran first), so a later save of the same candidate keeps whatever grid it was given.
+    fn normalize_new_candidate(post: &RedditPost, layer_bytes: &[Vec<u8>]) -> Candidate {
+        let mut candidate = post.to_bundle_candidate();
+        let candidate_dimensions = candidate.dimensions;
+        for (index, bytes) in layer_bytes.iter().enumerate() {
+            let Some(layer) = candidate.layers.get_mut(index) else {
+                break;
+            };
+            if layer.dimensions == (0, 0) {
+                layer.dimensions = image::load_from_memory(bytes)
+                    .map(|img| (img.width(), img.height()))
+                    .unwrap_or(candidate_dimensions);
+            }
+        }
+        if candidate.dimensions == (0, 0) {
+            if let Some(first) = candidate.layers.first() {
+                candidate.dimensions = first.dimensions;
+            }
+        }
+        if candidate.grid == GridConfig::default() {
+            if let Some(parsed) = candidate.parsed_dimensions {
+                if candidate.dimensions != (0, 0) {
+                    candidate.grid = GridConfig::auto_seed(parsed, candidate.dimensions);
+                }
+            }
+        }
+        candidate
+    }
+
     async fn ingest_post_filtered_inner<Hook>(
         &self,
         post: &RedditPost,
@@ -709,7 +735,7 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
         }
 
         // 2. Check deduplication against storage
-        if let Some(reason) = self.check_deduplication(post)? {
+        if let Some(reason) = self.check_deduplication(post).await? {
             info!(
                 post_id = %post.id,
                 reason = ?reason,
@@ -744,12 +770,28 @@ impl<H: RedditHarvester, S: StorageRepository> RedditIngestionService<H, S> {
             }
         }
 
-        // 4. Assemble candidate bundle
-        let candidate = post.to_bundle_candidate();
+        // 4. Assemble the candidate bundle, normalized the way the first persistence of a staging
+        //    bundle always was
+        let candidate = Self::normalize_new_candidate(post, &layer_bytes_list);
 
-        // 5. Persist staged bundle to data/staging/reddit/{post_id}/
-        self.storage
-            .save_staging_bundle(Some("reddit"), &candidate, &layer_bytes_list)?;
+        // 5. Write one blob per layer in index order, then the manifest last: a candidate must
+        //    never become discoverable in the catalog before the images it describes, or a failed
+        //    blob write would leave it visible and permanently skipped as already in staging
+        let mut written_keys: Vec<BlobKey> = Vec::with_capacity(layer_bytes_list.len());
+        for (index, bytes) in layer_bytes_list.iter().enumerate() {
+            let key = BlobKey::StagingLayer {
+                id: candidate.id.clone(),
+                index,
+            };
+            if let Err(err) = self.blobs.write_blob(&key, bytes).await {
+                for written in &written_keys {
+                    let _ = self.blobs.delete_blob(written).await;
+                }
+                return Err(err.into());
+            }
+            written_keys.push(key);
+        }
+        self.catalog.save_candidate(&candidate).await?;
 
         info!(
             post_id = %post.id,

@@ -7,14 +7,27 @@ use serde_json::json;
 use tempfile::tempdir;
 
 use curator::ports::StorageRepository;
-use curator::adapters::FilesystemStorage;
+use curator::adapters::{FilesystemStorage, InMemoryBlobStorage, InMemoryCatalogRepository};
 use curator::api::create_router;
 use curator::api::routes::DescribeResponse;
 use curator::api::state::AppState;
 use curator::domain::{Candidate, Source};
+use curator::ports::blob_storage::BlobStorage;
+use curator::ports::catalog_repository::CatalogRepository;
 use curator::services::description::{
     DescriptionError, DescriptionGenerator, DescriptionService,
 };
+
+/// Fresh in-memory catalog and blob ports: these tests exercise the description routes.
+fn in_memory_ports() -> (
+    Arc<dyn CatalogRepository + Send + Sync>,
+    Arc<dyn BlobStorage + Send + Sync>,
+) {
+    (
+        Arc::new(InMemoryCatalogRepository::new()),
+        Arc::new(InMemoryBlobStorage::new()),
+    )
+}
 
 /// Mock generator that can be configured to succeed, fail, or return empty text.
 struct MockDescriptionGenerator {
@@ -145,6 +158,7 @@ async fn test_description_service_empty_description_yields_error() {
 async fn test_api_staging_describe_strictly_fails_when_unconfigured() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
     let cand = Candidate::with_now(
         "cand_unconfigured_desc",
         Source::Reddit,
@@ -154,7 +168,7 @@ async fn test_api_staging_describe_strictly_fails_when_unconfigured() {
     storage.save_staging(&cand, &create_test_png()).unwrap();
 
     // AppState without OpenRouter / DescriptionService generator
-    let state = AppState::new(storage)
+    let state = AppState::new(storage, catalog, blobs)
         .with_description_service(Arc::new(DescriptionService::new(None)));
     let app = create_router(state);
 
@@ -179,6 +193,7 @@ async fn test_api_staging_describe_strictly_fails_when_unconfigured() {
 async fn test_api_staging_describe_strictly_fails_when_upstream_errors() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
     let cand = Candidate::with_now(
         "cand_failing_desc",
         Source::Reddit,
@@ -191,7 +206,7 @@ async fn test_api_staging_describe_strictly_fails_when_upstream_errors() {
         DescriptionError::GenerationFailed("rate limit reached".into()),
     ));
     let service = Arc::new(DescriptionService::new(Some(mock_gen)));
-    let state = AppState::new(storage).with_description_service(service);
+    let state = AppState::new(storage, catalog, blobs).with_description_service(service);
     let app = create_router(state);
 
     let req = Request::builder()
@@ -213,6 +228,7 @@ async fn test_api_staging_describe_strictly_fails_when_upstream_errors() {
 async fn test_api_staging_describe_succeeds_with_configured_service() {
     let dir = tempdir().unwrap();
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let (catalog, blobs) = in_memory_ports();
     let cand = Candidate::with_now(
         "cand_success_desc",
         Source::Reddit,
@@ -225,7 +241,7 @@ async fn test_api_staging_describe_succeeds_with_configured_service() {
         "Granite dungeon corridor with barred iron portcullis and damp flagstones.",
     ));
     let service = Arc::new(DescriptionService::new(Some(mock_gen)));
-    let state = AppState::new(storage).with_description_service(service);
+    let state = AppState::new(storage, catalog, blobs).with_description_service(service);
     let app = create_router(state);
 
     let req = Request::builder()

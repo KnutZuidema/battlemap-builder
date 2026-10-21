@@ -503,6 +503,10 @@ mod tests {
             self.inner.exists_blob(key).await
         }
 
+        async fn blob_size(&self, key: &BlobKey) -> Result<u64, StorageError> {
+            self.inner.blob_size(key).await
+        }
+
         async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
             self.inner.list_prefix(prefix).await
         }
@@ -549,6 +553,10 @@ mod tests {
 
         async fn exists_blob(&self, key: &BlobKey) -> Result<bool, StorageError> {
             self.inner.exists_blob(key).await
+        }
+
+        async fn blob_size(&self, key: &BlobKey) -> Result<u64, StorageError> {
+            self.inner.blob_size(key).await
         }
 
         async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {

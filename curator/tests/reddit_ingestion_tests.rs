@@ -702,9 +702,8 @@ async fn test_split_post_deduplication() {
     };
 
     // Pre-populate split child "gallery_split_0" into staging
-    let child_sidecar = split_child_post.to_sidecar_metadata(0).unwrap();
-    assert_eq!(child_sidecar.id, "gallery_split_0");
-    let child_candidate = child_sidecar.to_candidate();
+    let child_candidate = split_child_post.to_candidate(0).unwrap();
+    assert_eq!(child_candidate.id, "gallery_split_0");
     catalog.save_candidate(&child_candidate).await.unwrap();
     blobs
         .write_blob(&staging_layer("gallery_split_0", 0), &create_test_png())

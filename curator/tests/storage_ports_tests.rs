@@ -1,12 +1,22 @@
 //! Tests for the `BlobStorage`/`CatalogRepository` ports and their in-memory doubles.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use curator::adapters::filesystem_blob_storage::FilesystemBlobStorage;
 use curator::adapters::in_memory::{InMemoryBlobStorage, InMemoryCatalogRepository};
 use curator::domain::{Candidate, CuratedMap, LayerRole, RejectionReason, Source, Theme};
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
 use curator::ports::storage_error::StorageError;
+use tempfile::tempdir;
+
+fn hash_of(key: &BlobKey) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
 
 fn candidate(id: &str, source: Source, parent_group_id: Option<&str>) -> Candidate {
     let candidate = Candidate::with_now(id, source, format!("{id}.png"), (512, 512));
@@ -203,6 +213,146 @@ fn blob_key_to_path_resolves_canonical_paths() {
     assert!(!BlobKey::StagingDir { id: None }
         .is_prefix_of(&BlobKey::ExportArchive { name: "dataset".into() }));
     assert!(!bundle.is_prefix_of(&BlobKey::StagingLayer { id: "abc".into(), index: 0 }));
+}
+
+#[test]
+fn blob_key_identity_is_the_canonical_path() {
+    // `Layer::format_filename` drops `elevation` for the Roof/Variant/Ground roles, so keys that
+    // differ only in that field address one file and MUST compare (and hash) equal.
+    let roof_with_elevation = BlobKey::CuratedLayer {
+        id: "map-1".into(),
+        index: 1,
+        role: LayerRole::Roof,
+        elevation: Some(1),
+    };
+    let roof_without = BlobKey::CuratedLayer {
+        id: "map-1".into(),
+        index: 1,
+        role: LayerRole::Roof,
+        elevation: None,
+    };
+    let ground_with_elevation = BlobKey::CuratedLayer {
+        id: "map-1".into(),
+        index: 0,
+        role: LayerRole::Ground,
+        elevation: Some(0),
+    };
+    let ground_without = BlobKey::CuratedLayer {
+        id: "map-1".into(),
+        index: 0,
+        role: LayerRole::Ground,
+        elevation: None,
+    };
+    let variant_with_elevation = BlobKey::CuratedLayer {
+        id: "map-1".into(),
+        index: 2,
+        role: LayerRole::Variant,
+        elevation: Some(7),
+    };
+    let variant_without = BlobKey::CuratedLayer {
+        id: "map-1".into(),
+        index: 2,
+        role: LayerRole::Variant,
+        elevation: None,
+    };
+
+    for (with_elevation, without) in [
+        (&roof_with_elevation, &roof_without),
+        (&ground_with_elevation, &ground_without),
+        (&variant_with_elevation, &variant_without),
+    ] {
+        assert_eq!(with_elevation.to_path(), without.to_path());
+        assert_eq!(with_elevation, without);
+        assert_eq!(hash_of(with_elevation), hash_of(without));
+    }
+
+    // Distinct canonical paths stay distinct, even when they differ in only one field.
+    assert_ne!(roof_with_elevation, ground_with_elevation);
+    assert_ne!(
+        roof_without,
+        BlobKey::CuratedLayer {
+            id: "map-1".into(),
+            index: 2,
+            role: LayerRole::Roof,
+            elevation: None,
+        }
+    );
+    assert_ne!(
+        roof_without,
+        BlobKey::CuratedLayer {
+            id: "map-2".into(),
+            index: 1,
+            role: LayerRole::Roof,
+            elevation: None,
+        }
+    );
+    // UpperFloor/Basement elevations do reach the path, so they remain part of the identity.
+    let upper_1 = BlobKey::CuratedLayer {
+        id: "map-1".into(),
+        index: 3,
+        role: LayerRole::UpperFloor,
+        elevation: Some(1),
+    };
+    let upper_2 = BlobKey::CuratedLayer {
+        id: "map-1".into(),
+        index: 3,
+        role: LayerRole::UpperFloor,
+        elevation: Some(2),
+    };
+    assert_ne!(upper_1.to_path(), upper_2.to_path());
+    assert_ne!(upper_1, upper_2);
+    assert_ne!(hash_of(&upper_1), hash_of(&upper_2));
+}
+
+#[tokio::test]
+async fn constructed_keys_match_list_prefix_on_both_adapters() {
+    // The writer addresses the blob with a constructed key; `list_prefix` re-derives the key from
+    // the file name on the filesystem adapter (dropping the Roof elevation) but returns the stored
+    // key verbatim in memory. Both must agree on membership, or `update_curated` would delete the
+    // blob it just wrote.
+    let constructed = BlobKey::CuratedLayer {
+        id: "map-1".into(),
+        index: 1,
+        role: LayerRole::Roof,
+        elevation: Some(1),
+    };
+    let rederived = BlobKey::CuratedLayer {
+        id: "map-1".into(),
+        index: 1,
+        role: LayerRole::Roof,
+        elevation: None,
+    };
+    assert_eq!(constructed.to_path(), "curated/map-1/1_roof.png");
+
+    let dir = tempdir().unwrap();
+    let filesystem = FilesystemBlobStorage::new(dir.path());
+    let memory = InMemoryBlobStorage::new();
+    let adapters: [&dyn BlobStorage; 2] = [&filesystem, &memory];
+
+    for storage in adapters {
+        storage.write_blob(&constructed, b"roof-bytes").await.unwrap();
+
+        let listed = storage
+            .list_prefix(&BlobKey::CuratedDir {
+                id: Some("map-1".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(listed, vec![constructed.clone()]);
+        assert!(listed.contains(&constructed));
+
+        // The re-derived key addresses the same blob in both directions.
+        assert_eq!(storage.read_blob(&rederived).await.unwrap(), b"roof-bytes");
+        storage.delete_blob(&rederived).await.unwrap();
+        assert!(!storage.exists_blob(&constructed).await.unwrap());
+        assert!(storage
+            .list_prefix(&BlobKey::CuratedDir {
+                id: Some("map-1".into()),
+            })
+            .await
+            .unwrap()
+            .is_empty());
+    }
 }
 
 #[tokio::test]

@@ -10,7 +10,7 @@ use curator::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
 use curator::api::{create_router, AppState};
 use curator::domain::{
     BenchmarkMetadata, Candidate, CuratedLayer, CuratedMap, LayerRole, PurgeStagingResult,
-    RedditSidecarMetadata, RejectionReason, Source, StorageStats, Theme,
+    RejectionReason, Source, StorageStats, Theme,
 };
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::{CandidateFilter, CatalogRepository};
@@ -169,18 +169,19 @@ async fn test_get_storage_stats_populated() {
     let (catalog, blobs) = in_memory_ports();
 
     // 1. Populate staging with three candidates, one layer blob each.
-    let reddit_meta = RedditSidecarMetadata {
-        id: "reddit_post_1".to_string(),
-        source: Source::Reddit,
-        source_url: "https://reddit.com/r/battlemaps/1".to_string(),
-        title: "Dungeon Map 30x30".to_string(),
-        author: "cartographer".to_string(),
-        parsed_gridless: true,
-        parsed_dimensions: Some((1920, 1080)),
-        created_at: chrono::Utc::now(),
-    };
+    let reddit_cand = Candidate::with_now(
+        "reddit_post_1",
+        Source::Reddit,
+        "reddit_post_1.png",
+        (1920, 1080),
+    )
+    .with_source_url("https://reddit.com/r/battlemaps/1")
+    .with_title("Dungeon Map 30x30")
+    .with_author("cartographer")
+    .with_parsed_gridless(true)
+    .with_parsed_dimensions((1920, 1080));
     let reddit_bytes = b"\x89PNG\r\n\x1a\nreddit-image-data-payload";
-    seed_staging(&catalog, &blobs, &reddit_meta.to_candidate(), reddit_bytes).await;
+    seed_staging(&catalog, &blobs, &reddit_cand, reddit_bytes).await;
 
     let benchmark_meta = BenchmarkMetadata::new(
         "gen_bench_1",
@@ -322,20 +323,21 @@ async fn test_purge_staging_resets_staging_and_preserves_curated_rejected_teleme
     let (catalog, blobs) = in_memory_ports();
 
     // 1. Populate staging candidates.
-    let reddit_meta = RedditSidecarMetadata {
-        id: "reddit_purge_1".to_string(),
-        source: Source::Reddit,
-        source_url: "https://reddit.com/1".to_string(),
-        title: "Test Purge".to_string(),
-        author: "author".to_string(),
-        parsed_gridless: true,
-        parsed_dimensions: Some((1000, 1000)),
-        created_at: chrono::Utc::now(),
-    };
+    let reddit_cand = Candidate::with_now(
+        "reddit_purge_1",
+        Source::Reddit,
+        "reddit_purge_1.png",
+        (1000, 1000),
+    )
+    .with_source_url("https://reddit.com/1")
+    .with_title("Test Purge")
+    .with_author("author")
+    .with_parsed_gridless(true)
+    .with_parsed_dimensions((1000, 1000));
     seed_staging(
         &catalog,
         &blobs,
-        &reddit_meta.to_candidate(),
+        &reddit_cand,
         b"reddit-image-data-payload-to-purge",
     )
     .await;

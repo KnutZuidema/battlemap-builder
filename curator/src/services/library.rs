@@ -60,15 +60,20 @@ impl LibraryService {
             .ok()
     }
 
-    /// Deletes every blob below the staging directory of `id`.
-    async fn purge_staging_blobs(&self, id: &str) -> Result<(), StorageError> {
-        let prefix = BlobKey::StagingDir {
-            id: Some(id.to_string()),
-        };
+    /// Deletes every blob below the directory `prefix`.
+    async fn purge_blobs_under(&self, prefix: BlobKey) -> Result<(), StorageError> {
         for key in self.blobs.list_prefix(&prefix).await? {
             self.blobs.delete_blob(&key).await?;
         }
         Ok(())
+    }
+
+    /// Deletes every blob below the staging directory of `id`.
+    async fn purge_staging_blobs(&self, id: &str) -> Result<(), StorageError> {
+        self.purge_blobs_under(BlobKey::StagingDir {
+            id: Some(id.to_string()),
+        })
+        .await
     }
 
     /// Read the staging image bytes and display filename of candidate `id`.
@@ -502,6 +507,9 @@ impl LibraryService {
                 updated_layers.push(layer);
             }
 
+            // `BlobKey` identity is the canonical path, so a key re-derived from a file name by
+            // `list_prefix` (e.g. `{1, Roof, None}` for `1_roof.png`) matches the constructed key
+            // it was just written under (e.g. `{1, Roof, Some(1)}`) and the fresh blob survives.
             for old_key in &existing_keys {
                 if !written_keys.contains(old_key) {
                     self.blobs.delete_blob(old_key).await?;
@@ -586,9 +594,14 @@ impl LibraryService {
     }
 
     /// Resolve the bytes backing `layer` in an update payload by walking the same fallbacks the
-    /// filesystem repository used: the layer's own address, the existing layer at that index or
-    /// position, any blob whose filename starts with `{index}_`, the existing layer with the same
-    /// role, and finally the sole existing layer of a single-layer map.
+    /// filesystem repository used: the payload's own `filename`, the layer's own address, the
+    /// existing layer at that index or position, any blob whose filename starts with `{index}_`,
+    /// the existing layer with the same role, and finally the sole existing layer of a
+    /// single-layer map.
+    ///
+    /// The payload `filename` is consulted first because a PATCH may reassign existing files
+    /// across indices (e.g. index 0 carrying `1_upper_1.png` with role `ground`); the payload
+    /// names the source image, the index/role only name its destination.
     async fn resolve_curated_layer_bytes(
         &self,
         id: &str,
@@ -597,6 +610,18 @@ impl LibraryService {
         existing_keys: &[BlobKey],
         effective_layer_count: usize,
     ) -> Result<Vec<u8>, StorageError> {
+        if !layer.filename.is_empty() {
+            let named = format!("curated/{id}/{}", layer.filename);
+            if let Some(key) = existing_keys
+                .iter()
+                .find(|key| key.to_path() == named)
+            {
+                if let Ok(bytes) = self.blobs.read_blob(key).await {
+                    return Ok(bytes);
+                }
+            }
+        }
+
         let direct = Self::curated_key(id, layer.index, layer);
         if let Ok(bytes) = self.blobs.read_blob(&direct).await {
             return Ok(bytes);
@@ -681,12 +706,10 @@ impl LibraryService {
     ) -> Result<(), StorageError> {
         self.catalog.get_curated(id).await?;
 
-        let prefix = BlobKey::CuratedDir {
+        self.purge_blobs_under(BlobKey::CuratedDir {
             id: Some(id.to_string()),
-        };
-        for key in self.blobs.list_prefix(&prefix).await? {
-            self.blobs.delete_blob(&key).await?;
-        }
+        })
+        .await?;
         self.catalog.delete_curated(id).await?;
         self.catalog.log_rejection(id, reason, notes).await?;
         Ok(())

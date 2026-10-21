@@ -6,7 +6,8 @@ use std::sync::Arc;
 use curator::adapters::filesystem_blob_storage::FilesystemBlobStorage;
 use curator::adapters::filesystem_catalog_repository::FilesystemCatalogRepository;
 use curator::domain::{
-    Candidate, CuratedMap, LayerRole, RejectionReason, RejectionRecord, Source, Theme,
+    BenchmarkMetadata, Candidate, CuratedMap, LayerRole, RejectionReason, RejectionRecord, Source,
+    Theme,
 };
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
@@ -595,6 +596,78 @@ async fn malformed_manifest_is_invalid_data_and_listing_skips_it() {
         .await
         .unwrap();
     assert_eq!(curated_ids(maps), vec!["map-1"]);
+}
+
+#[tokio::test]
+async fn legacy_generated_manifest_migration_restores_visibility() {
+    let dir = tempdir().unwrap();
+    let storage = FilesystemCatalogRepository::new(dir.path());
+
+    let metadata = BenchmarkMetadata::new(
+        "gen-1",
+        "google/gemini-3.1-flash-image",
+        "cavern",
+        "A moody cavern battlemap",
+        Some(120),
+        Some(1024),
+        1500,
+        0.04,
+    );
+    // Pre-#176 generated bundle: the raw `BenchmarkMetadata` document as the manifest, plus the
+    // layer blob the retired `save_staging_generated` wrote next to it.
+    write_file(
+        &dir.path().join("staging/gen-1/manifest.json"),
+        serde_json::to_string_pretty(&metadata).unwrap().as_bytes(),
+    );
+    write_file(&dir.path().join("staging/gen-1/0.png"), b"legacy-image-bytes");
+    // A manifest that is neither a `Candidate` nor `BenchmarkMetadata` must be left alone.
+    write_file(&dir.path().join("staging/foreign/manifest.json"), b"{not json");
+
+    // Before the migration the strict catalog cannot see the generated bundle.
+    assert!(matches!(
+        storage.get_candidate("gen-1").await,
+        Err(StorageError::InvalidData(_))
+    ));
+    assert!(storage
+        .list_candidates(&CandidateFilter::default())
+        .await
+        .unwrap()
+        .is_empty());
+
+    assert_eq!(storage.migrate_legacy_generated_manifests(), 1);
+
+    let migrated = storage.get_candidate("gen-1").await.unwrap();
+    assert_eq!(migrated.id, "gen-1");
+    assert_eq!(migrated.source, Source::Generated);
+    assert_eq!(migrated.filename, "gen-1.png");
+    assert_eq!(migrated.dimensions, (1024, 1024));
+    assert_eq!(
+        migrated.source_url.as_deref(),
+        Some("openrouter://google/gemini-3.1-flash-image")
+    );
+    assert_eq!(migrated.resolved_layers()[0].index, 0);
+    assert_eq!(
+        candidate_ids(
+            storage
+                .list_candidates(&CandidateFilter::default())
+                .await
+                .unwrap()
+        ),
+        vec!["gen-1"]
+    );
+    // The layer blob is untouched and still sits at the path the migrated candidate addresses.
+    assert_eq!(
+        std::fs::read(dir.path().join("staging/gen-1/0.png")).unwrap(),
+        b"legacy-image-bytes"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("staging/foreign/manifest.json")).unwrap(),
+        b"{not json"
+    );
+
+    // Running it again is a no-op: nothing is rewritten and nothing is reported.
+    assert_eq!(storage.migrate_legacy_generated_manifests(), 0);
+    assert_eq!(storage.get_candidate("gen-1").await.unwrap(), migrated);
 }
 
 #[tokio::test]

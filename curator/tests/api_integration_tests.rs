@@ -830,14 +830,6 @@ async fn test_curate_errors_and_edge_cases() {
     let resp_empty_id = app.clone().oneshot(req_empty_id).await.unwrap();
     assert_eq!(resp_empty_id.status(), StatusCode::BAD_REQUEST);
 
-    // Curated image non-existent returns 404
-    let req_non_existent = Request::builder()
-        .uri("/api/image/curated/dungeon/does_not_exist")
-        .body(Body::empty())
-        .unwrap();
-    let resp_non_existent = app.clone().oneshot(req_non_existent).await.unwrap();
-    assert_eq!(resp_non_existent.status(), StatusCode::NOT_FOUND);
-
     // Curated image direct ID non-existent returns 404
     let req_direct_non_existent = Request::builder()
         .uri("/api/image/curated/does_not_exist")

@@ -4,10 +4,12 @@ use axum::{
     http::{header, Request, StatusCode},
 };
 use serde_json::{json, Value};
+use tempfile::tempdir;
 use tower::ServiceExt;
 
 use curator::adapters::{
-    InMemoryBlobStorage, InMemoryCatalogRepository, OpenRouterAdapter,
+    FilesystemBlobStorage, FilesystemCatalogRepository, InMemoryBlobStorage,
+    InMemoryCatalogRepository, OpenRouterAdapter,
 };
 use curator::api::{create_router, AppState, DescribeResponse, SuggestThemesResponse};
 use curator::domain::{
@@ -70,6 +72,50 @@ fn setup_test_app() -> (
     let state = AppState::new(catalog.clone(), blobs.clone()).with_openrouter(adapter);
     let router = create_router(state);
     (router, catalog, blobs)
+}
+
+/// Router over the filesystem-backed ports: the SPA regression tests must exercise the adapter
+/// that re-derives every [`BlobKey`] from the file name on `list_prefix`.
+fn setup_filesystem_test_app(
+    root: &std::path::Path,
+) -> (
+    axum::Router,
+    Arc<dyn CatalogRepository + Send + Sync>,
+    Arc<dyn BlobStorage + Send + Sync>,
+) {
+    let catalog: Arc<dyn CatalogRepository + Send + Sync> =
+        Arc::new(FilesystemCatalogRepository::new(root));
+    let blobs: Arc<dyn BlobStorage + Send + Sync> = Arc::new(FilesystemBlobStorage::new(root));
+    let router = create_router(AppState::new(catalog.clone(), blobs.clone()));
+    (router, catalog, blobs)
+}
+
+/// PATCHes `/api/curated/{id}` with `payload` and returns the response status.
+async fn patch_curated(app: &axum::Router, id: &str, payload: Value) -> StatusCode {
+    let req = Request::builder()
+        .uri(format!("/api/curated/{id}"))
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+/// GETs `/api/image/curated/{id}/{layer_index}` and returns the status plus body bytes.
+async fn get_curated_layer(
+    app: &axum::Router,
+    id: &str,
+    layer_index: usize,
+) -> (StatusCode, Vec<u8>) {
+    let req = Request::builder()
+        .uri(format!("/api/image/curated/{id}/{layer_index}"))
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    (status, bytes.to_vec())
 }
 
 /// Blob key of a curated map's `Ground` layer, resolved exactly like the dataset export service.
@@ -1068,6 +1114,211 @@ async fn test_curate_endpoint_persists_curated_bundle_from_in_memory_ports() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn test_patch_curated_layers_reindexing_reassigns_bytes_and_cleans_stale_keys() {
+    let (app, catalog, blobs) = setup_test_app();
+    let (_map, img0, img1) =
+        curate_test_bundle(&catalog, &blobs, "bundle_reindex", vec!["tower".into()]).await;
+
+    // The payload reassigns the existing files across indices: index 0 (Ground) names layer 1's
+    // file and index 1 (Roof) names layer 0's file.
+    let payload = json!({
+        "description": "Watchtower with fortified observation deck",
+        "layers": [
+            { "index": 0, "filename": "1_upper_1.png", "role": "ground", "elevation": 0, "dimensions": [300, 300] },
+            { "index": 1, "filename": "0_ground.png", "role": "roof", "elevation": null, "dimensions": [300, 300] }
+        ]
+    });
+    assert_eq!(
+        patch_curated(&app, "bundle_reindex", payload).await,
+        StatusCode::OK
+    );
+
+    let stored = catalog.get_curated("bundle_reindex").await.unwrap();
+    assert_eq!(stored.layers.len(), 2);
+    assert_eq!(stored.layers[0].filename, "0_ground.png");
+    assert_eq!(stored.layers[0].role, LayerRole::Ground);
+    assert_eq!(stored.layers[1].filename, "1_roof.png");
+    assert_eq!(stored.layers[1].role, LayerRole::Roof);
+
+    // The bytes follow the payload filenames: Ground now serves the former upper-floor image.
+    assert_eq!(get_curated_layer(&app, "bundle_reindex", 0).await, (StatusCode::OK, img1.clone()));
+    assert_eq!(get_curated_layer(&app, "bundle_reindex", 1).await, (StatusCode::OK, img0.clone()));
+
+    // Stale-key cleanup: the superseded `1_upper_1.png` is gone, only the canonical names remain.
+    let paths: Vec<String> = blobs
+        .list_prefix(&BlobKey::CuratedDir {
+            id: Some("bundle_reindex".into()),
+        })
+        .await
+        .unwrap()
+        .iter()
+        .map(BlobKey::to_path)
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "curated/bundle_reindex/0_ground.png".to_string(),
+            "curated/bundle_reindex/1_roof.png".to_string(),
+        ]
+    );
+
+    // Unassigned and all-excluded payloads are rejected without touching the stored layers.
+    let unassigned = json!({
+        "layers": [
+            { "index": 0, "filename": "0_ground.png", "role": "unassigned", "elevation": null, "dimensions": [300, 300] }
+        ]
+    });
+    assert_eq!(
+        patch_curated(&app, "bundle_reindex", unassigned).await,
+        StatusCode::BAD_REQUEST
+    );
+    let all_excluded = json!({
+        "layers": [
+            { "index": 0, "filename": "0_ground.png", "role": "exclude", "elevation": null, "dimensions": [300, 300] },
+            { "index": 1, "filename": "1_roof.png", "role": "exclude", "elevation": null, "dimensions": [300, 300] }
+        ]
+    });
+    assert_eq!(
+        patch_curated(&app, "bundle_reindex", all_excluded).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(get_curated_layer(&app, "bundle_reindex", 0).await, (StatusCode::OK, img1));
+    assert_eq!(get_curated_layer(&app, "bundle_reindex", 1).await, (StatusCode::OK, img0));
+}
+
+#[tokio::test]
+async fn test_patch_curated_preserves_omitted_source_url_and_caption() {
+    let (app, catalog, blobs) = setup_test_app();
+    let png = create_test_png(300, 300);
+
+    let candidate = Candidate::with_now("map_prov", Source::Reddit, "0.png", (300, 300))
+        .with_source_url("https://reddit.example/post/abc")
+        .with_grid(GridConfig::new(16, 0, 0));
+    catalog.save_candidate(&candidate).await.unwrap();
+    blobs
+        .write_blob(
+            &BlobKey::StagingLayer {
+                id: "map_prov".into(),
+                index: 0,
+            },
+            &png,
+        )
+        .await
+        .unwrap();
+    let curated = CurationService::new(
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(DescriptionService::new(None)),
+    )
+    .curate(
+        "map_prov",
+        vec!["crypt".into()],
+        None,
+        Some("Flooded crypt with shattered sarcophagi.".into()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        curated.layers[0].source_url.as_deref(),
+        Some("https://reddit.example/post/abc")
+    );
+
+    // A layer payload omitting source_url and caption carries both over from the stored layer.
+    let omitted = json!({
+        "layers": [
+            { "index": 0, "filename": "0_ground.png", "role": "ground", "elevation": 0, "dimensions": [300, 300] }
+        ]
+    });
+    assert_eq!(patch_curated(&app, "map_prov", omitted).await, StatusCode::OK);
+    let carried = catalog.get_curated("map_prov").await.unwrap();
+    assert_eq!(
+        carried.layers[0].source_url.as_deref(),
+        Some("https://reddit.example/post/abc")
+    );
+    assert_eq!(
+        carried.layers[0].caption.as_deref(),
+        Some("Flooded crypt with shattered sarcophagi.")
+    );
+
+    // An explicit payload value overrides the stored provenance.
+    let explicit = json!({
+        "layers": [
+            {
+                "index": 0,
+                "filename": "0_ground.png",
+                "role": "ground",
+                "elevation": 0,
+                "dimensions": [300, 300],
+                "source_url": "https://example.com/new-source",
+                "caption": "Explicit caption."
+            }
+        ]
+    });
+    assert_eq!(patch_curated(&app, "map_prov", explicit).await, StatusCode::OK);
+    let overridden = catalog.get_curated("map_prov").await.unwrap();
+    assert_eq!(
+        overridden.layers[0].source_url.as_deref(),
+        Some("https://example.com/new-source")
+    );
+    assert_eq!(overridden.layers[0].caption.as_deref(), Some("Explicit caption."));
+}
+
+/// Regression for the shipped SPA flow on the filesystem adapters: set an upper-floor layer's
+/// role to `roof` (the role select keeps its elevation), save, then save again. The second PATCH
+/// used to delete `curated/{id}/1_roof.png` because `list_prefix` re-derives that key with
+/// `elevation: None` while the writer held `Some(1)`.
+#[tokio::test]
+async fn test_patch_curated_roof_role_saved_twice_keeps_layer_blob_served() {
+    let dir = tempdir().unwrap();
+    let (app, catalog, blobs) = setup_filesystem_test_app(dir.path());
+    let (_map, img0, img1) =
+        curate_test_bundle(&catalog, &blobs, "roof_repatch", vec!["tower".into()]).await;
+
+    // First save: the upper-floor layer becomes `roof`, keeping elevation 1.
+    let first = json!({
+        "layers": [
+            { "index": 0, "filename": "0_ground.png", "role": "ground", "elevation": 0, "dimensions": [300, 300] },
+            { "index": 1, "filename": "1_upper_1.png", "role": "roof", "elevation": 1, "dimensions": [300, 300] }
+        ]
+    });
+    assert_eq!(patch_curated(&app, "roof_repatch", first).await, StatusCode::OK);
+    let saved = catalog.get_curated("roof_repatch").await.unwrap();
+    assert_eq!(saved.layers[1].filename, "1_roof.png");
+    assert_eq!(saved.layers[1].role, LayerRole::Roof);
+    assert_eq!(saved.layers[1].elevation, Some(1));
+    assert_eq!(
+        get_curated_layer(&app, "roof_repatch", 1).await,
+        (StatusCode::OK, img1.clone())
+    );
+
+    // Second save of the same map, as the inspector would re-send it after reloading.
+    let second = json!({
+        "layers": [
+            { "index": 0, "filename": "0_ground.png", "role": "ground", "elevation": 0, "dimensions": [300, 300] },
+            { "index": 1, "filename": "1_roof.png", "role": "roof", "elevation": 1, "dimensions": [300, 300] }
+        ]
+    });
+    assert_eq!(patch_curated(&app, "roof_repatch", second).await, StatusCode::OK);
+
+    // The freshly written blob survived the stale-key cleanup and is still served.
+    let roof_key = BlobKey::CuratedLayer {
+        id: "roof_repatch".into(),
+        index: 1,
+        role: LayerRole::Roof,
+        elevation: Some(1),
+    };
+    assert!(blobs.exists_blob(&roof_key).await.unwrap());
+    assert_eq!(
+        get_curated_layer(&app, "roof_repatch", 1).await,
+        (StatusCode::OK, img1)
+    );
+    assert_eq!(
+        get_curated_layer(&app, "roof_repatch", 0).await,
+        (StatusCode::OK, img0)
+    );
 }
 
 #[tokio::test]

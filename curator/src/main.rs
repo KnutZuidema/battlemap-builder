@@ -97,8 +97,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data_dir = %data_dir.display(),
         "Initializing filesystem catalog and blob ports..."
     );
-    let catalog: Arc<dyn CatalogRepository + Send + Sync> =
-        Arc::new(FilesystemCatalogRepository::new(&data_dir));
+    let catalog_repository = FilesystemCatalogRepository::new(&data_dir);
+    // One-shot repair of pre-#176 generated bundles whose manifest is still a raw
+    // `BenchmarkMetadata` document, so they stay visible to `GET /api/staging` and servable by
+    // `GET /api/image/staging/{id}`. Idempotent and never fatal.
+    let migrated = catalog_repository.migrate_legacy_generated_manifests();
+    if migrated > 0 {
+        tracing::info!(
+            count = migrated,
+            "Migrated legacy generated staging manifests to Candidate manifests"
+        );
+    }
+    let catalog: Arc<dyn CatalogRepository + Send + Sync> = Arc::new(catalog_repository);
     let blobs: Arc<dyn BlobStorage + Send + Sync> =
         Arc::new(FilesystemBlobStorage::new(&data_dir));
 

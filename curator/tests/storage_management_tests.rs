@@ -185,21 +185,24 @@ fn test_get_storage_stats_populated() {
     // Compute stats
     let stats = storage.get_storage_stats().expect("get storage stats");
 
-    // Validate Staging
+    // Validate Staging. `get_storage_stats` runs the startup flatten first, so the fixture's
+    // legacy `staging/{reddit,generated}/{id}/` bundles are now uniform `staging/{id}/` bundles:
+    // the entire footprint lands in the `root` bucket, while the pre-seeded `reddit`/`generated`
+    // buckets remain present (keeping the SPA-facing JSON shape stable) but empty.
     assert!(stats.staging.bytes > 0);
     assert_eq!(stats.staging.file_count, 6); // 3 candidates, each bundle has 1 png + 1 manifest.json
 
     let reddit_stats = stats.staging_breakdown.get("reddit").expect("reddit breakdown");
-    assert!(reddit_stats.bytes > 0);
-    assert_eq!(reddit_stats.file_count, 2);
+    assert_eq!(reddit_stats.bytes, 0);
+    assert_eq!(reddit_stats.file_count, 0);
 
     let gen_stats = stats.staging_breakdown.get("generated").expect("generated breakdown");
-    assert!(gen_stats.bytes > 0);
-    assert_eq!(gen_stats.file_count, 2);
+    assert_eq!(gen_stats.bytes, 0);
+    assert_eq!(gen_stats.file_count, 0);
 
     let root_stats = stats.staging_breakdown.get("root").expect("root breakdown");
-    assert!(root_stats.bytes > 0);
-    assert_eq!(root_stats.file_count, 2);
+    assert_eq!(root_stats.bytes, stats.staging.bytes);
+    assert_eq!(root_stats.file_count, 6);
 
     assert_eq!(
         stats.staging.bytes,

@@ -361,7 +361,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use crate::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
-    use crate::domain::{is_perspective_neutral, Candidate, LayerRole, Source};
+    use crate::domain::{is_perspective_neutral, Candidate, LayerRole, RejectionRecord, Source};
     use crate::ports::catalog_repository::CatalogRepository;
     use crate::services::description::DescriptionGenerator;
 
@@ -446,6 +446,10 @@ mod tests {
 
         async fn delete_curated(&self, id: &str) -> Result<(), StorageError> {
             self.inner.delete_curated(id).await
+        }
+
+        async fn rejection_records(&self) -> Result<Vec<RejectionRecord>, StorageError> {
+            self.inner.rejection_records().await
         }
 
         async fn is_rejected(&self, id: &str) -> Result<bool, StorageError> {

@@ -49,8 +49,10 @@ pub struct StorageStats {
     pub curated: DirectoryStats,
     /// Detailed storage breakdown per theme.
     pub curated_by_theme: HashMap<Theme, ThemeStorageStats>,
-    /// Rejection log footprint: byte size of `rejected/rejections.json` and the file it occupies
-    /// (1 while the log exists, 0 when it does not).
+    /// Rejection log footprint: the byte size of `rejected/rejections.json` plus the number of
+    /// rejection *records* it holds — the only `DirectoryStats.file_count` that counts records
+    /// rather than files, because the operator UI renders it as `N records`. Both numbers are
+    /// zero while the log is absent.
     pub rejected: DirectoryStats,
     /// Telemetry log footprint: combined byte size and file count of the blobs below
     /// `telemetry/`.

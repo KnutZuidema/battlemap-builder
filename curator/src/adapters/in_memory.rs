@@ -214,6 +214,14 @@ impl CatalogRepository for InMemoryCatalogRepository {
         Ok(())
     }
 
+    async fn rejection_records(&self) -> Result<Vec<RejectionRecord>, StorageError> {
+        Ok(self
+            .rejections
+            .read()
+            .expect("in-memory catalog lock poisoned")
+            .clone())
+    }
+
     async fn is_rejected(&self, id: &str) -> Result<bool, StorageError> {
         Ok(self
             .rejections

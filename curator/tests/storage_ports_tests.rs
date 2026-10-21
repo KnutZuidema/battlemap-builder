@@ -542,6 +542,9 @@ async fn catalog_curated_crud_and_filter_queries() {
 async fn rejection_log_is_queryable() {
     let repository = InMemoryCatalogRepository::new();
 
+    // An empty log reads as an empty list rather than an error.
+    assert!(repository.rejection_records().await.unwrap().is_empty());
+
     assert!(!repository.is_rejected("cand-1").await.unwrap());
     repository
         .log_rejection("cand-1", RejectionReason::GridBurnedIn, Some("baked-in grid"))
@@ -556,6 +559,16 @@ async fn rejection_log_is_queryable() {
         .await
         .unwrap();
     assert!(repository.is_rejected("cand-1").await.unwrap());
+
+    // The whole log is readable, in append order and with every field preserved.
+    let records = repository.rejection_records().await.unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].id, "cand-1");
+    assert_eq!(records[0].reason, RejectionReason::GridBurnedIn);
+    assert_eq!(records[0].notes.as_deref(), Some("baked-in grid"));
+    assert_eq!(records[1].id, "cand-1");
+    assert_eq!(records[1].reason, RejectionReason::BlurryLowRes);
+    assert_eq!(records[1].notes, None);
 }
 
 #[tokio::test]
@@ -605,6 +618,8 @@ async fn doubles_are_usable_through_arc_dyn_ports() {
         .await
         .unwrap();
     assert!(catalog.is_rejected("cand-1").await.unwrap());
+    // The `Arc<dyn CatalogRepository>` blanket impl forwards the record listing too.
+    assert_eq!(catalog.rejection_records().await.unwrap().len(), 1);
 
     catalog.delete_candidate("cand-1").await.unwrap();
     catalog.delete_curated("map-1").await.unwrap();

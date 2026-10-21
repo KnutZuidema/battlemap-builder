@@ -144,8 +144,14 @@ impl BlobStorage for FilesystemBlobStorage {
 
 /// Parses a canonical storage-relative path back into the [`BlobKey`] that produces it.
 ///
-/// Returns `None` for files that no [`BlobKey`] variant addresses (manifests, foreign files), and
-/// verifies the canonical round-trip so every returned key satisfies `key.to_path() == relative`.
+/// Returns `None` for files that no [`BlobKey`] variant addresses (manifests, foreign files) and
+/// for hidden files, and verifies the canonical round-trip so every returned key satisfies
+/// `key.to_path() == relative`.
+///
+/// Hidden files are skipped because the writers drop their in-flight atomic-write temp files into
+/// the very directory they are about to replace, e.g. `telemetry/.cost_ledger_{pid}_{n}.tmp`, and
+/// [`BlobStorage::list_prefix`] lists dotfiles. Such a temp file is not a blob; counting it would
+/// inflate the telemetry footprint and a rename racing the size read would fail the whole listing.
 fn key_from_relative_path(relative: &str) -> Option<BlobKey> {
     let parts: Vec<&str> = relative.split('/').collect();
     let key = match parts.as_slice() {
@@ -169,7 +175,9 @@ fn key_from_relative_path(relative: &str) -> Option<BlobKey> {
             name: file.strip_suffix(".zip")?.to_string(),
         },
         ["rejected", "rejections.json"] => BlobKey::RejectionLog,
-        ["telemetry", name] => BlobKey::TelemetryLog {
+        // Hidden temp files (`.{name}.{pid}.{n}.tmp`) are excluded, like the retired directory
+        // walk did: they are not telemetry ledgers.
+        ["telemetry", name] if !name.starts_with('.') => BlobKey::TelemetryLog {
             name: (*name).to_string(),
         },
         _ => return None,

@@ -4,6 +4,8 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+
 use curator::adapters::{FilesystemBlobStorage, InMemoryBlobStorage, InMemoryCatalogRepository};
 use curator::domain::{
     Candidate, CuratedMap, DirectoryStats, GridConfig, Layer, LayerRole, RejectionReason, Source,
@@ -149,7 +151,7 @@ async fn test_storage_stats_sums_blob_sizes_across_staging_and_curated() {
 
 #[tokio::test]
 async fn test_storage_stats_reports_rejection_log_and_telemetry_footprints() {
-    let (service, _catalog, blobs) = in_memory_service();
+    let (service, catalog, blobs) = in_memory_service();
 
     blobs
         .write_blob(
@@ -176,6 +178,14 @@ async fn test_storage_stats_reports_rejection_log_and_telemetry_footprints() {
         .write_blob(&BlobKey::RejectionLog, rejections)
         .await
         .expect("write rejection log");
+    catalog
+        .log_rejection(
+            "rejected_one",
+            RejectionReason::Irrelevant,
+            Some("already curated"),
+        )
+        .await
+        .expect("log rejection record");
     blobs
         .write_blob(
             &BlobKey::TelemetryLog {
@@ -208,6 +218,8 @@ async fn test_storage_stats_reports_rejection_log_and_telemetry_footprints() {
             + stats.staging_breakdown["reddit"].bytes
             + stats.staging_breakdown["generated"].bytes
     );
+    // `bytes` is the rejection log blob's file size and `file_count` is the number of rejection
+    // records the catalog holds (one here), not the single file the log occupies.
     assert_eq!(
         stats.rejected,
         DirectoryStats::new(rejections.len() as u64, 1)
@@ -424,4 +436,182 @@ async fn test_filesystem_blob_size_reports_length_and_not_found() {
         blobs.blob_size(&absent).await,
         Err(StorageError::NotFound(_))
     ));
+}
+
+/// [`BlobStorage`] double forwarding to an in-memory store, except that one key's size read fails
+/// with [`StorageError::NotFound`] — as if the writer had renamed the blob away between the
+/// listing and the size read.
+struct VanishingBlobStorage {
+    inner: Arc<InMemoryBlobStorage>,
+    vanishing: BlobKey,
+}
+
+#[async_trait]
+impl BlobStorage for VanishingBlobStorage {
+    async fn read_blob(&self, key: &BlobKey) -> Result<Vec<u8>, StorageError> {
+        self.inner.read_blob(key).await
+    }
+
+    async fn write_blob(&self, key: &BlobKey, bytes: &[u8]) -> Result<(), StorageError> {
+        self.inner.write_blob(key, bytes).await
+    }
+
+    async fn delete_blob(&self, key: &BlobKey) -> Result<(), StorageError> {
+        self.inner.delete_blob(key).await
+    }
+
+    async fn exists_blob(&self, key: &BlobKey) -> Result<bool, StorageError> {
+        self.inner.exists_blob(key).await
+    }
+
+    async fn blob_size(&self, key: &BlobKey) -> Result<u64, StorageError> {
+        if *key == self.vanishing {
+            return Err(StorageError::NotFound(format!(
+                "Blob '{}' not found",
+                key.to_path()
+            )));
+        }
+        self.inner.blob_size(key).await
+    }
+
+    async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
+        self.inner.list_prefix(prefix).await
+    }
+}
+
+/// The hidden atomic-write temp files the cost ledger and the blob adapter leave inside
+/// `telemetry/` are not ledgers: they must never inflate `telemetry.bytes`/`file_count`.
+#[tokio::test]
+async fn test_storage_stats_ignores_hidden_telemetry_temp_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let catalog = Arc::new(InMemoryCatalogRepository::new());
+    let blobs: Arc<dyn BlobStorage> = Arc::new(FilesystemBlobStorage::new(dir.path()));
+
+    let cost_ledger = BlobKey::TelemetryLog {
+        name: "cost_ledger.json".to_string(),
+    };
+    blobs
+        .write_blob(&cost_ledger, &[1u8; 300])
+        .await
+        .expect("write cost ledger");
+    // Exactly what `FileCostLedger::atomic_save` leaves in `telemetry/` while it replaces the
+    // ledger: a hidden temp file next to it.
+    std::fs::write(
+        dir.path().join("telemetry/.cost_ledger_4321_1.tmp"),
+        [2u8; 40],
+    )
+    .expect("write in-flight temp file");
+
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("telemetry"))
+            .expect("telemetry dir")
+            .count(),
+        2,
+        "the temp file really is on disk next to the ledger"
+    );
+    assert_eq!(
+        blobs
+            .list_prefix(&BlobKey::TelemetryDir)
+            .await
+            .expect("list telemetry"),
+        vec![cost_ledger]
+    );
+
+    let service = StorageMaintenanceService::new(catalog, blobs);
+    let stats = service.storage_stats().await.expect("stats succeed");
+
+    // Only the committed ledger is counted, and its temp file's bytes are nowhere in the totals.
+    assert_eq!(stats.telemetry, DirectoryStats::new(300, 1));
+    assert_eq!(stats.total_bytes, 300);
+    assert_eq!(stats.total_files, 1);
+}
+
+/// A key that vanishes between the listing and its size read must not fail the whole aggregation:
+/// `directory_stats` skips it, so `GET /api/storage/stats` never turns an ordinary rename race
+/// into a 404.
+#[tokio::test]
+async fn test_storage_stats_skips_a_key_that_vanishes_mid_scan() {
+    let inner = Arc::new(InMemoryBlobStorage::new());
+    let cost_ledger = BlobKey::TelemetryLog {
+        name: "cost_ledger.json".to_string(),
+    };
+    let vanished = BlobKey::TelemetryLog {
+        name: "generation_audit.json".to_string(),
+    };
+    inner
+        .write_blob(&cost_ledger, &[1u8; 300])
+        .await
+        .expect("write cost ledger");
+    inner
+        .write_blob(&vanished, &[2u8; 40])
+        .await
+        .expect("write audit ledger");
+
+    let blobs: Arc<dyn BlobStorage> = Arc::new(VanishingBlobStorage {
+        inner: inner.clone(),
+        vanishing: vanished.clone(),
+    });
+    // Both ledgers are listed; only the vanished one's size read fails.
+    assert_eq!(
+        blobs
+            .list_prefix(&BlobKey::TelemetryDir)
+            .await
+            .expect("list telemetry")
+            .len(),
+        2
+    );
+    let service =
+        StorageMaintenanceService::new(Arc::new(InMemoryCatalogRepository::new()), blobs);
+
+    let stats = service
+        .storage_stats()
+        .await
+        .expect("a vanished key must not fail the stats");
+
+    // The skipped key contributes neither bytes nor a file count.
+    assert_eq!(stats.telemetry, DirectoryStats::new(300, 1));
+    assert_eq!(stats.total_bytes, 300);
+    assert_eq!(stats.total_files, 1);
+}
+
+/// `rejected.bytes` is the rejection log blob's file size while `rejected.file_count` is the
+/// number of rejection records the catalog holds — the pre-cut-over operator semantics, which the
+/// SPA renders as `N records`.
+#[tokio::test]
+async fn test_storage_stats_rejected_counts_records_not_files() {
+    let (service, catalog, blobs) = in_memory_service();
+
+    for id in ["rej_1", "rej_2", "rej_3"] {
+        catalog
+            .log_rejection(id, RejectionReason::BlurryLowRes, None)
+            .await
+            .expect("log rejection");
+    }
+    assert_eq!(
+        catalog
+            .rejection_records()
+            .await
+            .expect("read rejection log")
+            .len(),
+        3
+    );
+    let log = br#"[{"id":"rej_1"},{"id":"rej_2"},{"id":"rej_3"}]"#;
+    blobs
+        .write_blob(&BlobKey::RejectionLog, log)
+        .await
+        .expect("write rejection log");
+
+    let stats = service.storage_stats().await.expect("stats succeed");
+
+    // Three records in one file: three reads as `records`, the file size as `bytes`.
+    assert_eq!(stats.rejected, DirectoryStats::new(log.len() as u64, 3));
+    assert_eq!(stats.total_bytes, log.len() as u64);
+    assert_eq!(stats.total_files, 3);
+
+    // With no log written at all, both numbers are zero rather than an error.
+    let (empty_service, _catalog, _blobs) = in_memory_service();
+    let empty = empty_service.storage_stats().await.expect("stats succeed");
+    assert_eq!(empty.rejected, DirectoryStats::default());
+    assert_eq!(empty.total_bytes, 0);
+    assert_eq!(empty.total_files, 0);
 }

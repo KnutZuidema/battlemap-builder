@@ -563,7 +563,8 @@ async fn test_api_storage_stats_and_purge_endpoints() {
             + stats_json["staging_breakdown"]["generated"]["bytes"].as_u64().unwrap()
     );
     // The rejection log and the telemetry ledgers are addressable blobs, so the endpoint reports
-    // their real footprint instead of zeros.
+    // their real footprint instead of zeros. `rejected.bytes` is the log file's size while
+    // `rejected.file_count` is the number of rejection records the catalog holds (one here).
     assert_eq!(
         stats_json["rejected"]["bytes"],
         rejections_payload.len() as u64
@@ -634,10 +635,10 @@ async fn test_api_storage_stats_and_purge_endpoints() {
     assert_eq!(status_json["curated_count"], 1);
 
     // 6. The staging area is drained through the ports the purge acts on: no candidate row and no
-    //    staging blob is left. `GET /api/staging` still reads the filesystem repository (cutting
-    //    that listing over is issue #174's territory) and this test seeds only the ports, so the
-    //    drained state is asserted on the ports themselves rather than on that endpoint's empty
-    //    filesystem tree.
+    //    staging blob is left. The drained state is asserted on those ports rather than on
+    //    `GET /api/staging`, which still reads the filesystem repository (cutting that listing over
+    //    is a later issue) while this test seeds only the ports: its filesystem tree is empty either
+    //    way, so asserting the endpoint's empty array would read as stronger than it is.
     assert!(catalog
         .list_candidates(&CandidateFilter::default())
         .await
@@ -656,18 +657,6 @@ async fn test_api_storage_stats_and_purge_endpoints() {
             .len(),
         1
     );
-
-    // `/api/staging` answers 200 with the filesystem repository's own (untouched, empty) view.
-    let req = Request::builder()
-        .uri("/api/staging")
-        .method("GET")
-        .body(Body::empty())
-        .unwrap();
-    let res = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let body_bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-    let staging_json: Value = serde_json::from_slice(&body_bytes).unwrap();
-    assert!(staging_json.as_array().unwrap().is_empty());
 
     // 7. Verify GET /api/storage/stats shows 0 staging bytes
     let req = Request::builder()

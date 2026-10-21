@@ -63,8 +63,9 @@ pub trait CurationWorkflow: Send + Sync {
 ///
 /// Curation is a saga over the two decoupled ports: the curated layer blobs are written first,
 /// the curated manifest is then committed to the catalog, and only a successful commit purges the
-/// staging bundle. A failed commit rolls the freshly written curated blobs back, so a retry always
-/// starts from the untouched staging candidate.
+/// staging bundle. A failed commit rolls the curated blobs this call created back, so a retry
+/// always starts from the untouched staging candidate; curated blobs an already committed bundle
+/// owned stay in place.
 ///
 /// No `<id>_lora1024.{png,txt}` companion is normalized or written (ADR-0007): the LoRA training
 /// samples are derived per Map Section on demand by the dataset export.
@@ -95,7 +96,8 @@ impl CurationService {
         }
     }
 
-    /// Best-effort rollback of the curated blobs written by the current curation call.
+    /// Best-effort rollback of the curated blobs created by the current curation call (blobs whose
+    /// key already held a previously committed curated blob are never rolled back).
     async fn rollback_curated(&self, written: &[BlobKey]) {
         for key in written {
             if let Err(err) = self.blobs.delete_blob(key).await {
@@ -254,8 +256,9 @@ impl CurationWorkflow for CurationService {
         .await;
 
         // 7. Build the curated layers (deterministic filenames counting only INCLUDED layers) and
-        //    write each CuratedLayer blob, remembering every key written by THIS call so a later
-        //    failure can roll exactly those back.
+        //    write each CuratedLayer blob, remembering only the keys that did not exist before this
+        //    call so a later failure can roll exactly those back without touching an already
+        //    committed bundle.
         let mut curated_layers: Vec<Layer> = Vec::with_capacity(included.len());
         let mut written: Vec<BlobKey> = Vec::with_capacity(included.len());
         for (curated_index, (layer, bytes)) in included.into_iter().enumerate() {
@@ -288,11 +291,24 @@ impl CurationWorkflow for CurationService {
                 role: layer.role,
                 elevation: layer.elevation,
             };
+            // Only blobs this call actually CREATES are rollback candidates: a key that already
+            // held a curated blob belongs to a previously committed bundle (re-curation of an
+            // already curated id), so deleting it on failure would leave that committed manifest
+            // dangling over a missing layer blob.
+            let pre_existing = match self.blobs.exists_blob(&key).await {
+                Ok(present) => present,
+                Err(err) => {
+                    self.rollback_curated(&written).await;
+                    return Err(err.into());
+                }
+            };
             if let Err(err) = self.blobs.write_blob(&key, &bytes).await {
                 self.rollback_curated(&written).await;
                 return Err(err.into());
             }
-            written.push(key);
+            if !pre_existing {
+                written.push(key);
+            }
             curated_layers.push(curated_layer);
         }
 
@@ -492,28 +508,133 @@ mod tests {
         }
     }
 
-    /// Seeds an in-memory catalog and blob store with `candidate` and its staging layer bytes,
-    /// addressed exactly as the ports address them (`staging/{id}/{index}.png`).
+    /// [`BlobStorage`] double over an in-memory store whose staging CLEANUP fails per mode: reads,
+    /// writes, and existence checks always succeed, so only the best-effort purge misbehaves.
+    struct FailingCleanupBlobStorage {
+        inner: InMemoryBlobStorage,
+        fail_list_prefix: bool,
+        fail_delete_blob: bool,
+    }
+
+    impl FailingCleanupBlobStorage {
+        fn new(fail_list_prefix: bool, fail_delete_blob: bool) -> Self {
+            Self {
+                inner: InMemoryBlobStorage::new(),
+                fail_list_prefix,
+                fail_delete_blob,
+            }
+        }
+
+        fn io_error(action: &str) -> StorageError {
+            StorageError::Io(std::io::Error::other(format!("simulated {action} failure")))
+        }
+    }
+
+    #[async_trait]
+    impl BlobStorage for FailingCleanupBlobStorage {
+        async fn read_blob(&self, key: &BlobKey) -> Result<Vec<u8>, StorageError> {
+            self.inner.read_blob(key).await
+        }
+
+        async fn write_blob(&self, key: &BlobKey, bytes: &[u8]) -> Result<(), StorageError> {
+            self.inner.write_blob(key, bytes).await
+        }
+
+        async fn delete_blob(&self, key: &BlobKey) -> Result<(), StorageError> {
+            if self.fail_delete_blob {
+                return Err(Self::io_error("blob delete"));
+            }
+            self.inner.delete_blob(key).await
+        }
+
+        async fn exists_blob(&self, key: &BlobKey) -> Result<bool, StorageError> {
+            self.inner.exists_blob(key).await
+        }
+
+        async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
+            if self.fail_list_prefix {
+                return Err(Self::io_error("prefix listing"));
+            }
+            self.inner.list_prefix(prefix).await
+        }
+    }
+
+    /// Captures the formatted output of a [`tracing`] subscriber into a shared buffer.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogs;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Seeds `catalog` with `candidate` and `blobs` with its staging layer bytes, addressed exactly
+    /// as the ports address them (`staging/{id}/{index}.png`).
+    async fn seed_staged(
+        catalog: &InMemoryCatalogRepository,
+        blobs: &impl BlobStorage,
+        candidate: &Candidate,
+        layer_bytes: &[(usize, Vec<u8>)],
+    ) {
+        catalog.save_candidate(candidate).await.unwrap();
+        for (index, bytes) in layer_bytes {
+            blobs
+                .write_blob(&CurationService::staging_key(&candidate.id, *index), bytes)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Seeds an in-memory catalog and blob store with `candidate` and its staging layer bytes.
     async fn staged_ports(
         candidate: Candidate,
         layer_bytes: &[(usize, Vec<u8>)],
     ) -> (Arc<InMemoryCatalogRepository>, Arc<InMemoryBlobStorage>) {
         let catalog = Arc::new(InMemoryCatalogRepository::new());
         let blobs = Arc::new(InMemoryBlobStorage::new());
-        catalog.save_candidate(&candidate).await.unwrap();
-        for (index, bytes) in layer_bytes {
+        seed_staged(&catalog, blobs.as_ref(), &candidate, layer_bytes).await;
+        (catalog, blobs)
+    }
+
+    /// Seeds an already committed curated bundle for `map`: its layer blobs (`layer_bytes` aligned
+    /// with `map.layers`) plus its manifest, exactly as a previous successful curation left them.
+    async fn commit_curated_bundle(
+        catalog: &InMemoryCatalogRepository,
+        blobs: &impl BlobStorage,
+        map: &CuratedMap,
+        layer_bytes: &[Vec<u8>],
+    ) {
+        assert_eq!(map.layers.len(), layer_bytes.len());
+        for (layer, bytes) in map.layers.iter().zip(layer_bytes) {
             blobs
                 .write_blob(
-                    &BlobKey::StagingLayer {
-                        id: candidate.id.clone(),
-                        index: *index,
-                    },
+                    &curated_key(&map.id, layer.index, layer.role, layer.elevation),
                     bytes,
                 )
                 .await
                 .unwrap();
         }
-        (catalog, blobs)
+        catalog.save_curated(map).await.unwrap();
     }
 
     fn curated_key(id: &str, index: usize, role: LayerRole, elevation: Option<i8>) -> BlobKey {
@@ -1124,5 +1245,200 @@ mod tests {
         assert!(curated_paths(&blobs, "cand_1").await.is_empty());
         assert!(catalog.get_curated("cand_1").await.is_err());
         assert!(catalog.get_candidate("cand_1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_curate_saga_keeps_a_pre_existing_committed_bundle_when_the_commit_fails() {
+        // An id that is ALREADY curated (re-curation via a duplicate `POST /api/curate`): the
+        // committed bundle's manifest and layer blobs pre-exist. The layer bytes are the same
+        // canonical staging bytes, as a re-curation of the same candidate would read them.
+        let (catalog, blobs) = staged_ports(
+            sample_candidate(),
+            &[(0, ground_bytes()), (1, upper_bytes())],
+        )
+        .await;
+        let committed = CuratedMap::with_now(
+            "cand_1",
+            Vec::<String>::new(),
+            vec!["dungeon".into()],
+            (2048, 2048),
+        )
+        .with_source(Source::Reddit)
+        .with_layers(vec![
+            Layer::new(0, "0_ground.png", LayerRole::Ground, Some(0), (2048, 2048)),
+            Layer::new(
+                1,
+                "1_upper_1.png",
+                LayerRole::UpperFloor,
+                Some(1),
+                (2048, 2048),
+            ),
+        ])
+        .with_description("committed description");
+        commit_curated_bundle(
+            &catalog,
+            blobs.as_ref(),
+            &committed,
+            &[ground_bytes(), upper_bytes()],
+        )
+        .await;
+
+        let failing: Arc<dyn CatalogRepository + Send + Sync> = Arc::new(FailingSaveCatalog {
+            inner: catalog.clone(),
+        });
+        let desc_service = Arc::new(DescriptionService::new(None));
+        let service = CurationService::new(failing, blobs.clone(), desc_service);
+
+        let err = service
+            .curate(
+                "cand_1",
+                vec!["dungeon".into()],
+                None,
+                Some("A detailed stone dungeon crypt".into()),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, CurationWorkflowError::Storage(_)),
+            "Expected Storage error, got {err:?}"
+        );
+
+        // The pre-existing curated blobs were NOT rolled back: the committed bundle still resolves
+        // instead of becoming a manifest dangling over missing layer blobs.
+        assert_eq!(
+            curated_paths(&blobs, "cand_1").await,
+            vec!["curated/cand_1/0_ground.png", "curated/cand_1/1_upper_1.png"]
+        );
+        assert_eq!(
+            blobs
+                .read_blob(&curated_key("cand_1", 0, LayerRole::Ground, Some(0)))
+                .await
+                .unwrap(),
+            ground_bytes()
+        );
+        assert_eq!(
+            blobs
+                .read_blob(&curated_key("cand_1", 1, LayerRole::UpperFloor, Some(1)))
+                .await
+                .unwrap(),
+            upper_bytes()
+        );
+        // … and the committed manifest is untouched by the failed call.
+        assert_eq!(catalog.get_curated("cand_1").await.unwrap(), committed);
+        // Staging stays untouched too, so the re-curation can be retried.
+        assert!(catalog.get_candidate("cand_1").await.is_ok());
+        assert_eq!(
+            staging_paths(&blobs, "cand_1").await,
+            vec!["staging/cand_1/0.png", "staging/cand_1/1.png"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_curate_succeeds_and_only_warns_when_the_staging_cleanup_fails() {
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let logs = CapturedLogs::default();
+
+        // `cand_1`: listing works, deleting each staging blob fails.
+        let delete_failing = FailingCleanupBlobStorage::new(false, true);
+        seed_staged(
+            &catalog,
+            &delete_failing,
+            &sample_candidate(),
+            &[(0, ground_bytes()), (1, upper_bytes())],
+        )
+        .await;
+
+        // `cand_2`: listing the staging bundle itself fails.
+        let list_failing = FailingCleanupBlobStorage::new(true, false);
+        let mut second = sample_candidate();
+        second.id = "cand_2".to_string();
+        seed_staged(
+            &catalog,
+            &list_failing,
+            &second,
+            &[(0, ground_bytes()), (1, upper_bytes())],
+        )
+        .await;
+
+        let delete_failing: Arc<dyn BlobStorage + Send + Sync> = Arc::new(delete_failing);
+        let list_failing: Arc<dyn BlobStorage + Send + Sync> = Arc::new(list_failing);
+
+        let capture = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .with_ansi(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(capture);
+
+        let service = CurationService::new(
+            catalog.clone(),
+            delete_failing.clone(),
+            Arc::new(DescriptionService::new(None)),
+        );
+        let map = service
+            .curate(
+                "cand_1",
+                vec!["dungeon".into()],
+                None,
+                Some("A detailed stone dungeon crypt".into()),
+            )
+            .await
+            .expect("a failed staging purge must not fail curation");
+
+        let other_service = CurationService::new(
+            catalog.clone(),
+            list_failing.clone(),
+            Arc::new(DescriptionService::new(None)),
+        );
+        let other_map = other_service
+            .curate(
+                "cand_2",
+                vec!["dungeon".into()],
+                None,
+                Some("A second stone dungeon crypt".into()),
+            )
+            .await
+            .expect("a failed staging listing must not fail curation");
+        drop(guard);
+
+        // Curation succeeded and the curated bundles are intact and committed.
+        assert_eq!(
+            curated_paths(&delete_failing, "cand_1").await,
+            vec!["curated/cand_1/0_ground.png", "curated/cand_1/1_upper_1.png"]
+        );
+        assert_eq!(catalog.get_curated("cand_1").await.unwrap(), map);
+        // (the listing double cannot enumerate, so the second bundle is addressed key by key)
+        assert_eq!(
+            list_failing
+                .read_blob(&curated_key("cand_2", 0, LayerRole::Ground, Some(0)))
+                .await
+                .unwrap(),
+            ground_bytes()
+        );
+        assert_eq!(
+            list_failing
+                .read_blob(&curated_key("cand_2", 1, LayerRole::UpperFloor, Some(1)))
+                .await
+                .unwrap(),
+            upper_bytes()
+        );
+        assert_eq!(catalog.get_curated("cand_2").await.unwrap(), other_map);
+
+        // Only warnings were emitted, one per cleanup failure site.
+        let logs = logs.text();
+        assert!(
+            logs.contains("WARN") && !logs.contains("ERROR"),
+            "Expected warnings only, got:\n{logs}"
+        );
+        assert!(
+            logs.contains("Failed to delete a staging blob during curation cleanup"),
+            "Missing delete warning in:\n{logs}"
+        );
+        assert!(
+            logs.contains("Failed to list the staging blobs of a curated candidate"),
+            "Missing list warning in:\n{logs}"
+        );
     }
 }

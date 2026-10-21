@@ -76,6 +76,13 @@ pub trait BlobStorage: Send + Sync {
     /// Returns whether a blob is stored at `key`.
     async fn exists_blob(&self, key: &BlobKey) -> Result<bool, StorageError>;
 
+    /// Byte length of the blob stored at `key`, failing with [`StorageError::NotFound`] when
+    /// nothing is stored there.
+    ///
+    /// Size accounting ([`crate::services::StorageMaintenanceService`]) reads this instead of
+    /// [`BlobStorage::read_blob`], so aggregating a directory never pulls its payloads into memory.
+    async fn blob_size(&self, key: &BlobKey) -> Result<u64, StorageError>;
+
     /// List the blobs below the `prefix` directory key, ordered by canonical path.
     async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError>;
 }
@@ -96,6 +103,10 @@ impl<T: ?Sized + BlobStorage> BlobStorage for std::sync::Arc<T> {
 
     async fn exists_blob(&self, key: &BlobKey) -> Result<bool, StorageError> {
         (**self).exists_blob(key).await
+    }
+
+    async fn blob_size(&self, key: &BlobKey) -> Result<u64, StorageError> {
+        (**self).blob_size(key).await
     }
 
     async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {

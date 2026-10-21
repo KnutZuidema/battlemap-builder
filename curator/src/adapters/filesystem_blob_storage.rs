@@ -89,6 +89,17 @@ impl BlobStorage for FilesystemBlobStorage {
         Ok(self.path_for(key).is_file())
     }
 
+    async fn blob_size(&self, key: &BlobKey) -> Result<u64, StorageError> {
+        let path = self.path_for(key);
+        match std::fs::metadata(&path) {
+            Ok(metadata) => Ok(metadata.len()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(StorageError::NotFound(
+                format!("Blob '{}' not found", key.to_path()),
+            )),
+            Err(err) => Err(StorageError::Io(err)),
+        }
+    }
+
     async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
         let start = match prefix {
             BlobKey::StagingDir { .. } | BlobKey::CuratedDir { .. } => {

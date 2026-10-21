@@ -10,7 +10,7 @@ use chrono::Utc;
 
 use curator::adapters::reddit::BackoffConfig;
 use curator::adapters::{
-    FilesystemBlobStorage, FilesystemCatalogRepository, FilesystemStorage, InMemoryBlobStorage,
+    FilesystemBlobStorage, FilesystemCatalogRepository, InMemoryBlobStorage,
     InMemoryCatalogRepository,
 };
 use curator::domain::{
@@ -51,12 +51,12 @@ impl DescriptionGenerator for ConstantDescriptionGen {
     }
 }
 
-/// Production curation workflow backed by the filesystem store, which shares `dir` with the
-/// filesystem ports. Curation and rejection are only reproducible through the real store: the
-/// in-memory doubles implement neither `CurationStore` nor the staging-to-curated move.
+/// Production curation workflow over filesystem-backed ports sharing `dir` with the rest of the
+/// suite, so curation and rejection move the real staging artifacts of the ingested candidates.
 fn curation_service(dir: &tempfile::TempDir) -> CurationService {
     CurationService::new(
-        Arc::new(FilesystemStorage::new(dir.path())),
+        Arc::new(FilesystemCatalogRepository::new(dir.path())),
+        Arc::new(FilesystemBlobStorage::new(dir.path())),
         Arc::new(DescriptionService::new(Some(Arc::new(
             ConstantDescriptionGen,
         )))),
@@ -657,15 +657,18 @@ async fn test_multi_image_gallery_ingestion() {
         .await
         .unwrap();
 
-    assert!(
-        !dir.path().join("staging").join("gallery_post").exists(),
-        "rejected candidate leaves no staging bundle behind"
-    );
+    // Every staging artifact is purged, not merely recorded in the rejection log: the manifest
+    // leaves the catalog and both gallery layer blobs are deleted.
     assert!(catalog.get_candidate("gallery_post").await.is_err());
-    assert!(!blobs
-        .exists_blob(&staging_layer("gallery_post", 0))
-        .await
-        .unwrap());
+    for index in 0..2 {
+        assert!(
+            !blobs
+                .exists_blob(&staging_layer("gallery_post", index))
+                .await
+                .unwrap(),
+            "rejected candidate leaves no staging blob behind"
+        );
+    }
     assert!(catalog.is_rejected("gallery_post").await.unwrap());
 
     // Subsequent harvest skips because rejected

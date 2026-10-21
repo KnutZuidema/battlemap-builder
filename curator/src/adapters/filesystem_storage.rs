@@ -3769,30 +3769,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_curate_flat_staging_image_via_service_rewrites_manifest_layer() {
+    async fn test_curate_staged_bundle_via_service_writes_canonical_curated_bundle() {
+        use crate::adapters::{FilesystemBlobStorage, FilesystemCatalogRepository};
+        use crate::ports::blob_storage::{BlobKey, BlobStorage};
+        use crate::ports::catalog_repository::CatalogRepository;
         use crate::services::{CurationService, CurationWorkflow, DescriptionService};
         use std::sync::Arc;
 
         let dir = tempdir().unwrap();
         let storage = Arc::new(FilesystemStorage::new(dir.path()));
-        let staging = storage.staging_dir();
-        std::fs::create_dir_all(&staging).unwrap();
+        let catalog = FilesystemCatalogRepository::new(dir.path());
+        let blobs = FilesystemBlobStorage::new(dir.path());
 
-        // Flat drop-in image: no bundle directory and no sidecar manifest.
-        // 1024×1024 at the default 64px grid yields the 16×16 cells curation requires.
+        // Uniform staging bundle: manifest plus `staging/{id}/{index}.png` (1024×1024 at the
+        // default 64px grid yields the 16×16 cells curation requires).
         let png_data = create_test_png(1024, 1024);
-        std::fs::write(staging.join("flat_cand.png"), &png_data).unwrap();
-        assert!(!staging.join("flat_cand.json").exists());
-        assert!(!staging.join("flat_cand").exists());
+        let candidate = Candidate::with_now("bundle_cand", Source::Manual, "0.png", (1024, 1024));
+        catalog.save_candidate(&candidate).await.unwrap();
+        blobs
+            .write_blob(
+                &BlobKey::StagingLayer {
+                    id: "bundle_cand".into(),
+                    index: 0,
+                },
+                &png_data,
+            )
+            .await
+            .unwrap();
 
         let service = CurationService::new(
-            storage.clone(),
+            Arc::new(catalog),
+            Arc::new(blobs),
             Arc::new(DescriptionService::new(None)),
         );
 
         let stored = service
             .curate(
-                "flat_cand",
+                "bundle_cand",
                 vec!["crypt".into()],
                 None,
                 Some("Damp stone crypt beneath a ruined keep.".into()),
@@ -3812,7 +3825,7 @@ mod tests {
             Some("Damp stone crypt beneath a ruined keep.")
         );
 
-        let bundle_dir = storage.find_curated_bundle_dir("flat_cand").unwrap();
+        let bundle_dir = storage.find_curated_bundle_dir("bundle_cand").unwrap();
         assert!(bundle_dir.join("0_ground.png").is_file());
         assert_eq!(
             std::fs::read(bundle_dir.join("0_ground.png")).unwrap(),
@@ -3828,6 +3841,11 @@ mod tests {
         assert_eq!(manifest.layers[0].role, LayerRole::Ground);
         assert_eq!(manifest.layers[0].elevation, Some(0));
         assert_eq!(manifest.layers[0].dimensions, (1024, 1024));
+
+        // The staging bundle was superseded by the curated one.
+        let staging_bundle = storage.staging_dir().join("bundle_cand");
+        assert!(!staging_bundle.join("manifest.json").is_file());
+        assert!(!staging_bundle.join("0.png").is_file());
     }
 
     #[test]

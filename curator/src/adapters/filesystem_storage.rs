@@ -1,68 +1,25 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 
-use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
-
 use crate::domain::{
-    crop_section_box, infer_bundle_layer_roles, is_perspective_neutral, normalize_tags,
-    sample_description, synthesize_map_sections, validate_layers_for_curation,
-    BenchmarkMetadata, Candidate, CaptionGenerator, CuratedMap, CuratedMapUpdate, DatasetIssue,
-    DatasetIssueCode, DatasetReadiness, DirectoryStats, GridConfig, Layer, LayerRole,
-    MapDatasetReadiness, MapSection, PurgeStagingResult, RedditSidecarMetadata, RejectionReason,
+    infer_bundle_layer_roles, normalize_tags, synthesize_map_sections,
+    validate_layers_for_curation,
+    BenchmarkMetadata, Candidate, CaptionGenerator, CuratedMap, CuratedMapUpdate,
+    DatasetReadiness, DirectoryStats, GridConfig, Layer, LayerRole,
+    MapDatasetReadiness, PurgeStagingResult, RedditSidecarMetadata, RejectionReason,
     RejectionRecord, Source,
     StorageStats, Theme, ThemeStorageStats,
 };
 use crate::ports::curation_store::CurationStore;
 use crate::ports::storage::{StorageError, StorageRepository};
+use crate::services::dataset_export::{
+    audit_map_readiness, create_lora_zip, crop_and_resample_section,
+};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// One planned LoRA dataset sample: a `Map Section` box, the `Physical Description` it is
-/// captioned with (resolved once through [`sample_description`]), and any defect that makes the
-/// sample unfit for a `Training Run`.
-struct DatasetSamplePlan {
-    col: u32,
-    row: u32,
-    description: Option<String>,
-    issues: Vec<DatasetIssue>,
-}
-
-impl DatasetSamplePlan {
-    fn is_ready(&self) -> bool {
-        self.issues.is_empty()
-    }
-}
-
-/// Builds the readiness report of a single curated map.
-fn map_readiness(
-    map: &CuratedMap,
-    sections: usize,
-    ready_sections: usize,
-    issues: Vec<DatasetIssue>,
-) -> MapDatasetReadiness {
-    MapDatasetReadiness {
-        id: map.id.clone(),
-        theme: map.primary_theme().to_string(),
-        sections,
-        ready_sections,
-        issues,
-    }
-}
-
-/// Renders a description for an issue detail without dumping an entire paragraph into the report.
-fn describe_for_issue(text: &str) -> String {
-    const MAX_CHARS: usize = 120;
-    let trimmed = text.trim();
-    if trimmed.chars().count() <= MAX_CHARS {
-        return trimmed.to_string();
-    }
-    let head: String = trimmed.chars().take(MAX_CHARS).collect();
-    format!("{head}…")
-}
 
 /// Filesystem-backed storage adapter implementing the `StorageRepository` port.
 /// Manages staging, curated thematic directories, and rejection logs.
@@ -226,51 +183,6 @@ impl FilesystemStorage {
             }
         }
     }
-    /// Crops the exact `16 × 16` Grid Cell Map Section box and Lanczos3-resamples it to exact
-    /// 1024×1024 PNG bytes without letterbox padding bars.
-    ///
-    /// Returns [`StorageError::InvalidData`] when the exact box does not fit inside the image, so
-    /// the LoRA ZIP export skips the section (with a warning) instead of a scale-changing crop.
-    fn crop_and_resample_section(
-        dynamic_img: &image::DynamicImage,
-        grid: &GridConfig,
-        col: u32,
-        row: u32,
-    ) -> Result<Vec<u8>, StorageError> {
-        if dynamic_img.width() == 0 || dynamic_img.height() == 0 {
-            return Err(StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Image dimensions are 0",
-            )));
-        }
-
-        let cropped = crop_section_box(dynamic_img, grid, col, row).ok_or_else(|| {
-            StorageError::InvalidData(format!(
-                "16x16 Map Section ({col}, {row}) does not fit inside the {}x{} image",
-                dynamic_img.width(),
-                dynamic_img.height()
-            ))
-        })?;
-        let cropped_rgba = cropped.to_rgba8();
-
-        let mut resizer = Resizer::new();
-        let mut scaled_rgba = image::RgbaImage::new(1024, 1024);
-        let resize_options = ResizeOptions::new()
-            .resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3));
-
-        resizer
-            .resize(&cropped_rgba, &mut scaled_rgba, &resize_options)
-            .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
-
-        let mut png_bytes = Vec::new();
-        let mut cursor = std::io::Cursor::new(&mut png_bytes);
-        scaled_rgba
-            .write_to(&mut cursor, image::ImageFormat::Png)
-            .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
-
-        Ok(png_bytes)
-    }
-
     /// Locate and deserialize a CuratedMap by its ID.
     fn find_curated_map_by_id(&self, id: &str) -> Option<CuratedMap> {
         if let Some(bundle_dir) = self.find_curated_bundle_dir(id) {
@@ -693,222 +605,23 @@ impl FilesystemStorage {
         None
     }
 
-    /// Enumerates the LoRA dataset samples a curated map contributes, resolving every section's
-    /// `Physical Description` through the one shared policy used by both the ZIP export and the
-    /// readiness audit.
-    ///
-    /// Maps persisted before Map Sections existed fall back to the map's full-grid lattice with
-    /// the map-level `Physical Description` reused for every section. Defects are reported instead
-    /// of raised: the export logs them and skips only the affected sections.
-    fn plan_dataset_samples(
-        map: &CuratedMap,
-        image: &image::DynamicImage,
-    ) -> (Vec<DatasetSamplePlan>, Vec<DatasetIssue>) {
-        let mut issues = Vec::new();
-
-        let synthesized_sections;
-        let sections: &[MapSection] = if !map.sections.is_empty() {
-            &map.sections
-        } else {
-            let origins = map.grid.section_origins(image.width(), image.height());
-            if origins.is_empty() {
-                issues.push(DatasetIssue::new(
-                    DatasetIssueCode::GridBelowMinimum,
-                    format!(
-                        "{}px grid yields no full 16×16 Grid Cell window in a {}×{} Ground layer",
-                        map.grid.cell_size_px,
-                        image.width(),
-                        image.height()
-                    ),
-                ));
-                return (Vec::new(), issues);
-            }
-            synthesized_sections = synthesize_map_sections(&origins, map.description.as_deref());
-            &synthesized_sections
-        };
-
-        let mut samples = Vec::with_capacity(sections.len());
-        for section in sections {
-            let mut section_issues = Vec::new();
-
-            if crop_section_box(image, &map.grid, section.col, section.row).is_none() {
-                section_issues.push(DatasetIssue::new(
-                    DatasetIssueCode::SectionUnresolvable,
-                    format!(
-                        "Map Section ({}, {}) does not fit inside the {}×{} Ground layer",
-                        section.col,
-                        section.row,
-                        image.width(),
-                        image.height()
-                    ),
-                ));
-            }
-
-            let description = sample_description(section, map.description.as_deref());
-            match description {
-                Some(text) if !is_perspective_neutral(text) => {
-                    section_issues.push(DatasetIssue::new(
-                        DatasetIssueCode::PhysicalDescriptionNotNeutral,
-                        format!(
-                            "Map Section ({}, {}) description holds camera, perspective, art-style or grid directives: \"{}\"",
-                            section.col,
-                            section.row,
-                            describe_for_issue(text)
-                        ),
-                    ));
-                }
-                None => {
-                    section_issues.push(DatasetIssue::new(
-                        DatasetIssueCode::PhysicalDescriptionMissing,
-                        format!(
-                            "Map Section ({}, {}) resolves to no Physical Description",
-                            section.col, section.row
-                        ),
-                    ));
-                }
-                _ => {}
-            }
-
-            samples.push(DatasetSamplePlan {
-                col: section.col,
-                row: section.row,
-                description: description.map(str::to_string),
-                issues: section_issues,
-            });
-        }
-
-        (samples, issues)
-    }
-
     /// Package a collection of curated maps' 16x16 sections into a LoRA training ZIP archive.
+    ///
+    /// Ground layer bytes come from the filesystem; the archive itself comes from the shared
+    /// `services::dataset_export` policy, so this adapter and the dataset export service ship
+    /// identical archives.
     fn create_lora_zip(&self, curated_maps: &[CuratedMap]) -> Result<Vec<u8>, StorageError> {
-        let mut buffer = std::io::Cursor::new(Vec::new());
-        {
-            let mut zip = zip::ZipWriter::new(&mut buffer);
-            let options = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated);
-
-            for map in curated_maps {
-                let theme_str = map.primary_theme();
-
-                let ground_bytes = match self.get_curated_ground_image_bytes(map) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        tracing::warn!("Skipping '{}' in LoRA ZIP export: {e}", map.id);
-                        continue;
-                    }
-                };
-
-                let dynamic_img = match image::load_from_memory(&ground_bytes) {
-                    Ok(img) => img,
-                    Err(e) => {
-                        tracing::warn!("Failed to decode ground image for '{}': {e}", map.id);
-                        continue;
-                    }
-                };
-
-                let (samples, plan_issues) = Self::plan_dataset_samples(map, &dynamic_img);
-                for issue in &plan_issues {
-                    tracing::warn!(
-                        "LoRA dataset issue for '{}': {} ({})",
-                        map.id,
-                        issue.detail,
-                        issue.code.as_str()
-                    );
-                }
-
-                for sample in samples {
-                    let image_bytes = match Self::crop_and_resample_section(
-                        &dynamic_img,
-                        &map.grid,
-                        sample.col,
-                        sample.row,
-                    ) {
-                        Ok(bytes) => bytes,
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to crop/resample section ({}, {}) for '{}': {e}",
-                                sample.col,
-                                sample.row,
-                                map.id
-                            );
-                            continue;
-                        }
-                    };
-
-                    // The Trigger Phrase heads every caption and is applied exactly once, here.
-                    let caption_text = CaptionGenerator::generate_with_theme_str(
-                        theme_str,
-                        &map.tags,
-                        sample.description.as_deref(),
-                    );
-
-                    let img_filename = format!(
-                        "{theme_str}/{}_c{}_r{}_lora1024.png",
-                        map.id, sample.col, sample.row
-                    );
-                    zip.start_file(&img_filename, options)?;
-                    zip.write_all(&image_bytes)?;
-
-                    let txt_filename = format!(
-                        "{theme_str}/{}_c{}_r{}_lora1024.txt",
-                        map.id, sample.col, sample.row
-                    );
-                    zip.start_file(&txt_filename, options)?;
-                    zip.write_all(caption_text.as_bytes())?;
-                }
-            }
-
-            zip.finish()?;
-        }
-
-        Ok(buffer.into_inner())
+        create_lora_zip(
+            curated_maps
+                .iter()
+                .map(|map| (map.clone(), self.get_curated_ground_image_bytes(map))),
+        )
     }
 
     /// Audits one curated map against the LoRA dataset contract by decoding its Ground layer and
     /// planning its samples exactly like [`Self::create_lora_zip`] does.
     fn audit_map_readiness(&self, map: &CuratedMap) -> MapDatasetReadiness {
-        let ground_bytes = match self.get_curated_ground_image_bytes(map) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                return map_readiness(
-                    map,
-                    0,
-                    0,
-                    vec![DatasetIssue::new(
-                        DatasetIssueCode::GroundLayerMissing,
-                        err.to_string(),
-                    )],
-                )
-            }
-        };
-
-        let image = match image::load_from_memory(&ground_bytes) {
-            Ok(image) => image,
-            Err(err) => {
-                return map_readiness(
-                    map,
-                    0,
-                    0,
-                    vec![DatasetIssue::new(
-                        DatasetIssueCode::GroundImageUnreadable,
-                        err.to_string(),
-                    )],
-                )
-            }
-        };
-
-        let (samples, mut issues) = Self::plan_dataset_samples(map, &image);
-        let sections = samples.len();
-        let ready_sections = samples
-            .iter()
-            .filter(|sample| sample.is_ready())
-            .count();
-        for sample in samples {
-            issues.extend(sample.issues);
-        }
-
-        map_readiness(map, sections, ready_sections, issues)
+        audit_map_readiness(map, self.get_curated_ground_image_bytes(map))
     }
 
     /// Audits the curated store against the LoRA dataset export contract, mirroring exactly what
@@ -1987,7 +1700,7 @@ impl StorageRepository for FilesystemStorage {
             .map(|s| (s.col, s.row))
             .unwrap_or((0, 0));
 
-        Self::crop_and_resample_section(&dynamic_img, &map.grid, col, row)
+        crop_and_resample_section(&dynamic_img, &map.grid, col, row)
     }
 
     fn get_curated_lora_caption(&self, theme: &Theme, id: &str) -> Result<String, StorageError> {

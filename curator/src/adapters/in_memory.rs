@@ -58,6 +58,15 @@ impl BlobStorage for InMemoryBlobStorage {
             .contains_key(key))
     }
 
+    async fn blob_size(&self, key: &BlobKey) -> Result<u64, StorageError> {
+        self.blobs
+            .read()
+            .expect("in-memory blob store lock poisoned")
+            .get(key)
+            .map(|bytes| bytes.len() as u64)
+            .ok_or_else(|| StorageError::NotFound(format!("Blob '{}' not found", key.to_path())))
+    }
+
     async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
         let blobs = self
             .blobs
@@ -203,6 +212,14 @@ impl CatalogRepository for InMemoryCatalogRepository {
             .expect("in-memory catalog lock poisoned")
             .remove(id);
         Ok(())
+    }
+
+    async fn rejection_records(&self) -> Result<Vec<RejectionRecord>, StorageError> {
+        Ok(self
+            .rejections
+            .read()
+            .expect("in-memory catalog lock poisoned")
+            .clone())
     }
 
     async fn is_rejected(&self, id: &str) -> Result<bool, StorageError> {

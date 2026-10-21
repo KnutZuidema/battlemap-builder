@@ -130,14 +130,6 @@ impl FilesystemCatalogRepository {
         }
         Ok(entities)
     }
-
-    fn read_rejections(&self) -> Result<Vec<RejectionRecord>, StorageError> {
-        let path = self.rejections_file();
-        if !path.is_file() {
-            return Ok(Vec::new());
-        }
-        Self::read_json(&path, "Rejection log")
-    }
 }
 
 /// A curated map matches a theme when any of its tags parses to that theme.
@@ -240,9 +232,18 @@ impl CatalogRepository for FilesystemCatalogRepository {
         Self::delete_manifest(&self.curated_manifest(id))
     }
 
+    async fn rejection_records(&self) -> Result<Vec<RejectionRecord>, StorageError> {
+        let path = self.rejections_file();
+        if !path.is_file() {
+            return Ok(Vec::new());
+        }
+        Self::read_json(&path, "Rejection log")
+    }
+
     async fn is_rejected(&self, id: &str) -> Result<bool, StorageError> {
         Ok(self
-            .read_rejections()?
+            .rejection_records()
+            .await?
             .iter()
             .any(|record| record.id == id))
     }
@@ -253,7 +254,7 @@ impl CatalogRepository for FilesystemCatalogRepository {
         reason: RejectionReason,
         notes: Option<&str>,
     ) -> Result<(), StorageError> {
-        let mut records = self.read_rejections()?;
+        let mut records = self.rejection_records().await?;
         records.push(RejectionRecord::with_now(
             id,
             reason,

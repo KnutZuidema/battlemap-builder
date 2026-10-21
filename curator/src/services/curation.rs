@@ -361,7 +361,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use crate::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
-    use crate::domain::{is_perspective_neutral, Candidate, LayerRole, Source};
+    use crate::domain::{is_perspective_neutral, Candidate, LayerRole, RejectionRecord, Source};
     use crate::ports::catalog_repository::CatalogRepository;
     use crate::services::description::DescriptionGenerator;
 
@@ -448,6 +448,10 @@ mod tests {
             self.inner.delete_curated(id).await
         }
 
+        async fn rejection_records(&self) -> Result<Vec<RejectionRecord>, StorageError> {
+            self.inner.rejection_records().await
+        }
+
         async fn is_rejected(&self, id: &str) -> Result<bool, StorageError> {
             self.inner.is_rejected(id).await
         }
@@ -503,6 +507,10 @@ mod tests {
             self.inner.exists_blob(key).await
         }
 
+        async fn blob_size(&self, key: &BlobKey) -> Result<u64, StorageError> {
+            self.inner.blob_size(key).await
+        }
+
         async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
             self.inner.list_prefix(prefix).await
         }
@@ -549,6 +557,10 @@ mod tests {
 
         async fn exists_blob(&self, key: &BlobKey) -> Result<bool, StorageError> {
             self.inner.exists_blob(key).await
+        }
+
+        async fn blob_size(&self, key: &BlobKey) -> Result<u64, StorageError> {
+            self.inner.blob_size(key).await
         }
 
         async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {

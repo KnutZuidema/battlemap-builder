@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::domain::{Candidate, CuratedMap, RejectionReason, Source, Theme};
+use crate::domain::{Candidate, CuratedMap, RejectionReason, RejectionRecord, Source, Theme};
 use crate::ports::storage_error::StorageError;
 
 /// Query filter for staging candidates. Every populated field must match (conjunction).
@@ -64,6 +64,12 @@ pub trait CatalogRepository: Send + Sync {
     /// Delete the curated map with `id`. Succeeds when it does not exist.
     async fn delete_curated(&self, id: &str) -> Result<(), StorageError>;
 
+    /// List every record in the rejection log, in append order.
+    ///
+    /// Returns an empty list when no log has been written yet; a malformed log fails with
+    /// [`StorageError::InvalidData`], matching the other catalog reads.
+    async fn rejection_records(&self) -> Result<Vec<RejectionRecord>, StorageError>;
+
     /// Returns whether `id` has previously been rejected.
     async fn is_rejected(&self, id: &str) -> Result<bool, StorageError>;
 
@@ -108,6 +114,10 @@ impl<T: ?Sized + CatalogRepository> CatalogRepository for std::sync::Arc<T> {
 
     async fn delete_curated(&self, id: &str) -> Result<(), StorageError> {
         (**self).delete_curated(id).await
+    }
+
+    async fn rejection_records(&self) -> Result<Vec<RejectionRecord>, StorageError> {
+        (**self).rejection_records().await
     }
 
     async fn is_rejected(&self, id: &str) -> Result<bool, StorageError> {

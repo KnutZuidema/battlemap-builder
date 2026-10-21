@@ -56,7 +56,18 @@ fn create_test_png(width: u32, height: u32) -> Vec<u8> {
     bytes
 }
 
-fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
+/// Router plus the filesystem repository and the in-memory catalog/blob ports it is paired with.
+///
+/// Routes that were cut over to the ports (dataset export, storage maintenance) read the ports,
+/// so a test targeting them must seed the ports; the filesystem repository keeps serving the
+/// routes that still read `state.storage`.
+fn setup_test_app() -> (
+    axum::Router,
+    Arc<FilesystemStorage>,
+    Arc<dyn CatalogRepository + Send + Sync>,
+    Arc<dyn BlobStorage + Send + Sync>,
+    tempfile::TempDir,
+) {
     let dir = tempdir().expect("Failed to create tempdir");
     let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
@@ -67,7 +78,56 @@ fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir)
     ));
     let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter);
     let router = create_router(state);
-    (router, storage, dir)
+    (router, storage, catalog, blobs, dir)
+}
+
+/// Blob key of a curated map's `Ground` layer, resolved exactly like the dataset export service.
+fn curated_ground_key(map: &CuratedMap) -> BlobKey {
+    match map
+        .layers
+        .iter()
+        .find(|layer| layer.role == LayerRole::Ground)
+        .or_else(|| map.layers.first())
+    {
+        Some(layer) => BlobKey::CuratedLayer {
+            id: map.id.clone(),
+            index: layer.index,
+            role: layer.role,
+            elevation: layer.elevation,
+        },
+        None => BlobKey::CuratedLayer {
+            id: map.id.clone(),
+            index: 0,
+            role: LayerRole::Ground,
+            elevation: Some(0),
+        },
+    }
+}
+
+/// Seeds a curated map into the ports the cut-over dataset routes read: the catalog entry with
+/// the implicit `0_ground.png` layer [`FilesystemStorage::save_curated`] synthesizes, plus the
+/// Ground layer blob under the key the export resolves.
+async fn seed_curated_ports(
+    catalog: &Arc<dyn CatalogRepository + Send + Sync>,
+    blobs: &Arc<dyn BlobStorage + Send + Sync>,
+    id: &str,
+    theme: Theme,
+    tags: Vec<String>,
+) {
+    let png = create_test_png(1024, 1024);
+    let mut map = CuratedMap::with_now(id, theme, tags, (1024, 1024));
+    map.layers = vec![CuratedLayer::new(
+        0,
+        CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), "png"),
+        LayerRole::Ground,
+        Some(0),
+        map.dimensions,
+    )];
+    catalog.save_curated(&map).await.expect("save curated map in the catalog");
+    blobs
+        .write_blob(&curated_ground_key(&map), &png)
+        .await
+        .expect("write curated Ground layer blob");
 }
 
 fn curate_test_map(
@@ -199,7 +259,7 @@ fn curate_test_bundle(
 
 #[tokio::test]
 async fn test_patch_curated_metadata_success() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, storage, ..) = setup_test_app();
     curate_test_map(
         &storage,
         "map_to_patch",
@@ -251,7 +311,7 @@ async fn test_patch_curated_metadata_success() {
 
 #[tokio::test]
 async fn test_patch_curated_layers() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, storage, ..) = setup_test_app();
     let (_map, _img0, _img1) =
         curate_test_bundle(&storage, "bundle_patch_layers", Theme::Dungeon, vec!["tower".into()]);
 
@@ -281,7 +341,7 @@ async fn test_patch_curated_layers() {
 
 #[tokio::test]
 async fn test_patch_curated_tags_only_payload_without_themes() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, storage, ..) = setup_test_app();
     curate_test_bundle(&storage, "tags_only_patch", Theme::Dungeon, vec!["tower".into()]);
 
     // The library inspector sends tags, description, and layers — never `themes`.
@@ -320,7 +380,7 @@ async fn test_patch_curated_tags_only_payload_without_themes() {
 
 #[tokio::test]
 async fn test_patch_curated_not_found_and_validation() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, storage, ..) = setup_test_app();
     curate_test_map(&storage, "map_val_1", Theme::Cave, vec![], None);
 
     // 404 for non-existent map
@@ -359,7 +419,7 @@ async fn test_patch_curated_not_found_and_validation() {
 
 #[tokio::test]
 async fn test_delete_curated_with_reason_and_notes() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, storage, ..) = setup_test_app();
     curate_test_map(&storage, "map_to_delete", Theme::Ruins, vec![], None);
 
     let req = Request::builder()
@@ -391,7 +451,7 @@ async fn test_delete_curated_with_reason_and_notes() {
 
 #[tokio::test]
 async fn test_delete_curated_default_empty_body() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, storage, ..) = setup_test_app();
     curate_test_map(&storage, "map_del_empty", Theme::Dungeon, vec![], None);
 
     let req = Request::builder()
@@ -415,7 +475,7 @@ async fn test_delete_curated_default_empty_body() {
 
 #[tokio::test]
 async fn test_delete_curated_not_found() {
-    let (app, _storage, _dir) = setup_test_app();
+    let (app, ..) = setup_test_app();
 
     let req = Request::builder()
         .uri("/api/curated/non_existent_curated")
@@ -429,7 +489,7 @@ async fn test_delete_curated_not_found() {
 
 #[tokio::test]
 async fn test_bulk_delete_curated() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, storage, ..) = setup_test_app();
     curate_test_map(&storage, "bulk_1", Theme::Dungeon, vec![], None);
     curate_test_map(&storage, "bulk_2", Theme::Wilderness, vec![], None);
     curate_test_map(&storage, "bulk_3", Theme::Cave, vec![], None);
@@ -479,7 +539,7 @@ async fn test_bulk_delete_curated() {
 
 #[tokio::test]
 async fn test_curated_suggest_themes_and_caching() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, storage, ..) = setup_test_app();
     curate_test_map(&storage, "theme_map_test", Theme::Dungeon, vec!["torch".into()], None);
 
     let req = Request::builder()
@@ -507,7 +567,7 @@ async fn test_curated_suggest_themes_and_caching() {
 
 #[tokio::test]
 async fn test_curated_describe_strictly_fails_when_unconfigured() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, storage, ..) = setup_test_app();
     curate_test_map(
         &storage,
         "describe_map_test",
@@ -666,9 +726,9 @@ async fn test_curated_describe_success_with_service() {
 
 #[tokio::test]
 async fn test_export_selected_lora_dataset() {
-    let (app, storage, _dir) = setup_test_app();
-    curate_test_map(&storage, "sel_export_1", Theme::Dungeon, vec!["dungeon".into()], None);
-    curate_test_map(&storage, "sel_export_2", Theme::Wilderness, vec!["forest".into()], None);
+    let (app, _storage, catalog, blobs, _dir) = setup_test_app();
+    seed_curated_ports(&catalog, &blobs, "sel_export_1", Theme::Dungeon, vec!["dungeon".into()]).await;
+    seed_curated_ports(&catalog, &blobs, "sel_export_2", Theme::Wilderness, vec!["forest".into()]).await;
 
     let req = Request::builder()
         .uri("/api/dataset/export-selected")
@@ -704,7 +764,7 @@ async fn test_export_selected_lora_dataset() {
 
 #[tokio::test]
 async fn test_get_curated_layer_image_by_id() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, storage, ..) = setup_test_app();
     let (_map, img0, img1) =
         curate_test_bundle(&storage, "multi_layer_stream", Theme::Dungeon, vec!["temple".into()]);
 

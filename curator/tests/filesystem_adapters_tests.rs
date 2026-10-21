@@ -109,6 +109,10 @@ fn blob_keys() -> Vec<BlobKey> {
         BlobKey::ExportArchive {
             name: "dataset-42".into(),
         },
+        BlobKey::RejectionLog,
+        BlobKey::TelemetryLog {
+            name: "cost_ledger.json".into(),
+        },
     ]
 }
 
@@ -161,6 +165,12 @@ async fn blob_round_trip_every_variant_lands_at_exact_path() {
         BlobKey::ExportArchive { name: "dataset-42".into() }.to_path(),
         "exports/dataset-42.zip"
     );
+    assert_eq!(BlobKey::RejectionLog.to_path(), "rejected/rejections.json");
+    assert_eq!(
+        BlobKey::TelemetryLog { name: "cost_ledger.json".into() }.to_path(),
+        "telemetry/cost_ledger.json"
+    );
+    assert_eq!(BlobKey::TelemetryDir.to_path(), "telemetry/");
 }
 
 #[tokio::test]
@@ -190,6 +200,16 @@ async fn blob_dir_prefixes_do_not_match_siblings() {
     // A flat legacy export file that must never be reported as a blob of `map-1`.
     write_file(&dir.path().join("curated/map-1_lora1024.png"), b"legacy");
 
+    let rejection = BlobKey::RejectionLog;
+    let ledger = BlobKey::TelemetryLog { name: "cost_ledger.json".into() };
+    for key in [&rejection, &ledger] {
+        storage.write_blob(key, key.to_path().as_bytes()).await.unwrap();
+    }
+    // Siblings whose paths merely start with `telemetry` must never be swallowed by the
+    // `telemetry/` prefix.
+    write_file(&dir.path().join("telemetry.json"), b"legacy");
+    write_file(&dir.path().join("telemetry_archive/cost_ledger.json"), b"old");
+
     let staging_1 = storage
         .list_prefix(&BlobKey::StagingDir { id: Some("cand-1".into()) })
         .await
@@ -214,6 +234,19 @@ async fn blob_dir_prefixes_do_not_match_siblings() {
         .unwrap();
     assert_eq!(all_curated, vec![map_1.clone(), map_2.clone()]);
 
+    let telemetry = storage
+        .list_prefix(&BlobKey::TelemetryDir)
+        .await
+        .unwrap();
+    assert_eq!(telemetry, vec![ledger.clone()]);
+
+    // The rejection log is its own key, and it lives outside the telemetry tree.
+    assert_eq!(
+        storage.list_prefix(&rejection).await.unwrap(),
+        vec![rejection.clone()]
+    );
+    assert!(!telemetry.contains(&rejection));
+
     // Prefixes match on the canonical path: an exact key is its own prefix.
     let exports = storage.list_prefix(&archive).await.unwrap();
     assert_eq!(exports, vec![archive.clone()]);
@@ -232,12 +265,49 @@ async fn blob_dir_prefixes_do_not_match_siblings() {
         .unwrap();
     assert!(missing.is_empty());
 
-    for key in all_staging.into_iter().chain(all_curated).chain(exports) {
+    for key in all_staging
+        .into_iter()
+        .chain(all_curated)
+        .chain(exports)
+        .chain(telemetry)
+        .chain([rejection.clone()])
+    {
         let path = dir.path().join(key.to_path());
         assert!(path.is_file());
         let relative = path.strip_prefix(dir.path()).unwrap();
         assert_eq!(relative.to_str().unwrap(), key.to_path());
     }
+}
+
+/// The atomic-write temp files both in-repo writers drop into the directory they are about to
+/// replace (`FileCostLedger::atomic_save` writes `telemetry/.cost_ledger_{pid}_{n}.tmp`,
+/// `FilesystemBlobStorage::atomic_write` writes `.{name}.{pid}.{n}.tmp`) are hidden, and hidden
+/// files are not blobs: they must not appear as telemetry ledgers, exactly like the retired
+/// directory walk that skipped dotfiles.
+#[tokio::test]
+async fn telemetry_dir_prefix_ignores_hidden_atomic_write_temp_files() {
+    let dir = tempdir().unwrap();
+    let storage = FilesystemBlobStorage::new(dir.path());
+    let ledger = BlobKey::TelemetryLog {
+        name: "cost_ledger.json".into(),
+    };
+    storage.write_blob(&ledger, b"ledger").await.unwrap();
+
+    // An in-flight replacement of the ledger and of a second, not-yet-written ledger.
+    write_file(&dir.path().join("telemetry/.cost_ledger_4321_1.tmp"), b"in flight");
+    write_file(
+        &dir.path().join("telemetry/.generation_audit.json.4321_2.tmp"),
+        b"in flight",
+    );
+    let on_disk = std::fs::read_dir(dir.path().join("telemetry"))
+        .unwrap()
+        .count();
+    assert_eq!(on_disk, 3, "the temp files really are on disk");
+
+    assert_eq!(
+        storage.list_prefix(&BlobKey::TelemetryDir).await.unwrap(),
+        vec![ledger]
+    );
 }
 
 #[tokio::test]
@@ -505,6 +575,39 @@ async fn rejection_log_appends_and_accumulates() {
     assert_eq!(records[1].id, "bad-2");
     assert_eq!(records[2].id, "bad-1");
     assert_eq!(records[2].reason, RejectionReason::Irrelevant);
+}
+
+#[tokio::test]
+async fn rejection_records_reads_the_log_and_reports_malformed_data() {
+    let dir = tempdir().unwrap();
+    let storage = FilesystemCatalogRepository::new(dir.path());
+
+    // No log yet: an empty list, not an error.
+    assert!(storage.rejection_records().await.unwrap().is_empty());
+
+    storage
+        .log_rejection("bad-1", RejectionReason::BlurryLowRes, Some("too small"))
+        .await
+        .unwrap();
+    storage
+        .log_rejection("bad-2", RejectionReason::GridBurnedIn, None)
+        .await
+        .unwrap();
+
+    let records = storage.rejection_records().await.unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].id, "bad-1");
+    assert_eq!(records[0].reason, RejectionReason::BlurryLowRes);
+    assert_eq!(records[0].notes.as_deref(), Some("too small"));
+    assert_eq!(records[1].id, "bad-2");
+    assert_eq!(records[1].notes, None);
+
+    // A malformed log mirrors the other catalog reads instead of reading as empty.
+    write_file(&dir.path().join("rejected/rejections.json"), b"{not json");
+    assert!(matches!(
+        storage.rejection_records().await,
+        Err(StorageError::InvalidData(_))
+    ));
 }
 
 #[tokio::test]

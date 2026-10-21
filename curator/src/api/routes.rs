@@ -21,9 +21,12 @@ use crate::domain::{
     PurgeStagingResult, RedditHarvestRequest, RejectionReason, StorageStats, Theme,
 };
 use crate::ports::storage::StorageError;
+use crate::ports::catalog_repository::{CandidateFilter, CuratedFilter};
 use crate::ports::cost_tracker::CostStats;
 use crate::services::sections::{describe_map_sections, SectionDescriptionContext};
-use crate::services::{IngestionSummary, RedditIngestionService};
+use crate::services::{
+    DatasetExportService, IngestionSummary, RedditIngestionService, StorageMaintenanceService,
+};
 use crate::adapters::clean_tags;
 pub use crate::services::description::detect_image_mime;
 
@@ -38,8 +41,16 @@ pub struct StatusResponse {
 
 /// GET /api/status - Health check and system metrics.
 pub async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResponse>, ApiError> {
-    let staging_count = state.storage.list_staging()?.len();
-    let curated_count = state.storage.list_curated(None)?.len();
+    let staging_count = state
+        .catalog
+        .list_candidates(&CandidateFilter::default())
+        .await?
+        .len();
+    let curated_count = state
+        .catalog
+        .list_curated(&CuratedFilter::default())
+        .await?
+        .len();
     let uptime_secs = state.start_time.elapsed().as_secs();
 
     Ok(Json(StatusResponse {
@@ -256,7 +267,8 @@ pub async fn get_dataset_export(
     Query(query): Query<ThemeQuery>,
 ) -> Result<Response, ApiError> {
     let theme = parse_optional_theme(query.theme.as_deref())?;
-    let zip_bytes = state.storage.export_lora_dataset(theme.as_ref())?;
+    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
+    let zip_bytes = export_service.export_lora_dataset(theme.as_ref()).await?;
 
     let response = Response::builder()
         .status(StatusCode::OK)
@@ -277,7 +289,8 @@ pub async fn get_dataset_readiness(
     Query(query): Query<ThemeQuery>,
 ) -> Result<Json<DatasetReadiness>, ApiError> {
     let theme = parse_optional_theme(query.theme.as_deref())?;
-    let report = state.storage.audit_dataset_readiness(theme.as_ref())?;
+    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
+    let report = export_service.audit_dataset_readiness(theme.as_ref()).await?;
 
     tracing::info!(
         ready = report.ready,
@@ -303,7 +316,10 @@ pub async fn post_dataset_export_selected(
     State(state): State<AppState>,
     Json(payload): Json<ExportSelectedRequest>,
 ) -> Result<Response, ApiError> {
-    let zip_bytes = state.storage.export_selected_lora_dataset(&payload.ids)?;
+    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
+    let zip_bytes = export_service
+        .export_selected_lora_dataset(&payload.ids)
+        .await?;
 
     let response = Response::builder()
         .status(StatusCode::OK)
@@ -1342,7 +1358,8 @@ pub async fn post_benchmark_cancel(
 pub async fn get_storage_stats(
     State(state): State<AppState>,
 ) -> Result<Json<StorageStats>, ApiError> {
-    let stats = state.storage.get_storage_stats()?;
+    let maintenance = StorageMaintenanceService::new(state.catalog.clone(), state.blobs.clone());
+    let stats = maintenance.storage_stats().await?;
     Ok(Json(stats))
 }
 
@@ -1350,7 +1367,8 @@ pub async fn get_storage_stats(
 pub async fn post_purge_staging(
     State(state): State<AppState>,
 ) -> Result<Json<PurgeStagingResult>, ApiError> {
-    let result = state.storage.purge_staging()?;
+    let maintenance = StorageMaintenanceService::new(state.catalog.clone(), state.blobs.clone());
+    let result = maintenance.purge_staging().await?;
     Ok(Json(result))
 }
 

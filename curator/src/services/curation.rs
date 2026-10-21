@@ -3,10 +3,11 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    normalize_tags, validate_layers_for_curation, CuratedMap, Layer, LayerRole, RejectionReason,
+    normalize_tags, validate_layers_for_curation, CuratedMap, Layer, RejectionReason,
 };
-use crate::ports::curation_store::CurationStore;
-use crate::ports::storage::StorageError;
+use crate::ports::blob_storage::{BlobKey, BlobStorage};
+use crate::ports::catalog_repository::CatalogRepository;
+use crate::ports::storage_error::StorageError;
 use crate::services::description::{DescriptionError, DescriptionService};
 use crate::services::sections::{describe_map_sections, SectionDescriptionContext};
 
@@ -59,22 +60,87 @@ pub trait CurationWorkflow: Send + Sync {
 }
 
 /// Domain service orchestrating candidate curation and rejection workflows.
+///
+/// Curation is a saga over the two decoupled ports: the curated layer blobs are written first,
+/// the curated manifest is then committed to the catalog, and only a successful commit purges the
+/// staging bundle. A failed commit rolls the freshly written curated blobs back, so a retry always
+/// starts from the untouched staging candidate.
+///
+/// No `<id>_lora1024.{png,txt}` companion is normalized or written (ADR-0007): the LoRA training
+/// samples are derived per Map Section on demand by the dataset export.
 pub struct CurationService {
-    store: Arc<dyn CurationStore>,
+    catalog: Arc<dyn CatalogRepository + Send + Sync>,
+    blobs: Arc<dyn BlobStorage + Send + Sync>,
     description_service: Arc<DescriptionService>,
 }
 
 impl CurationService {
     pub fn new(
-        store: Arc<dyn CurationStore>,
+        catalog: Arc<dyn CatalogRepository + Send + Sync>,
+        blobs: Arc<dyn BlobStorage + Send + Sync>,
         description_service: Arc<DescriptionService>,
     ) -> Self {
         Self {
-            store,
+            catalog,
+            blobs,
             description_service,
         }
     }
 
+    /// Canonical staging address of layer `index` of candidate `id`.
+    fn staging_key(id: &str, index: usize) -> BlobKey {
+        BlobKey::StagingLayer {
+            id: id.to_string(),
+            index,
+        }
+    }
+
+    /// Best-effort rollback of the curated blobs written by the current curation call.
+    async fn rollback_curated(&self, written: &[BlobKey]) {
+        for key in written {
+            if let Err(err) = self.blobs.delete_blob(key).await {
+                tracing::warn!(
+                    path = %key.to_path(),
+                    error = %err,
+                    "Failed to roll back a curated blob after a failed curation commit"
+                );
+            }
+        }
+    }
+
+    /// Best-effort purge of a candidate's staging bundle: every staging blob of the candidate plus
+    /// its staging manifest. Cleanup failures are logged and never fail the workflow.
+    async fn purge_staging(&self, id: &str) {
+        let staging_dir = BlobKey::StagingDir {
+            id: Some(id.to_string()),
+        };
+        match self.blobs.list_prefix(&staging_dir).await {
+            Ok(keys) => {
+                for key in keys {
+                    if let Err(err) = self.blobs.delete_blob(&key).await {
+                        tracing::warn!(
+                            path = %key.to_path(),
+                            error = %err,
+                            "Failed to delete a staging blob during curation cleanup"
+                        );
+                    }
+                }
+            }
+            Err(err) => tracing::warn!(
+                id = %id,
+                error = %err,
+                "Failed to list the staging blobs of a curated candidate"
+            ),
+        }
+
+        if let Err(err) = self.catalog.delete_candidate(id).await {
+            tracing::warn!(
+                id = %id,
+                error = %err,
+                "Failed to delete the curated candidate from staging"
+            );
+        }
+    }
 }
 
 #[async_trait]
@@ -86,15 +152,15 @@ impl CurationWorkflow for CurationService {
         layers: Option<Vec<Layer>>,
         description: Option<String>,
     ) -> Result<CuratedMap, CurationWorkflowError> {
-        let trimmed_id = candidate_id.trim();
-        if trimmed_id.is_empty() {
+        let id = candidate_id.trim();
+        if id.is_empty() {
             return Err(CurationWorkflowError::ValidationFailed(
                 "Candidate ID cannot be empty".to_string(),
             ));
         }
 
         // 1. O(1) candidate lookup
-        let candidate = self.store.get_staging_candidate(trimmed_id)?;
+        let candidate = self.catalog.get_candidate(id).await?;
 
         // Validate tags
         let clean_tags = normalize_tags(tags);
@@ -116,7 +182,8 @@ impl CurationWorkflow for CurationService {
                 CurationWorkflowError::ValidationFailed(
                     "Strictly one Ground layer is required to curate a candidate".to_string(),
                 )
-            })?;
+            })?
+            .clone();
 
         // 3. 16×16 full-grid curation gate (Ground layer dimensions win over manifest dims)
         let (ground_w, ground_h) = if ground_layer.dimensions != (0, 0) {
@@ -131,51 +198,48 @@ impl CurationWorkflow for CurationService {
             )));
         }
 
-        // 4. Physical description resolution via DescriptionService (STRICT: no procedural caption fallback)
-        let ground_layer_index = ground_layer.index;
-        let mut ground_bytes: Option<Vec<u8>> = None;
+        // 4. Read the bytes of every INCLUDED layer exactly once: the Ground bytes feed the
+        //    physical description and the section crops, and every included layer is needed to
+        //    write its curated blob.
+        let mut included: Vec<(Layer, Vec<u8>)> = Vec::new();
+        for layer in raw_layers.iter().filter(|l| l.role.is_included()) {
+            let bytes = self
+                .blobs
+                .read_blob(&Self::staging_key(id, layer.index))
+                .await?;
+            included.push((layer.clone(), bytes));
+        }
+        let ground_position = included
+            .iter()
+            .position(|(layer, _)| layer.role.is_ground())
+            .ok_or_else(|| {
+                CurationWorkflowError::ValidationFailed(
+                    "Strictly one Ground layer is required to curate a candidate".to_string(),
+                )
+            })?;
+        let ground_bytes = included[ground_position].1.as_slice();
+
+        // 5. Physical description resolution via DescriptionService (STRICT: no procedural caption
+        //    fallback). A user-supplied description bypasses vision entirely.
         let final_description = if let Some(desc) = description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
             desc.to_string()
         } else {
-            let bytes = self
-                .store
-                .get_staging_layer_bytes(trimmed_id, ground_layer_index)?;
-            let described = self
-                .description_service
+            self.description_service
                 .describe(
-                    &bytes,
+                    ground_bytes,
                     Some(ground_layer.filename.as_str()),
                     &clean_tags,
                     candidate.title.as_deref(),
                 )
-                .await?;
-            ground_bytes = Some(bytes);
-            described
+                .await?
         };
 
-        // 5. Update ground layer caption with resolved description
-        let mut layers_for_commit = raw_layers;
-        for layer in &mut layers_for_commit {
-            if layer.role == LayerRole::Ground {
-                layer.caption = Some(final_description.clone());
-            }
-        }
-
-        // 6. Derive overlapping 16×16 Map Sections with crop-specific descriptions.
-        //    `describe_map_sections` owns the section policy: multi-section maps get a
-        //    vision description per Ground-layer crop (with a deterministic per-section
-        //    caption fallback); single-section maps reuse the strict map-level physical
-        //    description verbatim.
-        let ground_bytes = match ground_bytes {
-            Some(bytes) => Some(bytes),
-            None => self
-                .store
-                .get_staging_layer_bytes(trimmed_id, ground_layer_index)
-                .ok(),
-        };
-        let ground_image = ground_bytes
-            .as_ref()
-            .and_then(|bytes| image::load_from_memory(bytes).ok());
+        // 6. Derive overlapping 16×16 Map Sections with crop-specific descriptions from the Ground
+        //    bytes already in hand (never re-read). `describe_map_sections` owns the section policy:
+        //    multi-section maps get a vision description per Ground-layer crop (reusing the
+        //    map-level physical description per section on failure); single-section maps reuse the
+        //    strict map-level physical description verbatim.
+        let ground_image = image::load_from_memory(ground_bytes).ok();
         let sections = describe_map_sections(
             &self.description_service,
             SectionDescriptionContext {
@@ -189,22 +253,71 @@ impl CurationWorkflow for CurationService {
         )
         .await;
 
-        // 7. Construct CuratedMap for atomic commit (bypassing staging manifest disk rewrites)
-        let map_to_commit = CuratedMap::with_now(
-            trimmed_id,
+        // 7. Build the curated layers (deterministic filenames counting only INCLUDED layers) and
+        //    write each CuratedLayer blob, remembering every key written by THIS call so a later
+        //    failure can roll exactly those back.
+        let mut curated_layers: Vec<Layer> = Vec::with_capacity(included.len());
+        let mut written: Vec<BlobKey> = Vec::with_capacity(included.len());
+        for (curated_index, (layer, bytes)) in included.into_iter().enumerate() {
+            let mut curated_layer = Layer::new(
+                curated_index,
+                Layer::format_filename(curated_index, layer.role, layer.elevation, "png"),
+                layer.role,
+                layer.elevation,
+                if layer.dimensions != (0, 0) {
+                    layer.dimensions
+                } else {
+                    candidate.dimensions
+                },
+            );
+            let caption = if layer.role.is_ground() {
+                Some(final_description.clone())
+            } else {
+                layer.caption.clone()
+            };
+            if let Some(caption) = caption {
+                curated_layer = curated_layer.with_caption(caption);
+            }
+            if let Some(source_url) = &layer.source_url {
+                curated_layer = curated_layer.with_source_url(source_url.clone());
+            }
+
+            let key = BlobKey::CuratedLayer {
+                id: id.to_string(),
+                index: curated_index,
+                role: layer.role,
+                elevation: layer.elevation,
+            };
+            if let Err(err) = self.blobs.write_blob(&key, &bytes).await {
+                self.rollback_curated(&written).await;
+                return Err(err.into());
+            }
+            written.push(key);
+            curated_layers.push(curated_layer);
+        }
+
+        let map = CuratedMap::with_now(
+            id,
             Vec::<String>::new(),
             clean_tags,
             candidate.dimensions,
         )
         .with_source(candidate.source)
         .with_grid(candidate.grid)
-        .with_layers(layers_for_commit)
+        .with_layers(curated_layers)
         .with_description(final_description)
         .with_sections(sections);
 
-        // 8. Atomic commit, returning the map exactly as written to disk
-        let stored_map = self.store.commit_curation(&map_to_commit)?;
-        Ok(stored_map)
+        // 8. Commit the manifest; a failure rolls the freshly written curated blobs back and leaves
+        //    the staging candidate untouched so curation can be retried.
+        if let Err(err) = self.catalog.save_curated(&map).await {
+            self.rollback_curated(&written).await;
+            return Err(err.into());
+        }
+
+        // 9. Success: the staging bundle is superseded by the curated bundle.
+        self.purge_staging(id).await;
+        Ok(map)
     }
 
     async fn reject(
@@ -213,14 +326,15 @@ impl CurationWorkflow for CurationService {
         reason: RejectionReason,
         notes: Option<&str>,
     ) -> Result<(), CurationWorkflowError> {
-        let trimmed_id = candidate_id.trim();
-        if trimmed_id.is_empty() {
+        let id = candidate_id.trim();
+        if id.is_empty() {
             return Err(CurationWorkflowError::ValidationFailed(
                 "Candidate ID cannot be empty".to_string(),
             ));
         }
 
-        self.store.reject_candidate(trimmed_id, reason, notes)?;
+        self.catalog.log_rejection(id, reason, notes).await?;
+        self.purge_staging(id).await;
         Ok(())
     }
 }
@@ -228,10 +342,11 @@ impl CurationWorkflow for CurationService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
-    use crate::domain::{is_perspective_neutral, Candidate, Source};
+    use crate::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
+    use crate::domain::{is_perspective_neutral, Candidate, LayerRole, Source};
+    use crate::ports::catalog_repository::CatalogRepository;
     use crate::services::description::DescriptionGenerator;
 
     struct MockDescriptionGenerator {
@@ -269,111 +384,179 @@ mod tests {
         }
     }
 
-    struct MockCurationStore {
-        candidate: Mutex<Option<Candidate>>,
-        layer_bytes: Mutex<HashMap<usize, Vec<u8>>>,
-        committed: Mutex<Option<CuratedMap>>,
-        rejected: Mutex<Option<(String, RejectionReason, Option<String>)>>,
-        get_staging_candidate_calls: AtomicUsize,
-        get_staging_layer_bytes_calls: AtomicUsize,
-        commit_curation_calls: AtomicUsize,
-        reject_candidate_calls: AtomicUsize,
+    /// [`CatalogRepository`] double over an in-memory catalog whose `save_curated` always fails,
+    /// forcing the curation saga down its rollback path.
+    struct FailingSaveCatalog {
+        inner: Arc<InMemoryCatalogRepository>,
     }
 
-    impl MockCurationStore {
-        fn new(candidate: Option<Candidate>) -> Self {
-            Self {
-                candidate: Mutex::new(candidate),
-                layer_bytes: Mutex::new(HashMap::new()),
-                committed: Mutex::new(None),
-                rejected: Mutex::new(None),
-                get_staging_candidate_calls: AtomicUsize::new(0),
-                get_staging_layer_bytes_calls: AtomicUsize::new(0),
-                commit_curation_calls: AtomicUsize::new(0),
-                reject_candidate_calls: AtomicUsize::new(0),
-            }
+    #[async_trait]
+    impl CatalogRepository for FailingSaveCatalog {
+        async fn get_candidate(&self, id: &str) -> Result<Candidate, StorageError> {
+            self.inner.get_candidate(id).await
         }
 
-        fn with_layer_bytes(self, index: usize, bytes: Vec<u8>) -> Self {
-            self.layer_bytes.lock().unwrap().insert(index, bytes);
-            self
-        }
-    }
-
-    impl CurationStore for MockCurationStore {
-        fn get_staging_candidate(&self, id: &str) -> Result<Candidate, StorageError> {
-            self.get_staging_candidate_calls.fetch_add(1, Ordering::SeqCst);
-            let guard = self.candidate.lock().unwrap();
-            match guard.as_ref() {
-                Some(c) if c.id == id => Ok(c.clone()),
-                _ => Err(StorageError::NotFound(format!("Candidate '{id}' not found"))),
-            }
+        async fn save_candidate(&self, candidate: &Candidate) -> Result<(), StorageError> {
+            self.inner.save_candidate(candidate).await
         }
 
-        fn get_staging_layer_bytes(&self, id: &str, layer_index: usize) -> Result<Vec<u8>, StorageError> {
-            self.get_staging_layer_bytes_calls.fetch_add(1, Ordering::SeqCst);
-            let guard = self.candidate.lock().unwrap();
-            if guard.as_ref().map(|c| c.id.as_str()) != Some(id) {
-                return Err(StorageError::NotFound(format!("Candidate '{id}' not found")));
-            }
-            let bytes_guard = self.layer_bytes.lock().unwrap();
-            bytes_guard.get(&layer_index).cloned().ok_or_else(|| {
-                StorageError::NotFound(format!("Layer {layer_index} not found for candidate '{id}'"))
-            })
+        async fn list_candidates(
+            &self,
+            filter: &crate::ports::catalog_repository::CandidateFilter,
+        ) -> Result<Vec<Candidate>, StorageError> {
+            self.inner.list_candidates(filter).await
         }
 
-        fn commit_curation(&self, map: &CuratedMap) -> Result<CuratedMap, StorageError> {
-            self.commit_curation_calls.fetch_add(1, Ordering::SeqCst);
-
-            // Mirror the filesystem adapter's persisted form: included layers only,
-            // deterministic filenames, and provenance/captions preserved.
-            let mut stored = map.clone();
-            let mut layers = Vec::new();
-            for (curated_idx, src_layer) in map.layers.iter().filter(|l| l.role.is_included()).enumerate() {
-                let ext = std::path::Path::new(&src_layer.filename)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("png");
-                let dest_filename =
-                    Layer::format_filename(curated_idx, src_layer.role, src_layer.elevation, ext);
-                let mut layer = Layer::new(
-                    curated_idx,
-                    dest_filename,
-                    src_layer.role,
-                    src_layer.elevation,
-                    if src_layer.dimensions != (0, 0) {
-                        src_layer.dimensions
-                    } else {
-                        map.dimensions
-                    },
-                );
-                if let Some(caption) = &src_layer.caption {
-                    layer = layer.with_caption(caption.clone());
-                }
-                if let Some(source_url) = &src_layer.source_url {
-                    layer = layer.with_source_url(source_url.clone());
-                }
-                layers.push(layer);
-            }
-            stored.layers = layers;
-            *self.committed.lock().unwrap() = Some(stored.clone());
-            Ok(stored)
+        async fn delete_candidate(&self, id: &str) -> Result<(), StorageError> {
+            self.inner.delete_candidate(id).await
         }
 
-        fn reject_candidate(
+        async fn get_curated(&self, id: &str) -> Result<CuratedMap, StorageError> {
+            self.inner.get_curated(id).await
+        }
+
+        async fn save_curated(&self, _map: &CuratedMap) -> Result<(), StorageError> {
+            Err(StorageError::Io(std::io::Error::other(
+                "simulated catalog failure",
+            )))
+        }
+
+        async fn list_curated(
+            &self,
+            filter: &crate::ports::catalog_repository::CuratedFilter,
+        ) -> Result<Vec<CuratedMap>, StorageError> {
+            self.inner.list_curated(filter).await
+        }
+
+        async fn delete_curated(&self, id: &str) -> Result<(), StorageError> {
+            self.inner.delete_curated(id).await
+        }
+
+        async fn is_rejected(&self, id: &str) -> Result<bool, StorageError> {
+            self.inner.is_rejected(id).await
+        }
+
+        async fn log_rejection(
             &self,
             id: &str,
             reason: RejectionReason,
             notes: Option<&str>,
         ) -> Result<(), StorageError> {
-            self.reject_candidate_calls.fetch_add(1, Ordering::SeqCst);
-            let guard = self.candidate.lock().unwrap();
-            if guard.as_ref().map(|c| c.id.as_str()) != Some(id) {
-                return Err(StorageError::NotFound(format!("Candidate '{id}' not found")));
-            }
-            *self.rejected.lock().unwrap() = Some((id.to_string(), reason, notes.map(Into::into)));
-            Ok(())
+            self.inner.log_rejection(id, reason, notes).await
         }
+    }
+
+    /// [`BlobStorage`] double whose writes fail from the `fail_writes_from`-th write on.
+    struct FlakyBlobStorage {
+        inner: InMemoryBlobStorage,
+        fail_writes_from: usize,
+        write_calls: AtomicUsize,
+    }
+
+    impl FlakyBlobStorage {
+        fn failing_from(fail_writes_from: usize) -> Self {
+            Self {
+                inner: InMemoryBlobStorage::new(),
+                fail_writes_from,
+                write_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BlobStorage for FlakyBlobStorage {
+        async fn read_blob(&self, key: &BlobKey) -> Result<Vec<u8>, StorageError> {
+            self.inner.read_blob(key).await
+        }
+
+        async fn write_blob(&self, key: &BlobKey, bytes: &[u8]) -> Result<(), StorageError> {
+            let call = self.write_calls.fetch_add(1, Ordering::SeqCst);
+            if call >= self.fail_writes_from {
+                return Err(StorageError::Io(std::io::Error::other(
+                    "simulated blob write failure",
+                )));
+            }
+            self.inner.write_blob(key, bytes).await
+        }
+
+        async fn delete_blob(&self, key: &BlobKey) -> Result<(), StorageError> {
+            self.inner.delete_blob(key).await
+        }
+
+        async fn exists_blob(&self, key: &BlobKey) -> Result<bool, StorageError> {
+            self.inner.exists_blob(key).await
+        }
+
+        async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
+            self.inner.list_prefix(prefix).await
+        }
+    }
+
+    /// Seeds an in-memory catalog and blob store with `candidate` and its staging layer bytes,
+    /// addressed exactly as the ports address them (`staging/{id}/{index}.png`).
+    async fn staged_ports(
+        candidate: Candidate,
+        layer_bytes: &[(usize, Vec<u8>)],
+    ) -> (Arc<InMemoryCatalogRepository>, Arc<InMemoryBlobStorage>) {
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let blobs = Arc::new(InMemoryBlobStorage::new());
+        catalog.save_candidate(&candidate).await.unwrap();
+        for (index, bytes) in layer_bytes {
+            blobs
+                .write_blob(
+                    &BlobKey::StagingLayer {
+                        id: candidate.id.clone(),
+                        index: *index,
+                    },
+                    bytes,
+                )
+                .await
+                .unwrap();
+        }
+        (catalog, blobs)
+    }
+
+    fn curated_key(id: &str, index: usize, role: LayerRole, elevation: Option<i8>) -> BlobKey {
+        BlobKey::CuratedLayer {
+            id: id.to_string(),
+            index,
+            role,
+            elevation,
+        }
+    }
+
+    /// Canonical paths of every curated blob of `id`, ordered by canonical path.
+    async fn curated_paths(blobs: &impl BlobStorage, id: &str) -> Vec<String> {
+        blobs
+            .list_prefix(&BlobKey::CuratedDir {
+                id: Some(id.to_string()),
+            })
+            .await
+            .unwrap()
+            .iter()
+            .map(|key| key.to_path())
+            .collect()
+    }
+
+    /// Canonical paths of every staging blob of `id`, ordered by canonical path.
+    async fn staging_paths(blobs: &impl BlobStorage, id: &str) -> Vec<String> {
+        blobs
+            .list_prefix(&BlobKey::StagingDir {
+                id: Some(id.to_string()),
+            })
+            .await
+            .unwrap()
+            .iter()
+            .map(|key| key.to_path())
+            .collect()
+    }
+
+    fn ground_bytes() -> Vec<u8> {
+        b"\x89PNG\r\n\x1a\nfake_ground_bytes".to_vec()
+    }
+
+    fn upper_bytes() -> Vec<u8> {
+        b"\x89PNG\r\n\x1a\nfake_upper_bytes".to_vec()
     }
 
     fn sample_candidate() -> Candidate {
@@ -440,14 +623,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_curate_with_user_description_bypasses_vision_and_returns_in_memory() {
-        let cand = sample_candidate();
-        let store = Arc::new(
-            MockCurationStore::new(Some(cand))
-                .with_layer_bytes(0, b"\x89PNG\r\n\x1a\nfake_ground_bytes".to_vec()),
-        );
-        let desc_service = Arc::new(DescriptionService::new(None)); // Unconfigured vision
-        let service = CurationService::new(store.clone(), desc_service);
+    async fn test_curate_with_user_description_bypasses_vision_and_persists_every_layer() {
+        let (catalog, blobs) = staged_ports(sample_candidate(), &[(0, ground_bytes()), (1, upper_bytes())]).await;
+        // Unconfigured vision: the user description must bypass it entirely.
+        let desc_service = Arc::new(DescriptionService::new(None));
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
 
         let result = service
             .curate(
@@ -459,34 +639,53 @@ mod tests {
             .await
             .expect("curation should succeed with user description");
 
-        // O(1) single candidate lookup; the user description skips map-level vision, but
-        // multi-section maps still read Ground bytes once to crop section descriptions.
-        assert_eq!(store.get_staging_candidate_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(store.get_staging_layer_bytes_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(store.commit_curation_calls.load(Ordering::SeqCst), 1);
-
-        // CuratedMap returned directly in memory
         assert_eq!(result.id, "cand_1");
         assert_eq!(result.tags, vec!["dungeon", "crypt"]);
         assert_eq!(result.description.as_deref(), Some("A detailed stone dungeon crypt"));
         assert_eq!(result.layers.len(), 2);
         assert_eq!(result.layers[0].filename, "0_ground.png");
-        assert_eq!(result.layers[0].caption.as_deref(), Some("A detailed stone dungeon crypt"));
+        assert_eq!(
+            result.layers[0].caption.as_deref(),
+            Some("A detailed stone dungeon crypt")
+        );
         assert_eq!(result.layers[1].filename, "1_upper_1.png");
+
+        // The manifest persisted in the catalog is the map returned to the caller.
+        assert_eq!(catalog.get_curated("cand_1").await.unwrap(), result);
+
+        // Every included layer was written to its canonical curated blob address with its bytes.
+        assert_eq!(
+            curated_paths(&blobs, "cand_1").await,
+            vec!["curated/cand_1/0_ground.png", "curated/cand_1/1_upper_1.png"]
+        );
+        assert_eq!(
+            blobs
+                .read_blob(&curated_key("cand_1", 0, LayerRole::Ground, Some(0)))
+                .await
+                .unwrap(),
+            ground_bytes()
+        );
+        assert_eq!(
+            blobs
+                .read_blob(&curated_key("cand_1", 1, LayerRole::UpperFloor, Some(1)))
+                .await
+                .unwrap(),
+            upper_bytes()
+        );
+
+        // The candidate left staging: manifest and every staging blob are gone.
+        assert!(catalog.get_candidate("cand_1").await.is_err());
+        assert!(staging_paths(&blobs, "cand_1").await.is_empty());
     }
 
     #[tokio::test]
     async fn test_curate_with_vision_description_resolves_and_populates_captions() {
-        let cand = sample_candidate();
-        let store = Arc::new(
-            MockCurationStore::new(Some(cand))
-                .with_layer_bytes(0, b"\x89PNG\r\n\x1a\nfake_ground_bytes".to_vec()),
-        );
+        let (catalog, blobs) = staged_ports(sample_candidate(), &[(0, ground_bytes()), (1, upper_bytes())]).await;
         let gen = Arc::new(MockDescriptionGenerator::success(
             "An ancient mossy stone dungeon",
         ));
         let desc_service = Arc::new(DescriptionService::new(Some(gen.clone())));
-        let service = CurationService::new(store.clone(), desc_service);
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
 
         let result = service
             .curate(
@@ -498,35 +697,35 @@ mod tests {
             .await
             .expect("curation should resolve vision description");
 
-        assert_eq!(store.get_staging_candidate_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(store.get_staging_layer_bytes_calls.load(Ordering::SeqCst), 1);
+        // One map-level vision call: the undecodable Ground bytes cannot be cropped into sections.
         assert_eq!(gen.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(store.commit_curation_calls.load(Ordering::SeqCst), 1);
-
         assert_eq!(result.description.as_deref(), Some("An ancient mossy stone dungeon"));
-        assert_eq!(result.layers[0].caption.as_deref(), Some("An ancient mossy stone dungeon"));
+        assert_eq!(
+            result.layers[0].caption.as_deref(),
+            Some("An ancient mossy stone dungeon")
+        );
+        assert_eq!(catalog.get_curated("cand_1").await.unwrap(), result);
+        assert!(catalog.get_candidate("cand_1").await.is_err());
+        assert!(staging_paths(&blobs, "cand_1").await.is_empty());
     }
 
     #[tokio::test]
     async fn test_curate_multi_section_generates_distinct_vision_descriptions() {
         let (cand, ground_png) = two_section_candidate();
-        let store = Arc::new(
-            MockCurationStore::new(Some(cand)).with_layer_bytes(0, ground_png),
-        );
+        let (catalog, blobs) = staged_ports(cand, &[(0, ground_png)]).await;
         let generator = Arc::new(ContentKeyedGenerator {
             calls: AtomicUsize::new(0),
         });
         let desc_service = Arc::new(DescriptionService::new(Some(generator.clone())));
-        let service = CurationService::new(store.clone(), desc_service);
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
 
         let result = service
             .curate("cand_two", vec!["dungeon".into(), "crypt".into()], None, None)
             .await
             .expect("multi-section curation should succeed");
 
-        // Ground bytes are read once and reused for the map description plus both crops.
-        assert_eq!(store.get_staging_layer_bytes_calls.load(Ordering::SeqCst), 1);
-        // One map-level description plus one per section.
+        // One map-level description plus one per section; the Ground bytes are read once and
+        // reused for both crops.
         assert_eq!(generator.calls.load(Ordering::SeqCst), 3);
 
         assert_eq!(result.sections.len(), 2);
@@ -551,28 +750,21 @@ mod tests {
             "Multi-section maps must never persist identical section descriptions"
         );
 
-        let committed = store
-            .committed
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("curation must be committed");
-        assert_eq!(committed.sections, result.sections);
-        assert_eq!(committed.description, result.description);
-        assert_eq!(committed.layers[0].caption, result.description);
+        let persisted = catalog.get_curated("cand_two").await.unwrap();
+        assert_eq!(persisted.sections, result.sections);
+        assert_eq!(persisted.description, result.description);
+        assert_eq!(persisted.layers[0].caption, result.description);
     }
 
     #[tokio::test]
     async fn test_curate_multi_section_failure_reuses_neutral_map_description() {
         let (cand, ground_png) = two_section_candidate();
-        let store = Arc::new(
-            MockCurationStore::new(Some(cand)).with_layer_bytes(0, ground_png),
-        );
+        let (catalog, blobs) = staged_ports(cand, &[(0, ground_png)]).await;
         let generator = Arc::new(MockDescriptionGenerator::failure(
             DescriptionError::GenerationFailed("OpenRouter 500 error".into()),
         ));
         let desc_service = Arc::new(DescriptionService::new(Some(generator.clone())));
-        let service = CurationService::new(store.clone(), desc_service);
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
 
         // The map-level description is supplied, so only section crops hit the failing generator.
         let result = service
@@ -607,22 +799,17 @@ mod tests {
             result.sections
         );
 
-        let committed = store.committed.lock().unwrap().clone().unwrap();
-        assert_eq!(committed.sections, result.sections);
+        assert_eq!(catalog.get_curated("cand_two").await.unwrap().sections, result.sections);
     }
 
     #[tokio::test]
     async fn test_curate_vision_failure_propagates_immediately_without_fallback() {
-        let cand = sample_candidate();
-        let store = Arc::new(
-            MockCurationStore::new(Some(cand))
-                .with_layer_bytes(0, b"\x89PNG\r\n\x1a\nfake_ground_bytes".to_vec()),
-        );
+        let (catalog, blobs) = staged_ports(sample_candidate(), &[(0, ground_bytes()), (1, upper_bytes())]).await;
         let gen = Arc::new(MockDescriptionGenerator::failure(
             DescriptionError::GenerationFailed("OpenRouter 500 error".into()),
         ));
         let desc_service = Arc::new(DescriptionService::new(Some(gen)));
-        let service = CurationService::new(store.clone(), desc_service);
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
 
         let err = service
             .curate("cand_1", vec!["dungeon".into()], None, None)
@@ -636,19 +823,20 @@ mod tests {
             other => panic!("Expected DescriptionFailed, got {other:?}"),
         }
 
-        // Commit was NEVER called
-        assert_eq!(store.commit_curation_calls.load(Ordering::SeqCst), 0);
+        // Nothing was committed and the staging candidate is untouched.
+        assert!(curated_paths(&blobs, "cand_1").await.is_empty());
+        assert!(catalog.get_candidate("cand_1").await.is_ok());
+        assert_eq!(
+            staging_paths(&blobs, "cand_1").await,
+            vec!["staging/cand_1/0.png", "staging/cand_1/1.png"]
+        );
     }
 
     #[tokio::test]
     async fn test_curate_unconfigured_vision_fails_when_description_omitted() {
-        let cand = sample_candidate();
-        let store = Arc::new(
-            MockCurationStore::new(Some(cand))
-                .with_layer_bytes(0, b"\x89PNG\r\n\x1a\nfake_ground_bytes".to_vec()),
-        );
+        let (catalog, blobs) = staged_ports(sample_candidate(), &[(0, ground_bytes()), (1, upper_bytes())]).await;
         let desc_service = Arc::new(DescriptionService::new(None)); // No generator configured
-        let service = CurationService::new(store.clone(), desc_service);
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
 
         let err = service
             .curate("cand_1", vec!["dungeon".into()], None, None)
@@ -660,15 +848,15 @@ mod tests {
             other => panic!("Expected DescriptionFailed(NotConfigured), got {other:?}"),
         }
 
-        assert_eq!(store.commit_curation_calls.load(Ordering::SeqCst), 0);
+        assert!(curated_paths(&blobs, "cand_1").await.is_empty());
+        assert!(catalog.get_candidate("cand_1").await.is_ok());
     }
 
     #[tokio::test]
     async fn test_curate_validation_failure_missing_ground_layer() {
-        let cand = sample_candidate();
-        let store = Arc::new(MockCurationStore::new(Some(cand)));
+        let (catalog, blobs) = staged_ports(sample_candidate(), &[(0, ground_bytes())]).await;
         let desc_service = Arc::new(DescriptionService::new(None));
-        let service = CurationService::new(store.clone(), desc_service);
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
 
         // Custom layers without Ground
         let layers = vec![
@@ -687,15 +875,15 @@ mod tests {
             }
             other => panic!("Expected ValidationFailed, got {other:?}"),
         }
-        assert_eq!(store.commit_curation_calls.load(Ordering::SeqCst), 0);
+        assert!(curated_paths(&blobs, "cand_1").await.is_empty());
+        assert!(catalog.get_candidate("cand_1").await.is_ok());
     }
 
     #[tokio::test]
     async fn test_curate_validation_failure_multiple_ground_layers() {
-        let cand = sample_candidate();
-        let store = Arc::new(MockCurationStore::new(Some(cand)));
+        let (catalog, blobs) = staged_ports(sample_candidate(), &[(0, ground_bytes())]).await;
         let desc_service = Arc::new(DescriptionService::new(None));
-        let service = CurationService::new(store.clone(), desc_service);
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
 
         // Custom layers with 2 Ground layers
         let layers = vec![
@@ -714,15 +902,15 @@ mod tests {
             }
             other => panic!("Expected ValidationFailed, got {other:?}"),
         }
-        assert_eq!(store.commit_curation_calls.load(Ordering::SeqCst), 0);
+        assert!(curated_paths(&blobs, "cand_1").await.is_empty());
+        assert!(catalog.get_candidate("cand_1").await.is_ok());
     }
 
     #[tokio::test]
     async fn test_curate_validation_failure_all_excluded() {
-        let cand = sample_candidate();
-        let store = Arc::new(MockCurationStore::new(Some(cand)));
+        let (catalog, blobs) = staged_ports(sample_candidate(), &[(0, ground_bytes())]).await;
         let desc_service = Arc::new(DescriptionService::new(None));
-        let service = CurationService::new(store.clone(), desc_service);
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
 
         let layers = vec![
             Layer::new(0, "0.png", LayerRole::Exclude, None, (2048, 2048)),
@@ -744,10 +932,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_curate_validation_failure_unassigned_layer() {
-        let cand = sample_candidate();
-        let store = Arc::new(MockCurationStore::new(Some(cand)));
+        let (catalog, blobs) = staged_ports(sample_candidate(), &[(0, ground_bytes())]).await;
         let desc_service = Arc::new(DescriptionService::new(None));
-        let service = CurationService::new(store.clone(), desc_service);
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
 
         let layers = vec![
             Layer::new(0, "0.png", LayerRole::Ground, Some(0), (2048, 2048)),
@@ -769,10 +956,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_curate_validation_failure_invalid_elevation() {
-        let cand = sample_candidate();
-        let store = Arc::new(MockCurationStore::new(Some(cand)));
+        let (catalog, blobs) = staged_ports(sample_candidate(), &[(0, ground_bytes())]).await;
         let desc_service = Arc::new(DescriptionService::new(None));
-        let service = CurationService::new(store.clone(), desc_service);
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
 
         // UpperFloor with negative elevation
         let layers = vec![
@@ -795,9 +981,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_curate_candidate_not_found() {
-        let store = Arc::new(MockCurationStore::new(None));
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let blobs = Arc::new(InMemoryBlobStorage::new());
         let desc_service = Arc::new(DescriptionService::new(None));
-        let service = CurationService::new(store.clone(), desc_service);
+        let service = CurationService::new(catalog, blobs, desc_service);
 
         let err = service
             .curate("missing_cand", vec!["dungeon".into()], None, Some("desc".into()))
@@ -813,14 +1000,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_curate_custom_layers_bypass_manifest_rewrite_and_curates_subset() {
-        let cand = sample_candidate(); // 2 layers: 0=Ground, 1=UpperFloor
-        let store = Arc::new(
-            MockCurationStore::new(Some(cand))
-                .with_layer_bytes(0, b"\x89PNG\r\n\x1a\nfake_ground_bytes".to_vec()),
-        );
+    async fn test_curate_custom_layers_curates_only_the_included_subset() {
+        let (catalog, blobs) = staged_ports(sample_candidate(), &[(0, ground_bytes()), (1, upper_bytes())]).await;
         let desc_service = Arc::new(DescriptionService::new(None));
-        let service = CurationService::new(store.clone(), desc_service);
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
 
         // Custom layer assignments: exclude UpperFloor (layer 1)
         let custom_layers = vec![
@@ -842,24 +1025,104 @@ mod tests {
         assert_eq!(result.layers[0].index, 0);
         assert_eq!(result.layers[0].role, LayerRole::Ground);
         assert_eq!(result.layers[0].filename, "0_ground.png");
+        assert_eq!(
+            curated_paths(&blobs, "cand_1").await,
+            vec!["curated/cand_1/0_ground.png"]
+        );
+        // The excluded layer's staging blob is purged with the rest of the staging bundle.
+        assert!(staging_paths(&blobs, "cand_1").await.is_empty());
+        assert!(catalog.get_candidate("cand_1").await.is_err());
     }
 
     #[tokio::test]
-    async fn test_reject_delegates_to_store() {
-        let cand = sample_candidate();
-        let store = Arc::new(MockCurationStore::new(Some(cand)));
+    async fn test_reject_logs_reason_and_purges_staging() {
+        let (catalog, blobs) = staged_ports(sample_candidate(), &[(0, ground_bytes()), (1, upper_bytes())]).await;
         let desc_service = Arc::new(DescriptionService::new(None));
-        let service = CurationService::new(store.clone(), desc_service);
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
 
         service
             .reject("cand_1", RejectionReason::BlurryLowRes, Some("Too blurry"))
             .await
             .expect("rejection should succeed");
 
-        assert_eq!(store.reject_candidate_calls.load(Ordering::SeqCst), 1);
-        let rejected = store.rejected.lock().unwrap().clone().unwrap();
-        assert_eq!(rejected.0, "cand_1");
-        assert_eq!(rejected.1, RejectionReason::BlurryLowRes);
-        assert_eq!(rejected.2.as_deref(), Some("Too blurry"));
+        assert!(catalog.is_rejected("cand_1").await.unwrap());
+        assert!(catalog.get_candidate("cand_1").await.is_err());
+        assert!(staging_paths(&blobs, "cand_1").await.is_empty());
+        // A rejection never produces curated artifacts.
+        assert!(curated_paths(&blobs, "cand_1").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_curate_saga_rolls_back_curated_blobs_when_catalog_commit_fails() {
+        let (catalog, blobs) = staged_ports(sample_candidate(), &[(0, ground_bytes()), (1, upper_bytes())]).await;
+        let failing: Arc<dyn CatalogRepository + Send + Sync> = Arc::new(FailingSaveCatalog {
+            inner: catalog.clone(),
+        });
+        let desc_service = Arc::new(DescriptionService::new(None));
+        let service = CurationService::new(failing, blobs.clone(), desc_service);
+
+        let err = service
+            .curate(
+                "cand_1",
+                vec!["dungeon".into()],
+                None,
+                Some("A detailed stone dungeon crypt".into()),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, CurationWorkflowError::Storage(_)),
+            "Expected Storage error, got {err:?}"
+        );
+
+        // Every curated blob written by the failed call was rolled back …
+        assert!(curated_paths(&blobs, "cand_1").await.is_empty());
+        // … no manifest was committed …
+        assert!(catalog.get_curated("cand_1").await.is_err());
+        // … and staging is untouched, so the candidate can be curated again.
+        assert!(catalog.get_candidate("cand_1").await.is_ok());
+        assert_eq!(
+            staging_paths(&blobs, "cand_1").await,
+            vec!["staging/cand_1/0.png", "staging/cand_1/1.png"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_curate_saga_rolls_back_partially_written_blobs_when_a_write_fails() {
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        // Writes 0 and 1 seed staging; write 2 (the Ground curated blob) succeeds and write 3
+        // (the UpperFloor curated blob) fails, leaving one curated blob to roll back.
+        let blobs = Arc::new(FlakyBlobStorage::failing_from(3));
+        catalog.save_candidate(&sample_candidate()).await.unwrap();
+        blobs
+            .write_blob(&CurationService::staging_key("cand_1", 0), &ground_bytes())
+            .await
+            .unwrap();
+        blobs
+            .write_blob(&CurationService::staging_key("cand_1", 1), &upper_bytes())
+            .await
+            .unwrap();
+
+        let desc_service = Arc::new(DescriptionService::new(None));
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
+
+        let err = service
+            .curate(
+                "cand_1",
+                vec!["dungeon".into()],
+                None,
+                Some("A detailed stone dungeon crypt".into()),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, CurationWorkflowError::Storage(_)),
+            "Expected Storage error, got {err:?}"
+        );
+        assert!(curated_paths(&blobs, "cand_1").await.is_empty());
+        assert!(catalog.get_curated("cand_1").await.is_err());
+        assert!(catalog.get_candidate("cand_1").await.is_ok());
     }
 }

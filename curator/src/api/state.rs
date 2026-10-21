@@ -39,10 +39,11 @@ impl AppState {
         Arc::new(DescriptionService::new(generator))
     }
     fn default_curation_service(
-        storage: Arc<dyn StorageRepository + Send + Sync>,
+        catalog: Arc<dyn CatalogRepository + Send + Sync>,
+        blobs: Arc<dyn BlobStorage + Send + Sync>,
         description_service: Arc<DescriptionService>,
     ) -> Arc<dyn CurationWorkflow> {
-        Arc::new(CurationService::new(storage, description_service))
+        Arc::new(CurationService::new(catalog, blobs, description_service))
     }
 
 
@@ -61,7 +62,7 @@ impl AppState {
         );
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
-        let curation_service = Self::default_curation_service(storage.clone(), description_service.clone());
+        let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
             storage,
             catalog,
@@ -94,7 +95,7 @@ impl AppState {
         );
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
-        let curation_service = Self::default_curation_service(storage.clone(), description_service.clone());
+        let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
             storage,
             catalog,
@@ -126,7 +127,7 @@ impl AppState {
         );
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
-        let curation_service = Self::default_curation_service(storage.clone(), description_service.clone());
+        let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
             storage,
             catalog,
@@ -159,7 +160,7 @@ impl AppState {
         );
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
-        let curation_service = Self::default_curation_service(storage.clone(), description_service.clone());
+        let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
             storage,
             catalog,
@@ -186,7 +187,7 @@ impl AppState {
     ) -> Self {
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
-        let curation_service = Self::default_curation_service(storage.clone(), description_service.clone());
+        let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
             storage,
             catalog,
@@ -210,14 +211,22 @@ impl AppState {
             openrouter as Arc<dyn DescriptionGenerator>,
         )));
         self.description_service = desc_service.clone();
-        self.curation_service = Self::default_curation_service(self.storage.clone(), desc_service);
+        self.curation_service = Self::default_curation_service(
+            self.catalog.clone(),
+            self.blobs.clone(),
+            desc_service,
+        );
         self
     }
 
     /// Creates a new `AppState` with an explicit description service (ideal for testing).
     pub fn with_description_service(mut self, description_service: Arc<DescriptionService>) -> Self {
         self.description_service = description_service.clone();
-        self.curation_service = Self::default_curation_service(self.storage.clone(), description_service);
+        self.curation_service = Self::default_curation_service(
+            self.catalog.clone(),
+            self.blobs.clone(),
+            description_service,
+        );
         self
     }
 

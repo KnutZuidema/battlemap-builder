@@ -2,61 +2,61 @@
 
 ## 1. Executive Summary & Decoupling Audit
 
-The Curator service utilizes a Hexagonal Architecture (Ports and Adapters) pattern to isolate domain models and business logic from persistence mechanisms. The primary storage interface is defined by the `StorageRepository` port (`curator/src/ports/storage.rs`).
+The Curator service utilizes a Hexagonal Architecture (Ports and Adapters) pattern to isolate domain models and business logic from persistence mechanisms. ADR-0006 replaced the former monolithic `StorageRepository` with two focused, asynchronous ports in `curator/src/ports/`:
 
-### StorageRepository Port Audit
+- `CatalogRepository` (`catalog_repository.rs`) persists domain entities (`Candidate`, `CuratedMap`, rejection records).
+- `BlobStorage` (`blob_storage.rs`) performs raw byte I/O addressed by strongly-typed `BlobKey` values.
 
-An audit of `StorageRepository` confirms complete decoupling from local filesystem paths:
-- **No Path Leaks:** No method signatures in `StorageRepository` expose `std::path::Path`, `std::path::PathBuf`, or OS-specific filesystem handles.
-- **Abstract Identifiers:** All access methods operate strictly on domain primitives:
-  - Candidate and map identifiers: `&str` (e.g. `"map_42"`)
-  - Classification and routing: `&Theme` (e.g. `Theme::Dungeon`, `Theme::Cave`)
+### Port Audit
+
+An audit of both ports confirms complete decoupling from local filesystem paths:
+- **No Path Leaks:** Neither port exposes `std::path::Path`, `std::path::PathBuf`, or OS-specific filesystem handles. `BlobKey::to_path` is the single source of truth for the canonical storage-relative path, so no caller hand-builds one.
+- **Abstract Identifiers:** All blob access is addressed by `BlobKey` (`StagingLayer`, `CuratedLayer`, `ExportArchive`, `RejectionLog`, `TelemetryLog`, and the directory prefixes); catalog access operates strictly on domain primitives:
+  - Candidate and map identifiers: `&str`
+  - Classification and filtering: `CuratedFilter::theme` (`&Theme`/`Theme`)
   - Layer indexing: `usize`
   - In-memory byte buffers: `&[u8]`, `Vec<u8>`
-  - Domain records: `&Candidate`, `&CuratedMap`, `&RedditSidecarMetadata`, `&BenchmarkMetadata`
-- **LoRA Dataset Packaging:** `export_lora_dataset(&self, theme: Option<&Theme>) -> Result<Vec<u8>, StorageError>` packages normalized 1024x1024 PNGs and companion `.txt` captions into standard ZIP format without relying on temporary disk files.
-- **Atomic Abstractions:** Curation (`curate_staging`), rejection (`reject_staging`), and staging cleanup (`purge_staging`) are modeled as high-level atomic domain operations rather than filesystem moves or file unlinks.
+  - Domain records: `&Candidate`, `&CuratedMap`
+- **LoRA Dataset Packaging:** `DatasetExportService::export_lora_dataset` packages per-Map-Section 1024×1024 PNGs and captions into a standard ZIP archive in memory, never relying on temporary disk files.
+- **Atomic Abstractions:** Curation, rejection, layer/label edits, and staging cleanup are modeled as application services (`CurationService`, `LibraryService`, `StorageMaintenanceService`) orchestrating the two ports, rather than the adapter exposing filesystem moves or file unlinks.
 
 ---
 
 ## 2. Object Key Mapping Strategy
 
-When transitioning from the local `FilesystemStorage` adapter to a cloud object storage backend (`S3StorageAdapter`), flat hierarchies with virtual prefix delimiters (`/`) map directly to S3/R2 key namespaces.
+When transitioning from the local `FilesystemBlobStorage`/`FilesystemCatalogRepository` adapters to cloud object storage backends, flat hierarchies with virtual prefix delimiters (`/`) map directly to S3/R2 key namespaces. `BlobKey::to_path` already emits exactly these keys.
 
 ### 2.1 Staging Area (`staging/`)
 
-Incoming battlemaps harvested from Reddit, generated via benchmark suites, or uploaded manually reside in `staging/`.
+Incoming battlemaps harvested from Reddit, generated via benchmark suites, or uploaded manually reside in one uniform `staging/{id}/` bundle layout. The ingestion source lives on the `Candidate` record; there are no `staging/reddit/` or `staging/generated/` path prefixes.
 
 | Entity | Object Key Format | Content-Type | Example |
 | :--- | :--- | :--- | :--- |
 | **Candidate Manifest** | `staging/{id}/manifest.json` | `application/json` | `staging/cand_981a/manifest.json` |
 | **Layer Image (Primary)** | `staging/{id}/{index}.png` | `image/png` | `staging/cand_981a/0.png` |
 | **Multi-Layer Image** | `staging/{id}/{index}.png` | `image/png` | `staging/cand_981a/1.png` |
-| **Subfolder Ingestion** | `staging/{subfolder}/{id}/...` | `image/png` | `staging/reddit/t3_xyz/0.png` |
 
 #### Atomic Move Semantics in Object Storage
-Since S3 and R2 lack a native POSIX `rename` syscall, moving candidates from `staging/` to `curated/` during triage approval is implemented as:
-1. `CopyObject` from `staging/{id}/{file}` to `curated/{theme}/{id}/{dest_file}`
-2. `PutObject` writing the finalized `curated/{theme}/{id}/manifest.json`
-3. `DeleteObjects` batch-pruning the source keys in `staging/{id}/`
+Object stores lack a native POSIX `rename` syscall, so curation is a saga over the ports rather than a single move:
+1. `BlobStorage::write_blob` for every included layer at `curated/{id}/{index}_{role}.png` (rollback deletes exactly the blobs this call created on failure)
+2. `CatalogRepository::save_curated` commits the finalized `curated/{id}/manifest.json`
+3. `BlobStorage::list_prefix` + `delete_blob` prune the source keys in `staging/{id}/`, then `CatalogRepository::delete_candidate` removes the candidate
 
 ### 2.2 Curated Dataset Library (`curated/`)
 
-Approved battlemaps organized by theme with full multi-layer representations and LoRA training companions:
+Approved battlemaps live in flat `<id>/` bundles (ADR-0003); theme membership is derived from the map's tags, never from a directory prefix. LoRA training samples are derived per Map Section on demand at export time (ADR-0007), so no `<id>_lora1024` companions are stored:
 
 | Entity | Object Key Format | Content-Type | Description |
 | :--- | :--- | :--- | :--- |
-| **Theme Manifest** | `curated/{theme}/{id}/manifest.json` | `application/json` | Full `CuratedMap` metadata (rating, layers, tags) |
-| **Layer PNGs** | `curated/{theme}/{id}/{index}_{role}_{elev}.png` | `image/png` | Layer files (e.g. `0_ground_0.png`, `1_upper_1.png`) |
-| **LoRA Normalized Image** | `curated/{theme}/{id}/{id}_lora1024.png` | `image/png` | Exact 1024x1024 Lanczos3-rescaled training image |
-| **LoRA Companion Caption** | `curated/{theme}/{id}/{id}_lora1024.txt` | `text/plain; charset=utf-8` | Kohya / AI-Toolkit comma-delimited caption |
+| **Curated Manifest** | `curated/{id}/manifest.json` | `application/json` | Full `CuratedMap` metadata (tags, layers, sections) |
+| **Layer PNGs** | `curated/{id}/{index}_{role}.png` | `image/png` | Layer files (e.g. `0_ground.png`, `1_upper_1.png`) |
 
-### 2.3 Catalog & Records (`records/`)
+### 2.3 Catalog & Records (`rejected/`, `telemetry/`)
 
 | Entity | Object Key Format | Content-Type | Description |
 | :--- | :--- | :--- | :--- |
-| **Rejection Log** | `records/rejections.json` | `application/json` | Append-only catalog of rejected map candidate hashes |
-| **Cost Ledger** | `records/cost_ledger.json` | `application/json` | Model token generation and inference spend ledger |
+| **Rejection Log** | `rejected/rejections.json` | `application/json` | Append-only catalog of rejected map candidate hashes |
+| **Cost Ledger** | `telemetry/cost_ledger.json` | `application/json` | Model token generation and inference spend ledger |
 
 ---
 
@@ -116,23 +116,27 @@ Battlemap PNG files typically measure 2048x2048 to 4096x4096 (5MB to 40MB per la
                       |   Domain / Application      |
                       +-----------------------------+
                                      |
-                                     v
-                      +-----------------------------+
-                      |  StorageRepository (Port)   |
-                      +-----------------------------+
-                                     |
                 +--------------------+--------------------+
                 |                                         |
                 v                                         v
    +-------------------------+              +-------------------------+
-   |    FilesystemStorage    |              |     S3StorageAdapter    |
-   |   (Local disk adapter)  |              |   (S3 / R2 / MinIO)     |
+   |  CatalogRepository      |              |      BlobStorage        |
+   |        (Port)           |              |         (Port)          |
+   +-------------------------+              +-------------------------+
+                |                                         |
+                v                                         v
+   +-------------------------+              +-------------------------+
+   | FilesystemCatalogRepo   |              |  FilesystemBlobStorage  |
+   |   (Local disk adapter)  |              |   (Local disk adapter)  |
    +-------------------------+              +-------------------------+
                 |                                         |
                 v                                         v
          Local File System                         AWS S3 / R2 API
-     data/staging/ & curated/                  https://<account>.r2.cloudflarestorage.com
+     staging/{id}/manifest.json                https://<account>.r2.cloudflarestorage.com
+     curated/{id}/manifest.json
 ```
+
+A cloud deployment swaps only the two adapters (`S3CatalogRepository`, `S3BlobStorage`); the ports and every service above them stay unchanged.
 
 ### Configuration via Environment Variables
 

@@ -33,17 +33,18 @@ impl StorageMaintenanceService {
 
     /// Aggregates the storage footprint of the staging and curated areas.
     ///
-    /// `staging_breakdown` keeps its three legacy keys — `root`, `reddit` and `generated` — which
-    /// stay zero now that staging is one uniform `staging/{id}/` bundle layout instead of nested
-    /// per-source subdirectories; `staging` carries the aggregate instead. `rejected` and
-    /// `telemetry` stay empty for the same reason: the rejection log and the telemetry logs are
-    /// not blob-addressed, so no port reports their footprint.
+    /// `staging_breakdown` keeps its three legacy keys: staging is one uniform `staging/{id}/`
+    /// bundle layout with no nested per-source subdirectories, so the entire footprint sits in
+    /// `root` (`root` equals `staging`), while `reddit` and `generated` stay present — the SPA
+    /// renders all three — at zero. `rejected` is the rejection log blob's byte size and single
+    /// file, `telemetry` the byte size and file count of the telemetry log blobs below
+    /// `telemetry/`.
     pub async fn storage_stats(&self) -> Result<StorageStats, StorageError> {
         let staging = self.directory_stats(&BlobKey::StagingDir { id: None }).await?;
         let curated = self.directory_stats(&BlobKey::CuratedDir { id: None }).await?;
 
         let mut staging_breakdown = HashMap::new();
-        staging_breakdown.insert("root".to_string(), DirectoryStats::default());
+        staging_breakdown.insert("root".to_string(), staging);
         staging_breakdown.insert("reddit".to_string(), DirectoryStats::default());
         staging_breakdown.insert("generated".to_string(), DirectoryStats::default());
 
@@ -69,8 +70,13 @@ impl StorageMaintenanceService {
             }
         }
 
-        let rejected = DirectoryStats::default();
-        let telemetry = DirectoryStats::default();
+        // The rejection log is a single blob: its byte size plus the one file it occupies.
+        let rejected = match self.blobs.blob_size(&BlobKey::RejectionLog).await {
+            Ok(bytes) => DirectoryStats::new(bytes, 1),
+            Err(StorageError::NotFound(_)) => DirectoryStats::default(),
+            Err(err) => return Err(err),
+        };
+        let telemetry = self.directory_stats(&BlobKey::TelemetryDir).await?;
 
         let total_bytes = staging.bytes + curated.bytes + rejected.bytes + telemetry.bytes;
         let total_files =
@@ -90,8 +96,9 @@ impl StorageMaintenanceService {
 
     /// Deletes every staging blob and the staging candidates describing them.
     ///
-    /// Curated bundles (`curated/`) and the rejection log are never touched: only the `staging/`
-    /// prefix is enumerated, and the catalog rows removed are exactly the staging candidates.
+    /// Curated bundles (`curated/`), the rejection log and the telemetry ledgers are never
+    /// touched: only the `staging/` prefix is enumerated, and the catalog rows removed are exactly
+    /// the staging candidates.
     pub async fn purge_staging(&self) -> Result<PurgeStagingResult, StorageError> {
         let mut purged_files = 0usize;
         let mut reclaimed_bytes = 0u64;

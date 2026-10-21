@@ -102,7 +102,7 @@ impl BlobStorage for FilesystemBlobStorage {
 
     async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
         let start = match prefix {
-            BlobKey::StagingDir { .. } | BlobKey::CuratedDir { .. } => {
+            BlobKey::StagingDir { .. } | BlobKey::CuratedDir { .. } | BlobKey::TelemetryDir => {
                 self.root_dir.join(prefix.to_path())
             }
             _ => self.root_dir.clone(),
@@ -167,6 +167,10 @@ fn key_from_relative_path(relative: &str) -> Option<BlobKey> {
         }
         ["exports", file] => BlobKey::ExportArchive {
             name: file.strip_suffix(".zip")?.to_string(),
+        },
+        ["rejected", "rejections.json"] => BlobKey::RejectionLog,
+        ["telemetry", name] => BlobKey::TelemetryLog {
+            name: (*name).to_string(),
         },
         _ => return None,
     };

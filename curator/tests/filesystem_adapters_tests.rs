@@ -109,6 +109,10 @@ fn blob_keys() -> Vec<BlobKey> {
         BlobKey::ExportArchive {
             name: "dataset-42".into(),
         },
+        BlobKey::RejectionLog,
+        BlobKey::TelemetryLog {
+            name: "cost_ledger.json".into(),
+        },
     ]
 }
 
@@ -161,6 +165,12 @@ async fn blob_round_trip_every_variant_lands_at_exact_path() {
         BlobKey::ExportArchive { name: "dataset-42".into() }.to_path(),
         "exports/dataset-42.zip"
     );
+    assert_eq!(BlobKey::RejectionLog.to_path(), "rejected/rejections.json");
+    assert_eq!(
+        BlobKey::TelemetryLog { name: "cost_ledger.json".into() }.to_path(),
+        "telemetry/cost_ledger.json"
+    );
+    assert_eq!(BlobKey::TelemetryDir.to_path(), "telemetry/");
 }
 
 #[tokio::test]
@@ -190,6 +200,16 @@ async fn blob_dir_prefixes_do_not_match_siblings() {
     // A flat legacy export file that must never be reported as a blob of `map-1`.
     write_file(&dir.path().join("curated/map-1_lora1024.png"), b"legacy");
 
+    let rejection = BlobKey::RejectionLog;
+    let ledger = BlobKey::TelemetryLog { name: "cost_ledger.json".into() };
+    for key in [&rejection, &ledger] {
+        storage.write_blob(key, key.to_path().as_bytes()).await.unwrap();
+    }
+    // Siblings whose paths merely start with `telemetry` must never be swallowed by the
+    // `telemetry/` prefix.
+    write_file(&dir.path().join("telemetry.json"), b"legacy");
+    write_file(&dir.path().join("telemetry_archive/cost_ledger.json"), b"old");
+
     let staging_1 = storage
         .list_prefix(&BlobKey::StagingDir { id: Some("cand-1".into()) })
         .await
@@ -214,6 +234,19 @@ async fn blob_dir_prefixes_do_not_match_siblings() {
         .unwrap();
     assert_eq!(all_curated, vec![map_1.clone(), map_2.clone()]);
 
+    let telemetry = storage
+        .list_prefix(&BlobKey::TelemetryDir)
+        .await
+        .unwrap();
+    assert_eq!(telemetry, vec![ledger.clone()]);
+
+    // The rejection log is its own key, and it lives outside the telemetry tree.
+    assert_eq!(
+        storage.list_prefix(&rejection).await.unwrap(),
+        vec![rejection.clone()]
+    );
+    assert!(!telemetry.contains(&rejection));
+
     // Prefixes match on the canonical path: an exact key is its own prefix.
     let exports = storage.list_prefix(&archive).await.unwrap();
     assert_eq!(exports, vec![archive.clone()]);
@@ -232,7 +265,13 @@ async fn blob_dir_prefixes_do_not_match_siblings() {
         .unwrap();
     assert!(missing.is_empty());
 
-    for key in all_staging.into_iter().chain(all_curated).chain(exports) {
+    for key in all_staging
+        .into_iter()
+        .chain(all_curated)
+        .chain(exports)
+        .chain(telemetry)
+        .chain([rejection.clone()])
+    {
         let path = dir.path().join(key.to_path());
         assert!(path.is_file());
         let relative = path.strip_prefix(dir.path()).unwrap();

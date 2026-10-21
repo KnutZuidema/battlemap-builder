@@ -14,7 +14,7 @@ use curator::domain::{
     RedditSidecarMetadata, RejectionReason, Source, StorageStats, Theme,
 };
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
-use curator::ports::catalog_repository::CatalogRepository;
+use curator::ports::catalog_repository::{CandidateFilter, CatalogRepository};
 use curator::ports::storage::StorageRepository;
 
 /// Fresh in-memory catalog and blob ports: these tests exercise the storage management routes.
@@ -455,6 +455,10 @@ async fn test_api_storage_stats_and_purge_endpoints() {
 
     assert_eq!(stats_json["staging"]["bytes"], 0);
     assert_eq!(stats_json["staging"]["file_count"], 0);
+    for key in ["root", "reddit", "generated"] {
+        assert_eq!(stats_json["staging_breakdown"][key]["bytes"], 0);
+        assert_eq!(stats_json["staging_breakdown"][key]["file_count"], 0);
+    }
     assert_eq!(stats_json["curated"]["bytes"], 0);
     assert_eq!(stats_json["curated"]["file_count"], 0);
     assert_eq!(stats_json["rejected"]["bytes"], 0);
@@ -493,6 +497,31 @@ async fn test_api_storage_stats_and_purge_endpoints() {
         .log_rejection("api_rej_1", RejectionReason::GridBurnedIn, None)
         .await
         .unwrap();
+    let rejections_payload = br#"{"id":"api_rej_1","reason":"grid_burned_in"}"#;
+    blobs
+        .write_blob(&BlobKey::RejectionLog, rejections_payload)
+        .await
+        .unwrap();
+    let ledger_payload = br#"{"cumulative_spend":0.12}"#;
+    blobs
+        .write_blob(
+            &BlobKey::TelemetryLog {
+                name: "cost_ledger.json".to_string(),
+            },
+            ledger_payload,
+        )
+        .await
+        .unwrap();
+    let audit_payload = br#"{"runs":3}"#;
+    blobs
+        .write_blob(
+            &BlobKey::TelemetryLog {
+                name: "generation_audit.json".to_string(),
+            },
+            audit_payload,
+        )
+        .await
+        .unwrap();
 
     // 3. GET /api/storage/stats with populated data
     let req = Request::builder()
@@ -513,12 +542,38 @@ async fn test_api_storage_stats_and_purge_endpoints() {
     assert_eq!(stats_json["staging"]["file_count"], 1);
     assert_eq!(stats_json["curated"]["bytes"], curated_payload.len() as u64);
     assert_eq!(stats_json["curated"]["file_count"], 1);
-    // The rejection log and the telemetry ledger are not blob-addressed, so no port reports their
-    // footprint: both areas keep their response shape and stay structurally zero (see the PR body).
-    assert_eq!(stats_json["rejected"]["bytes"], 0);
-    assert_eq!(stats_json["rejected"]["file_count"], 0);
-    assert_eq!(stats_json["telemetry"]["bytes"], 0);
-    assert_eq!(stats_json["telemetry"]["file_count"], 0);
+    // Staging is one uniform bundle layout, so the whole footprint is the `root` bucket and the
+    // two legacy source buckets stay present at zero; the SPA renders all three.
+    assert_eq!(
+        stats_json["staging_breakdown"]["root"]["bytes"],
+        stats_json["staging"]["bytes"]
+    );
+    assert_eq!(
+        stats_json["staging_breakdown"]["root"]["file_count"],
+        stats_json["staging"]["file_count"]
+    );
+    assert_eq!(stats_json["staging_breakdown"]["reddit"]["bytes"], 0);
+    assert_eq!(stats_json["staging_breakdown"]["reddit"]["file_count"], 0);
+    assert_eq!(stats_json["staging_breakdown"]["generated"]["bytes"], 0);
+    assert_eq!(stats_json["staging_breakdown"]["generated"]["file_count"], 0);
+    assert_eq!(
+        stats_json["staging"]["bytes"],
+        stats_json["staging_breakdown"]["root"]["bytes"].as_u64().unwrap()
+            + stats_json["staging_breakdown"]["reddit"]["bytes"].as_u64().unwrap()
+            + stats_json["staging_breakdown"]["generated"]["bytes"].as_u64().unwrap()
+    );
+    // The rejection log and the telemetry ledgers are addressable blobs, so the endpoint reports
+    // their real footprint instead of zeros.
+    assert_eq!(
+        stats_json["rejected"]["bytes"],
+        rejections_payload.len() as u64
+    );
+    assert_eq!(stats_json["rejected"]["file_count"], 1);
+    assert_eq!(
+        stats_json["telemetry"]["bytes"],
+        (ledger_payload.len() + audit_payload.len()) as u64
+    );
+    assert_eq!(stats_json["telemetry"]["file_count"], 2);
     assert_eq!(
         stats_json["total_bytes"],
         stats_json["staging"]["bytes"].as_u64().unwrap()
@@ -578,19 +633,41 @@ async fn test_api_storage_stats_and_purge_endpoints() {
     assert_eq!(status_json["staging_count"], 0);
     assert_eq!(status_json["curated_count"], 1);
 
-    // 6. Verify GET /api/staging returns empty array. That listing still reads the filesystem
-    //    repository (cutting it over is issue #174's territory) and this test seeds only the ports
-    //    the storage routes read, so it lists nothing; the drained port-backed view of the staging
-    //    area is asserted through /api/status above and /api/storage/stats below.
+    // 6. The staging area is drained through the ports the purge acts on: no candidate row and no
+    //    staging blob is left. `GET /api/staging` still reads the filesystem repository (cutting
+    //    that listing over is issue #174's territory) and this test seeds only the ports, so the
+    //    drained state is asserted on the ports themselves rather than on that endpoint's empty
+    //    filesystem tree.
+    assert!(catalog
+        .list_candidates(&CandidateFilter::default())
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(blobs
+        .list_prefix(&BlobKey::StagingDir { id: None })
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        blobs
+            .list_prefix(&BlobKey::CuratedDir { id: None })
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // `/api/staging` answers 200 with the filesystem repository's own (untouched, empty) view.
     let req = Request::builder()
         .uri("/api/staging")
         .method("GET")
         .body(Body::empty())
         .unwrap();
     let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
     let body_bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
     let staging_json: Value = serde_json::from_slice(&body_bytes).unwrap();
-    assert_eq!(staging_json.as_array().unwrap().len(), 0);
+    assert!(staging_json.as_array().unwrap().is_empty());
 
     // 7. Verify GET /api/storage/stats shows 0 staging bytes
     let req = Request::builder()
@@ -603,9 +680,29 @@ async fn test_api_storage_stats_and_purge_endpoints() {
     let stats_json: Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(stats_json["staging"]["bytes"], 0);
     assert_eq!(stats_json["staging"]["file_count"], 0);
+    assert_eq!(stats_json["staging_breakdown"]["root"]["bytes"], 0);
+    assert_eq!(stats_json["staging_breakdown"]["root"]["file_count"], 0);
     assert_eq!(stats_json["curated"]["bytes"], curated_payload.len() as u64);
     assert_eq!(stats_json["curated"]["file_count"], 1);
-    assert_eq!(stats_json["rejected"]["file_count"], 0);
+    // The purge only enumerates `staging/`, so the rejection log and the telemetry ledgers keep
+    // their footprint.
+    assert_eq!(
+        stats_json["rejected"]["bytes"],
+        rejections_payload.len() as u64
+    );
+    assert_eq!(stats_json["rejected"]["file_count"], 1);
+    assert_eq!(
+        stats_json["telemetry"]["bytes"],
+        (ledger_payload.len() + audit_payload.len()) as u64
+    );
+    assert_eq!(stats_json["telemetry"]["file_count"], 2);
+    assert_eq!(
+        stats_json["total_bytes"],
+        curated_payload.len() as u64
+            + rejections_payload.len() as u64
+            + (ledger_payload.len() + audit_payload.len()) as u64
+    );
+    assert_eq!(stats_json["total_files"], 1 + 1 + 2);
 
     let _ = dir;
 }

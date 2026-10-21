@@ -158,6 +158,25 @@ fn blob_key_to_path_resolves_canonical_paths() {
         BlobKey::CuratedDir { id: Some("abc".into()) }.to_path(),
         "curated/abc/"
     );
+    assert_eq!(BlobKey::RejectionLog.to_path(), "rejected/rejections.json");
+    assert_eq!(
+        BlobKey::TelemetryLog { name: "cost_ledger.json".into() }.to_path(),
+        "telemetry/cost_ledger.json"
+    );
+    // The telemetry directory prefix renders with its trailing slash, so it never swallows a
+    // sibling whose path merely starts with the same text.
+    assert_eq!(BlobKey::TelemetryDir.to_path(), "telemetry/");
+    assert!(BlobKey::TelemetryDir.is_prefix_of(&BlobKey::TelemetryLog {
+        name: "cost_ledger.json".into(),
+    }));
+    assert!(!BlobKey::TelemetryDir.is_prefix_of(&BlobKey::RejectionLog));
+    assert!(!BlobKey::TelemetryDir.is_prefix_of(&BlobKey::ExportArchive {
+        name: "telemetry".into(),
+    }));
+    assert!(!BlobKey::StagingDir { id: None }.is_prefix_of(&BlobKey::TelemetryLog {
+        name: "cost_ledger.json".into(),
+    }));
+    assert!(!BlobKey::CuratedDir { id: None }.is_prefix_of(&BlobKey::RejectionLog));
 
     // A curated bundle prefix contains its own layers and is itself contained by the whole
     // curated tree, but never matches a sibling bundle whose id merely starts with the same text.
@@ -235,6 +254,37 @@ async fn blob_list_prefix_orders_by_path_and_rejects_sibling_id_collisions() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn telemetry_dir_prefix_lists_only_telemetry_logs() {
+    let storage = InMemoryBlobStorage::new();
+    let cost_ledger = BlobKey::TelemetryLog { name: "cost_ledger.json".into() };
+    let audit = BlobKey::TelemetryLog { name: "generation_audit.json".into() };
+    let rejection = BlobKey::RejectionLog;
+    let staging = BlobKey::StagingLayer { id: "cand-1".into(), index: 0 };
+
+    // Written out of path order to prove the listing sorts by canonical path.
+    storage.write_blob(&audit, b"audit").await.unwrap();
+    storage.write_blob(&cost_ledger, b"ledger").await.unwrap();
+    storage.write_blob(&rejection, b"rejections").await.unwrap();
+    storage.write_blob(&staging, b"layer").await.unwrap();
+
+    assert_eq!(
+        storage.list_prefix(&BlobKey::TelemetryDir).await.unwrap(),
+        vec![cost_ledger.clone(), audit.clone()]
+    );
+    // The rejection log is not a telemetry log, and the whole key is its own prefix.
+    assert_eq!(
+        storage.list_prefix(&rejection).await.unwrap(),
+        vec![rejection.clone()]
+    );
+    assert!(storage
+        .list_prefix(&BlobKey::TelemetryDir)
+        .await
+        .unwrap()
+        .iter()
+        .all(|key| BlobKey::TelemetryDir.is_prefix_of(key)));
 }
 
 #[tokio::test]

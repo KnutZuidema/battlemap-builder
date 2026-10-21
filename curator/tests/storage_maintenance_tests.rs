@@ -2,7 +2,6 @@
 //! accounting across the staging and curated areas, staging reclamation, and the size contract of
 //! both blob adapters.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use curator::adapters::{FilesystemBlobStorage, InMemoryBlobStorage, InMemoryCatalogRepository};
@@ -102,7 +101,13 @@ async fn test_storage_stats_sums_blob_sizes_across_staging_and_curated() {
     assert_eq!(stats.staging.bytes, 768);
     assert_eq!(stats.staging.file_count, 2);
 
-    for key in ["root", "reddit", "generated"] {
+    // Staging is one uniform `staging/{id}/` layout, so the whole footprint sits in `root` while
+    // `reddit` and `generated` stay present (the SPA renders all three) at zero.
+    assert_eq!(
+        stats.staging_breakdown.get("root").expect("root present"),
+        &stats.staging
+    );
+    for key in ["reddit", "generated"] {
         assert_eq!(
             stats
                 .staging_breakdown
@@ -112,6 +117,12 @@ async fn test_storage_stats_sums_blob_sizes_across_staging_and_curated() {
             "'{key}' stays zero under the uniform staging layout"
         );
     }
+    assert_eq!(
+        stats.staging.bytes,
+        stats.staging_breakdown["root"].bytes
+            + stats.staging_breakdown["reddit"].bytes
+            + stats.staging_breakdown["generated"].bytes
+    );
 
     assert_eq!(stats.curated.bytes, 1024 + 2048 + 128);
     assert_eq!(stats.curated.file_count, 3);
@@ -128,10 +139,85 @@ async fn test_storage_stats_sums_blob_sizes_across_staging_and_curated() {
         0
     );
 
+    // No rejection log was written and no telemetry blob exists, so both areas report an empty
+    // footprint (`NotFound` is an absent log, not an error).
     assert_eq!(stats.rejected, DirectoryStats::default());
     assert_eq!(stats.telemetry, DirectoryStats::default());
     assert_eq!(stats.total_bytes, 768 + 1024 + 2048 + 128);
     assert_eq!(stats.total_files, 5);
+}
+
+#[tokio::test]
+async fn test_storage_stats_reports_rejection_log_and_telemetry_footprints() {
+    let (service, _catalog, blobs) = in_memory_service();
+
+    blobs
+        .write_blob(
+            &BlobKey::StagingLayer {
+                id: "cand_a".to_string(),
+                index: 0,
+            },
+            &[7u8; 512],
+        )
+        .await
+        .expect("write staging blob");
+    blobs
+        .write_blob(
+            &BlobKey::StagingLayer {
+                id: "cand_b".to_string(),
+                index: 0,
+            },
+            &[8u8; 128],
+        )
+        .await
+        .expect("write staging blob");
+    let rejections = br#"{"id":"rejected_one","reason":"irrelevant"}"#;
+    blobs
+        .write_blob(&BlobKey::RejectionLog, rejections)
+        .await
+        .expect("write rejection log");
+    blobs
+        .write_blob(
+            &BlobKey::TelemetryLog {
+                name: "cost_ledger.json".to_string(),
+            },
+            &[1u8; 300],
+        )
+        .await
+        .expect("write cost ledger");
+    blobs
+        .write_blob(
+            &BlobKey::TelemetryLog {
+                name: "generation_audit.json".to_string(),
+            },
+            &[2u8; 40],
+        )
+        .await
+        .expect("write generation audit ledger");
+
+    let stats = service.storage_stats().await.expect("stats succeed");
+
+    assert_eq!(stats.staging, DirectoryStats::new(640, 2));
+    assert_eq!(
+        stats.staging_breakdown["root"],
+        DirectoryStats::new(640, 2)
+    );
+    assert_eq!(
+        stats.staging.bytes,
+        stats.staging_breakdown["root"].bytes
+            + stats.staging_breakdown["reddit"].bytes
+            + stats.staging_breakdown["generated"].bytes
+    );
+    assert_eq!(
+        stats.rejected,
+        DirectoryStats::new(rejections.len() as u64, 1)
+    );
+    assert_eq!(stats.telemetry, DirectoryStats::new(340, 2));
+    assert_eq!(
+        stats.total_bytes,
+        640 + rejections.len() as u64 + 340
+    );
+    assert_eq!(stats.total_files, 2 + 1 + 2);
 }
 
 #[tokio::test]
@@ -200,6 +286,21 @@ async fn test_purge_staging_removes_staging_and_preserves_curated_and_rejections
         .log_rejection("rejected_one", RejectionReason::Irrelevant, Some("already curated"))
         .await
         .expect("log rejection");
+    let rejections = br#"{"id":"rejected_one"}"#;
+    blobs
+        .write_blob(&BlobKey::RejectionLog, rejections)
+        .await
+        .expect("write rejection log");
+    let ledger = [4u8; 77];
+    blobs
+        .write_blob(
+            &BlobKey::TelemetryLog {
+                name: "cost_ledger.json".to_string(),
+            },
+            &ledger,
+        )
+        .await
+        .expect("write cost ledger");
 
     let result = service.purge_staging().await.expect("purge succeeds");
 
@@ -218,7 +319,8 @@ async fn test_purge_staging_removes_staging_and_preserves_curated_and_rejections
         .expect("list candidates")
         .is_empty());
 
-    // Curated bundles and the rejection log survive untouched.
+    // Curated bundles, the rejection log and the telemetry ledger survive untouched: only the
+    // `staging/` prefix is enumerated.
     assert_eq!(
         blobs
             .list_prefix(&BlobKey::CuratedDir { id: None })
@@ -227,6 +329,29 @@ async fn test_purge_staging_removes_staging_and_preserves_curated_and_rejections
             .len(),
         1
     );
+    assert_eq!(
+        blobs
+            .read_blob(&BlobKey::RejectionLog)
+            .await
+            .expect("read rejection log"),
+        rejections
+    );
+    assert_eq!(
+        blobs
+            .read_blob(&BlobKey::TelemetryLog {
+                name: "cost_ledger.json".to_string(),
+            })
+            .await
+            .expect("read cost ledger"),
+        ledger
+    );
+    let stats = service.storage_stats().await.expect("stats after purge");
+    assert_eq!(stats.staging, DirectoryStats::default());
+    assert_eq!(
+        stats.rejected,
+        DirectoryStats::new(rejections.len() as u64, 1)
+    );
+    assert_eq!(stats.telemetry, DirectoryStats::new(ledger.len() as u64, 1));
     assert_eq!(
         blobs
             .read_blob(&curated_layer(&map.id, 0, LayerRole::Ground, Some(0)))
@@ -272,8 +397,8 @@ async fn test_in_memory_blob_size_reports_length_and_not_found() {
 
 #[tokio::test]
 async fn test_filesystem_blob_size_reports_length_and_not_found() {
-    let root = TempRoot::new("blob-size");
-    let blobs = FilesystemBlobStorage::new(root.path());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let blobs = FilesystemBlobStorage::new(dir.path());
     let key = BlobKey::ExportArchive {
         name: "lora-dataset".to_string(),
     };
@@ -299,33 +424,4 @@ async fn test_filesystem_blob_size_reports_length_and_not_found() {
         blobs.blob_size(&absent).await,
         Err(StorageError::NotFound(_))
     ));
-}
-
-/// Self-cleaning scratch directory below the system temp root, so the `FilesystemBlobStorage`
-/// adapter can be exercised without the `tempfile` crate.
-struct TempRoot(PathBuf);
-
-impl TempRoot {
-    fn new(tag: &str) -> Self {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "curator-{tag}-{}-{unique}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&path).expect("create scratch root");
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempRoot {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
 }

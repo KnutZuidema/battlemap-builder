@@ -607,9 +607,9 @@ impl FilesystemStorage {
 
     /// Package a collection of curated maps' 16x16 sections into a LoRA training ZIP archive.
     ///
-    /// Ground layer bytes come from the filesystem; the archive itself is built by the shared
-    /// [`create_lora_zip`] policy so this adapter and [`DatasetExportService`] ship identical
-    /// archives.
+    /// Ground layer bytes come from the filesystem; the archive itself comes from the shared
+    /// `services::dataset_export` policy, so this adapter and the dataset export service ship
+    /// identical archives.
     fn create_lora_zip(&self, curated_maps: &[CuratedMap]) -> Result<Vec<u8>, StorageError> {
         create_lora_zip(
             curated_maps

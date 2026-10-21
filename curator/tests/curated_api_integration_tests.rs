@@ -15,13 +15,14 @@ use curator::domain::{
     Candidate, CandidateLayer, CuratedLayer, CuratedMap, CuratedMapUpdate, GridConfig, LayerRole,
     RejectionReason, Source, Theme,
 };
-use curator::ports::blob_storage::BlobStorage;
+use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::CatalogRepository;
 use curator::ports::storage::StorageRepository;
 use async_trait::async_trait;
 use curator::services::description::{DescriptionError, DescriptionGenerator, DescriptionService};
 
-/// Fresh in-memory catalog and blob ports: these tests exercise curated and description routes.
+/// Fresh in-memory catalog and blob ports: the curation lifecycle tests drive the HTTP surface
+/// through `AppState` with zero filesystem fixtures.
 fn in_memory_ports() -> (
     Arc<dyn CatalogRepository + Send + Sync>,
     Arc<dyn BlobStorage + Send + Sync>,
@@ -875,4 +876,178 @@ async fn test_patch_curated_regrid_persists_vision_description_without_descripti
         serde_json::from_str(&std::fs::read_to_string(manifest_path).unwrap()).unwrap();
     assert_eq!(persisted.description.as_deref(), Some(generated));
     assert_eq!(persisted.sections[0].description, generated);
+}
+
+/// `AppState` whose curation workflow runs over fresh in-memory catalog and blob doubles.
+///
+/// `AppState` still carries a `StorageRepository` until #176 deletes the monolithic port, so the
+/// slot holds an empty filesystem store; the curation endpoints never read it, which keeps the
+/// curation lifecycle exercised here free of disk fixtures.
+fn setup_in_memory_curation_app(
+    description_service: Arc<DescriptionService>,
+) -> (
+    axum::Router,
+    Arc<InMemoryCatalogRepository>,
+    Arc<InMemoryBlobStorage>,
+    tempfile::TempDir,
+) {
+    let dir = tempdir().expect("Failed to create tempdir");
+    let storage = Arc::new(FilesystemStorage::new(dir.path()));
+    let catalog = Arc::new(InMemoryCatalogRepository::new());
+    let blobs = Arc::new(InMemoryBlobStorage::new());
+    let state = AppState::new(storage, catalog.clone(), blobs.clone())
+        .with_description_service(description_service);
+    (create_router(state), catalog, blobs, dir)
+}
+
+/// Seeds the in-memory staging bundle of `candidate` at the canonical port addresses
+/// (`staging/{id}/manifest.json` plus `staging/{id}/{index}.png`).
+async fn seed_staging_bundle(
+    catalog: &InMemoryCatalogRepository,
+    blobs: &InMemoryBlobStorage,
+    candidate: &Candidate,
+    layer_bytes: &[Vec<u8>],
+) {
+    catalog.save_candidate(candidate).await.unwrap();
+    for (index, bytes) in layer_bytes.iter().enumerate() {
+        blobs
+            .write_blob(
+                &BlobKey::StagingLayer {
+                    id: candidate.id.clone(),
+                    index,
+                },
+                bytes,
+            )
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_curate_endpoint_persists_curated_bundle_from_in_memory_ports() {
+    let (app, catalog, blobs, _dir) =
+        setup_in_memory_curation_app(Arc::new(DescriptionService::new(None)));
+
+    let ground_bytes = create_test_png(1024, 1024);
+    let upper_bytes = create_test_png(64, 64);
+    let mut candidate = Candidate::with_now("memory_curate", Source::Reddit, "0.png", (1024, 1024));
+    candidate.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1024, 1024)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1024, 1024)),
+    ];
+    seed_staging_bundle(
+        &catalog,
+        &blobs,
+        &candidate,
+        &[ground_bytes.clone(), upper_bytes.clone()],
+    )
+    .await;
+
+    let payload = json!({
+        "id": "memory_curate",
+        "themes": ["dungeon"],
+        "tags": ["crypt"],
+        "description": "A flooded stone crypt"
+    });
+    let req = Request::builder()
+        .uri("/api/curate")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let res: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(res["status"], "ok");
+    assert_eq!(res["curated"]["id"], "memory_curate");
+    assert_eq!(res["curated"]["description"], "A flooded stone crypt");
+    assert_eq!(res["curated"]["layers"][0]["filename"], "0_ground.png");
+    assert_eq!(
+        res["curated"]["layers"][0]["caption"],
+        "A flooded stone crypt"
+    );
+    assert_eq!(res["curated"]["layers"][1]["filename"], "1_upper_1.png");
+
+    // The response is exactly the manifest committed to the catalog.
+    let persisted = catalog.get_curated("memory_curate").await.unwrap();
+    assert_eq!(serde_json::to_value(&persisted).unwrap(), res["curated"]);
+
+    // Both curated layer blobs landed at their canonical addresses with the staging bytes.
+    assert_eq!(
+        blobs
+            .read_blob(&BlobKey::CuratedLayer {
+                id: "memory_curate".into(),
+                index: 0,
+                role: LayerRole::Ground,
+                elevation: Some(0),
+            })
+            .await
+            .unwrap(),
+        ground_bytes
+    );
+    assert_eq!(
+        blobs
+            .read_blob(&BlobKey::CuratedLayer {
+                id: "memory_curate".into(),
+                index: 1,
+                role: LayerRole::UpperFloor,
+                elevation: Some(1),
+            })
+            .await
+            .unwrap(),
+        upper_bytes
+    );
+
+    // The staging bundle is gone: candidate manifest and every staging blob.
+    assert!(catalog.get_candidate("memory_curate").await.is_err());
+    assert!(blobs
+        .list_prefix(&BlobKey::StagingDir {
+            id: Some("memory_curate".into())
+        })
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_reject_endpoint_logs_rejection_and_purges_in_memory_staging() {
+    let (app, catalog, blobs, _dir) =
+        setup_in_memory_curation_app(Arc::new(DescriptionService::new(None)));
+
+    let candidate = Candidate::with_now("memory_reject", Source::Reddit, "0.png", (1024, 1024));
+    seed_staging_bundle(&catalog, &blobs, &candidate, &[create_test_png(1024, 1024)]).await;
+
+    let req = Request::builder()
+        .uri("/api/reject")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({
+                "id": "memory_reject",
+                "reason": "BlurryLowRes",
+                "notes": "Too blurry"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let res: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(res["status"], "ok");
+    assert_eq!(res["id"], "memory_reject");
+
+    // Rejection is recorded in the catalog and the staging bundle is purged.
+    assert!(catalog.is_rejected("memory_reject").await.unwrap());
+    assert!(catalog.get_candidate("memory_reject").await.is_err());
+    assert!(blobs
+        .list_prefix(&BlobKey::StagingDir {
+            id: Some("memory_reject".into())
+        })
+        .await
+        .unwrap()
+        .is_empty());
 }

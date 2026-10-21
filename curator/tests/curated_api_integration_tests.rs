@@ -8,7 +8,8 @@ use tempfile::tempdir;
 use tower::ServiceExt;
 
 use curator::adapters::{
-    FilesystemStorage, InMemoryBlobStorage, InMemoryCatalogRepository, OpenRouterAdapter,
+    FilesystemBlobStorage, FilesystemCatalogRepository, InMemoryBlobStorage,
+    InMemoryCatalogRepository, OpenRouterAdapter,
 };
 use curator::api::{create_router, AppState, DescribeResponse, SuggestThemesResponse};
 use curator::domain::{
@@ -17,7 +18,7 @@ use curator::domain::{
 };
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::CatalogRepository;
-use curator::ports::storage::StorageRepository;
+use curator::services::curation::{CurationService, CurationWorkflow};
 use async_trait::async_trait;
 use curator::services::description::{DescriptionError, DescriptionGenerator, DescriptionService};
 
@@ -56,29 +57,65 @@ fn create_test_png(width: u32, height: u32) -> Vec<u8> {
     bytes
 }
 
-/// Router plus the filesystem repository and the in-memory catalog/blob ports it is paired with.
-///
-/// Routes that were cut over to the ports (dataset export, storage maintenance) read the ports,
-/// so a test targeting them must seed the ports; the filesystem repository keeps serving the
-/// routes that still read `state.storage`.
+/// Router plus the in-memory catalog/blob ports it serves every route from.
 fn setup_test_app() -> (
     axum::Router,
-    Arc<FilesystemStorage>,
     Arc<dyn CatalogRepository + Send + Sync>,
     Arc<dyn BlobStorage + Send + Sync>,
-    tempfile::TempDir,
 ) {
-    let dir = tempdir().expect("Failed to create tempdir");
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
     let adapter = Arc::new(OpenRouterAdapter::with_config(
         "",
         "http://127.0.0.1:1".to_string(),
         1,
     ));
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter);
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_openrouter(adapter);
     let router = create_router(state);
-    (router, storage, catalog, blobs, dir)
+    (router, catalog, blobs)
+}
+
+/// Router over the filesystem-backed ports: the SPA regression tests must exercise the adapter
+/// that re-derives every [`BlobKey`] from the file name on `list_prefix`.
+fn setup_filesystem_test_app(
+    root: &std::path::Path,
+) -> (
+    axum::Router,
+    Arc<dyn CatalogRepository + Send + Sync>,
+    Arc<dyn BlobStorage + Send + Sync>,
+) {
+    let catalog: Arc<dyn CatalogRepository + Send + Sync> =
+        Arc::new(FilesystemCatalogRepository::new(root));
+    let blobs: Arc<dyn BlobStorage + Send + Sync> = Arc::new(FilesystemBlobStorage::new(root));
+    let router = create_router(AppState::new(catalog.clone(), blobs.clone()));
+    (router, catalog, blobs)
+}
+
+/// PATCHes `/api/curated/{id}` with `payload` and returns the response status.
+async fn patch_curated(app: &axum::Router, id: &str, payload: Value) -> StatusCode {
+    let req = Request::builder()
+        .uri(format!("/api/curated/{id}"))
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
+/// GETs `/api/image/curated/{id}/{layer_index}` and returns the status plus body bytes.
+async fn get_curated_layer(
+    app: &axum::Router,
+    id: &str,
+    layer_index: usize,
+) -> (StatusCode, Vec<u8>) {
+    let req = Request::builder()
+        .uri(format!("/api/image/curated/{id}/{layer_index}"))
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    (status, bytes.to_vec())
 }
 
 /// Blob key of a curated map's `Ground` layer, resolved exactly like the dataset export service.
@@ -104,34 +141,37 @@ fn curated_ground_key(map: &CuratedMap) -> BlobKey {
     }
 }
 
-/// Seeds a curated map into the ports the cut-over dataset routes read: the catalog entry with
-/// the implicit `0_ground.png` layer [`FilesystemStorage::save_curated`] synthesizes, plus the
-/// Ground layer blob under the key the export resolves.
+/// Seeds a curated map into the ports the dataset routes read: the catalog entry with the
+/// implicit `0_ground.png` layer, plus the Ground layer blob under the key the export resolves.
 async fn seed_curated_ports(
     catalog: &Arc<dyn CatalogRepository + Send + Sync>,
     blobs: &Arc<dyn BlobStorage + Send + Sync>,
-    id: &str,
-    theme: Theme,
-    tags: Vec<String>,
+    map: &CuratedMap,
+    png: &[u8],
 ) {
-    let png = create_test_png(1024, 1024);
-    let mut map = CuratedMap::with_now(id, theme, tags, (1024, 1024));
-    map.layers = vec![CuratedLayer::new(
-        0,
-        CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), "png"),
-        LayerRole::Ground,
-        Some(0),
-        map.dimensions,
-    )];
-    catalog.save_curated(&map).await.expect("save curated map in the catalog");
+    let mut stored = map.clone();
+    if stored.layers.is_empty() {
+        stored.layers = vec![CuratedLayer::new(
+            0,
+            CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), "png"),
+            LayerRole::Ground,
+            Some(0),
+            stored.dimensions,
+        )];
+    }
+    catalog
+        .save_curated(&stored)
+        .await
+        .expect("save curated map in the catalog");
     blobs
-        .write_blob(&curated_ground_key(&map), &png)
+        .write_blob(&curated_ground_key(&stored), png)
         .await
         .expect("write curated Ground layer blob");
 }
 
-fn curate_test_map(
-    storage: &FilesystemStorage,
+async fn curate_test_map(
+    catalog: &Arc<dyn CatalogRepository + Send + Sync>,
+    blobs: &Arc<dyn BlobStorage + Send + Sync>,
     id: &str,
     theme: Theme,
     tags: Vec<String>,
@@ -144,7 +184,14 @@ fn curate_test_map(
     if let Some(d) = desc {
         map = map.with_description(d);
     }
-    storage.save_curated(&map, &png).expect("save curated test map");
+    seed_curated_ports(catalog, blobs, &map, &png).await;
+    map.layers = vec![CuratedLayer::new(
+        0,
+        CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), "png"),
+        LayerRole::Ground,
+        Some(0),
+        map.dimensions,
+    )];
     map
 }
 
@@ -183,8 +230,9 @@ impl DescriptionGenerator for RecordingDescriptionGen {
     }
 }
 
-fn curate_map_with_grid(
-    storage: &FilesystemStorage,
+async fn curate_map_with_grid(
+    catalog: &Arc<dyn CatalogRepository + Send + Sync>,
+    blobs: &Arc<dyn BlobStorage + Send + Sync>,
     id: &str,
     dimensions: (u32, u32),
     cell_size_px: u32,
@@ -196,26 +244,35 @@ fn curate_map_with_grid(
     if let Some(d) = desc {
         map = map.with_description(d);
     }
-    storage.save_curated(&map, &png).expect("save curated test map");
+    seed_curated_ports(catalog, blobs, &map, &png).await;
+    map.layers = vec![CuratedLayer::new(
+        0,
+        CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), "png"),
+        LayerRole::Ground,
+        Some(0),
+        dimensions,
+    )];
     map
 }
 
 /// 512×512 curated map with a 32px grid: exactly 16×16 full cells, i.e. one Map Section.
-fn curate_single_section_map(
-    storage: &FilesystemStorage,
+async fn curate_single_section_map(
+    catalog: &Arc<dyn CatalogRepository + Send + Sync>,
+    blobs: &Arc<dyn BlobStorage + Send + Sync>,
     id: &str,
     desc: Option<&str>,
 ) -> CuratedMap {
-    curate_map_with_grid(storage, id, (512, 512), 32, desc)
+    curate_map_with_grid(catalog, blobs, id, (512, 512), 32, desc).await
 }
 
 /// 2048×2048 curated map with the default 64px grid: 32×32 cells, i.e. four Map Sections.
-fn curate_multi_section_map(
-    storage: &FilesystemStorage,
+async fn curate_multi_section_map(
+    catalog: &Arc<dyn CatalogRepository + Send + Sync>,
+    blobs: &Arc<dyn BlobStorage + Send + Sync>,
     id: &str,
     desc: Option<&str>,
 ) -> CuratedMap {
-    curate_map_with_grid(storage, id, (2048, 2048), 64, desc)
+    curate_map_with_grid(catalog, blobs, id, (2048, 2048), 64, desc).await
 }
 
 fn regrid_payload(cell_size_px: u32) -> Value {
@@ -228,45 +285,64 @@ fn regrid_payload(cell_size_px: u32) -> Value {
     })
 }
 
-fn curate_test_bundle(
-    storage: &FilesystemStorage,
+async fn curate_test_bundle(
+    catalog: &Arc<dyn CatalogRepository + Send + Sync>,
+    blobs: &Arc<dyn BlobStorage + Send + Sync>,
     id: &str,
-    theme: Theme,
     tags: Vec<String>,
 ) -> (CuratedMap, Vec<u8>, Vec<u8>) {
     let img0 = create_test_png(300, 300);
     let img1 = create_test_png(300, 300);
 
-    let cand = Candidate::with_now(id, Source::Manual, "0.png", (300, 300));
-    storage
-        .save_staging_bundle(None, &cand, &[img0.clone(), img1.clone()])
-        .expect("save staging bundle");
+    // A 16px grid gives an 18×18 cell lattice, so the bundle is curation-eligible.
+    let cand = Candidate::with_now(id, Source::Manual, "0.png", (300, 300))
+        .with_grid(GridConfig::new(16, 0, 0));
+    catalog.save_candidate(&cand).await.expect("save candidate");
+    for (index, bytes) in [&img0, &img1].into_iter().enumerate() {
+        blobs
+            .write_blob(
+                &BlobKey::StagingLayer {
+                    id: id.to_string(),
+                    index,
+                },
+                bytes,
+            )
+            .await
+            .expect("write staging layer");
+    }
 
-    storage
-        .update_staging_layers(
-            id,
-            vec![
-                CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (300, 300)),
-                CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (300, 300)),
-            ],
-        )
+    let mut updated = cand;
+    updated.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (300, 300)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (300, 300)),
+    ];
+    catalog
+        .save_candidate(&updated)
+        .await
         .expect("update staging layers");
 
-    let curated = CuratedMap::with_now(id, theme, tags, (300, 300));
-    storage.curate_staging(&curated).expect("curate staging");
+    let curated = CurationService::new(
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(DescriptionService::new(None)),
+    )
+    .curate(id, tags, None, Some("Bundle test description".to_string()))
+    .await
+    .expect("curate staging");
     (curated, img0, img1)
 }
 
 #[tokio::test]
 async fn test_patch_curated_metadata_success() {
-    let (app, storage, ..) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
     curate_test_map(
-        &storage,
+        &catalog,
+        &blobs,
         "map_to_patch",
         Theme::Dungeon,
         vec!["old_tag".into()],
         Some("Old dungeon description"),
-    );
+    ).await;
 
     let update_payload = json!({
         "themes": ["tavern", "coastal"],
@@ -297,7 +373,7 @@ async fn test_patch_curated_metadata_success() {
     );
 
     // Verify storage persistence
-    let listed = storage.list_curated(None).unwrap();
+    let listed = catalog.list_curated(&Default::default()).await.unwrap();
     let stored = listed.iter().find(|m| m.id == "map_to_patch").unwrap();
     assert!(stored.tags.contains(&"tavern".to_string()));
     assert!(stored.tags.contains(&"coastal".to_string()));
@@ -311,9 +387,9 @@ async fn test_patch_curated_metadata_success() {
 
 #[tokio::test]
 async fn test_patch_curated_layers() {
-    let (app, storage, ..) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
     let (_map, _img0, _img1) =
-        curate_test_bundle(&storage, "bundle_patch_layers", Theme::Dungeon, vec!["tower".into()]);
+        curate_test_bundle(&catalog, &blobs, "bundle_patch_layers", vec!["tower".into()]).await;
 
     let update = CuratedMapUpdate::default().with_layers(vec![
         CuratedLayer::new(0, "0.png", LayerRole::Basement, Some(-1), (300, 300)),
@@ -341,8 +417,8 @@ async fn test_patch_curated_layers() {
 
 #[tokio::test]
 async fn test_patch_curated_tags_only_payload_without_themes() {
-    let (app, storage, ..) = setup_test_app();
-    curate_test_bundle(&storage, "tags_only_patch", Theme::Dungeon, vec!["tower".into()]);
+    let (app, catalog, blobs) = setup_test_app();
+    curate_test_bundle(&catalog, &blobs, "tags_only_patch", vec!["tower".into()]).await;
 
     // The library inspector sends tags, description, and layers — never `themes`.
     let payload = json!({
@@ -373,15 +449,15 @@ async fn test_patch_curated_tags_only_payload_without_themes() {
     );
     assert!(updated.get("themes").is_none());
 
-    let listed = storage.list_curated(None).unwrap();
+    let listed = catalog.list_curated(&Default::default()).await.unwrap();
     let stored = listed.iter().find(|m| m.id == "tags_only_patch").unwrap();
     assert_eq!(stored.tags, vec!["tower", "crypt"]);
 }
 
 #[tokio::test]
 async fn test_patch_curated_not_found_and_validation() {
-    let (app, storage, ..) = setup_test_app();
-    curate_test_map(&storage, "map_val_1", Theme::Cave, vec![], None);
+    let (app, catalog, blobs) = setup_test_app();
+    curate_test_map(&catalog, &blobs, "map_val_1", Theme::Cave, vec![], None).await;
 
     // 404 for non-existent map
     let req_404 = Request::builder()
@@ -419,8 +495,8 @@ async fn test_patch_curated_not_found_and_validation() {
 
 #[tokio::test]
 async fn test_delete_curated_with_reason_and_notes() {
-    let (app, storage, ..) = setup_test_app();
-    curate_test_map(&storage, "map_to_delete", Theme::Ruins, vec![], None);
+    let (app, catalog, blobs) = setup_test_app();
+    curate_test_map(&catalog, &blobs, "map_to_delete", Theme::Ruins, vec![], None).await;
 
     let req = Request::builder()
         .uri("/api/curated/map_to_delete")
@@ -439,11 +515,11 @@ async fn test_delete_curated_with_reason_and_notes() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     // Verify map was removed from storage
-    let listed = storage.list_curated(None).unwrap();
+    let listed = catalog.list_curated(&Default::default()).await.unwrap();
     assert!(listed.iter().all(|m| m.id != "map_to_delete"));
 
     // Verify rejection record
-    let rejections = storage.read_rejections().unwrap();
+    let rejections = catalog.rejection_records().await.unwrap();
     let rec = rejections.iter().find(|r| r.id == "map_to_delete").expect("rejection record");
     assert_eq!(rec.reason, RejectionReason::GridBurnedIn);
     assert_eq!(rec.notes.as_deref(), Some("Visible square grid"));
@@ -451,8 +527,8 @@ async fn test_delete_curated_with_reason_and_notes() {
 
 #[tokio::test]
 async fn test_delete_curated_default_empty_body() {
-    let (app, storage, ..) = setup_test_app();
-    curate_test_map(&storage, "map_del_empty", Theme::Dungeon, vec![], None);
+    let (app, catalog, blobs) = setup_test_app();
+    curate_test_map(&catalog, &blobs, "map_del_empty", Theme::Dungeon, vec![], None).await;
 
     let req = Request::builder()
         .uri("/api/curated/map_del_empty")
@@ -464,11 +540,11 @@ async fn test_delete_curated_default_empty_body() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     // Verify removal
-    let listed = storage.list_curated(None).unwrap();
+    let listed = catalog.list_curated(&Default::default()).await.unwrap();
     assert!(listed.iter().all(|m| m.id != "map_del_empty"));
 
     // Verify default unspecified rejection
-    let rejections = storage.read_rejections().unwrap();
+    let rejections = catalog.rejection_records().await.unwrap();
     let rec = rejections.iter().find(|r| r.id == "map_del_empty").expect("rejection record");
     assert_eq!(rec.reason, RejectionReason::Unspecified);
 }
@@ -489,10 +565,10 @@ async fn test_delete_curated_not_found() {
 
 #[tokio::test]
 async fn test_bulk_delete_curated() {
-    let (app, storage, ..) = setup_test_app();
-    curate_test_map(&storage, "bulk_1", Theme::Dungeon, vec![], None);
-    curate_test_map(&storage, "bulk_2", Theme::Wilderness, vec![], None);
-    curate_test_map(&storage, "bulk_3", Theme::Cave, vec![], None);
+    let (app, catalog, blobs) = setup_test_app();
+    curate_test_map(&catalog, &blobs, "bulk_1", Theme::Dungeon, vec![], None).await;
+    curate_test_map(&catalog, &blobs, "bulk_2", Theme::Wilderness, vec![], None).await;
+    curate_test_map(&catalog, &blobs, "bulk_3", Theme::Cave, vec![], None).await;
 
     let req = Request::builder()
         .uri("/api/curated/bulk-delete")
@@ -515,12 +591,12 @@ async fn test_bulk_delete_curated() {
     assert_eq!(json_res["deleted_count"], 2);
 
     // bulk_1 and bulk_3 deleted, bulk_2 remains
-    let remaining = storage.list_curated(None).unwrap();
+    let remaining = catalog.list_curated(&Default::default()).await.unwrap();
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].id, "bulk_2");
 
     // Rejections recorded
-    let rejections = storage.read_rejections().unwrap();
+    let rejections = catalog.rejection_records().await.unwrap();
     assert!(rejections.iter().any(|r| r.id == "bulk_1" && r.reason == RejectionReason::BlurryLowRes));
     assert!(rejections.iter().any(|r| r.id == "bulk_3" && r.reason == RejectionReason::BlurryLowRes));
 
@@ -539,8 +615,8 @@ async fn test_bulk_delete_curated() {
 
 #[tokio::test]
 async fn test_curated_suggest_themes_and_caching() {
-    let (app, storage, ..) = setup_test_app();
-    curate_test_map(&storage, "theme_map_test", Theme::Dungeon, vec!["torch".into()], None);
+    let (app, catalog, blobs) = setup_test_app();
+    curate_test_map(&catalog, &blobs, "theme_map_test", Theme::Dungeon, vec!["torch".into()], None).await;
 
     let req = Request::builder()
         .uri("/api/curated/theme_map_test/suggest-themes")
@@ -567,14 +643,15 @@ async fn test_curated_suggest_themes_and_caching() {
 
 #[tokio::test]
 async fn test_curated_describe_strictly_fails_when_unconfigured() {
-    let (app, storage, ..) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
     curate_test_map(
-        &storage,
+        &catalog,
+        &blobs,
         "describe_map_test",
         Theme::Tavern,
         vec!["wooden".into(), "fireplace".into()],
         Some("A cozy roadside tavern"),
-    );
+    ).await;
 
     // Call describe with empty body while unconfigured -> must return 503 SERVICE_UNAVAILABLE (no silent fallback)
     let req = Request::builder()
@@ -598,23 +675,22 @@ async fn test_curated_describe_strictly_fails_when_unconfigured() {
 
 #[tokio::test]
 async fn test_curated_describe_never_sends_description_as_title_and_merges_tags() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
     let generator = Arc::new(RecordingDescriptionGen::new(Ok(
         "Rustic wooden tavern with roaring fireplace.".to_string(),
     )));
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
     let app = create_router(state);
 
     let stored = curate_test_map(
-        &storage,
+        &catalog,
+        &blobs,
         "describe_map_title",
         Theme::Tavern,
         vec!["wooden".into(), "fireplace".into()],
         Some("A cozy roadside tavern description that must not become a title"),
-    );
+    ).await;
 
     // Empty body: fall back to the stored tags and the suggestion cache, never the description.
     let req = Request::builder()
@@ -646,23 +722,22 @@ async fn test_curated_describe_never_sends_description_as_title_and_merges_tags(
 
 #[tokio::test]
 async fn test_curated_describe_merges_requested_themes_and_tags() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
     let generator = Arc::new(RecordingDescriptionGen::new(Ok(
         "Merged description.".to_string(),
     )));
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
     let app = create_router(state);
 
     curate_test_map(
-        &storage,
+        &catalog,
+        &blobs,
         "describe_map_merge",
         Theme::Dungeon,
         vec!["stone".into()],
         Some("Stored description"),
-    );
+    ).await;
 
     let req = Request::builder()
         .uri("/api/curated/describe_map_merge/describe")
@@ -693,22 +768,21 @@ async fn test_curated_describe_merges_requested_themes_and_tags() {
 
 #[tokio::test]
 async fn test_curated_describe_success_with_service() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
     let mock_desc = "Rustic wooden tavern with roaring fireplace and sturdy oak tables.";
     let mock_gen = Arc::new(MockCuratedGen(Ok(mock_desc.to_string())));
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(Some(mock_gen))));
     let app = create_router(state);
 
     curate_test_map(
-        &storage,
+        &catalog,
+        &blobs,
         "describe_map_success",
         Theme::Tavern,
         vec!["wooden".into(), "fireplace".into()],
         Some("A cozy roadside tavern"),
-    );
+    ).await;
 
     let req = Request::builder()
         .uri("/api/curated/describe_map_success/describe")
@@ -726,9 +800,9 @@ async fn test_curated_describe_success_with_service() {
 
 #[tokio::test]
 async fn test_export_selected_lora_dataset() {
-    let (app, _storage, catalog, blobs, _dir) = setup_test_app();
-    seed_curated_ports(&catalog, &blobs, "sel_export_1", Theme::Dungeon, vec!["dungeon".into()]).await;
-    seed_curated_ports(&catalog, &blobs, "sel_export_2", Theme::Wilderness, vec!["forest".into()]).await;
+    let (app, catalog, blobs) = setup_test_app();
+    curate_test_map(&catalog, &blobs, "sel_export_1", Theme::Dungeon, vec!["dungeon".into()], None).await;
+    curate_test_map(&catalog, &blobs, "sel_export_2", Theme::Wilderness, vec!["forest".into()], None).await;
 
     let req = Request::builder()
         .uri("/api/dataset/export-selected")
@@ -764,9 +838,9 @@ async fn test_export_selected_lora_dataset() {
 
 #[tokio::test]
 async fn test_get_curated_layer_image_by_id() {
-    let (app, storage, ..) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
     let (_map, img0, img1) =
-        curate_test_bundle(&storage, "multi_layer_stream", Theme::Dungeon, vec!["temple".into()]);
+        curate_test_bundle(&catalog, &blobs, "multi_layer_stream", vec!["temple".into()]).await;
 
     // Stream layer 0 by direct ID
     let req0 = Request::builder()
@@ -819,14 +893,12 @@ async fn test_get_curated_layer_image_by_id() {
 
 #[tokio::test]
 async fn test_patch_curated_regrid_strictly_fails_when_vision_unconfigured() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(None)));
     let app = create_router(state);
 
-    curate_multi_section_map(&storage, "regrid_unconfigured", None);
+    curate_multi_section_map(&catalog, &blobs, "regrid_unconfigured", None).await;
 
     let req = Request::builder()
         .uri("/api/curated/regrid_unconfigured")
@@ -845,29 +917,22 @@ async fn test_patch_curated_regrid_strictly_fails_when_vision_unconfigured() {
     );
 
     // Nothing was synthesized or persisted: manifest still lacks description/sections.
-    let stored = storage
-        .list_curated(None)
-        .unwrap()
-        .into_iter()
-        .find(|m| m.id == "regrid_unconfigured")
-        .unwrap();
+    let stored = catalog.get_curated("regrid_unconfigured").await.unwrap();
     assert_eq!(stored.description, None);
     assert!(stored.sections.is_empty());
 }
 
 #[tokio::test]
 async fn test_patch_curated_regrid_strictly_fails_when_vision_errors() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
     let generator = Arc::new(RecordingDescriptionGen::new(Err(
         DescriptionError::GenerationFailed("upstream 500".into()),
     )));
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
     let app = create_router(state);
 
-    curate_multi_section_map(&storage, "regrid_failing_vision", None);
+    curate_multi_section_map(&catalog, &blobs, "regrid_failing_vision", None).await;
 
     let req = Request::builder()
         .uri("/api/curated/regrid_failing_vision")
@@ -879,28 +944,21 @@ async fn test_patch_curated_regrid_strictly_fails_when_vision_errors() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 
-    let stored = storage
-        .list_curated(None)
-        .unwrap()
-        .into_iter()
-        .find(|m| m.id == "regrid_failing_vision")
-        .unwrap();
+    let stored = catalog.get_curated("regrid_failing_vision").await.unwrap();
     assert_eq!(stored.description, None);
     assert!(stored.sections.is_empty());
 }
 
 #[tokio::test]
 async fn test_patch_curated_regrid_persists_vision_description_without_description_title() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
     let generated = "Vision-generated subterranean vault with flooded channels";
     let generator = Arc::new(RecordingDescriptionGen::new(Ok(generated.to_string())));
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
     let app = create_router(state);
 
-    curate_single_section_map(&storage, "regrid_success", None);
+    curate_single_section_map(&catalog, &blobs, "regrid_success", None).await;
 
     let req = Request::builder()
         .uri("/api/curated/regrid_success")
@@ -927,37 +985,24 @@ async fn test_patch_curated_regrid_persists_vision_description_without_descripti
         "PATCH regrid must call the generator with no title, not the description"
     );
 
-    let manifest_path = dir
-        .path()
-        .join("curated")
-        .join("regrid_success")
-        .join("manifest.json");
-    let persisted: CuratedMap =
-        serde_json::from_str(&std::fs::read_to_string(manifest_path).unwrap()).unwrap();
+    let persisted = catalog.get_curated("regrid_success").await.unwrap();
     assert_eq!(persisted.description.as_deref(), Some(generated));
     assert_eq!(persisted.sections[0].description, generated);
 }
 
 /// `AppState` whose curation workflow runs over fresh in-memory catalog and blob doubles.
-///
-/// `AppState` still carries a `StorageRepository` until #176 deletes the monolithic port, so the
-/// slot holds an empty filesystem store; the curation endpoints never read it, which keeps the
-/// curation lifecycle exercised here free of disk fixtures.
 fn setup_in_memory_curation_app(
     description_service: Arc<DescriptionService>,
 ) -> (
     axum::Router,
     Arc<InMemoryCatalogRepository>,
     Arc<InMemoryBlobStorage>,
-    tempfile::TempDir,
 ) {
-    let dir = tempdir().expect("Failed to create tempdir");
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let catalog = Arc::new(InMemoryCatalogRepository::new());
     let blobs = Arc::new(InMemoryBlobStorage::new());
-    let state = AppState::new(storage, catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone())
         .with_description_service(description_service);
-    (create_router(state), catalog, blobs, dir)
+    (create_router(state), catalog, blobs)
 }
 
 /// Seeds the in-memory staging bundle of `candidate` at the canonical port addresses
@@ -985,7 +1030,7 @@ async fn seed_staging_bundle(
 
 #[tokio::test]
 async fn test_curate_endpoint_persists_curated_bundle_from_in_memory_ports() {
-    let (app, catalog, blobs, _dir) =
+    let (app, catalog, blobs) =
         setup_in_memory_curation_app(Arc::new(DescriptionService::new(None)));
 
     let ground_bytes = create_test_png(1024, 1024);
@@ -1072,8 +1117,213 @@ async fn test_curate_endpoint_persists_curated_bundle_from_in_memory_ports() {
 }
 
 #[tokio::test]
+async fn test_patch_curated_layers_reindexing_reassigns_bytes_and_cleans_stale_keys() {
+    let (app, catalog, blobs) = setup_test_app();
+    let (_map, img0, img1) =
+        curate_test_bundle(&catalog, &blobs, "bundle_reindex", vec!["tower".into()]).await;
+
+    // The payload reassigns the existing files across indices: index 0 (Ground) names layer 1's
+    // file and index 1 (Roof) names layer 0's file.
+    let payload = json!({
+        "description": "Watchtower with fortified observation deck",
+        "layers": [
+            { "index": 0, "filename": "1_upper_1.png", "role": "ground", "elevation": 0, "dimensions": [300, 300] },
+            { "index": 1, "filename": "0_ground.png", "role": "roof", "elevation": null, "dimensions": [300, 300] }
+        ]
+    });
+    assert_eq!(
+        patch_curated(&app, "bundle_reindex", payload).await,
+        StatusCode::OK
+    );
+
+    let stored = catalog.get_curated("bundle_reindex").await.unwrap();
+    assert_eq!(stored.layers.len(), 2);
+    assert_eq!(stored.layers[0].filename, "0_ground.png");
+    assert_eq!(stored.layers[0].role, LayerRole::Ground);
+    assert_eq!(stored.layers[1].filename, "1_roof.png");
+    assert_eq!(stored.layers[1].role, LayerRole::Roof);
+
+    // The bytes follow the payload filenames: Ground now serves the former upper-floor image.
+    assert_eq!(get_curated_layer(&app, "bundle_reindex", 0).await, (StatusCode::OK, img1.clone()));
+    assert_eq!(get_curated_layer(&app, "bundle_reindex", 1).await, (StatusCode::OK, img0.clone()));
+
+    // Stale-key cleanup: the superseded `1_upper_1.png` is gone, only the canonical names remain.
+    let paths: Vec<String> = blobs
+        .list_prefix(&BlobKey::CuratedDir {
+            id: Some("bundle_reindex".into()),
+        })
+        .await
+        .unwrap()
+        .iter()
+        .map(BlobKey::to_path)
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "curated/bundle_reindex/0_ground.png".to_string(),
+            "curated/bundle_reindex/1_roof.png".to_string(),
+        ]
+    );
+
+    // Unassigned and all-excluded payloads are rejected without touching the stored layers.
+    let unassigned = json!({
+        "layers": [
+            { "index": 0, "filename": "0_ground.png", "role": "unassigned", "elevation": null, "dimensions": [300, 300] }
+        ]
+    });
+    assert_eq!(
+        patch_curated(&app, "bundle_reindex", unassigned).await,
+        StatusCode::BAD_REQUEST
+    );
+    let all_excluded = json!({
+        "layers": [
+            { "index": 0, "filename": "0_ground.png", "role": "exclude", "elevation": null, "dimensions": [300, 300] },
+            { "index": 1, "filename": "1_roof.png", "role": "exclude", "elevation": null, "dimensions": [300, 300] }
+        ]
+    });
+    assert_eq!(
+        patch_curated(&app, "bundle_reindex", all_excluded).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(get_curated_layer(&app, "bundle_reindex", 0).await, (StatusCode::OK, img1));
+    assert_eq!(get_curated_layer(&app, "bundle_reindex", 1).await, (StatusCode::OK, img0));
+}
+
+#[tokio::test]
+async fn test_patch_curated_preserves_omitted_source_url_and_caption() {
+    let (app, catalog, blobs) = setup_test_app();
+    let png = create_test_png(300, 300);
+
+    let candidate = Candidate::with_now("map_prov", Source::Reddit, "0.png", (300, 300))
+        .with_source_url("https://reddit.example/post/abc")
+        .with_grid(GridConfig::new(16, 0, 0));
+    catalog.save_candidate(&candidate).await.unwrap();
+    blobs
+        .write_blob(
+            &BlobKey::StagingLayer {
+                id: "map_prov".into(),
+                index: 0,
+            },
+            &png,
+        )
+        .await
+        .unwrap();
+    let curated = CurationService::new(
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(DescriptionService::new(None)),
+    )
+    .curate(
+        "map_prov",
+        vec!["crypt".into()],
+        None,
+        Some("Flooded crypt with shattered sarcophagi.".into()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        curated.layers[0].source_url.as_deref(),
+        Some("https://reddit.example/post/abc")
+    );
+
+    // A layer payload omitting source_url and caption carries both over from the stored layer.
+    let omitted = json!({
+        "layers": [
+            { "index": 0, "filename": "0_ground.png", "role": "ground", "elevation": 0, "dimensions": [300, 300] }
+        ]
+    });
+    assert_eq!(patch_curated(&app, "map_prov", omitted).await, StatusCode::OK);
+    let carried = catalog.get_curated("map_prov").await.unwrap();
+    assert_eq!(
+        carried.layers[0].source_url.as_deref(),
+        Some("https://reddit.example/post/abc")
+    );
+    assert_eq!(
+        carried.layers[0].caption.as_deref(),
+        Some("Flooded crypt with shattered sarcophagi.")
+    );
+
+    // An explicit payload value overrides the stored provenance.
+    let explicit = json!({
+        "layers": [
+            {
+                "index": 0,
+                "filename": "0_ground.png",
+                "role": "ground",
+                "elevation": 0,
+                "dimensions": [300, 300],
+                "source_url": "https://example.com/new-source",
+                "caption": "Explicit caption."
+            }
+        ]
+    });
+    assert_eq!(patch_curated(&app, "map_prov", explicit).await, StatusCode::OK);
+    let overridden = catalog.get_curated("map_prov").await.unwrap();
+    assert_eq!(
+        overridden.layers[0].source_url.as_deref(),
+        Some("https://example.com/new-source")
+    );
+    assert_eq!(overridden.layers[0].caption.as_deref(), Some("Explicit caption."));
+}
+
+/// Regression for the shipped SPA flow on the filesystem adapters: set an upper-floor layer's
+/// role to `roof` (the role select keeps its elevation), save, then save again. The second PATCH
+/// used to delete `curated/{id}/1_roof.png` because `list_prefix` re-derives that key with
+/// `elevation: None` while the writer held `Some(1)`.
+#[tokio::test]
+async fn test_patch_curated_roof_role_saved_twice_keeps_layer_blob_served() {
+    let dir = tempdir().unwrap();
+    let (app, catalog, blobs) = setup_filesystem_test_app(dir.path());
+    let (_map, img0, img1) =
+        curate_test_bundle(&catalog, &blobs, "roof_repatch", vec!["tower".into()]).await;
+
+    // First save: the upper-floor layer becomes `roof`, keeping elevation 1.
+    let first = json!({
+        "layers": [
+            { "index": 0, "filename": "0_ground.png", "role": "ground", "elevation": 0, "dimensions": [300, 300] },
+            { "index": 1, "filename": "1_upper_1.png", "role": "roof", "elevation": 1, "dimensions": [300, 300] }
+        ]
+    });
+    assert_eq!(patch_curated(&app, "roof_repatch", first).await, StatusCode::OK);
+    let saved = catalog.get_curated("roof_repatch").await.unwrap();
+    assert_eq!(saved.layers[1].filename, "1_roof.png");
+    assert_eq!(saved.layers[1].role, LayerRole::Roof);
+    assert_eq!(saved.layers[1].elevation, Some(1));
+    assert_eq!(
+        get_curated_layer(&app, "roof_repatch", 1).await,
+        (StatusCode::OK, img1.clone())
+    );
+
+    // Second save of the same map, as the inspector would re-send it after reloading.
+    let second = json!({
+        "layers": [
+            { "index": 0, "filename": "0_ground.png", "role": "ground", "elevation": 0, "dimensions": [300, 300] },
+            { "index": 1, "filename": "1_roof.png", "role": "roof", "elevation": 1, "dimensions": [300, 300] }
+        ]
+    });
+    assert_eq!(patch_curated(&app, "roof_repatch", second).await, StatusCode::OK);
+
+    // The freshly written blob survived the stale-key cleanup and is still served.
+    let roof_key = BlobKey::CuratedLayer {
+        id: "roof_repatch".into(),
+        index: 1,
+        role: LayerRole::Roof,
+        elevation: Some(1),
+    };
+    assert!(blobs.exists_blob(&roof_key).await.unwrap());
+    assert_eq!(
+        get_curated_layer(&app, "roof_repatch", 1).await,
+        (StatusCode::OK, img1)
+    );
+    assert_eq!(
+        get_curated_layer(&app, "roof_repatch", 0).await,
+        (StatusCode::OK, img0)
+    );
+}
+
+#[tokio::test]
 async fn test_reject_endpoint_logs_rejection_and_purges_in_memory_staging() {
-    let (app, catalog, blobs, _dir) =
+    let (app, catalog, blobs) =
         setup_in_memory_curation_app(Arc::new(DescriptionService::new(None)));
 
     let candidate = Candidate::with_now("memory_reject", Source::Reddit, "0.png", (1024, 1024));

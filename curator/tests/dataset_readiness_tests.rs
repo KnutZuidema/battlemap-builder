@@ -8,11 +8,10 @@ use std::sync::Arc;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use serde_json::Value;
-use tempfile::tempdir;
 use tower::ServiceExt;
 use zip::ZipArchive;
 
-use curator::adapters::{FilesystemStorage, InMemoryBlobStorage, InMemoryCatalogRepository};
+use curator::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
 use curator::api::{create_router, AppState};
 use curator::domain::{
     CuratedLayer, CuratedMap, DatasetIssueCode, GridConfig, LayerRole, MapSection, Theme,
@@ -20,7 +19,7 @@ use curator::domain::{
 };
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::CatalogRepository;
-use curator::ports::storage::StorageRepository;
+use curator::services::DatasetExportService;
 
 /// Fresh in-memory catalog and blob ports: these tests exercise the dataset routes.
 fn in_memory_ports() -> (
@@ -33,23 +32,16 @@ fn in_memory_ports() -> (
     )
 }
 
-/// Router plus the filesystem repository and the in-memory catalog/blob ports it is paired with.
-///
-/// The readiness route was cut over to the ports, so a test targeting it seeds the ports; the
-/// filesystem repository keeps serving the routes that still read `state.storage`.
+/// Router plus the in-memory catalog/blob ports it serves every route from.
 fn setup_test_app() -> (
     axum::Router,
-    Arc<FilesystemStorage>,
     Arc<dyn CatalogRepository + Send + Sync>,
     Arc<dyn BlobStorage + Send + Sync>,
-    tempfile::TempDir,
 ) {
-    let dir = tempdir().expect("Failed to create tempdir");
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone());
+    let state = AppState::new(catalog.clone(), blobs.clone());
     let router = create_router(state);
-    (router, storage, catalog, blobs, dir)
+    (router, catalog, blobs)
 }
 
 /// Blob key of a curated map's `Ground` layer, resolved exactly like the readiness audit.
@@ -75,9 +67,8 @@ fn curated_ground_key(map: &CuratedMap) -> BlobKey {
     }
 }
 
-/// Seeds a curated map into the ports the cut-over readiness route reads: the catalog entry with
-/// the implicit Ground layer [`FilesystemStorage::save_curated`] synthesizes, plus the Ground
-/// layer blob under the key the audit resolves.
+/// Seeds a curated map into the ports the readiness route reads: the catalog entry with the
+/// implicit Ground layer, plus the Ground layer blob under the key the audit resolves.
 async fn seed_curated_ports(
     catalog: &Arc<dyn CatalogRepository + Send + Sync>,
     blobs: &Arc<dyn BlobStorage + Send + Sync>,
@@ -133,12 +124,17 @@ fn caption_in_archive(archive: &mut ZipArchive<Cursor<&Vec<u8>>>, name: &str) ->
 
 #[tokio::test]
 async fn test_clean_multisection_dataset_is_ready_and_captions_apply_the_trigger_phrase_once() {
-    let (_app, storage, ..) = setup_test_app();
-    storage
-        .save_curated(&ready_multisection_map("ready_multi"), &create_test_png(2048, 2048))
-        .unwrap();
+    let (_app, catalog, blobs) = setup_test_app();
+    seed_curated_ports(
+        &catalog,
+        &blobs,
+        &ready_multisection_map("ready_multi"),
+        &create_test_png(2048, 2048),
+    )
+    .await;
+    let export = DatasetExportService::new(catalog.clone(), blobs.clone());
 
-    let report = storage.audit_dataset_readiness(None).unwrap();
+    let report = export.audit_dataset_readiness(None).await.unwrap();
     assert!(report.ready, "{:?}", report.maps);
     assert_eq!(report.maps_total, 1);
     assert_eq!(report.maps_ready, 1);
@@ -148,7 +144,7 @@ async fn test_clean_multisection_dataset_is_ready_and_captions_apply_the_trigger
     assert!(report.maps[0].issues.is_empty(), "{:?}", report.maps[0].issues);
 
     // The exported ZIP agrees with the audit: 4 pairs, every caption headed by the Trigger Phrase.
-    let zip_bytes = storage.export_lora_dataset(None).unwrap();
+    let zip_bytes = export.export_lora_dataset(None).await.unwrap();
     let mut archive = ZipArchive::new(Cursor::new(&zip_bytes)).unwrap();
     assert_eq!(archive.len(), 8);
 
@@ -172,7 +168,7 @@ async fn test_clean_multisection_dataset_is_ready_and_captions_apply_the_trigger
 
 #[tokio::test]
 async fn test_legacy_bundle_without_sections_reuses_the_neutral_map_description() {
-    let (_app, storage, ..) = setup_test_app();
+    let (_app, catalog, blobs) = setup_test_app();
     // Pre-ADR-0007 manifests carry neither sections nor a grid: the full lattice contributes one
     // 16×16 window, described by the map-level Physical Description.
     let legacy = CuratedMap::with_now(
@@ -183,14 +179,15 @@ async fn test_legacy_bundle_without_sections_reuses_the_neutral_map_description(
     )
     .with_description("Timber hall with a stone hearth and long trestle tables.");
 
-    storage.save_curated(&legacy, &create_test_png(1024, 1024)).unwrap();
+    seed_curated_ports(&catalog, &blobs, &legacy, &create_test_png(1024, 1024)).await;
+    let export = DatasetExportService::new(catalog.clone(), blobs.clone());
 
-    let report = storage.audit_dataset_readiness(None).unwrap();
+    let report = export.audit_dataset_readiness(None).await.unwrap();
     assert!(report.ready, "{:?}", report.maps);
     assert_eq!(report.sections_total, 1);
     assert_eq!(report.sections_ready, 1);
 
-    let zip_bytes = storage.export_lora_dataset(None).unwrap();
+    let zip_bytes = export.export_lora_dataset(None).await.unwrap();
     let mut archive = ZipArchive::new(Cursor::new(&zip_bytes)).unwrap();
     let caption = caption_in_archive(&mut archive, "tavern/legacy_flat_c0_r0_lora1024.txt");
     assert_eq!(caption.matches(TRIGGER_PHRASE).count(), 1, "{caption}");
@@ -199,7 +196,7 @@ async fn test_legacy_bundle_without_sections_reuses_the_neutral_map_description(
 
 #[tokio::test]
 async fn test_caption_contaminated_section_description_is_flagged_not_neutral() {
-    let (_app, storage, ..) = setup_test_app();
+    let (_app, catalog, blobs) = setup_test_app();
     // Exactly what the retired per-section caption fallback persisted into a Map Section
     // description: the Trigger Phrase plus camera directives inside a Physical Description.
     let contaminated = format!("{TRIGGER_PHRASE}, dungeon, crypt, obsidian altar");
@@ -214,9 +211,10 @@ async fn test_caption_contaminated_section_description_is_flagged_not_neutral() 
     .with_description("Granite hall with carved pillars.")
     .with_sections(vec![MapSection::new(0, 0, contaminated.clone())]);
 
-    storage.save_curated(&map, &create_test_png(1024, 1024)).unwrap();
+    seed_curated_ports(&catalog, &blobs, &map, &create_test_png(1024, 1024)).await;
+    let export = DatasetExportService::new(catalog.clone(), blobs.clone());
 
-    let report = storage.audit_dataset_readiness(None).unwrap();
+    let report = export.audit_dataset_readiness(None).await.unwrap();
     assert!(!report.ready);
     assert_eq!(report.maps_ready, 0);
     assert_eq!(report.sections_total, 1);
@@ -236,7 +234,7 @@ async fn test_caption_contaminated_section_description_is_flagged_not_neutral() 
     assert!(flagged.detail.contains("Map Section (0, 0)"), "{}", flagged.detail);
 
     // Exporting still yields a single Trigger Phrase, however contaminated the stored prose is.
-    let zip_bytes = storage.export_lora_dataset(None).unwrap();
+    let zip_bytes = export.export_lora_dataset(None).await.unwrap();
     let mut archive = ZipArchive::new(Cursor::new(&zip_bytes)).unwrap();
     let caption = caption_in_archive(&mut archive, "dungeon/contaminated_c0_r0_lora1024.txt");
     assert_eq!(caption.matches(TRIGGER_PHRASE).count(), 1, "{caption}");
@@ -245,7 +243,7 @@ async fn test_caption_contaminated_section_description_is_flagged_not_neutral() 
 
 #[tokio::test]
 async fn test_section_without_any_physical_description_is_flagged() {
-    let (_app, storage, ..) = setup_test_app();
+    let (_app, catalog, blobs) = setup_test_app();
     let map = CuratedMap::with_now(
         "undescribed",
         Theme::Cave,
@@ -255,9 +253,10 @@ async fn test_section_without_any_physical_description_is_flagged() {
     .with_grid(GridConfig::new(64, 0, 0))
     .with_sections(vec![MapSection::new(0, 0, "   ")]);
 
-    storage.save_curated(&map, &create_test_png(1024, 1024)).unwrap();
+    seed_curated_ports(&catalog, &blobs, &map, &create_test_png(1024, 1024)).await;
+    let export = DatasetExportService::new(catalog.clone(), blobs.clone());
 
-    let report = storage.audit_dataset_readiness(None).unwrap();
+    let report = export.audit_dataset_readiness(None).await.unwrap();
     assert!(!report.ready);
     assert_eq!(report.sections_ready, 0);
     assert_eq!(
@@ -268,7 +267,7 @@ async fn test_section_without_any_physical_description_is_flagged() {
 
 #[tokio::test]
 async fn test_unresolvable_sections_and_below_minimum_grids_are_flagged() {
-    let (_app, storage, ..) = setup_test_app();
+    let (_app, catalog, blobs) = setup_test_app();
 
     // (a) A section whose 16×16 box starts past the Ground layer edge: (16, 16) at 64px needs
     //     1024..2048 on a 1024×1024 image.
@@ -284,9 +283,7 @@ async fn test_unresolvable_sections_and_below_minimum_grids_are_flagged() {
         MapSection::new(0, 0, "Northwest chamber with a stone dais."),
         MapSection::new(16, 16, "South-east chamber beyond the map edge."),
     ]);
-    storage
-        .save_curated(&out_of_bounds, &create_test_png(1024, 1024))
-        .unwrap();
+    seed_curated_ports(&catalog, &blobs, &out_of_bounds, &create_test_png(1024, 1024)).await;
 
     // (b) An 8×8 cell map cannot contribute a single full 16×16 window.
     let too_small = CuratedMap::with_now(
@@ -297,11 +294,12 @@ async fn test_unresolvable_sections_and_below_minimum_grids_are_flagged() {
     )
     .with_grid(GridConfig::new(64, 0, 0))
     .with_description("River ford with a broken footbridge.");
-    storage
-        .save_curated(&too_small, &create_test_png(512, 512))
-        .unwrap();
+    seed_curated_ports(&catalog, &blobs, &too_small, &create_test_png(512, 512)).await;
 
-    let report = storage.audit_dataset_readiness(None).unwrap();
+    let report = DatasetExportService::new(catalog, blobs)
+        .audit_dataset_readiness(None)
+        .await
+        .unwrap();
     assert!(!report.ready);
     assert_eq!(report.maps_total, 2);
 
@@ -338,12 +336,15 @@ async fn test_unresolvable_sections_and_below_minimum_grids_are_flagged() {
 
 #[tokio::test]
 async fn test_unreadable_ground_layer_is_flagged() {
-    let (_app, storage, ..) = setup_test_app();
+    let (_app, catalog, blobs) = setup_test_app();
     let map = ready_multisection_map("corrupt_ground");
 
-    storage.save_curated(&map, b"\x89PNG\r\n\x1a\n not really a png").unwrap();
+    seed_curated_ports(&catalog, &blobs, &map, b"\x89PNG\r\n\x1a\n not really a png").await;
 
-    let report = storage.audit_dataset_readiness(None).unwrap();
+    let report = DatasetExportService::new(catalog, blobs)
+        .audit_dataset_readiness(None)
+        .await
+        .unwrap();
     assert!(!report.ready);
     assert_eq!(
         report.maps[0].issues[0].code,
@@ -353,7 +354,7 @@ async fn test_unreadable_ground_layer_is_flagged() {
 
 #[tokio::test]
 async fn test_readiness_endpoint_reports_the_baseline_dataset_and_filters_by_theme() {
-    let (app, _storage, catalog, blobs, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
     seed_curated_ports(
         &catalog,
         &blobs,

@@ -825,11 +825,6 @@ impl Candidate {
             dimensions: self.dimensions,
         }]
     }
-
-    /// Validates that this candidate's layers are ready for curation.
-    pub fn validate_for_curation(&self) -> Result<(), String> {
-        validate_layers_for_curation(&self.resolved_layers())
-    }
 }
 
 /// Formats Reddit permalink and direct media URL into a canonical source URL string.
@@ -842,68 +837,6 @@ pub fn format_source_url(permalink: &str, direct_url: &str) -> String {
         p.to_string()
     } else {
         format!("{p} | {d}")
-    }
-}
-
-/// Companion sidecar metadata for a harvested Reddit battlemap item.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RedditSidecarMetadata {
-    pub id: String,
-    pub source: Source,
-    pub source_url: String,
-    pub title: String,
-    pub author: String,
-    pub parsed_gridless: bool,
-    pub parsed_dimensions: Option<(u32, u32)>,
-    pub created_at: DateTime<Utc>,
-}
-
-impl RedditSidecarMetadata {
-    pub fn to_candidate(&self) -> Candidate {
-        self.clone().into()
-    }
-}
-
-impl From<RedditSidecarMetadata> for Candidate {
-    fn from(meta: RedditSidecarMetadata) -> Self {
-        Self {
-            id: meta.id.clone(),
-            source: meta.source,
-            filename: format!("{}.png", meta.id),
-            dimensions: meta.parsed_dimensions.unwrap_or((0, 0)),
-            created_at: meta.created_at,
-            source_url: Some(meta.source_url),
-            title: Some(meta.title),
-            author: Some(meta.author),
-            parsed_gridless: Some(meta.parsed_gridless),
-            parsed_dimensions: meta.parsed_dimensions,
-            grid: GridConfig::default(),
-            layers: Vec::new(),
-            parent_group_id: None,
-        }
-    }
-}
-
-impl TryFrom<Candidate> for RedditSidecarMetadata {
-    type Error = &'static str;
-
-    fn try_from(c: Candidate) -> Result<Self, Self::Error> {
-        Ok(Self {
-            id: c.id,
-            source: c.source,
-            source_url: c.source_url.unwrap_or_default(),
-            title: c.title.unwrap_or_default(),
-            author: c.author.unwrap_or_default(),
-            parsed_gridless: c.parsed_gridless.unwrap_or(false),
-            parsed_dimensions: c.parsed_dimensions.or_else(|| {
-                if c.dimensions != (0, 0) {
-                    Some(c.dimensions)
-                } else {
-                    None
-                }
-            }),
-            created_at: c.created_at,
-        })
     }
 }
 
@@ -1186,16 +1119,6 @@ pub struct CuratedMapUpdate {
 impl CuratedMapUpdate {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn with_themes(mut self, themes: Vec<String>) -> Self {
-        self.themes = Some(themes);
-        self
-    }
-
-    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
-        self.tags = Some(tags);
-        self
     }
 
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
@@ -1815,25 +1738,6 @@ impl RedditPost {
         Some(candidate)
     }
 
-    pub fn to_sidecar_metadata(&self, media_index: usize) -> Option<RedditSidecarMetadata> {
-        let media = self.media.get(media_index)?;
-        let id = if self.media.len() <= 1 {
-            self.id.clone()
-        } else {
-            format!("{}_{}", self.id, media_index)
-        };
-        Some(RedditSidecarMetadata {
-            id,
-            source: Source::Reddit,
-            source_url: format_source_url(&self.permalink, &media.url),
-            title: self.title.clone(),
-            author: self.author.clone(),
-            parsed_gridless: self.tags.is_gridless(),
-            parsed_dimensions: self.tags.dimensions,
-            created_at: Utc::now(),
-        })
-    }
-
     pub fn to_bundle_candidate(&self) -> Candidate {
         let primary_media = self.media.first();
         let primary_dimensions = match primary_media.and_then(|m| match (m.width, m.height) {
@@ -2029,39 +1933,6 @@ mod tests {
         let roundtrip: Candidate = serde_json::from_str(&reserialized).expect("roundtrip");
         assert_eq!(roundtrip.id, parsed.id);
         assert_eq!(roundtrip.source_url, parsed.source_url);
-    }
-
-    #[test]
-    fn test_reddit_sidecar_metadata_conversions() {
-        let meta = RedditSidecarMetadata {
-            id: "red_42".to_string(),
-            source: Source::Reddit,
-            source_url: "https://i.redd.it/red42.png".to_string(),
-            title: "Crystal Cavern".to_string(),
-            author: "cave_builder".to_string(),
-            parsed_gridless: false,
-            parsed_dimensions: Some((50, 50)),
-            created_at: Utc::now(),
-        };
-
-        let json = serde_json::to_string_pretty(&meta).expect("serialize sidecar");
-        assert!(json.contains("\"id\": \"red_42\""));
-        assert!(json.contains("\"parsed_gridless\": false"));
-
-        let parsed_meta: RedditSidecarMetadata = serde_json::from_str(&json).expect("deserialize sidecar");
-        assert_eq!(parsed_meta, meta);
-
-        // Conversion to Candidate
-        let cand = meta.to_candidate();
-        assert_eq!(cand.id, "red_42");
-        assert_eq!(cand.filename, "red_42.png");
-        assert_eq!(cand.dimensions, (50, 50));
-        assert_eq!(cand.parsed_gridless, Some(false));
-
-        // Conversion from Candidate
-        let back: RedditSidecarMetadata = cand.try_into().expect("try_into metadata");
-        assert_eq!(back.id, meta.id);
-        assert_eq!(back.title, meta.title);
     }
 
     #[test]
@@ -2833,68 +2704,31 @@ mod tests {
         let invalid_ground = vec![layer(0, LayerRole::Ground, Some(1))];
         assert!(validate_layers_for_curation(&invalid_ground).is_err());
 
-        // Candidate validation method checks
-        let mut cand_all_excluded = Candidate::with_now(
-            "cand_excl",
-            Source::Reddit,
-            "cand_excl/0.png",
-            (1000, 1000),
-        );
-        cand_all_excluded.layers = vec![
-            CandidateLayer::new(0, "0.png", LayerRole::Exclude, None, (1000, 1000)),
-            CandidateLayer::new(1, "1.png", LayerRole::Exclude, None, (1000, 1000)),
+        // A valid mixed bundle (Ground + UpperFloor + Roof + excluded) passes.
+        let valid_mixed = vec![
+            layer(0, LayerRole::Ground, Some(0)),
+            layer(1, LayerRole::UpperFloor, Some(1)),
+            layer(2, LayerRole::Roof, None),
+            layer(3, LayerRole::Exclude, None),
         ];
-        assert!(cand_all_excluded.validate_for_curation().is_err());
-
-        let mut cand_unassigned = Candidate::with_now(
-            "cand_unass",
-            Source::Reddit,
-            "cand_unass/0.png",
-            (1000, 1000),
-        );
-        cand_unassigned.layers = vec![
-            CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1000, 1000)),
-            CandidateLayer::new(1, "1.png", LayerRole::Unassigned, None, (1000, 1000)),
-        ];
-        assert!(cand_unassigned.validate_for_curation().is_err());
-
-        let mut cand_valid = Candidate::with_now(
-            "cand_ok",
-            Source::Reddit,
-            "cand_ok/0.png",
-            (1000, 1000),
-        );
-        cand_valid.layers = vec![
-            CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1000, 1000)),
-            CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1000, 1000)),
-            CandidateLayer::new(2, "2.png", LayerRole::Roof, None, (1000, 1000)),
-            CandidateLayer::new(3, "3.png", LayerRole::Exclude, None, (1000, 1000)),
-        ];
-        assert!(cand_valid.validate_for_curation().is_ok());
-
-        // Default single-image candidate defaults to Ground(0) and passes
-        let cand_single = Candidate::with_now(
-            "cand_single",
-            Source::Reddit,
-            "cand_single.png",
-            (1000, 1000),
-        );
-        assert!(cand_single.validate_for_curation().is_ok());
+        assert!(validate_layers_for_curation(&valid_mixed).is_ok());
     }
 
     #[test]
     fn test_curated_map_update_serialization() {
-        let update = CuratedMapUpdate::default()
-            .with_themes(vec!["tavern".into(), "coastal".into()])
-            .with_tags(vec!["dockside".into()])
-            .with_description("A seaside tavern with salty breeze and wooden tables.")
-            .with_layers(vec![CuratedLayer::new(
-                0,
-                "0_ground.png",
-                LayerRole::Ground,
-                Some(0),
-                (2048, 2048),
-            )]);
+        let update = CuratedMapUpdate {
+            themes: Some(vec!["tavern".into(), "coastal".into()]),
+            tags: Some(vec!["dockside".into()]),
+            ..CuratedMapUpdate::default()
+        }
+        .with_description("A seaside tavern with salty breeze and wooden tables.")
+        .with_layers(vec![CuratedLayer::new(
+            0,
+            "0_ground.png",
+            LayerRole::Ground,
+            Some(0),
+            (2048, 2048),
+        )]);
 
         let json = serde_json::to_string(&update).unwrap();
         assert!(json.contains("tavern"));

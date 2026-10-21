@@ -4437,17 +4437,7 @@
         const primaryTheme = tags[0] || "dungeon";
         card.dataset.theme = primaryTheme;
 
-        let themeParam = "dungeon";
-        if (primaryTheme && CANONICAL_THEMES.includes(primaryTheme.toLowerCase())) {
-            themeParam = primaryTheme.toLowerCase();
-        } else {
-            const found = tags.find(t => CANONICAL_THEMES.includes((t || "").toLowerCase()));
-            if (found) {
-                themeParam = found.toLowerCase();
-            }
-        }
-
-        const thumbUrl = `/api/image/curated/${encodeURIComponent(themeParam)}/${encodeURIComponent(map.id)}`;
+        const thumbUrl = `/api/image/curated/${encodeURIComponent(map.id)}`;
         const layerCount = (map.layers && map.layers.length > 0) ? map.layers.length : 1;
         const layerLabel = `${layerCount} Layer${layerCount === 1 ? "" : "s"}`;
         const isBundle = map.layers && Array.isArray(map.layers) && map.layers.length > 1;
@@ -4571,13 +4561,7 @@
 
                     const layerIdx = layer.index !== undefined ? layer.index : parseInt(pill.dataset.layerIdx, 10);
                     const directUrl = `/api/image/curated/${encodeURIComponent(map.id)}/${layerIdx}`;
-                    const fallbackUrl = `/api/image/curated/${encodeURIComponent(themeParam)}/${encodeURIComponent(map.id)}/${layerIdx}`;
 
-                    thumbImg.onerror = () => {
-                        if (thumbImg.src !== fallbackUrl && !thumbImg.src.endsWith(fallbackUrl)) {
-                            thumbImg.src = fallbackUrl;
-                        }
-                    };
                     if (thumbImg.src !== directUrl && !thumbImg.src.endsWith(directUrl)) {
                         thumbImg.src = directUrl;
                     }
@@ -5447,14 +5431,7 @@
         const actualLayerIdx = (layerObj && layerObj.index !== undefined) ? layerObj.index : validLayerIndex;
         const cacheKey = `${map.id}_layer_${actualLayerIdx}`;
 
-        const primaryTheme = (map.tags && map.tags.length > 0) ? map.tags[0] : "dungeon";
-        let themeParam = "dungeon";
-        if (primaryTheme && CANONICAL_THEMES.includes(primaryTheme.toLowerCase())) {
-            themeParam = primaryTheme.toLowerCase();
-        }
-
         const directUrl = `/api/image/curated/${encodeURIComponent(map.id)}/${actualLayerIdx}`;
-        const fallbackUrl = `/api/image/curated/${encodeURIComponent(themeParam)}/${encodeURIComponent(map.id)}/${actualLayerIdx}`;
 
         let img = state.libraryFullscreenImageCache.get(cacheKey);
         if (img && img.complete && img.naturalWidth > 0) {
@@ -5466,11 +5443,6 @@
             if (!img) {
                 img = new Image();
                 img.src = directUrl;
-                img.onerror = () => {
-                    if (img.src !== fallbackUrl && !img.src.endsWith(fallbackUrl)) {
-                        img.src = fallbackUrl;
-                    }
-                };
                 state.libraryFullscreenImageCache.set(cacheKey, img);
             }
             img.onload = () => {
@@ -5619,12 +5591,6 @@
         fsLayerFilmstripStrip.innerHTML = "";
         const fragment = document.createDocumentFragment();
 
-        const primaryTheme = (map.tags && map.tags.length > 0) ? map.tags[0] : "dungeon";
-        let themeParam = "dungeon";
-        if (primaryTheme && CANONICAL_THEMES.includes(primaryTheme.toLowerCase())) {
-            themeParam = primaryTheme.toLowerCase();
-        }
-
         map.layers.forEach((layer, idx) => {
             const card = document.createElement("div");
             const isActive = idx === state.libraryFullscreenLayerIndex;
@@ -5633,7 +5599,6 @@
 
             const layerIdx = layer.index !== undefined ? layer.index : idx;
             const thumbUrl = `/api/image/curated/${encodeURIComponent(map.id)}/${layerIdx}`;
-            const fallbackUrl = `/api/image/curated/${encodeURIComponent(themeParam)}/${encodeURIComponent(map.id)}/${layerIdx}`;
 
             const role = (layer.role || "ground").toLowerCase().replace(/[-_]/g, "");
             let roleClass = "fs-role-ground";
@@ -5668,15 +5633,6 @@
                     <span class="fs-elevation-badge mono">${escapeHtml(elevText)}</span>
                 </div>
             `;
-
-            const imgEl = card.querySelector(".fs-layer-card-img");
-            if (imgEl) {
-                imgEl.onerror = () => {
-                    if (imgEl.src !== fallbackUrl && !imgEl.src.endsWith(fallbackUrl)) {
-                        imgEl.src = fallbackUrl;
-                    }
-                };
-            }
 
             card.addEventListener("click", () => {
                 switchFullscreenLayer(idx);
@@ -6072,9 +6028,6 @@
         }
 
         const map = state.libraryDrawerMap;
-        const primaryTheme = (state.libraryDraft.tags && state.libraryDraft.tags.length > 0)
-            ? state.libraryDraft.tags[0]
-            : "dungeon";
 
         const fragment = document.createDocumentFragment();
 
@@ -6085,7 +6038,6 @@
 
             const layerIdx = layer.index !== undefined ? layer.index : idx;
             const directUrl = `/api/image/curated/${encodeURIComponent(map.id)}/${layerIdx}`;
-            const fallbackUrl = `/api/image/curated/${encodeURIComponent(primaryTheme)}/${encodeURIComponent(map.id)}/${layerIdx}`;
 
             const roleCls = getScrubPillRoleClass(layer.role);
             const roleName = formatRoleName(layer.role, layer.elevation);
@@ -6128,15 +6080,6 @@
                     </div>
                 </div>
             `;
-
-            const thumbImg = card.querySelector(".inspector-layer-thumb");
-            if (thumbImg) {
-                thumbImg.onerror = () => {
-                    if (thumbImg.src !== fallbackUrl && !thumbImg.src.endsWith(fallbackUrl)) {
-                        thumbImg.src = fallbackUrl;
-                    }
-                };
-            }
 
             const roleSelect = card.querySelector(".inspector-role-select");
             const elevInput = card.querySelector(".inspector-elev-input");

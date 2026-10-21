@@ -10,7 +10,6 @@ use crate::ports::blob_storage::BlobStorage;
 use crate::ports::catalog_repository::CatalogRepository;
 use crate::ports::cost_tracker::CostTracker;
 use crate::ports::harvester::RedditHarvester;
-use crate::ports::storage::StorageRepository;
 use crate::services::BenchmarkService;
 use crate::services::curation::{CurationService, CurationWorkflow};
 use crate::services::description::{DescriptionGenerator, DescriptionService};
@@ -18,7 +17,6 @@ use crate::services::description::{DescriptionGenerator, DescriptionService};
 /// Shared application state for the Axum HTTP server.
 #[derive(Clone)]
 pub struct AppState {
-    pub storage: Arc<dyn StorageRepository + Send + Sync>,
     pub catalog: Arc<dyn CatalogRepository + Send + Sync>,
     pub blobs: Arc<dyn BlobStorage + Send + Sync>,
     pub harvester: Arc<dyn RedditHarvester + Send + Sync>,
@@ -47,15 +45,13 @@ impl AppState {
     }
 
 
-    /// Creates a new `AppState` wrapping the given storage repository and default RedditCrawler.
+    /// Creates a new `AppState` over the catalog and blob ports with the default RedditCrawler.
     pub fn new(
-        storage: Arc<dyn StorageRepository + Send + Sync>,
         catalog: Arc<dyn CatalogRepository + Send + Sync>,
         blobs: Arc<dyn BlobStorage + Send + Sync>,
     ) -> Self {
         let cost_tracker: Arc<dyn CostTracker + Send + Sync> = Arc::new(FileCostLedger::default());
         let benchmark_service = Self::default_benchmark_service(
-            storage.clone(),
             cost_tracker.clone(),
             catalog.clone(),
             blobs.clone(),
@@ -64,7 +60,6 @@ impl AppState {
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
-            storage,
             catalog,
             blobs,
             harvester: Arc::new(RedditCrawler::from_env()),
@@ -81,14 +76,12 @@ impl AppState {
 
     /// Creates a new `AppState` with a custom harvester (useful for testing or customized adapters).
     pub fn with_harvester(
-        storage: Arc<dyn StorageRepository + Send + Sync>,
         harvester: Arc<dyn RedditHarvester + Send + Sync>,
         catalog: Arc<dyn CatalogRepository + Send + Sync>,
         blobs: Arc<dyn BlobStorage + Send + Sync>,
     ) -> Self {
         let cost_tracker: Arc<dyn CostTracker + Send + Sync> = Arc::new(FileCostLedger::default());
         let benchmark_service = Self::default_benchmark_service(
-            storage.clone(),
             cost_tracker.clone(),
             catalog.clone(),
             blobs.clone(),
@@ -97,7 +90,6 @@ impl AppState {
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
-            storage,
             catalog,
             blobs,
             harvester,
@@ -114,13 +106,11 @@ impl AppState {
 
     /// Creates a new `AppState` with a custom cost tracker.
     pub fn with_cost_tracker(
-        storage: Arc<dyn StorageRepository + Send + Sync>,
         cost_tracker: Arc<dyn CostTracker + Send + Sync>,
         catalog: Arc<dyn CatalogRepository + Send + Sync>,
         blobs: Arc<dyn BlobStorage + Send + Sync>,
     ) -> Self {
         let benchmark_service = Self::default_benchmark_service(
-            storage.clone(),
             cost_tracker.clone(),
             catalog.clone(),
             blobs.clone(),
@@ -129,7 +119,6 @@ impl AppState {
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
-            storage,
             catalog,
             blobs,
             harvester: Arc::new(RedditCrawler::from_env()),
@@ -144,16 +133,14 @@ impl AppState {
         }
     }
 
-    /// Creates a new `AppState` with custom storage, harvester, and cost tracker.
+    /// Creates a new `AppState` with a custom harvester and cost tracker.
     pub fn with_all(
-        storage: Arc<dyn StorageRepository + Send + Sync>,
         harvester: Arc<dyn RedditHarvester + Send + Sync>,
         cost_tracker: Arc<dyn CostTracker + Send + Sync>,
         catalog: Arc<dyn CatalogRepository + Send + Sync>,
         blobs: Arc<dyn BlobStorage + Send + Sync>,
     ) -> Self {
         let benchmark_service = Self::default_benchmark_service(
-            storage.clone(),
             cost_tracker.clone(),
             catalog.clone(),
             blobs.clone(),
@@ -162,7 +149,6 @@ impl AppState {
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
-            storage,
             catalog,
             blobs,
             harvester,
@@ -179,7 +165,6 @@ impl AppState {
 
     /// Creates an `AppState` with an explicit benchmark service (ideal for testing with mock engines).
     pub fn with_benchmark_service(
-        storage: Arc<dyn StorageRepository + Send + Sync>,
         benchmark_service: Arc<BenchmarkService>,
         cost_tracker: Arc<dyn CostTracker + Send + Sync>,
         catalog: Arc<dyn CatalogRepository + Send + Sync>,
@@ -189,7 +174,6 @@ impl AppState {
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
-            storage,
             catalog,
             blobs,
             harvester: Arc::new(RedditCrawler::from_env()),
@@ -246,7 +230,6 @@ impl AppState {
 
     /// Helper to try instantiating OpenRouterAdapter from environment if keys are present.
     fn default_benchmark_service(
-        storage: Arc<dyn StorageRepository + Send + Sync>,
         cost_tracker: Arc<dyn CostTracker + Send + Sync>,
         catalog: Arc<dyn CatalogRepository + Send + Sync>,
         blobs: Arc<dyn BlobStorage + Send + Sync>,
@@ -256,7 +239,6 @@ impl AppState {
             .map(|adapter| {
                 Arc::new(BenchmarkService::with_cost_tracker(
                     Arc::new(adapter),
-                    storage,
                     cost_tracker,
                     catalog,
                     blobs,
@@ -271,7 +253,6 @@ impl AppState {
         }
 
         if let Some(service) = Self::default_benchmark_service(
-            self.storage.clone(),
             self.cost_tracker.clone(),
             self.catalog.clone(),
             self.blobs.clone(),

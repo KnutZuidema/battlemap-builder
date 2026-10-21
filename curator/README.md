@@ -190,8 +190,8 @@ data/
   - Theme-only resolution selects the most recently curated map and its center-most 16×16 section.
   - Sections are never rescaled: when the exact box does not fit the loaded image the section is **unresolvable**, the reference conditioning path falls back to the static reference, and the LoRA ZIP export logs a warning and skips that section instead of center-cropping or magnifying it.
 - **Deterministic Layer Filenames**: Layers are saved with standardized names: `<index>_<role>[_<elevation>].<ext>` (e.g. `0_ground.png`, `1_upper_1.png`, `2_basement_-1.png`).
-- **Atomic Operations**: Files are written and moved atomically (`atomic_write`, `atomic_move`), ensuring crash-safe state updates.
-- **Backward Compatibility**: API routes serve curated images by both direct ID (`/api/image/curated/<id>`) and legacy theme routes (`/api/image/curated/<theme>/<id>`).
+- **Atomic Operations**: Manifests and blobs are written atomically (`atomic_write` in the filesystem catalog and blob adapters), ensuring crash-safe state updates.
+- **Theme-Free Image Routes**: Curated images are served by id (`/api/image/curated/<id>` and `/api/image/curated/<id>/<layer_index>`); theme remains a listing/export filter (`/api/curated?theme=...`), never part of a storage path.
 
 ---
 

@@ -13,7 +13,7 @@ use curator::domain::{
 };
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::{CandidateFilter, CatalogRepository};
-use curator::ports::storage::StorageError;
+use curator::ports::storage_error::StorageError;
 use curator::services::StorageMaintenanceService;
 
 /// Fresh in-memory catalog and blob ports, plus the service wired to them.

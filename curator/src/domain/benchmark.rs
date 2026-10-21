@@ -322,7 +322,8 @@ pub struct GenerationResponse {
     pub cost_usd: f64,
 }
 
-/// Companion metadata stored in `data/staging/generated/{id}.json`.
+/// Metadata describing one benchmark generation output, mirrored into the staging `Candidate`
+/// manifest when the output is persisted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BenchmarkMetadata {
     pub id: String,

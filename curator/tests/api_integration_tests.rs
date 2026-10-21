@@ -9,20 +9,19 @@ use tower::ServiceExt;
 
 use async_trait::async_trait;
 use curator::adapters::{
-    FileCostLedger, FilesystemBlobStorage, FilesystemCatalogRepository, FilesystemStorage,
-    OpenRouterAdapter,
+    FileCostLedger, InMemoryBlobStorage, InMemoryCatalogRepository, OpenRouterAdapter,
 };
 use curator::api::{create_router, AppState, DescribeResponse, SuggestThemesResponse};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use curator::ports::blob_storage::BlobStorage;
-use curator::ports::catalog_repository::CatalogRepository;
+use curator::ports::blob_storage::{BlobKey, BlobStorage};
+use curator::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
 use curator::ports::cost_tracker::{CostTracker, GenerationCostRecord};
 use curator::domain::{
     Candidate, CandidateLayer, CuratedMap, GridConfig, HarvestedMedia, LayerRole, ParsedTags,
     RedditHarvestQuery, RedditPost, Source, Theme,
 };
 use curator::ports::harvester::{HarvesterError, RedditHarvester};
-use curator::ports::storage::StorageRepository;
+use curator::domain::CuratedLayer;
 use curator::services::description::{DescriptionError, DescriptionGenerator, DescriptionService};
 
 struct MockDescriptionGen(Result<String, DescriptionError>);
@@ -85,35 +84,120 @@ impl DescriptionGenerator for CapturingDescriptionGen {
     }
 }
 
-/// Filesystem-backed catalog and blob ports sharing `dir` with the legacy storage repository.
-fn filesystem_ports(
-    dir: &tempfile::TempDir,
-) -> (
-    Arc<dyn CatalogRepository + Send + Sync>,
-    Arc<dyn BlobStorage + Send + Sync>,
-) {
+/// Fresh in-memory catalog and blob ports: the routes are served from these doubles alone.
+fn in_memory_ports() -> (Arc<InMemoryCatalogRepository>, Arc<InMemoryBlobStorage>) {
     (
-        Arc::new(FilesystemCatalogRepository::new(dir.path())),
-        Arc::new(FilesystemBlobStorage::new(dir.path())),
+        Arc::new(InMemoryCatalogRepository::new()),
+        Arc::new(InMemoryBlobStorage::new()),
     )
 }
 
-fn setup_test_app() -> (axum::Router, Arc<FilesystemStorage>, tempfile::TempDir) {
-    let dir = tempdir().expect("Failed to create tempdir");
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let (catalog, blobs) = filesystem_ports(&dir);
+fn setup_test_app() -> (
+    axum::Router,
+    Arc<InMemoryCatalogRepository>,
+    Arc<InMemoryBlobStorage>,
+) {
+    let (catalog, blobs) = in_memory_ports();
     let desc_service = Arc::new(DescriptionService::new(Some(Arc::new(
         TaggedMockDescriptionGen,
     ))));
-    let state =
-        AppState::new(storage.clone(), catalog, blobs).with_description_service(desc_service);
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_description_service(desc_service);
     let router = create_router(state);
-    (router, storage, dir)
+    (router, catalog, blobs)
+}
+
+/// Seeds a staging candidate and its primary layer blob at the canonical port addresses.
+async fn seed_staging(
+    catalog: &Arc<InMemoryCatalogRepository>,
+    blobs: &Arc<InMemoryBlobStorage>,
+    candidate: &Candidate,
+    png: &[u8],
+) {
+    catalog.save_candidate(candidate).await.expect("save candidate");
+    blobs
+        .write_blob(
+            &BlobKey::StagingLayer {
+                id: candidate.id.clone(),
+                index: 0,
+            },
+            png,
+        )
+        .await
+        .expect("write staging blob");
+}
+
+/// Seeds a staging bundle manifest and one `staging/{id}/{index}.png` blob per layer.
+async fn seed_staging_bundle(
+    catalog: &Arc<InMemoryCatalogRepository>,
+    blobs: &Arc<InMemoryBlobStorage>,
+    candidate: &Candidate,
+    layer_bytes: &[Vec<u8>],
+) {
+    catalog.save_candidate(candidate).await.expect("save candidate");
+    for (index, bytes) in layer_bytes.iter().enumerate() {
+        blobs
+            .write_blob(
+                &BlobKey::StagingLayer {
+                    id: candidate.id.clone(),
+                    index,
+                },
+                bytes,
+            )
+            .await
+            .expect("write staging layer");
+    }
+}
+
+/// Blob key of a curated map's `Ground` layer, resolved like the dataset export service.
+fn curated_ground_key(map: &CuratedMap) -> BlobKey {
+    match map
+        .layers
+        .iter()
+        .find(|layer| layer.role == LayerRole::Ground)
+        .or_else(|| map.layers.first())
+    {
+        Some(layer) => BlobKey::CuratedLayer {
+            id: map.id.clone(),
+            index: layer.index,
+            role: layer.role,
+            elevation: layer.elevation,
+        },
+        None => BlobKey::CuratedLayer {
+            id: map.id.clone(),
+            index: 0,
+            role: LayerRole::Ground,
+            elevation: Some(0),
+        },
+    }
+}
+
+/// Seeds a curated map with an explicit Ground layer and its layer blob.
+async fn seed_curated(
+    catalog: &Arc<InMemoryCatalogRepository>,
+    blobs: &Arc<InMemoryBlobStorage>,
+    map: &CuratedMap,
+    png: &[u8],
+) {
+    let mut stored = map.clone();
+    if stored.layers.is_empty() {
+        stored.layers = vec![CuratedLayer::new(
+            0,
+            CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), "png"),
+            LayerRole::Ground,
+            Some(0),
+            stored.dimensions,
+        )];
+    }
+    catalog.save_curated(&stored).await.expect("save curated map");
+    blobs
+        .write_blob(&curated_ground_key(&stored), png)
+        .await
+        .expect("write curated Ground blob");
 }
 
 #[tokio::test]
 async fn test_api_status_empty() {
-    let (app, _storage, _dir) = setup_test_app();
+    let (app, _catalog, _blobs) = setup_test_app();
 
     let req = Request::builder()
         .uri("/api/status")
@@ -135,13 +219,13 @@ async fn test_api_status_empty() {
 
 #[tokio::test]
 async fn test_api_staging_and_status_counts() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     // Populate staging with 2 candidates
     let cand1 = Candidate::with_now("c1", Source::Reddit, "c1.png", (1024, 768));
     let cand2 = Candidate::with_now("c2", Source::Manual, "c2.jpg", (2048, 1536));
-    storage.save_staging(&cand1, b"\x89PNG\r\n\x1a\nfake-png-1").unwrap();
-    storage.save_staging(&cand2, b"\xFF\xD8\xFFfake-jpeg-2").unwrap();
+    seed_staging(&catalog, &blobs, &cand1, b"\x89PNG\r\n\x1a\nfake-png-1").await;
+    seed_staging(&catalog, &blobs, &cand2, b"\xFF\xD8\xFFfake-jpeg-2").await;
 
     // Status check
     let req = Request::builder()
@@ -172,11 +256,11 @@ async fn test_api_staging_and_status_counts() {
 
 #[tokio::test]
 async fn test_api_image_staging_streaming_and_headers() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     let png_data = b"\x89PNG\r\n\x1a\nsome_png_image_payload";
     let cand = Candidate::with_now("png_candidate", Source::Reddit, "map.png", (1000, 1000));
-    storage.save_staging(&cand, png_data).unwrap();
+    seed_staging(&catalog, &blobs, &cand, png_data).await;
 
     let req = Request::builder()
         .uri("/api/image/staging/png_candidate")
@@ -207,11 +291,11 @@ async fn test_api_image_staging_streaming_and_headers() {
 
 #[tokio::test]
 async fn test_api_curate_endpoint() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     let img_bytes = b"\x89PNG\r\n\x1a\ncurate_this_map";
     let cand = Candidate::with_now("map_to_curate", Source::Generated, "dungeon.png", (1920, 1080));
-    storage.save_staging(&cand, img_bytes).unwrap();
+    seed_staging(&catalog, &blobs, &cand, img_bytes).await;
 
     // Curate candidate with themes
     let curate_payload = json!({
@@ -239,16 +323,16 @@ async fn test_api_curate_endpoint() {
     assert_eq!(res_json["curated"]["dimensions"], json!([1920, 1080]));
 
     // Staging should now be empty
-    assert_eq!(storage.list_staging().unwrap().len(), 0);
+    assert_eq!(catalog.list_candidates(&CandidateFilter::default()).await.unwrap().len(), 0);
 
     // Curated directory should have 1 item
-    let curated = storage.list_curated(Some(&Theme::Dungeon)).unwrap();
+    let curated = catalog.list_curated(&CuratedFilter { theme: Some(Theme::Dungeon), ..Default::default() }).await.unwrap();
     assert_eq!(curated.len(), 1);
     assert_eq!(curated[0].id, "map_to_curate");
 
-    // Fetch the curated image via API
+    // Fetch the curated Ground image by direct ID.
     let req_img = Request::builder()
-        .uri("/api/image/curated/dungeon/map_to_curate")
+        .uri("/api/image/curated/map_to_curate")
         .body(Body::empty())
         .unwrap();
     let resp_img = app.clone().oneshot(req_img).await.unwrap();
@@ -263,16 +347,6 @@ async fn test_api_curate_endpoint() {
     );
     let img_body = to_bytes(resp_img.into_body(), usize::MAX).await.unwrap();
     assert_eq!(img_body.as_ref(), img_bytes);
-
-    // Fetch the curated image via direct ID endpoint /api/image/curated/map_to_curate
-    let req_img_direct = Request::builder()
-        .uri("/api/image/curated/map_to_curate")
-        .body(Body::empty())
-        .unwrap();
-    let resp_img_direct = app.clone().oneshot(req_img_direct).await.unwrap();
-    assert_eq!(resp_img_direct.status(), StatusCode::OK);
-    let direct_body = to_bytes(resp_img_direct.into_body(), usize::MAX).await.unwrap();
-    assert_eq!(direct_body.as_ref(), img_bytes);
 
     // Empty themes should return 400
     let empty_themes_req = Request::builder()
@@ -294,11 +368,11 @@ async fn test_api_curate_endpoint() {
 
 #[tokio::test]
 async fn test_api_curate_accepts_unified_tags_without_legacy_themes() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     let img_bytes = b"\x89PNG\r\n\x1a\ntags_only_map";
     let cand = Candidate::with_now("tags_only_map", Source::Generated, "dungeon.png", (1920, 1080));
-    storage.save_staging(&cand, img_bytes).unwrap();
+    seed_staging(&catalog, &blobs, &cand, img_bytes).await;
 
     let curate_payload = json!({
         "id": "tags_only_map",
@@ -325,7 +399,7 @@ async fn test_api_curate_accepts_unified_tags_without_legacy_themes() {
 
     // Missing every tag source is rejected with the tag-specific message.
     let cand = Candidate::with_now("untagged_map", Source::Generated, "dungeon.png", (1920, 1080));
-    storage.save_staging(&cand, img_bytes).unwrap();
+    seed_staging(&catalog, &blobs, &cand, img_bytes).await;
     let req_missing = Request::builder()
         .uri("/api/curate")
         .method("POST")
@@ -341,7 +415,7 @@ async fn test_api_curate_accepts_unified_tags_without_legacy_themes() {
 
 #[tokio::test]
 async fn test_curate_response_matches_curated_listing_including_provenance() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     let mut cand = Candidate::with_now("provenance_map", Source::Reddit, "0.png", (1920, 1080));
     cand.layers = vec![
@@ -350,16 +424,10 @@ async fn test_curate_response_matches_curated_listing_including_provenance() {
         CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1920, 1080))
             .with_source_url("https://i.redd.it/provenance_1.png"),
     ];
-    storage
-        .save_staging_bundle(
-            None,
-            &cand,
-            &[
+    seed_staging_bundle(&catalog, &blobs, &cand, &[
                 b"\x89PNG\r\n\x1a\nprovenance_ground".to_vec(),
                 b"\x89PNG\r\n\x1a\nprovenance_upper".to_vec(),
-            ],
-        )
-        .unwrap();
+            ]).await;
 
     let curate_payload = json!({
         "id": "provenance_map",
@@ -407,7 +475,7 @@ async fn test_curate_response_matches_curated_listing_including_provenance() {
 
 #[tokio::test]
 async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() {
-    let (app, storage, dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     // 1. Prepare candidate in staging with multi-layer bundle
     let img0 = b"\x89PNG\r\n\x1a\nlayer0_ground_map";
@@ -417,12 +485,10 @@ async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() 
         CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1920, 1080)),
         CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1920, 1080)),
     ];
-    storage
-        .save_staging_bundle(None, &cand, &[img0.to_vec(), img1.to_vec()])
-        .unwrap();
+    seed_staging_bundle(&catalog, &blobs, &cand, &[img0.to_vec(), img1.to_vec()]).await;
 
     // Verify candidate is in staging
-    assert_eq!(storage.list_staging().unwrap().len(), 1);
+    assert_eq!(catalog.list_candidates(&CandidateFilter::default()).await.unwrap().len(), 1);
 
     // 2. Curate rejection when themes is empty: returns HTTP 400 Bad Request
     let req_empty_themes = Request::builder()
@@ -505,76 +571,47 @@ async fn test_e2e_curation_decision_flow_with_dynamic_themes_and_flat_storage() 
     assert!(res_json["curated"]["rating"].is_null());
 
     // 5. Staging should now be empty (candidate removed from queue)
-    assert_eq!(storage.list_staging().unwrap().len(), 0);
+    assert_eq!(catalog.list_candidates(&CandidateFilter::default()).await.unwrap().len(), 0);
 
-    // 6. Verify flat storage directory on disk: data/curated/<id>/manifest.json
-    let curated_bundle_dir = dir.path().join("curated").join("dungeon_complex");
-    assert!(
-        curated_bundle_dir.is_dir(),
-        "Curated bundle directory must exist at flat layout: {:?}",
-        curated_bundle_dir
-    );
-
-    let manifest_path = curated_bundle_dir.join("manifest.json");
-    assert!(
-        manifest_path.is_file(),
-        "manifest.json must exist in curated bundle directory: {:?}",
-        manifest_path
-    );
-
-    let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
-    let manifest: Value = serde_json::from_str(&manifest_content).unwrap();
-
-    assert_eq!(manifest["id"], "dungeon_complex");
+    // 6. Verify the curated manifest persisted in the catalog matches the response.
+    let manifest = catalog.get_curated("dungeon_complex").await.unwrap();
+    assert_eq!(manifest.id, "dungeon_complex");
     assert_eq!(
-        manifest["tags"],
-        json!(["dungeon", "crypt", "boss-arena", "torchlight", "fantasy"])
+        manifest.tags,
+        vec!["dungeon", "crypt", "boss-arena", "torchlight", "fantasy"]
     );
-    assert!(manifest["themes"].is_null());
-    assert_eq!(manifest["dimensions"], json!([1920, 1080]));
-    assert!(manifest["rating"].is_null(), "Curated map manifest must not have rating");
+    assert_eq!(manifest.dimensions, (1920, 1080));
+    assert_eq!(manifest.layers[0].filename, "0_ground.png");
+    assert_eq!(manifest.layers[1].filename, "1_upper_1.png");
 
-    // Verify deterministically named layer image files exist in flat directory
-    let layer0_path = curated_bundle_dir.join("0_ground.png");
-    assert!(
-        layer0_path.is_file(),
-        "Layer 0 image must exist at deterministic path: {:?}",
-        layer0_path
-    );
-    let layer1_path = curated_bundle_dir.join("1_upper_1.png");
-    assert!(
-        layer1_path.is_file(),
-        "Layer 1 image must exist at deterministic path: {:?}",
-        layer1_path
-    );
+    // Deterministic curated layer blobs exist at their canonical addresses.
+    let curated_keys = blobs
+        .list_prefix(&BlobKey::CuratedDir {
+            id: Some("dungeon_complex".to_string()),
+        })
+        .await
+        .unwrap();
+    assert!(curated_keys.iter().any(|key| key.to_path().ends_with("0_ground.png")));
+    assert!(curated_keys.iter().any(|key| key.to_path().ends_with("1_upper_1.png")));
 
-    // 7. Verify API image retrieval by direct ID and by theme
+    // 7. Verify API image retrieval by direct ID.
     let req_direct = Request::builder()
         .uri("/api/image/curated/dungeon_complex")
         .body(Body::empty())
         .unwrap();
-    let resp_direct = app.clone().oneshot(req_direct).await.unwrap();
+    let resp_direct = app.oneshot(req_direct).await.unwrap();
     assert_eq!(resp_direct.status(), StatusCode::OK);
     let direct_bytes = to_bytes(resp_direct.into_body(), usize::MAX).await.unwrap();
     assert_eq!(direct_bytes.as_ref(), img0);
-
-    let req_theme = Request::builder()
-        .uri("/api/image/curated/dungeon/dungeon_complex")
-        .body(Body::empty())
-        .unwrap();
-    let resp_theme = app.oneshot(req_theme).await.unwrap();
-    assert_eq!(resp_theme.status(), StatusCode::OK);
-    let theme_bytes = to_bytes(resp_theme.into_body(), usize::MAX).await.unwrap();
-    assert_eq!(theme_bytes.as_ref(), img0);
 }
 
 #[tokio::test]
 async fn test_api_curate_building_theme_and_aliases() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     let img_bytes = b"\x89PNG\r\n\x1a\nisolated_cottage";
     let cand1 = Candidate::with_now("cabin_map", Source::Reddit, "cabin.png", (2048, 2048));
-    storage.save_staging(&cand1, img_bytes).unwrap();
+    seed_staging(&catalog, &blobs, &cand1, img_bytes).await;
 
     // Curate candidate with theme "building"
     let curate_payload = json!({
@@ -602,14 +639,14 @@ async fn test_api_curate_building_theme_and_aliases() {
     assert!(res_json["curated"]["themes"].is_null());
 
     // Verify stored under Theme::Building
-    let curated = storage.list_curated(Some(&Theme::Building)).unwrap();
+    let curated = catalog.list_curated(&CuratedFilter { theme: Some(Theme::Building), ..Default::default() }).await.unwrap();
     assert_eq!(curated.len(), 1);
     assert_eq!(curated[0].id, "cabin_map");
     assert_eq!(curated[0].theme(), Some(Theme::Building));
 
-    // Fetch the curated image via /api/image/curated/building/cabin_map
+    // Fetch the curated image via /api/image/curated/cabin_map
     let req_img = Request::builder()
-        .uri("/api/image/curated/building/cabin_map")
+        .uri("/api/image/curated/cabin_map")
         .body(Body::empty())
         .unwrap();
     let resp_img = app.clone().oneshot(req_img).await.unwrap();
@@ -617,7 +654,7 @@ async fn test_api_curate_building_theme_and_aliases() {
 
     // Test alias "outpost" also curates into Theme::Building
     let cand2 = Candidate::with_now("outpost_map", Source::Generated, "outpost.png", (1024, 1024));
-    storage.save_staging(&cand2, img_bytes).unwrap();
+    seed_staging(&catalog, &blobs, &cand2, img_bytes).await;
 
     let alias_payload = json!({
         "id": "outpost_map",
@@ -640,16 +677,16 @@ async fn test_api_curate_building_theme_and_aliases() {
     assert!(res_json2["curated"]["themes"].is_null());
     assert!(res_json2["curated"]["tags"].as_array().unwrap().contains(&json!("building")));
 
-    let building_list = storage.list_curated(Some(&Theme::Building)).unwrap();
+    let building_list = catalog.list_curated(&CuratedFilter { theme: Some(Theme::Building), ..Default::default() }).await.unwrap();
     assert_eq!(building_list.len(), 2);
 }
 
 #[tokio::test]
 async fn test_api_reject_endpoint() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     let cand = Candidate::with_now("bad_map", Source::Reddit, "bad.png", (800, 600));
-    storage.save_staging(&cand, b"\x89PNG\r\n\x1a\nbad").unwrap();
+    seed_staging(&catalog, &blobs, &cand, b"\x89PNG\r\n\x1a\nbad").await;
 
     let reject_payload = json!({
         "id": "bad_map",
@@ -673,14 +710,14 @@ async fn test_api_reject_endpoint() {
     assert_eq!(res_json["id"], "bad_map");
 
     // Staging should be empty
-    assert_eq!(storage.list_staging().unwrap().len(), 0);
+    assert_eq!(catalog.list_candidates(&CandidateFilter::default()).await.unwrap().len(), 0);
 
     // Should be recorded in rejections
-    assert!(storage.is_rejected("bad_map").unwrap());
+    assert!(catalog.is_rejected("bad_map").await.unwrap());
 
     // Test rejecting without explicit reason or notes
     let cand_simple = Candidate::with_now("bad_map_simple", Source::Reddit, "simple.png", (800, 600));
-    storage.save_staging(&cand_simple, b"\x89PNG\r\n\x1a\nsimple").unwrap();
+    seed_staging(&catalog, &blobs, &cand_simple, b"\x89PNG\r\n\x1a\nsimple").await;
 
     let req_simple = Request::builder()
         .uri("/api/reject")
@@ -691,12 +728,12 @@ async fn test_api_reject_endpoint() {
 
     let response_simple = app.clone().oneshot(req_simple).await.unwrap();
     assert_eq!(response_simple.status(), StatusCode::OK);
-    assert!(storage.is_rejected("bad_map_simple").unwrap());
+    assert!(catalog.is_rejected("bad_map_simple").await.unwrap());
 }
 
 #[tokio::test]
 async fn test_static_asset_and_spa_routing() {
-    let (app, _storage, _dir) = setup_test_app();
+    let (app, _catalog, _blobs) = setup_test_app();
 
     // Root GET / serves index.html
     let req = Request::builder().uri("/").body(Body::empty()).unwrap();
@@ -755,7 +792,7 @@ async fn test_static_asset_and_spa_routing() {
 
 #[tokio::test]
 async fn test_curate_errors_and_edge_cases() {
-    let (app, _storage, _dir) = setup_test_app();
+    let (app, _catalog, _blobs) = setup_test_app();
 
     // Curating non-existent candidate returns 404
     let req = Request::builder()
@@ -792,22 +829,6 @@ async fn test_curate_errors_and_edge_cases() {
         .unwrap();
     let resp_empty_id = app.clone().oneshot(req_empty_id).await.unwrap();
     assert_eq!(resp_empty_id.status(), StatusCode::BAD_REQUEST);
-
-    // Curated image with invalid theme returns 400
-    let req_bad_theme = Request::builder()
-        .uri("/api/image/curated/invalid_theme_name/map_1")
-        .body(Body::empty())
-        .unwrap();
-    let resp_bad_theme = app.clone().oneshot(req_bad_theme).await.unwrap();
-    assert_eq!(resp_bad_theme.status(), StatusCode::BAD_REQUEST);
-
-    // Curated image non-existent returns 404
-    let req_non_existent = Request::builder()
-        .uri("/api/image/curated/dungeon/does_not_exist")
-        .body(Body::empty())
-        .unwrap();
-    let resp_non_existent = app.clone().oneshot(req_non_existent).await.unwrap();
-    assert_eq!(resp_non_existent.status(), StatusCode::NOT_FOUND);
 
     // Curated image direct ID non-existent returns 404
     let req_direct_non_existent = Request::builder()
@@ -886,13 +907,11 @@ async fn test_api_harvest_reddit_json_response() {
         tags: ParsedTags::parse_title("[40x40] Ancient Crypt [Gridded]"),
     };
 
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let (catalog, blobs) = filesystem_ports(&dir);
+    let (catalog, blobs) = in_memory_ports();
     let harvester = Arc::new(MockHarvester {
         posts: vec![post_gridless, post_gridded],
     });
-    let state = AppState::with_harvester(storage.clone(), harvester, catalog, blobs);
+    let state = AppState::with_harvester(harvester, catalog, blobs);
     let app = create_router(state);
 
     // 3. Post harvest request with gridless_only: true
@@ -968,11 +987,9 @@ async fn test_api_harvest_reddit_sse_streaming() {
         tags: ParsedTags::parse_title("[25x25] Goblin Ambush [Gridless]"),
     };
 
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let (catalog, blobs) = filesystem_ports(&dir);
+    let (catalog, blobs) = in_memory_ports();
     let harvester = Arc::new(MockHarvester { posts: vec![post] });
-    let state = AppState::with_harvester(storage.clone(), harvester, catalog, blobs);
+    let state = AppState::with_harvester(harvester, catalog, blobs);
     let app = create_router(state);
 
     // 3. Post harvest request with Accept: text/event-stream
@@ -1028,11 +1045,10 @@ async fn test_api_harvest_reddit_sse_streaming() {
 #[tokio::test]
 async fn test_api_cost_stats_and_reset_session() {
     let dir = tempdir().expect("tempdir");
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let (catalog, blobs) = filesystem_ports(&dir);
+    let (catalog, blobs) = in_memory_ports();
     let ledger_path = dir.path().join("telemetry").join("cost_ledger.json");
     let ledger = Arc::new(FileCostLedger::new(&ledger_path));
-    let state = AppState::with_cost_tracker(storage.clone(), ledger.clone(), catalog, blobs);
+    let state = AppState::with_cost_tracker(ledger.clone(), catalog, blobs);
     let app = create_router(state);
 
     // 1. Initial GET /api/cost/stats should be zeroed
@@ -1200,46 +1216,47 @@ impl curator::ports::model_engine::ModelEngine for MockBenchmarkEngine {
     }
 }
 
-fn setup_benchmark_test_app_with_recorder() -> (
+/// Router, ports, cost ledger, and the engine request recorder of the benchmark test app.
+type BenchmarkTestApp = (
     axum::Router,
-    Arc<FilesystemStorage>,
+    Arc<InMemoryCatalogRepository>,
+    Arc<InMemoryBlobStorage>,
     Arc<FileCostLedger>,
-    tempfile::TempDir,
     Arc<std::sync::Mutex<Vec<curator::domain::GenerationRequest>>>,
-) {
+);
+
+fn setup_benchmark_test_app_with_recorder() -> BenchmarkTestApp {
     let dir = tempdir().expect("Failed to create tempdir");
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let (catalog, blobs) = filesystem_ports(&dir);
+    let (catalog, blobs) = in_memory_ports();
     let ledger_path = dir.path().join("telemetry/cost_ledger.json");
     let ledger = Arc::new(FileCostLedger::new(&ledger_path));
     let (engine_struct, captured) = MockBenchmarkEngine::new();
     let engine = Arc::new(engine_struct);
     let benchmark_service = Arc::new(curator::services::BenchmarkService::with_cost_tracker(
         engine,
-        storage.clone(),
         ledger.clone(),
         catalog.clone(),
         blobs.clone(),
     ));
     let state =
-        AppState::with_benchmark_service(storage.clone(), benchmark_service, ledger.clone(), catalog, blobs);
+        AppState::with_benchmark_service(benchmark_service, ledger.clone(), catalog.clone(), blobs.clone());
     let router = create_router(state);
-    (router, storage, ledger, dir, captured)
+    (router, catalog, blobs, ledger, captured)
 }
 
 fn setup_benchmark_test_app() -> (
     axum::Router,
-    Arc<FilesystemStorage>,
+    Arc<InMemoryCatalogRepository>,
+    Arc<InMemoryBlobStorage>,
     Arc<FileCostLedger>,
-    tempfile::TempDir,
 ) {
-    let (router, storage, ledger, dir, _captured) = setup_benchmark_test_app_with_recorder();
-    (router, storage, ledger, dir)
+    let (router, catalog, blobs, ledger, _captured) = setup_benchmark_test_app_with_recorder();
+    (router, catalog, blobs, ledger)
 }
 
 #[tokio::test]
 async fn test_api_benchmark_validation() {
-    let (app, _storage, _ledger, _dir) = setup_benchmark_test_app();
+    let (app, _catalog, _blobs, _ledger) = setup_benchmark_test_app();
 
     // 1. Empty models should fail with 400
     let req1 = Request::builder()
@@ -1271,7 +1288,7 @@ async fn test_api_benchmark_validation() {
 
 #[tokio::test]
 async fn test_api_benchmark_run_json_and_cost_recording() {
-    let (app, storage, ledger, _dir) = setup_benchmark_test_app();
+    let (app, catalog, _blobs, ledger) = setup_benchmark_test_app();
 
     let payload = json!({
         "models": ["meta/muse-image"],
@@ -1303,7 +1320,7 @@ async fn test_api_benchmark_run_json_and_cost_recording() {
     assert!((json["total_cost_usd"].as_f64().unwrap() - 0.04).abs() < 1e-6);
 
     // Verify staging discovered candidates
-    let candidates = storage.list_staging().expect("list staging succeeds");
+    let candidates = catalog.list_candidates(&CandidateFilter::default()).await.expect("list staging succeeds");
     assert_eq!(candidates.len(), 2);
 
     // Verify cost ledger tracked both generations
@@ -1328,7 +1345,7 @@ async fn test_api_benchmark_run_json_and_cost_recording() {
 
 #[tokio::test]
 async fn test_api_benchmark_run_sse_streaming() {
-    let (app, _storage, _ledger, _dir) = setup_benchmark_test_app();
+    let (app, _catalog, _blobs, _ledger) = setup_benchmark_test_app();
 
     let payload = json!({
         "models": ["meta/muse-image"],
@@ -1356,7 +1373,7 @@ async fn test_api_benchmark_run_sse_streaming() {
 
 #[tokio::test]
 async fn test_api_benchmark_cancel() {
-    let (app, _storage, _ledger, _dir) = setup_benchmark_test_app();
+    let (app, _catalog, _blobs, _ledger) = setup_benchmark_test_app();
 
     let req = Request::builder()
         .uri("/api/benchmark/cancel")
@@ -1373,7 +1390,7 @@ async fn test_api_benchmark_cancel() {
 
 #[tokio::test]
 async fn test_api_benchmark_reference_conditioning_default_true() {
-    let (app, _storage, _ledger, _dir, captured) = setup_benchmark_test_app_with_recorder();
+    let (app, _catalog, _blobs, _ledger, captured) = setup_benchmark_test_app_with_recorder();
 
     // Default payload without use_reference_conditioning (defaults to true)
     let payload = json!({
@@ -1414,7 +1431,7 @@ async fn test_api_benchmark_reference_conditioning_default_true() {
 
 #[tokio::test]
 async fn test_api_benchmark_reference_conditioning_disabled() {
-    let (app, _storage, _ledger, _dir, captured) = setup_benchmark_test_app_with_recorder();
+    let (app, _catalog, _blobs, _ledger, captured) = setup_benchmark_test_app_with_recorder();
 
     // Explicitly disable reference conditioning
     let payload = json!({
@@ -1461,7 +1478,7 @@ async fn test_api_benchmark_reference_conditioning_curated_prioritization_and_pe
     use curator::domain::CuratedMap;
     use image::{ImageBuffer, Rgb};
 
-    let (app, storage, _ledger, _dir, captured) = setup_benchmark_test_app_with_recorder();
+    let (app, catalog, blobs, _ledger, captured) = setup_benchmark_test_app_with_recorder();
 
     // Save a 5-star curated map in the Dungeon theme
     let map = CuratedMap::new(
@@ -1478,7 +1495,7 @@ async fn test_api_benchmark_reference_conditioning_curated_prioritization_and_pe
     let mut png_bytes = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
         .unwrap();
-    storage.save_curated(&map, &png_bytes).unwrap();
+    seed_curated(&catalog, &blobs, &map, &png_bytes).await;
 
     // Request benchmark run with reference conditioning enabled
     let payload = json!({
@@ -1508,6 +1525,15 @@ async fn test_api_benchmark_reference_conditioning_curated_prioritization_and_pe
         body_str
     );
 
+    // Verify staging persistence: generated raster output and JSON sidecar
+    let staging = catalog
+        .list_candidates(&CandidateFilter::default())
+        .await
+        .expect("list staging succeeds");
+    assert_eq!(staging.len(), 1);
+    assert!(staging[0].id.starts_with("bench_meta_muse_image_stone_crypt_"));
+    assert_eq!(staging[0].source, curator::domain::Source::Generated);
+
     // Verify captured engine request has the curated reference image attached
     let requests = captured.lock().unwrap();
     assert_eq!(requests.len(), 1);
@@ -1516,17 +1542,11 @@ async fn test_api_benchmark_reference_conditioning_curated_prioritization_and_pe
         requests[0].images[0].label,
         "Perspective Reference: 2D dungeon Plan View"
     );
-
-    // Verify staging persistence: generated raster output and JSON sidecar
-    let staging = storage.list_staging().expect("list staging succeeds");
-    assert_eq!(staging.len(), 1);
-    assert!(staging[0].id.starts_with("bench_meta_muse_image_stone_crypt_"));
-    assert_eq!(staging[0].source, curator::domain::Source::Generated);
 }
 
 #[tokio::test]
 async fn test_api_layer_image_retrieval() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     let img0 = b"\x89PNG\r\n\x1a\nlayer0_bytes_staging";
     let img1 = b"\x89PNG\r\n\x1a\nlayer1_bytes_staging";
@@ -1536,9 +1556,7 @@ async fn test_api_layer_image_retrieval() {
         CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1024, 1024)),
         CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1024, 1024)),
     ];
-    storage
-        .save_staging_bundle(None, &cand, &[img0.to_vec(), img1.to_vec()])
-        .unwrap();
+    seed_staging_bundle(&catalog, &blobs, &cand, &[img0.to_vec(), img1.to_vec()]).await;
 
     // 1. Staging layer 0 retrieval
     let req0 = Request::builder()
@@ -1610,7 +1628,7 @@ async fn test_api_layer_image_retrieval() {
 
     // 6. Curated layer 0 retrieval
     let req_curated0 = Request::builder()
-        .uri("/api/image/curated/dungeon/bundle_img_test/0")
+        .uri("/api/image/curated/bundle_img_test/0")
         .body(Body::empty())
         .unwrap();
     let resp_curated0 = app.clone().oneshot(req_curated0).await.unwrap();
@@ -1624,7 +1642,7 @@ async fn test_api_layer_image_retrieval() {
 
     // 7. Curated layer 1 retrieval
     let req_curated1 = Request::builder()
-        .uri("/api/image/curated/dungeon/bundle_img_test/1")
+        .uri("/api/image/curated/bundle_img_test/1")
         .body(Body::empty())
         .unwrap();
     let resp_curated1 = app.clone().oneshot(req_curated1).await.unwrap();
@@ -1634,7 +1652,7 @@ async fn test_api_layer_image_retrieval() {
 
     // 8. Curated out-of-bounds layer 99 returns 404
     let req_curated99 = Request::builder()
-        .uri("/api/image/curated/dungeon/bundle_img_test/99")
+        .uri("/api/image/curated/bundle_img_test/99")
         .body(Body::empty())
         .unwrap();
     let resp_curated99 = app.oneshot(req_curated99).await.unwrap();
@@ -1643,7 +1661,7 @@ async fn test_api_layer_image_retrieval() {
 
 #[tokio::test]
 async fn test_api_curate_bundle_validation_and_success() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     let img0 = b"\x89PNG\r\n\x1a\nlayer0_bytes";
     let img1 = b"\x89PNG\r\n\x1a\nlayer1_bytes";
@@ -1655,9 +1673,7 @@ async fn test_api_curate_bundle_validation_and_success() {
         CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1024, 1024)),
         CandidateLayer::new(1, "1.png", LayerRole::Unassigned, None, (1024, 1024)),
     ];
-    storage
-        .save_staging_bundle(None, &cand_unassigned, &[img0.to_vec(), img1.to_vec()])
-        .unwrap();
+    seed_staging_bundle(&catalog, &blobs, &cand_unassigned, &[img0.to_vec(), img1.to_vec()]).await;
 
     let req_unassigned = Request::builder()
         .uri("/api/curate")
@@ -1689,9 +1705,7 @@ async fn test_api_curate_bundle_validation_and_success() {
         CandidateLayer::new(0, "0.png", LayerRole::Exclude, None, (1024, 1024)),
         CandidateLayer::new(1, "1.png", LayerRole::Exclude, None, (1024, 1024)),
     ];
-    storage
-        .save_staging_bundle(None, &cand_excluded, &[img0.to_vec(), img1.to_vec()])
-        .unwrap();
+    seed_staging_bundle(&catalog, &blobs, &cand_excluded, &[img0.to_vec(), img1.to_vec()]).await;
 
     let req_excluded = Request::builder()
         .uri("/api/curate")
@@ -1723,9 +1737,7 @@ async fn test_api_curate_bundle_validation_and_success() {
         CandidateLayer::new(0, "0.png", LayerRole::UpperFloor, Some(1), (800, 600)),
         CandidateLayer::new(1, "1.png", LayerRole::Roof, None, (800, 600)),
     ];
-    storage
-        .save_staging_bundle(None, &cand_no_ground, &[img0.to_vec(), img1.to_vec()])
-        .unwrap();
+    seed_staging_bundle(&catalog, &blobs, &cand_no_ground, &[img0.to_vec(), img1.to_vec()]).await;
 
     let req_no_ground = Request::builder()
         .uri("/api/curate")
@@ -1756,9 +1768,7 @@ async fn test_api_curate_bundle_validation_and_success() {
         CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (800, 600)),
         CandidateLayer::new(1, "1.png", LayerRole::Ground, Some(0), (800, 600)),
     ];
-    storage
-        .save_staging_bundle(None, &cand_multi_ground, &[img0.to_vec(), img1.to_vec()])
-        .unwrap();
+    seed_staging_bundle(&catalog, &blobs, &cand_multi_ground, &[img0.to_vec(), img1.to_vec()]).await;
 
     let req_multi_ground = Request::builder()
         .uri("/api/curate")
@@ -1824,11 +1834,11 @@ async fn test_api_curate_bundle_validation_and_success() {
     assert!(curate_json["curated"]["themes"].is_null());
 
     // Staging should no longer contain cand_unassigned
-    let remaining_staging = storage.list_staging().unwrap();
+    let remaining_staging = catalog.list_candidates(&CandidateFilter::default()).await.unwrap();
     assert!(remaining_staging.iter().all(|c| c.id != "cand_unassigned"));
 
     // Curated theme should have cand_unassigned with multiple layers
-    let curated_list = storage.list_curated(Some(&Theme::Dungeon)).unwrap();
+    let curated_list = catalog.list_curated(&CuratedFilter { theme: Some(Theme::Dungeon), ..Default::default() }).await.unwrap();
     let curated_item = curated_list
         .iter()
         .find(|m| m.id == "cand_unassigned")
@@ -1840,7 +1850,7 @@ async fn test_api_curate_bundle_validation_and_success() {
 
 #[tokio::test]
 async fn test_api_patch_staging_layers() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     let img0 = b"\x89PNG\r\n\x1a\nlayer0_bytes";
     let img1 = b"\x89PNG\r\n\x1a\nlayer1_bytes";
@@ -1850,9 +1860,7 @@ async fn test_api_patch_staging_layers() {
         CandidateLayer::new(0, "0.png", LayerRole::Unassigned, None, (1200, 800)),
         CandidateLayer::new(1, "1.png", LayerRole::Unassigned, None, (1200, 800)),
     ];
-    storage
-        .save_staging_bundle(None, &cand, &[img0.to_vec(), img1.to_vec()])
-        .unwrap();
+    seed_staging_bundle(&catalog, &blobs, &cand, &[img0.to_vec(), img1.to_vec()]).await;
 
     let patch_payload = json!({
         "layers": [
@@ -1889,7 +1897,7 @@ async fn test_api_patch_staging_layers() {
     assert_eq!(updated.layers[1].role, LayerRole::Roof);
 
     // Verify in staging storage
-    let staged_list = storage.list_staging().unwrap();
+    let staged_list = catalog.list_candidates(&CandidateFilter::default()).await.unwrap();
     let staged_item = staged_list
         .iter()
         .find(|c| c.id == "patch_layers_cand")
@@ -1900,7 +1908,7 @@ async fn test_api_patch_staging_layers() {
 
 #[tokio::test]
 async fn test_api_staging_split_and_regroup() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     let img0 = b"\x89PNG\r\n\x1a\nsplit_ground_bytes";
     let img1 = b"\x89PNG\r\n\x1a\nsplit_upper_bytes";
@@ -1910,9 +1918,7 @@ async fn test_api_staging_split_and_regroup() {
         CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1000, 1000)),
         CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1000, 1000)),
     ];
-    storage
-        .save_staging_bundle(None, &cand, &[img0.to_vec(), img1.to_vec()])
-        .unwrap();
+    seed_staging_bundle(&catalog, &blobs, &cand, &[img0.to_vec(), img1.to_vec()]).await;
 
     // 1. POST /api/staging/{id}/split decomposes bundle into standalone candidates with parent_group_id
     let req_split = Request::builder()
@@ -1938,7 +1944,7 @@ async fn test_api_staging_split_and_regroup() {
     );
 
     // Original bundle should no longer exist in staging
-    let staging = storage.list_staging().unwrap();
+    let staging = catalog.list_candidates(&CandidateFilter::default()).await.unwrap();
     assert!(staging.iter().all(|c| c.id != "split_regroup_cand"));
     assert!(staging.iter().any(|c| c.id == "split_regroup_cand_0"));
     assert!(staging.iter().any(|c| c.id == "split_regroup_cand_1"));
@@ -1959,7 +1965,7 @@ async fn test_api_staging_split_and_regroup() {
     assert_eq!(regrouped.parent_group_id, None);
 
     // Split children should be cleaned up, and regrouped candidate is in staging
-    let final_staging = storage.list_staging().unwrap();
+    let final_staging = catalog.list_candidates(&CandidateFilter::default()).await.unwrap();
     assert!(final_staging.iter().all(|c| c.id != "split_regroup_cand_0"));
     assert!(final_staging.iter().all(|c| c.id != "split_regroup_cand_1"));
     assert!(final_staging.iter().any(|c| c.id == "split_regroup_cand"));
@@ -1967,13 +1973,11 @@ async fn test_api_staging_split_and_regroup() {
 
 #[tokio::test]
 async fn test_suggest_themes_fallback_when_no_api_key() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     // Ensure candidate exists in staging
     let cand = Candidate::with_now("cand_no_key", Source::Manual, "cand_no_key.png", (1024, 1024));
-    storage
-        .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
-        .unwrap();
+    seed_staging(&catalog, &blobs, &cand, b"\x89PNG\r\n\x1a\nfake-image-bytes").await;
 
     // 1. POST /api/staging/{id}/suggest-themes
     let req_post = Request::builder()
@@ -2039,21 +2043,17 @@ async fn test_suggest_themes_with_model_and_caching() {
         axum::serve(listener, mock_app).await.unwrap();
     });
 
-    let dir = tempdir().expect("Failed to create tempdir");
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let (catalog, blobs) = filesystem_ports(&dir);
+    let (catalog, blobs) = in_memory_ports();
     let adapter = Arc::new(OpenRouterAdapter::with_config(
         "test_key",
         format!("http://127.0.0.1:{}", addr.port()),
         2,
     ));
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter);
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_openrouter(adapter);
     let app = create_router(state);
 
     let cand = Candidate::with_now("cand_cached_1", Source::Manual, "cand_cached_1.png", (1024, 1024));
-    storage
-        .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
-        .unwrap();
+    seed_staging(&catalog, &blobs, &cand, b"\x89PNG\r\n\x1a\nfake-image-bytes").await;
 
     // First request: Cache miss -> invokes mock OpenRouter model
     let req1 = Request::builder()
@@ -2126,21 +2126,17 @@ async fn test_suggest_themes_fallback_on_model_error() {
         axum::serve(listener, mock_app).await.unwrap();
     });
 
-    let dir = tempdir().expect("Failed to create tempdir");
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let (catalog, blobs) = filesystem_ports(&dir);
+    let (catalog, blobs) = in_memory_ports();
     let adapter = Arc::new(OpenRouterAdapter::with_config(
         "test_key",
         format!("http://127.0.0.1:{}", addr.port()),
         2,
     ));
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter);
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_openrouter(adapter);
     let app = create_router(state);
 
     let cand = Candidate::with_now("cand_err_1", Source::Manual, "cand_err_1.png", (1024, 1024));
-    storage
-        .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
-        .unwrap();
+    seed_staging(&catalog, &blobs, &cand, b"\x89PNG\r\n\x1a\nfake-image-bytes").await;
 
     let req = Request::builder()
         .uri("/api/staging/cand_err_1/suggest-themes")
@@ -2161,7 +2157,7 @@ async fn test_suggest_themes_fallback_on_model_error() {
 
 #[tokio::test]
 async fn test_suggest_themes_empty_candidate_id_returns_bad_request() {
-    let (app, _storage, _dir) = setup_test_app();
+    let (app, _catalog, _blobs) = setup_test_app();
 
     let req = Request::builder()
         .uri("/api/staging/%20/suggest-themes")
@@ -2175,15 +2171,13 @@ async fn test_suggest_themes_empty_candidate_id_returns_bad_request() {
 
 #[tokio::test]
 async fn test_describe_candidate_fallback_when_no_api_key() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let (catalog, blobs) = filesystem_ports(&dir);
+    let (catalog, blobs) = in_memory_ports();
     let adapter_no_key = Arc::new(OpenRouterAdapter::with_config(
         "",
         "http://127.0.0.1:1".to_string(),
         1,
     ));
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter_no_key);
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_openrouter(adapter_no_key);
     let app = create_router(state);
 
     let cand = Candidate::with_now(
@@ -2194,9 +2188,7 @@ async fn test_describe_candidate_fallback_when_no_api_key() {
     )
     .with_title("Flooded Stone Dungeon Crypt [50x50]");
 
-    storage
-        .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
-        .unwrap();
+    seed_staging(&catalog, &blobs, &cand, b"\x89PNG\r\n\x1a\nfake-image-bytes").await;
 
     // 1. GET /api/staging/{id}/describe with empty body -> 503 SERVICE_UNAVAILABLE
     let req_get = Request::builder()
@@ -2220,11 +2212,9 @@ async fn test_describe_candidate_fallback_when_no_api_key() {
 }
 #[tokio::test]
 async fn test_describe_candidate_passes_candidate_title_and_merged_tags() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let (catalog, blobs) = filesystem_ports(&dir);
+    let (catalog, blobs) = in_memory_ports();
     let generator = Arc::new(CapturingDescriptionGen::default());
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
     state.theme_suggestions_cache.write().await.insert(
         "cand_desc_title".to_string(),
@@ -2239,9 +2229,7 @@ async fn test_describe_candidate_passes_candidate_title_and_merged_tags() {
         (1024, 1024),
     )
     .with_title("Flooded Stone Dungeon Crypt [50x50]");
-    storage
-        .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
-        .unwrap();
+    seed_staging(&catalog, &blobs, &cand, b"\x89PNG\r\n\x1a\nfake-image-bytes").await;
 
     let payload = json!({
         "tags": ["stone", "Crypt", "  "]
@@ -2273,12 +2261,10 @@ async fn test_describe_candidate_passes_candidate_title_and_merged_tags() {
 
 #[tokio::test]
 async fn test_describe_candidate_with_payload_themes_and_tags() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let (catalog, blobs) = filesystem_ports(&dir);
+    let (catalog, blobs) = in_memory_ports();
     let mock_desc = "Dark underground cave with sharp stalagmites and glowing crystals.";
     let mock_gen = Arc::new(MockDescriptionGen(Ok(mock_desc.to_string())));
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone())
         .with_description_service(Arc::new(DescriptionService::new(Some(mock_gen))));
     let app = create_router(state);
 
@@ -2288,9 +2274,7 @@ async fn test_describe_candidate_with_payload_themes_and_tags() {
         "cand_desc_payload.png",
         (1024, 1024),
     );
-    storage
-        .save_staging(&cand, b"\x89PNG\r\n\x1a\nfake-image-bytes")
-        .unwrap();
+    seed_staging(&catalog, &blobs, &cand, b"\x89PNG\r\n\x1a\nfake-image-bytes").await;
 
     let payload = json!({
         "themes": ["cave"],
@@ -2348,18 +2332,16 @@ async fn test_describe_candidate_with_mock_openrouter() {
         axum::serve(listener, mock_app).await.unwrap();
     });
 
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let (catalog, blobs) = filesystem_ports(&dir);
+    let (catalog, blobs) = in_memory_ports();
     let cand = Candidate::with_now("cand_mock_ai", Source::Manual, "cand_mock_ai.png", (1024, 1024));
-    storage.save_staging(&cand, &create_test_png()).unwrap();
+    seed_staging(&catalog, &blobs, &cand, &create_test_png()).await;
 
     let adapter = Arc::new(OpenRouterAdapter::with_config(
         "sk-test-key",
         format!("http://127.0.0.1:{}", addr.port()),
         2,
     ));
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter);
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_openrouter(adapter);
     let app = create_router(state);
 
     let req = Request::builder()
@@ -2425,14 +2407,12 @@ async fn test_describe_candidate_sends_image_mime_for_path_shaped_filename() {
         axum::serve(listener, mock_app).await.unwrap();
     });
 
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let (catalog, blobs) = filesystem_ports(&dir);
-    // An empty filename makes persistence assign the production `<id>/<layer>` shape.
-    let cand = Candidate::with_now("cand_mock_path", Source::Reddit, "", (1024, 1024));
-    storage.save_staging(&cand, &create_test_png()).unwrap();
+    let (catalog, blobs) = in_memory_ports();
+    // Production staging candidates carry the relative `<id>/<layer>` shape as their filename.
+    let cand = Candidate::with_now("cand_mock_path", Source::Reddit, "cand_mock_path/0.png", (1024, 1024));
+    seed_staging(&catalog, &blobs, &cand, &create_test_png()).await;
     assert_eq!(
-        storage.get_staging_candidate("cand_mock_path").unwrap().resolved_filename(),
+        catalog.get_candidate("cand_mock_path").await.unwrap().resolved_filename(),
         "cand_mock_path/0.png",
         "regression precondition: stored filename is a relative path, not a MIME type"
     );
@@ -2442,7 +2422,7 @@ async fn test_describe_candidate_sends_image_mime_for_path_shaped_filename() {
         format!("http://127.0.0.1:{}", addr.port()),
         2,
     ));
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter);
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_openrouter(adapter);
     let app = create_router(state);
 
     let req = Request::builder()
@@ -2485,18 +2465,14 @@ async fn test_describe_candidate_offline_fallback() {
     });
 
     // 1. With no API key: OpenRouter configured with empty key -> strictly 503 SERVICE_UNAVAILABLE
-    let dir1 = tempdir().unwrap();
-    let storage1 = Arc::new(FilesystemStorage::new(dir1.path()));
-    storage1
-        .save_staging(&cand, &create_test_png())
-        .unwrap();
+    let (catalog1, blobs1) = in_memory_ports();
+    seed_staging(&catalog1, &blobs1, &cand, &create_test_png()).await;
     let adapter_no_key = Arc::new(OpenRouterAdapter::with_config(
         "",
         "http://127.0.0.1:1".to_string(),
         1,
     ));
-    let (catalog1, blobs1) = filesystem_ports(&dir1);
-    let state1 = AppState::new(storage1, catalog1, blobs1).with_openrouter(adapter_no_key);
+    let state1 = AppState::new(catalog1, blobs1).with_openrouter(adapter_no_key);
     let app1 = create_router(state1);
 
     let req1 = Request::builder()
@@ -2510,18 +2486,14 @@ async fn test_describe_candidate_offline_fallback() {
     assert_eq!(resp1.status(), StatusCode::SERVICE_UNAVAILABLE); // Strict error propagation (no silent fallback)
 
     // 2. Offline / unreachable OpenRouter endpoint -> strictly 502 BAD_GATEWAY
-    let dir2 = tempdir().unwrap();
-    let storage2 = Arc::new(FilesystemStorage::new(dir2.path()));
-    storage2
-        .save_staging(&cand, &create_test_png())
-        .unwrap();
+    let (catalog2, blobs2) = in_memory_ports();
+    seed_staging(&catalog2, &blobs2, &cand, &create_test_png()).await;
     let adapter_offline = Arc::new(OpenRouterAdapter::with_config(
         "sk-test-key",
         "http://127.0.0.1:1".to_string(),
         1,
     ));
-    let (catalog2, blobs2) = filesystem_ports(&dir2);
-    let state2 = AppState::new(storage2, catalog2, blobs2).with_openrouter(adapter_offline);
+    let state2 = AppState::new(catalog2, blobs2).with_openrouter(adapter_offline);
     let app2 = create_router(state2);
 
     let req2 = Request::builder()
@@ -2537,7 +2509,7 @@ async fn test_describe_candidate_offline_fallback() {
 
 #[tokio::test]
 async fn test_describe_candidate_error_handling() {
-    let (app, _storage, _dir) = setup_test_app();
+    let (app, _catalog, _blobs) = setup_test_app();
 
     // 1. Not found candidate
     let req_not_found = Request::builder()
@@ -2562,7 +2534,7 @@ async fn test_describe_candidate_error_handling() {
 
 #[tokio::test]
 async fn test_curate_candidate_with_explicit_description_persistence() {
-    let (app, storage, dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     let cand = Candidate::with_now(
         "cand_curate_explicit_desc",
@@ -2570,9 +2542,7 @@ async fn test_curate_candidate_with_explicit_description_persistence() {
         "cand_curate_explicit_desc.png",
         (1024, 1024),
     );
-    storage
-        .save_staging(&cand, &create_test_png())
-        .unwrap();
+    seed_staging(&catalog, &blobs, &cand, &create_test_png()).await;
 
     let custom_desc = "Grand limestone throne room with ornate stone pillars, banners, and obsidian dais.";
     let curate_payload = json!({
@@ -2598,19 +2568,12 @@ async fn test_curate_candidate_with_explicit_description_persistence() {
     // 1. Response has curated.description == Some(...)
     assert_eq!(json["curated"]["description"].as_str(), Some(custom_desc));
 
-    // 2. data/curated/<id>/manifest.json contains "description"
-    let manifest_path = dir
-        .path()
-        .join("curated")
-        .join("cand_curate_explicit_desc")
-        .join("manifest.json");
-    assert!(manifest_path.is_file());
-    let manifest_str = std::fs::read_to_string(&manifest_path).unwrap();
-    assert!(manifest_str.contains("\"description\""));
-    assert!(manifest_str.contains("obsidian dais"));
+    // 2. The catalog manifest persists the description.
+    let manifest = catalog.get_curated("cand_curate_explicit_desc").await.unwrap();
+    assert_eq!(manifest.description.as_deref(), Some(custom_desc));
 
     // 3. Primary layer caption matches description
-    let curated_list = storage.list_curated(None).unwrap();
+    let curated_list = catalog.list_curated(&CuratedFilter::default()).await.unwrap();
     assert_eq!(curated_list.len(), 1);
     assert_eq!(curated_list[0].description.as_deref(), Some(custom_desc));
     let ground_layer = curated_list[0]
@@ -2620,36 +2583,26 @@ async fn test_curate_candidate_with_explicit_description_persistence() {
         .expect("Ground layer must be present");
     assert_eq!(ground_layer.caption.as_deref(), Some(custom_desc));
 
-    // 4. <id>_lora1024 companion files do NOT exist on disk, and storage dynamically returns caption with description
-    let lora_txt_path = dir
-        .path()
-        .join("curated")
-        .join("cand_curate_explicit_desc")
-        .join("cand_curate_explicit_desc_lora1024.txt");
-    assert!(!lora_txt_path.exists());
-    let lora_png_path = dir
-        .path()
-        .join("curated")
-        .join("cand_curate_explicit_desc")
-        .join("cand_curate_explicit_desc_lora1024.png");
-    assert!(!lora_png_path.exists());
-    let lora_str = storage
-        .get_curated_lora_caption(&Theme::Dungeon, "cand_curate_explicit_desc")
+    // 4. No `<id>_lora1024` companion blob exists: samples are derived on demand (ADR-0007).
+    let curated_keys = blobs
+        .list_prefix(&BlobKey::CuratedDir {
+            id: Some("cand_curate_explicit_desc".to_string()),
+        })
+        .await
         .unwrap();
-    assert!(lora_str.contains("obsidian dais"));
+    assert!(!curated_keys.iter().any(|key| key.to_path().contains("lora1024")));
+    assert!(!curated_keys.is_empty());
 }
 
 #[tokio::test]
 async fn test_curate_candidate_auto_description_fallback_offline() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let (catalog, blobs) = filesystem_ports(&dir);
+    let (catalog, blobs) = in_memory_ports();
     let adapter = Arc::new(OpenRouterAdapter::with_config(
         "sk-test-key",
         "http://127.0.0.1:1".to_string(),
         1,
     ));
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_openrouter(adapter);
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_openrouter(adapter);
     let app = create_router(state);
     let cand = Candidate::with_now(
         "cand_curate_auto_offline",
@@ -2657,9 +2610,7 @@ async fn test_curate_candidate_auto_description_fallback_offline() {
         "cand_curate_auto_offline.png",
         (1024, 1024),
     );
-    storage
-        .save_staging(&cand, &create_test_png())
-        .unwrap();
+    seed_staging(&catalog, &blobs, &cand, &create_test_png()).await;
 
     let curate_payload = json!({
         "id": "cand_curate_auto_offline",
@@ -2679,26 +2630,18 @@ async fn test_curate_candidate_auto_description_fallback_offline() {
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 
     // Staging candidate must NOT be removed or committed
-    assert_eq!(storage.list_staging().unwrap().len(), 1);
+    assert_eq!(catalog.list_candidates(&CandidateFilter::default()).await.unwrap().len(), 1);
 
-    // Curated manifest must NOT exist on disk
-    let manifest_path = dir
-        .path()
-        .join("curated")
-        .join("cand_curate_auto_offline")
-        .join("manifest.json");
-    assert!(!manifest_path.exists());
+    // Curated manifest must NOT have been committed.
+    assert!(catalog.get_curated("cand_curate_auto_offline").await.is_err());
 }
 
 #[tokio::test]
 async fn test_legacy_manifest_without_description_deserialization() {
-    let (app, _storage, dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
-    // Create a legacy curated bundle directly on disk without a "description" field in manifest.json
+    // A legacy curated manifest carries neither a `description` field nor a schema version.
     let legacy_id = "legacy_cand_no_desc";
-    let bundle_dir = dir.path().join("curated").join(legacy_id);
-    std::fs::create_dir_all(&bundle_dir).unwrap();
-
     let legacy_manifest_json = json!({
         "id": legacy_id,
         "themes": ["dungeon"],
@@ -2716,22 +2659,15 @@ async fn test_legacy_manifest_without_description_deserialization() {
         ]
     });
 
-    let manifest_path = bundle_dir.join("manifest.json");
-    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&legacy_manifest_json).unwrap()).unwrap();
-
-    // Verify direct deserialization succeeds cleanly without error
-    let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
+    let manifest_content = serde_json::to_string(&legacy_manifest_json).unwrap();
     assert!(!manifest_content.contains("\"description\""));
-    let deserialized: Result<CuratedMap, _> = serde_json::from_str(&manifest_content);
-    assert!(deserialized.is_ok(), "Legacy manifest without description field must deserialize cleanly");
-    let map = deserialized.unwrap();
+    let map: CuratedMap = serde_json::from_str(&manifest_content)
+        .expect("legacy manifest without description must deserialize cleanly");
     assert_eq!(map.id, legacy_id);
     assert_eq!(map.description, None);
 
-    // Write dummy image files
     let dummy_image = create_test_png();
-    std::fs::write(bundle_dir.join("0_ground.png"), &dummy_image).unwrap();
-    std::fs::write(bundle_dir.join(format!("{legacy_id}.png")), &dummy_image).unwrap();
+    seed_curated(&catalog, &blobs, &map, &dummy_image).await;
 
     // Call GET /api/curated
     let req = Request::builder()
@@ -2794,15 +2730,13 @@ async fn test_api_post_curate_delegates_to_curation_workflow_and_zero_store_scan
         }
     }
 
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
-    let (catalog, blobs) = filesystem_ports(&dir);
+    let (catalog, blobs) = in_memory_ports();
     let spy = Arc::new(SpyWorkflow {
         curate_calls: AtomicUsize::new(0),
         reject_calls: AtomicUsize::new(0),
     });
 
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone()).with_curation_service(spy.clone());
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_curation_service(spy.clone());
     let app = create_router(state);
 
     let curate_payload = json!({
@@ -2828,8 +2762,8 @@ async fn test_api_post_curate_delegates_to_curation_workflow_and_zero_store_scan
     // Verified: exactly 1 call to CurationWorkflow::curate
     assert_eq!(spy.curate_calls.load(Ordering::SeqCst), 1);
     // Verified: zero calls to storage list_staging / list_curated by route handler
-    assert_eq!(storage.list_staging().unwrap().len(), 0);
-    assert_eq!(storage.list_curated(None).unwrap().len(), 0);
+    assert_eq!(catalog.list_candidates(&CandidateFilter::default()).await.unwrap().len(), 0);
+    assert_eq!(catalog.list_curated(&CuratedFilter::default()).await.unwrap().len(), 0);
 
     // Also verify reject delegates to CurationWorkflow
     let reject_payload = json!({
@@ -2850,15 +2784,15 @@ async fn test_api_post_curate_delegates_to_curation_workflow_and_zero_store_scan
 
 #[tokio::test]
 async fn test_staging_grid_patch_and_curation_persistence() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     // Stage candidate with default grid (64, 0, 0)
     let cand = Candidate::with_now("cand_grid_test", Source::Reddit, "cand_grid_test.png", (2560, 2560));
     let dummy_image = create_test_png();
-    storage.save_staging(&cand, &dummy_image).unwrap();
+    seed_staging(&catalog, &blobs, &cand, &dummy_image).await;
 
     // Verify initial candidate grid in storage
-    let staging_list = storage.list_staging().unwrap();
+    let staging_list = catalog.list_candidates(&CandidateFilter::default()).await.unwrap();
     let initial_cand = staging_list.iter().find(|c| c.id == "cand_grid_test").unwrap();
     assert_eq!(initial_cand.grid.cell_size_px, 64);
     assert_eq!(initial_cand.grid.offset_x, 0);
@@ -2885,7 +2819,7 @@ async fn test_staging_grid_patch_and_curation_persistence() {
     assert_eq!(updated_cand.grid.offset_y, 20);
 
     // Verify persisted on disk for staging candidate
-    let staging_list = storage.list_staging().unwrap();
+    let staging_list = catalog.list_candidates(&CandidateFilter::default()).await.unwrap();
     let persisted_staging = staging_list.iter().find(|c| c.id == "cand_grid_test").unwrap();
     assert_eq!(persisted_staging.grid.cell_size_px, 128);
     assert_eq!(persisted_staging.grid.offset_x, 10);
@@ -2906,7 +2840,7 @@ async fn test_staging_grid_patch_and_curation_persistence() {
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let curated_list = storage.list_curated(None).unwrap();
+    let curated_list = catalog.list_curated(&CuratedFilter::default()).await.unwrap();
     let curated_map = curated_list.iter().find(|m| m.id == "cand_grid_test").unwrap();
     assert_eq!(curated_map.grid.cell_size_px, 128);
     assert_eq!(curated_map.grid.offset_x, 10);
@@ -2936,7 +2870,7 @@ async fn test_staging_grid_patch_and_curation_persistence() {
     assert_eq!(updated_curated.grid.offset_y, 15);
 
     // Verify persisted on disk for curated map
-    let curated_list = storage.list_curated(None).unwrap();
+    let curated_list = catalog.list_curated(&CuratedFilter::default()).await.unwrap();
     let persisted_curated = curated_list.iter().find(|m| m.id == "cand_grid_test").unwrap();
     assert_eq!(persisted_curated.grid.cell_size_px, 70);
     assert_eq!(persisted_curated.grid.offset_x, 5);
@@ -2945,11 +2879,11 @@ async fn test_staging_grid_patch_and_curation_persistence() {
 
 #[tokio::test]
 async fn test_api_curate_gate_rejects_undersized_grid() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     // 1. Single-image candidate with < 16 full cells (e.g. 800x600 px with 64px grid -> 12x9 cells)
     let small_cand = Candidate::with_now("small_map", Source::Reddit, "small.png", (800, 600));
-    storage.save_staging(&small_cand, b"\x89PNG\r\n\x1a\nsmall").unwrap();
+    seed_staging(&catalog, &blobs, &small_cand, b"\x89PNG\r\n\x1a\nsmall").await;
 
     let curate_req = Request::builder()
         .uri("/api/curate")
@@ -2984,7 +2918,7 @@ async fn test_api_curate_gate_rejects_undersized_grid() {
     // 1024x1024 with 64px is normally 16x16, but offset_x = 10 -> (1024-10)/64 = 15 cols
     let mut offset_cand = Candidate::with_now("offset_map", Source::Reddit, "offset.png", (1024, 1024));
     offset_cand.grid = GridConfig::new(64, 10, 0);
-    storage.save_staging(&offset_cand, b"\x89PNG\r\n\x1a\noffset").unwrap();
+    seed_staging(&catalog, &blobs, &offset_cand, b"\x89PNG\r\n\x1a\noffset").await;
 
     let offset_req = Request::builder()
         .uri("/api/curate")
@@ -3012,7 +2946,7 @@ async fn test_api_curate_gate_rejects_undersized_grid() {
 
 #[tokio::test]
 async fn test_api_curate_gate_respects_payload_layer_role_updates() {
-    let (app, storage, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     let img_large = b"\x89PNG\r\n\x1a\nlarge_layer";
     let img_small = b"\x89PNG\r\n\x1a\nsmall_layer";
@@ -3025,9 +2959,7 @@ async fn test_api_curate_gate_respects_payload_layer_role_updates() {
         CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (1024, 1024)),
         CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (800, 600)),
     ];
-    storage
-        .save_staging_bundle(None, &cand, &[img_large.to_vec(), img_small.to_vec()])
-        .unwrap();
+    seed_staging_bundle(&catalog, &blobs, &cand, &[img_large.to_vec(), img_small.to_vec()]).await;
 
     // 1. Curate payload swaps roles: Layer 1 becomes Ground (800x600), Layer 0 becomes UpperFloor.
     // The gate MUST check the updated payload.layers and reject because Ground is 12x9 (<16x16).
@@ -3083,9 +3015,7 @@ async fn test_api_curate_gate_respects_payload_layer_role_updates() {
         CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (800, 600)),
         CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (1024, 1024)),
     ];
-    storage
-        .save_staging_bundle(None, &cand2, &[img_small.to_vec(), img_large.to_vec()])
-        .unwrap();
+    seed_staging_bundle(&catalog, &blobs, &cand2, &[img_small.to_vec(), img_large.to_vec()]).await;
 
     // Curate payload promotes Layer 1 (1024x1024) to Ground, and demotes Layer 0 to UpperFloor.
     // The gate MUST check payload.layers, see Ground is 1024x1024 (16x16 cells), and accept.
@@ -3128,7 +3058,7 @@ async fn test_api_curate_gate_respects_payload_layer_role_updates() {
 
 #[tokio::test]
 async fn test_curate_exactly_16x16_produces_single_map_section_reusing_description() {
-    let (app, storage, dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     // 16x16 cells at 64px = 1024x1024 px
     let img_bytes = create_test_png();
@@ -3138,7 +3068,7 @@ async fn test_curate_exactly_16x16_produces_single_map_section_reusing_descripti
         "cand_16x16_single.png",
         (1024, 1024),
     );
-    storage.save_staging(&cand, &img_bytes).unwrap();
+    seed_staging(&catalog, &blobs, &cand, &img_bytes).await;
 
     let custom_desc = "Compact 16x16 arcane summoning chamber with inscribed runic circle.";
     let curate_payload = json!({
@@ -3171,10 +3101,8 @@ async fn test_curate_exactly_16x16_produces_single_map_section_reusing_descripti
     assert_eq!(sections[0]["row"], 0);
     assert_eq!(sections[0]["description"].as_str(), Some(custom_desc));
 
-    // Verify manifest.json on disk
-    let manifest_path = dir.path().join("curated").join("cand_16x16_single").join("manifest.json");
-    let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
-    let curated_manifest: CuratedMap = serde_json::from_str(&manifest_content).unwrap();
+    // Verify the persisted catalog manifest.
+    let curated_manifest = catalog.get_curated("cand_16x16_single").await.unwrap();
     assert_eq!(curated_manifest.sections.len(), 1);
     assert_eq!(curated_manifest.sections[0].col, 0);
     assert_eq!(curated_manifest.sections[0].row, 0);
@@ -3183,7 +3111,7 @@ async fn test_curate_exactly_16x16_produces_single_map_section_reusing_descripti
 
 #[tokio::test]
 async fn test_curate_multi_section_32x32_produces_all_map_sections() {
-    let (app, storage, dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     // 32x32 cells at 64px = 2048x2048 px
     // Generate valid 2048x2048 PNG image
@@ -3197,7 +3125,7 @@ async fn test_curate_multi_section_32x32_produces_all_map_sections() {
         "cand_32x32_multi.png",
         (2048, 2048),
     );
-    storage.save_staging(&cand, &img_bytes).unwrap();
+    seed_staging(&catalog, &blobs, &cand, &img_bytes).await;
 
     let curate_payload = json!({
         "id": "cand_32x32_multi",
@@ -3237,10 +3165,8 @@ async fn test_curate_multi_section_32x32_produces_all_map_sections() {
         assert!(desc.contains("dungeon") || desc.contains("stone"));
     }
 
-    // Verify manifest.json on disk
-    let manifest_path = dir.path().join("curated").join("cand_32x32_multi").join("manifest.json");
-    let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
-    let curated_manifest: CuratedMap = serde_json::from_str(&manifest_content).unwrap();
+    // Verify the persisted catalog manifest.
+    let curated_manifest = catalog.get_curated("cand_32x32_multi").await.unwrap();
     assert_eq!(curated_manifest.sections.len(), 4);
     assert_eq!(curated_manifest.sections[0].col, 0);
     assert_eq!(curated_manifest.sections[0].row, 0);
@@ -3254,7 +3180,7 @@ async fn test_curate_multi_section_32x32_produces_all_map_sections() {
 
 #[tokio::test]
 async fn test_patch_curated_grid_validates_curation_gate_and_recomputes_sections() {
-    let (app, storage, dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     // 1. Stage and curate a 2048x2048 map with default 64px grid (32x32 cells -> 4 sections)
     let img = image::RgbaImage::new(2048, 2048);
@@ -3267,7 +3193,7 @@ async fn test_patch_curated_grid_validates_curation_gate_and_recomputes_sections
         "map_to_regrid.png",
         (2048, 2048),
     );
-    storage.save_staging(&cand, &img_bytes).unwrap();
+    seed_staging(&catalog, &blobs, &cand, &img_bytes).await;
 
     let curate_payload = json!({
         "id": "map_to_regrid",
@@ -3285,7 +3211,7 @@ async fn test_patch_curated_grid_validates_curation_gate_and_recomputes_sections
     assert_eq!(curate_resp.status(), StatusCode::OK);
 
     // Initial curated map has 4 sections
-    let curated_list = storage.list_curated(None).unwrap();
+    let curated_list = catalog.list_curated(&CuratedFilter::default()).await.unwrap();
     let initial_curated = curated_list.iter().find(|m| m.id == "map_to_regrid").unwrap();
     assert_eq!(initial_curated.sections.len(), 4);
 
@@ -3344,10 +3270,8 @@ async fn test_patch_curated_grid_validates_curation_gate_and_recomputes_sections
         Some("A sprawling subterranean temple complex.")
     );
 
-    // 4. Verify updated manifest.json on disk
-    let manifest_path = dir.path().join("curated").join("map_to_regrid").join("manifest.json");
-    let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
-    let updated_manifest: CuratedMap = serde_json::from_str(&manifest_content).unwrap();
+    // 4. Verify the updated catalog manifest.
+    let updated_manifest = catalog.get_curated("map_to_regrid").await.unwrap();
     assert_eq!(updated_manifest.grid.cell_size_px, 128);
     assert_eq!(updated_manifest.sections.len(), 1);
     assert_eq!(updated_manifest.sections[0].col, 0);

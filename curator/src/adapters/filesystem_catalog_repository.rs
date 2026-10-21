@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::domain::{Candidate, CuratedMap, RejectionReason, RejectionRecord, Theme};
+use crate::domain::{
+    BenchmarkMetadata, Candidate, CuratedMap, RejectionReason, RejectionRecord, Theme,
+};
 use crate::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
 use crate::ports::storage_error::StorageError;
 
@@ -129,6 +131,53 @@ impl FilesystemCatalogRepository {
             }
         }
         Ok(entities)
+    }
+
+    /// One-shot, best-effort migration of pre-#176 generated staging bundles, called once at
+    /// startup from the composition root.
+    ///
+    /// Before #176 the generated-image pipeline persisted the raw [`BenchmarkMetadata`] document
+    /// as the bundle manifest (`staging/{id}/manifest.json`, formerly
+    /// `staging/generated/{id}/manifest.json`), and the retired monolithic storage repository
+    /// mapped it through [`BenchmarkMetadata::to_candidate`] while serving it.
+    /// [`CatalogRepository`] only reads [`Candidate`] manifests, so those bundles would silently
+    /// disappear from `list_candidates` and fail `get_candidate`. Rewriting each such manifest in
+    /// place restores them; the layer blobs are left untouched.
+    ///
+    /// Idempotent (a manifest that already parses as `Candidate` is skipped, so a second run is a
+    /// no-op) and never fatal: manifests that parse as neither shape, and rewrites that fail, are
+    /// logged and skipped so startup always continues. Returns the number of manifests migrated.
+    pub fn migrate_legacy_generated_manifests(&self) -> usize {
+        let entries = match std::fs::read_dir(self.staging_dir()) {
+            Ok(entries) => entries,
+            Err(_) => return 0,
+        };
+        let mut migrated = 0;
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let manifest = entry.path().join("manifest.json");
+            let bytes = match std::fs::read(&manifest) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            if serde_json::from_slice::<Candidate>(&bytes).is_ok() {
+                continue;
+            }
+            let Ok(metadata) = serde_json::from_slice::<BenchmarkMetadata>(&bytes) else {
+                continue;
+            };
+            match Self::write_json(&manifest, &metadata.to_candidate()) {
+                Ok(()) => migrated += 1,
+                Err(err) => tracing::warn!(
+                    path = %manifest.display(),
+                    error = %err,
+                    "Skipping legacy generated staging manifest migration"
+                ),
+            }
+        }
+        migrated
     }
 }
 

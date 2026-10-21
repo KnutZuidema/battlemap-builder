@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tempfile::tempdir;
 use tokio::net::TcpListener;
 use async_trait::async_trait;
 use axum::routing::get;
@@ -9,10 +8,7 @@ use axum::Router;
 use chrono::Utc;
 
 use curator::adapters::reddit::BackoffConfig;
-use curator::adapters::{
-    FilesystemBlobStorage, FilesystemCatalogRepository, InMemoryBlobStorage,
-    InMemoryCatalogRepository,
-};
+use curator::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
 use curator::domain::{
     CuratedMap, GridConfig, HarvestedMedia, LayerRole, ParsedTags, RedditHarvestQuery, RedditPost,
     RejectionReason, Source, Theme,
@@ -51,12 +47,14 @@ impl DescriptionGenerator for ConstantDescriptionGen {
     }
 }
 
-/// Production curation workflow over filesystem-backed ports sharing `dir` with the rest of the
-/// suite, so curation and rejection move the real staging artifacts of the ingested candidates.
-fn curation_service(dir: &tempfile::TempDir) -> CurationService {
+/// Production curation workflow over the same in-memory ports the ingestion service wrote to.
+fn curation_service(
+    catalog: Arc<InMemoryCatalogRepository>,
+    blobs: Arc<InMemoryBlobStorage>,
+) -> CurationService {
     CurationService::new(
-        Arc::new(FilesystemCatalogRepository::new(dir.path())),
-        Arc::new(FilesystemBlobStorage::new(dir.path())),
+        catalog,
+        blobs,
         Arc::new(DescriptionService::new(Some(Arc::new(
             ConstantDescriptionGen,
         )))),
@@ -304,11 +302,9 @@ async fn test_end_to_end_ingestion_download_and_staging_persistence() {
     let png_bytes = create_test_png_sized(512, 512);
     let image_url = spawn_image_server("/image.png", png_bytes.clone()).await;
 
-    // 2. Filesystem-backed ports sharing one root with the production curation store, so step 8
-    //    moves the candidate through the real staging-to-curated implementation
-    let dir = tempdir().unwrap();
-    let catalog = Arc::new(FilesystemCatalogRepository::new(dir.path()));
-    let blobs = Arc::new(FilesystemBlobStorage::new(dir.path()));
+    // 2. In-memory ports shared by ingestion and the production curation store, so step 8 moves
+    //    the candidate through the real staging-to-curated implementation.
+    let (catalog, blobs) = in_memory_ports();
 
     let post = RedditPost {
         id: "harvest_1".into(),
@@ -327,7 +323,7 @@ async fn test_end_to_end_ingestion_download_and_staging_persistence() {
     let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
 
     // 3. Run ingest_posts
-    let summary = service.ingest_posts(&[post.clone()]).await.unwrap();
+    let summary = service.ingest_posts(std::slice::from_ref(&post)).await.unwrap();
     assert_eq!(summary.processed, 1);
     assert_eq!(summary.downloaded, 1);
     assert_eq!(summary.skipped, 0);
@@ -373,13 +369,13 @@ async fn test_end_to_end_ingestion_download_and_staging_persistence() {
     assert_eq!(cand.author.as_deref(), Some("spire_architect"));
 
     // 7. Verify repeated harvest skips previously downloaded candidate
-    let second_summary = service.ingest_posts(&[post.clone()]).await.unwrap();
+    let second_summary = service.ingest_posts(std::slice::from_ref(&post)).await.unwrap();
     assert_eq!(second_summary.processed, 1);
     assert_eq!(second_summary.downloaded, 0);
     assert_eq!(second_summary.skipped, 1);
 
     // 8. Curate through the production workflow: the curated map replaces its staging artifacts
-    let curated = curation_service(&dir)
+    let curated = curation_service(catalog.clone(), blobs.clone())
         .curate(
             "harvest_1",
             vec!["sci-fi".into(), "crystal".into()],
@@ -572,11 +568,9 @@ async fn test_multi_image_gallery_ingestion() {
     let png_bytes = create_test_png();
     let img_url = spawn_image_server("/gallery.png", png_bytes.clone()).await;
 
-    // Filesystem-backed ports sharing one root with the production curation store, so the
-    // rejection below purges the staging bundle through the real implementation
-    let dir = tempdir().unwrap();
-    let catalog = Arc::new(FilesystemCatalogRepository::new(dir.path()));
-    let blobs = Arc::new(FilesystemBlobStorage::new(dir.path()));
+    // In-memory ports shared with the production curation store, so the rejection below purges
+    // the staging bundle through the real implementation.
+    let (catalog, blobs) = in_memory_ports();
 
     let gallery_post = RedditPost {
         id: "gallery_post".into(),
@@ -652,7 +646,7 @@ async fn test_multi_image_gallery_ingestion() {
 
     // Reject gallery_post through the production curation workflow: the staging bundle and its
     // layer blobs are purged, not merely recorded in the rejection log
-    curation_service(&dir)
+    curation_service(catalog.clone(), blobs.clone())
         .reject(
             "gallery_post",
             RejectionReason::BlurryLowRes,
@@ -708,9 +702,8 @@ async fn test_split_post_deduplication() {
     };
 
     // Pre-populate split child "gallery_split_0" into staging
-    let child_sidecar = split_child_post.to_sidecar_metadata(0).unwrap();
-    assert_eq!(child_sidecar.id, "gallery_split_0");
-    let child_candidate = child_sidecar.to_candidate();
+    let child_candidate = split_child_post.to_candidate(0).unwrap();
+    assert_eq!(child_candidate.id, "gallery_split_0");
     catalog.save_candidate(&child_candidate).await.unwrap();
     blobs
         .write_blob(&staging_layer("gallery_split_0", 0), &create_test_png())

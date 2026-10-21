@@ -11,7 +11,18 @@ use crate::ports::storage_error::StorageError;
 /// (`staging/{id}/{index}.png`, flat `curated/{id}/` bundles per ADR-0003, dataset export
 /// archives, the rejection log, and telemetry ledgers), so no caller ever hand-builds a path
 /// string.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+///
+/// # Identity is the canonical path
+///
+/// Equality and hashing are defined by [`BlobKey::to_path`], never by the struct fields: some
+/// variants carry fields that do not influence the resolved path, because
+/// [`Layer::format_filename`] drops `elevation` for the `Roof`/`Variant`/`Ground` roles. A
+/// [`BlobKey::CuratedLayer`] built by a caller (`{index: 1, role: Roof, elevation: Some(1)}`) and
+/// the same address re-derived from the file name by [`BlobStorage::list_prefix`]
+/// (`{index: 1, role: Roof, elevation: None}`) therefore resolve to one file and MUST compare
+/// equal — otherwise a writer would delete the blob it just wrote. This is the same rule
+/// `ExportArchive` was fixed for in #171, applied to the whole enum.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum BlobKey {
     /// Staging bundle layer `staging/{id}/{index}.png`.
     StagingLayer { id: String, index: usize },
@@ -38,6 +49,24 @@ pub enum BlobKey {
     CuratedDir { id: Option<String> },
     /// Directory prefix `telemetry/`, used to enumerate every [`BlobKey::TelemetryLog`].
     TelemetryDir,
+}
+
+/// A `BlobKey` equals another exactly when both resolve to the same canonical path (see the
+/// type-level invariant above), so keys that address one file always agree even when their
+/// fields differ.
+impl PartialEq for BlobKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_path() == other.to_path()
+    }
+}
+
+impl Eq for BlobKey {}
+
+/// Hashes the canonical path, so equal keys always land in the same bucket.
+impl std::hash::Hash for BlobKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.to_path().hash(state);
+    }
 }
 
 impl BlobKey {

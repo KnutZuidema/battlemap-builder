@@ -3,13 +3,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use curator::adapters::{
-    FileCostLedger, FilesystemBlobStorage, FilesystemCatalogRepository, FilesystemStorage,
-    RedditCrawler,
+    FileCostLedger, FilesystemBlobStorage, FilesystemCatalogRepository, RedditCrawler,
 };
 use curator::api::{create_router, AppState};
 use curator::ports::blob_storage::BlobStorage;
 use curator::ports::catalog_repository::CatalogRepository;
-use curator::ports::storage::StorageRepository;
 use tracing_subscriber::EnvFilter;
 
 fn resolve_port() -> u16 {
@@ -97,15 +95,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!(
         data_dir = %data_dir.display(),
-        "Initializing filesystem storage repository..."
+        "Initializing filesystem catalog and blob ports..."
     );
-    let fs_storage = FilesystemStorage::new(&data_dir);
-    if let Err(err) = fs_storage.migrate_legacy_storage() {
-        tracing::warn!(error = %err, "Failed to migrate legacy storage on startup");
+    let catalog_repository = FilesystemCatalogRepository::new(&data_dir);
+    // One-shot repair of pre-#176 generated bundles whose manifest is still a raw
+    // `BenchmarkMetadata` document, so they stay visible to `GET /api/staging` and servable by
+    // `GET /api/image/staging/{id}`. Idempotent and never fatal.
+    let migrated = catalog_repository.migrate_legacy_generated_manifests();
+    if migrated > 0 {
+        tracing::info!(
+            count = migrated,
+            "Migrated legacy generated staging manifests to Candidate manifests"
+        );
     }
-    let storage: Arc<dyn StorageRepository + Send + Sync> = Arc::new(fs_storage);
-    let catalog: Arc<dyn CatalogRepository + Send + Sync> =
-        Arc::new(FilesystemCatalogRepository::new(&data_dir));
+    let catalog: Arc<dyn CatalogRepository + Send + Sync> = Arc::new(catalog_repository);
     let blobs: Arc<dyn BlobStorage + Send + Sync> =
         Arc::new(FilesystemBlobStorage::new(&data_dir));
 
@@ -132,7 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let state = AppState::with_all(storage, Arc::new(crawler), cost_tracker, catalog, blobs);
+    let state = AppState::with_all(Arc::new(crawler), cost_tracker, catalog, blobs);
     let app = create_router(state);
 
     tracing::info!(

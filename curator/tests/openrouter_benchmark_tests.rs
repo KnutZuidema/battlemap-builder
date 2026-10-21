@@ -10,33 +10,21 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{json, Value};
-use tempfile::TempDir;
 use tokio::net::TcpListener;
 
 use curator::adapters::{
-    FilesystemStorage, InMemoryBlobStorage, InMemoryCatalogRepository, OpenRouterAdapter,
+    InMemoryBlobStorage, InMemoryCatalogRepository, OpenRouterAdapter,
 };
 use curator::domain::{
-    BenchmarkArchetype, BenchmarkMetadata, GenerationRequest, ModelApiType,
+    BenchmarkArchetype, GenerationRequest, ModelApiType,
     ALL_BENCHMARK_MODELS, MODEL_GEMINI_31_FLASH, MODEL_GEMINI_31_FLASH_LITE, MODEL_MUSE,
     MODEL_SEEDREAM_50_FLASH,
 };
-use curator::ports::blob_storage::BlobStorage;
-use curator::ports::catalog_repository::CatalogRepository;
+use curator::domain::{Candidate, Source};
+use curator::ports::blob_storage::{BlobKey, BlobStorage};
+use curator::ports::catalog_repository::{CatalogRepository, CandidateFilter};
 use curator::ports::model_engine::{ModelEngine, ModelEngineError};
-use curator::ports::storage::StorageRepository;
 use curator::services::BenchmarkService;
-
-/// Fresh in-memory catalog and blob ports for reference resolution under test.
-fn reference_ports() -> (
-    Arc<dyn CatalogRepository + Send + Sync>,
-    Arc<dyn BlobStorage + Send + Sync>,
-) {
-    (
-        Arc::new(InMemoryCatalogRepository::new()),
-        Arc::new(InMemoryBlobStorage::new()),
-    )
-}
 
 const TEST_PNG_BASE64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
@@ -296,10 +284,9 @@ async fn test_benchmark_persistence_to_staging_generated() {
         2,
     ));
 
-    let temp_dir = TempDir::new().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
-    let (catalog, blobs) = reference_ports();
-    let service = BenchmarkService::new(adapter, storage.clone(), catalog, blobs);
+    let catalog = Arc::new(InMemoryCatalogRepository::new());
+    let blobs = Arc::new(InMemoryBlobStorage::new());
+    let service = BenchmarkService::new(adapter, catalog.clone(), blobs.clone());
 
     // Run single benchmark with persistence
     let bench_result = service
@@ -307,48 +294,38 @@ async fn test_benchmark_persistence_to_staging_generated() {
         .await
         .expect("benchmark execution and persistence succeeds");
 
-    let generated_dir = temp_dir.path().join("staging").join("generated");
-    let bundle_dir = generated_dir.join(&bench_result.metadata.id);
-    let png_path = if bundle_dir.join("0.png").is_file() {
-        bundle_dir.join("0.png")
-    } else {
-        generated_dir.join(format!("{}.png", bench_result.metadata.id))
-    };
-    let json_path = if bundle_dir.join("manifest.json").is_file() {
-        bundle_dir.join("manifest.json")
-    } else {
-        generated_dir.join(format!("{}.json", bench_result.metadata.id))
-    };
+    let image = blobs
+        .read_blob(&BlobKey::StagingLayer {
+            id: bench_result.metadata.id.clone(),
+            index: 0,
+        })
+        .await
+        .expect("generated layer blob exists");
+    assert_eq!(image, bench_result.image_bytes);
 
-    assert!(png_path.is_file(), "PNG output exists in data/staging/generated");
-    assert!(json_path.is_file(), "JSON metadata exists in data/staging/generated");
-    // Read companion JSON and verify fields match specifications
-    let json_str = std::fs::read_to_string(&json_path).expect("read metadata json");
-    let meta: BenchmarkMetadata = serde_json::from_str(&json_str).expect("parsed benchmark metadata");
-
-    assert_eq!(meta.id, bench_result.metadata.id);
-    assert_eq!(meta.model, MODEL_GEMINI_31_FLASH);
-    assert_eq!(meta.prompt_name, "Stone Crypt");
+    // The persisted manifest is a real `Candidate`, preserving the benchmark provenance.
+    let staged = catalog
+        .get_candidate(&bench_result.metadata.id)
+        .await
+        .expect("generated output is discoverable as a candidate");
+    assert_eq!(staged.id, bench_result.metadata.id);
+    assert_eq!(staged.source, Source::Generated);
+    assert_eq!(staged.author.as_deref(), Some(MODEL_GEMINI_31_FLASH));
+    let expected_title = format!("Stone Crypt: {MODEL_GEMINI_31_FLASH}");
     assert_eq!(
-        meta.prompt_text,
-        "Flat 2D stone dungeon crypt, central sarcophagus, poché masonry walls, iron torches, gridless."
+        staged.title.as_deref(),
+        Some(expected_title.as_str()),
+        "benchmark title carries the prompt name and model"
     );
-    assert_eq!(meta.prompt_tokens, Some(120));
-    assert_eq!(meta.completion_tokens, Some(480));
-    assert_eq!(meta.cost_usd, 0.035);
-    assert!(meta.latency_ms > 0);
+    assert_eq!(staged.layers.len(), 1);
+    assert_eq!(staged.layers[0].filename, "0.png");
 
-    // Verify storage list_staging discovers it as Candidate with Source::Generated
-    let staged = storage.list_staging().expect("list staging succeeds");
-    assert_eq!(staged.len(), 1);
-    assert_eq!(staged[0].id, bench_result.metadata.id);
-    assert_eq!(staged[0].source, curator::domain::Source::Generated);
-
-    // Verify storage get_staging_image retrieves the bytes
-    let image_bytes = storage
-        .get_staging_image(&bench_result.metadata.id)
-        .expect("retrieved staged image bytes");
-    assert_eq!(image_bytes, bench_result.image_bytes);
+    let candidates: Vec<Candidate> = catalog
+        .list_candidates(&CandidateFilter::default())
+        .await
+        .expect("list staging succeeds");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].id, bench_result.metadata.id);
 }
 
 #[tokio::test]
@@ -360,10 +337,9 @@ async fn test_benchmark_suite_execution_and_persistence() {
         2,
     ));
 
-    let temp_dir = TempDir::new().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
-    let (catalog, blobs) = reference_ports();
-    let service = BenchmarkService::new(adapter, storage.clone(), catalog, blobs);
+    let catalog = Arc::new(InMemoryCatalogRepository::new());
+    let blobs = Arc::new(InMemoryBlobStorage::new());
+    let service = BenchmarkService::new(adapter, catalog.clone(), blobs.clone());
 
     let models = vec![MODEL_GEMINI_31_FLASH.to_string(), MODEL_MUSE.to_string()];
     let archetypes = [
@@ -379,24 +355,22 @@ async fn test_benchmark_suite_execution_and_persistence() {
     // 2 models * 2 archetypes = 4 generated benchmarks
     assert_eq!(results.len(), 4);
 
-    let generated_dir = temp_dir.path().join("staging").join("generated");
     for res in &results {
-        let bundle_dir = generated_dir.join(&res.metadata.id);
-        let png = if bundle_dir.join("0.png").is_file() {
-            bundle_dir.join("0.png")
-        } else {
-            generated_dir.join(format!("{}.png", res.metadata.id))
-        };
-        let json = if bundle_dir.join("manifest.json").is_file() {
-            bundle_dir.join("manifest.json")
-        } else {
-            generated_dir.join(format!("{}.json", res.metadata.id))
-        };
-        assert!(png.is_file());
-        assert!(json.is_file());
+        let image = blobs
+            .read_blob(&BlobKey::StagingLayer {
+                id: res.metadata.id.clone(),
+                index: 0,
+            })
+            .await
+            .expect("generated layer blob exists");
+        assert_eq!(image, res.image_bytes);
+        assert!(catalog.get_candidate(&res.metadata.id).await.is_ok());
     }
 
-    let staged = storage.list_staging().expect("list staging succeeds");
+    let staged = catalog
+        .list_candidates(&CandidateFilter::default())
+        .await
+        .expect("list staging succeeds");
     assert_eq!(staged.len(), 4);
 }
 

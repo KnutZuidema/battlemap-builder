@@ -5,16 +5,17 @@ use axum::{
     body::{to_bytes, Body},
     http::{header, Request, StatusCode},
 };
-use tempfile::tempdir;
 use tower::ServiceExt;
 use zip::ZipArchive;
 
-use curator::adapters::{FilesystemStorage, InMemoryBlobStorage, InMemoryCatalogRepository};
+use curator::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
 use curator::api::{create_router, AppState};
 use curator::domain::{Candidate, CuratedMap, CuratedLayer, GridConfig, LayerRole, MapSection, Source, Theme};
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::CatalogRepository;
-use curator::ports::storage::StorageRepository;
+use curator::services::curation::{CurationService, CurationWorkflow};
+use curator::services::description::DescriptionService;
+use curator::services::DatasetExportService;
 use image::GenericImageView;
 
 /// Fresh in-memory catalog and blob ports: these tests exercise the dataset routes.
@@ -28,23 +29,16 @@ fn in_memory_ports() -> (
     )
 }
 
-/// Router plus the filesystem repository and the in-memory catalog/blob ports it is paired with.
-///
-/// The dataset routes were cut over to the ports, so a test targeting them seeds the ports; the
-/// filesystem repository keeps serving the routes that still read `state.storage`.
+/// Router plus the in-memory catalog/blob ports it serves every route from.
 fn setup_test_app() -> (
     axum::Router,
-    Arc<FilesystemStorage>,
     Arc<dyn CatalogRepository + Send + Sync>,
     Arc<dyn BlobStorage + Send + Sync>,
-    tempfile::TempDir,
 ) {
-    let dir = tempdir().expect("Failed to create tempdir");
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone());
+    let state = AppState::new(catalog.clone(), blobs.clone());
     let router = create_router(state);
-    (router, storage, catalog, blobs, dir)
+    (router, catalog, blobs)
 }
 
 /// Blob key of a curated map's `Ground` layer, resolved exactly like the dataset export service.
@@ -70,9 +64,9 @@ fn curated_ground_key(map: &CuratedMap) -> BlobKey {
     }
 }
 
-/// Seeds a curated map into the ports the cut-over dataset routes read: the catalog entry with
-/// the implicit Ground layer [`FilesystemStorage::save_curated`] synthesizes, plus the Ground
-/// layer blob under the key both the export and the readiness audit resolve.
+/// Seeds a curated map into the ports the dataset routes read: the catalog entry with the
+/// implicit Ground layer, plus the Ground layer blob under the key both the export and the
+/// readiness audit resolve.
 async fn seed_curated_ports(
     catalog: &Arc<dyn CatalogRepository + Send + Sync>,
     blobs: &Arc<dyn BlobStorage + Send + Sync>,
@@ -109,7 +103,7 @@ fn create_test_png(width: u32, height: u32) -> Vec<u8> {
 
 #[tokio::test]
 async fn test_api_curated_listing_with_and_without_theme_filtering() {
-    let (app, storage, ..) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
     let png_bytes = create_test_png(64, 64);
 
     // Save curated maps in different themes
@@ -138,10 +132,10 @@ async fn test_api_curated_listing_with_and_without_theme_filtering() {
         (1024, 1024),
     );
 
-    storage.save_curated(&map_dungeon1, &png_bytes).unwrap();
-    storage.save_curated(&map_dungeon2, &png_bytes).unwrap();
-    storage.save_curated(&map_cave, &png_bytes).unwrap();
-    storage.save_curated(&map_wilderness, &png_bytes).unwrap();
+    seed_curated_ports(&catalog, &blobs, &map_dungeon1, &png_bytes).await;
+    seed_curated_ports(&catalog, &blobs, &map_dungeon2, &png_bytes).await;
+    seed_curated_ports(&catalog, &blobs, &map_cave, &png_bytes).await;
+    seed_curated_ports(&catalog, &blobs, &map_wilderness, &png_bytes).await;
 
     // 1. GET /api/curated without theme query returns all 4 maps
     let req_all = Request::builder()
@@ -218,10 +212,9 @@ async fn test_api_curated_listing_with_and_without_theme_filtering() {
     assert_eq!(resp_invalid.status(), StatusCode::BAD_REQUEST);
 }
 
-#[test]
-fn test_storage_export_lora_dataset_paired_png_and_txt() {
-    let dir = tempdir().expect("Failed to create tempdir");
-    let storage = FilesystemStorage::new(dir.path());
+#[tokio::test]
+async fn test_storage_export_lora_dataset_paired_png_and_txt() {
+    let (catalog, blobs) = in_memory_ports();
     // 1024x1024 matches the maps' declared dimensions and default 64px grid so the exact
     // 16x16 Grid Cell section box resolves.
     let png_bytes = create_test_png(1024, 1024);
@@ -239,11 +232,12 @@ fn test_storage_export_lora_dataset_paired_png_and_txt() {
         (1024, 1024),
     );
 
-    storage.save_curated(&map1, &png_bytes).unwrap();
-    storage.save_curated(&map2, &png_bytes).unwrap();
+    seed_curated_ports(&catalog, &blobs, &map1, &png_bytes).await;
+    seed_curated_ports(&catalog, &blobs, &map2, &png_bytes).await;
 
     // Export all themes
-    let zip_bytes = storage.export_lora_dataset(None).unwrap();
+    let export = DatasetExportService::new(catalog, blobs);
+    let zip_bytes = export.export_lora_dataset(None).await.unwrap();
     assert!(!zip_bytes.is_empty());
 
     let mut archive = ZipArchive::new(Cursor::new(&zip_bytes)).unwrap();
@@ -269,7 +263,7 @@ fn test_storage_export_lora_dataset_paired_png_and_txt() {
     assert!(caption_content.contains("dungeon"));
 
     // Verify filtered export for Theme::Dungeon only
-    let dungeon_zip = storage.export_lora_dataset(Some(&Theme::Dungeon)).unwrap();
+    let dungeon_zip = export.export_lora_dataset(Some(&Theme::Dungeon)).await.unwrap();
     let mut dungeon_archive = ZipArchive::new(Cursor::new(&dungeon_zip)).unwrap();
     assert_eq!(dungeon_archive.len(), 2);
 
@@ -283,7 +277,7 @@ fn test_storage_export_lora_dataset_paired_png_and_txt() {
 
 #[tokio::test]
 async fn test_api_dataset_export_headers_and_stream() {
-    let (app, _storage, catalog, blobs, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
     // 1024x1024 matches the map's declared dimensions and default 64px grid so the exact
     // 16x16 Grid Cell section box resolves.
     let png_bytes = create_test_png(1024, 1024);
@@ -326,10 +320,13 @@ async fn test_api_dataset_export_headers_and_stream() {
 
 #[tokio::test]
 async fn test_empty_theme_export_handling() {
-    let (app, storage, ..) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
-    // 1. Direct adapter call on empty storage
-    let empty_zip = storage.export_lora_dataset(Some(&Theme::SciFi)).unwrap();
+    // 1. Direct service call on empty storage
+    let empty_zip = DatasetExportService::new(catalog, blobs)
+        .export_lora_dataset(Some(&Theme::SciFi))
+        .await
+        .unwrap();
     assert!(!empty_zip.is_empty(), "Empty ZIP must contain valid EOCD bytes");
 
     let archive = ZipArchive::new(Cursor::new(&empty_zip)).unwrap();
@@ -361,7 +358,7 @@ async fn test_empty_theme_export_handling() {
 
 #[tokio::test]
 async fn test_curation_does_not_write_lora_files_to_disk() {
-    let (_app, storage, _, _, dir) = setup_test_app();
+    let (catalog, blobs) = in_memory_ports();
     let png_bytes = create_test_png(1024, 1024);
 
     let cand = Candidate::with_now(
@@ -371,40 +368,51 @@ async fn test_curation_does_not_write_lora_files_to_disk() {
         (1024, 1024),
     )
     .with_title("Clean Crypt Without Disk Artifacts");
-    storage.save_staging(&cand, &png_bytes).unwrap();
+    catalog.save_candidate(&cand).await.unwrap();
+    blobs
+        .write_blob(
+            &BlobKey::StagingLayer {
+                id: "clean_bundle_map".to_string(),
+                index: 0,
+            },
+            &png_bytes,
+        )
+        .await
+        .unwrap();
 
-    let curated = CuratedMap::with_now(
-        "clean_bundle_map",
-        Theme::Dungeon,
-        vec!["crypt".into(), "clean".into()],
-        (1024, 1024),
-    )
-    .with_description("A clean crypt bundle");
+    let service = CurationService::new(
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(DescriptionService::new(None)),
+    );
+    service
+        .curate(
+            "clean_bundle_map",
+            vec!["crypt".into(), "clean".into()],
+            None,
+            Some("A clean crypt bundle".to_string()),
+        )
+        .await
+        .expect("curate staging candidate");
 
-    storage.curate_staging(&curated).unwrap();
+    assert!(catalog.get_curated("clean_bundle_map").await.is_ok());
+    assert!(catalog.get_candidate("clean_bundle_map").await.is_err());
 
-    let bundle_dir = dir.path().join("curated").join("clean_bundle_map");
-    assert!(bundle_dir.is_dir());
-    assert!(bundle_dir.join("manifest.json").is_file());
-    assert!(bundle_dir.join("0_ground.png").is_file());
-
-    // Assert NO _lora1024 files on disk
-    assert!(!bundle_dir.join("clean_bundle_map_lora1024.png").exists());
-    assert!(!bundle_dir.join("clean_bundle_map_lora1024.txt").exists());
-
-    // Bundle directory must contain only manifest.json and layer image files
-    let entries: Vec<_> = std::fs::read_dir(&bundle_dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
-    assert_eq!(entries.len(), 2);
-    assert!(entries.contains(&"manifest.json".to_string()));
-    assert!(entries.contains(&"0_ground.png".to_string()));
+    // The curated bundle holds exactly its Ground layer blob: no LoRA companion artifacts exist.
+    let keys = blobs
+        .list_prefix(&BlobKey::CuratedDir {
+            id: Some("clean_bundle_map".to_string()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(keys.len(), 1);
+    assert!(keys[0].to_path().ends_with("0_ground.png"));
+    assert!(!keys.iter().any(|key| key.to_path().contains("lora1024")));
 }
 
 #[tokio::test]
 async fn test_multisection_map_export_produces_four_distinct_pairs_with_per_section_descriptions() {
-    let (app, _storage, catalog, blobs, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
     let png_bytes = create_test_png(2048, 2048);
 
     let sections = vec![
@@ -488,7 +496,7 @@ async fn test_multisection_map_export_produces_four_distinct_pairs_with_per_sect
 
 #[tokio::test]
 async fn test_post_export_selected_multisection_and_custom_grid() {
-    let (app, _storage, catalog, blobs, _dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
     let png_bytes = create_test_png(2048, 2048);
 
     let multi_map = CuratedMap::with_now(

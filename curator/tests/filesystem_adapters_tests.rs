@@ -7,10 +7,12 @@ use curator::adapters::filesystem_blob_storage::FilesystemBlobStorage;
 use curator::adapters::filesystem_catalog_repository::FilesystemCatalogRepository;
 use curator::adapters::filesystem_storage::FilesystemStorage;
 use curator::domain::{
-    Candidate, CuratedMap, LayerRole, RejectionReason, RejectionRecord, Source, Theme,
+    BenchmarkMetadata, Candidate, CuratedMap, LayerRole, RejectionReason, RejectionRecord, Source,
+    Theme,
 };
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
+use curator::ports::storage::StorageRepository;
 use curator::ports::storage_error::StorageError;
 use tempfile::tempdir;
 
@@ -70,6 +72,24 @@ fn snapshot_dir(root: &Path) -> Vec<(String, Vec<u8>)> {
 
 fn candidate_manifest(id: &str, source: Source) -> Vec<u8> {
     serde_json::to_string_pretty(&candidate(id, source, None))
+        .unwrap()
+        .into_bytes()
+}
+
+/// The raw `BenchmarkMetadata` manifest that the legacy `save_staging_generated` writer drops at
+/// `staging/generated/{id}/manifest.json` (it is NOT a `Candidate` document).
+fn benchmark_manifest(id: &str) -> Vec<u8> {
+    let metadata = BenchmarkMetadata::new(
+        id,
+        "openai/dall-e-3",
+        "cavern",
+        "A moody cavern battlemap",
+        Some(120),
+        Some(1024),
+        1500,
+        0.04,
+    );
+    serde_json::to_string_pretty(&metadata)
         .unwrap()
         .into_bytes()
 }
@@ -551,7 +571,7 @@ async fn startup_migration_flattens_legacy_staging_bundles_for_dedup() {
     write_file(&legacy_generated.join("0.png"), b"legacy-generated-layer");
     write_file(
         &legacy_generated.join("manifest.json"),
-        &candidate_manifest("gen_crypt", Source::Generated),
+        &benchmark_manifest("gen_crypt"),
     );
 
     // The constructor runs the startup migration; run it again to prove it is safe on every boot.
@@ -578,16 +598,27 @@ async fn startup_migration_flattens_legacy_staging_bundles_for_dedup() {
         b"legacy-generated-layer"
     );
 
-    // Deduplication reads the flat catalog, so the migrated candidates are visible to it.
+    // The monolith still resolves both flattened bundles: `parse_candidate_json` parses a
+    // `Candidate` document directly and falls back to `BenchmarkMetadata::to_candidate()` for the
+    // raw benchmark manifest that the legacy `save_staging_generated` writer left behind.
+    let monolith = FilesystemStorage::new(dir.path());
+    let staged_ids = candidate_ids(monolith.list_staging().expect("list staging succeeds"));
+    assert!(staged_ids.contains(&"legacy_crypt".to_string()));
+    assert!(staged_ids.contains(&"gen_crypt".to_string()));
+
+    // The strict catalog deserializes `Candidate` manifests only, so the raw `BenchmarkMetadata`
+    // manifest now at `staging/gen_crypt/manifest.json` is deliberately NOT listed. #176 replaces
+    // the generated-candidate writer with `catalog.save_candidate` + `blobs.write_blob`, and legacy
+    // manifest awareness must not leak into this long-lived adapter.
     let catalog = FilesystemCatalogRepository::new(dir.path());
     assert_eq!(
         catalog.get_candidate("legacy_crypt").await.unwrap().id,
         "legacy_crypt"
     );
-    assert_eq!(
-        catalog.get_candidate("gen_crypt").await.unwrap().id,
-        "gen_crypt"
-    );
+    assert!(matches!(
+        catalog.get_candidate("gen_crypt").await,
+        Err(StorageError::InvalidData(_))
+    ));
     assert_eq!(
         candidate_ids(
             catalog
@@ -595,7 +626,7 @@ async fn startup_migration_flattens_legacy_staging_bundles_for_dedup() {
                 .await
                 .unwrap()
         ),
-        vec!["gen_crypt".to_string(), "legacy_crypt".to_string()]
+        vec!["legacy_crypt".to_string()]
     );
 }
 

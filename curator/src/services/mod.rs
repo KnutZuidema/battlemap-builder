@@ -3,6 +3,7 @@ pub mod description;
 pub mod benchmark;
 pub mod dataset_export;
 pub mod ingestion;
+pub mod library;
 pub mod reference_provider;
 pub mod sections;
 pub mod storage_maintenance;
@@ -13,6 +14,7 @@ pub use curation::*;
 pub use benchmark::*;
 pub use dataset_export::DatasetExportService;
 pub use storage_maintenance::StorageMaintenanceService;
+pub use library::LibraryService;
 pub use ingestion::{
     candidate_id_for_post, IngestionError, IngestionOutcome, IngestionProgress, IngestionSummary,
     RedditIngestionService, SkipReason,

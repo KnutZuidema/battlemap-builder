@@ -4,10 +4,9 @@ use axum::{
     http::{Request, StatusCode},
 };
 use serde_json::Value;
-use tempfile::tempdir;
 use tower::ServiceExt;
 
-use curator::adapters::{FilesystemStorage, InMemoryBlobStorage, InMemoryCatalogRepository};
+use curator::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
 use curator::api::{create_router, AppState};
 use curator::domain::{
     BenchmarkMetadata, Candidate, CuratedLayer, CuratedMap, LayerRole, PurgeStagingResult,
@@ -15,7 +14,7 @@ use curator::domain::{
 };
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::{CandidateFilter, CatalogRepository};
-use curator::ports::storage::StorageRepository;
+use curator::services::StorageMaintenanceService;
 
 /// Fresh in-memory catalog and blob ports: these tests exercise the storage management routes.
 fn in_memory_ports() -> (
@@ -28,23 +27,16 @@ fn in_memory_ports() -> (
     )
 }
 
-/// Router plus the filesystem repository and the in-memory catalog/blob ports it is paired with.
-///
-/// The storage maintenance routes were cut over to the ports, so a test targeting them seeds the
-/// ports; the filesystem repository keeps serving the routes that still read `state.storage`.
+/// Router plus the in-memory catalog/blob ports it serves every route from.
 fn setup_test_app() -> (
     axum::Router,
-    Arc<FilesystemStorage>,
     Arc<dyn CatalogRepository + Send + Sync>,
     Arc<dyn BlobStorage + Send + Sync>,
-    tempfile::TempDir,
 ) {
-    let dir = tempdir().expect("Failed to create tempdir");
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(storage.clone(), catalog.clone(), blobs.clone());
+    let state = AppState::new(catalog.clone(), blobs.clone());
     let router = create_router(state);
-    (router, storage, catalog, blobs, dir)
+    (router, catalog, blobs)
 }
 
 /// Blob key of a curated map's `Ground` layer, resolved exactly like the storage maintenance
@@ -71,9 +63,8 @@ fn curated_ground_key(map: &CuratedMap) -> BlobKey {
     }
 }
 
-/// Seeds a curated map into the ports the cut-over storage routes read: the catalog entry with
-/// the implicit Ground layer [`FilesystemStorage::save_curated`] synthesizes, plus the Ground
-/// layer blob the curated byte accounting sums.
+/// Seeds a curated map into the ports the storage routes read: the catalog entry with the
+/// implicit Ground layer, plus the Ground layer blob the curated byte accounting sums.
 async fn seed_curated_ports(
     catalog: &Arc<dyn CatalogRepository + Send + Sync>,
     blobs: &Arc<dyn BlobStorage + Send + Sync>,
@@ -100,6 +91,29 @@ async fn seed_curated_ports(
         .expect("write curated Ground layer blob");
 }
 
+/// Seeds a staging candidate and its single layer blob into the ports.
+async fn seed_staging(
+    catalog: &Arc<dyn CatalogRepository + Send + Sync>,
+    blobs: &Arc<dyn BlobStorage + Send + Sync>,
+    candidate: &Candidate,
+    png: &[u8],
+) {
+    catalog
+        .save_candidate(candidate)
+        .await
+        .expect("save staging candidate");
+    blobs
+        .write_blob(
+            &BlobKey::StagingLayer {
+                id: candidate.id.clone(),
+                index: 0,
+            },
+            png,
+        )
+        .await
+        .expect("write staging layer blob");
+}
+
 fn create_test_png(width: u32, height: u32) -> Vec<u8> {
     let img = image::RgbImage::new(width, height);
     let mut bytes = Vec::new();
@@ -112,12 +126,12 @@ fn create_test_png(width: u32, height: u32) -> Vec<u8> {
     bytes
 }
 
-#[test]
-fn test_get_storage_stats_empty() {
-    let dir = tempdir().expect("tempdir");
-    let storage = FilesystemStorage::new(dir.path());
+#[tokio::test]
+async fn test_get_storage_stats_empty() {
+    let (catalog, blobs) = in_memory_ports();
+    let maintenance = StorageMaintenanceService::new(catalog, blobs);
 
-    let stats: StorageStats = storage.get_storage_stats().expect("stats succeeds");
+    let stats: StorageStats = maintenance.storage_stats().await.expect("stats succeeds");
 
     assert_eq!(stats.staging.bytes, 0);
     assert_eq!(stats.staging.file_count, 0);
@@ -150,12 +164,11 @@ fn test_get_storage_stats_empty() {
     assert_eq!(stats.total_files, 0);
 }
 
-#[test]
-fn test_get_storage_stats_populated() {
-    let dir = tempdir().expect("tempdir");
-    let storage = FilesystemStorage::new(dir.path());
+#[tokio::test]
+async fn test_get_storage_stats_populated() {
+    let (catalog, blobs) = in_memory_ports();
 
-    // 1. Populate staging/reddit
+    // 1. Populate staging with three candidates, one layer blob each.
     let reddit_meta = RedditSidecarMetadata {
         id: "reddit_post_1".to_string(),
         source: Source::Reddit,
@@ -167,11 +180,8 @@ fn test_get_storage_stats_populated() {
         created_at: chrono::Utc::now(),
     };
     let reddit_bytes = b"\x89PNG\r\n\x1a\nreddit-image-data-payload";
-    storage
-        .save_staging_reddit(&reddit_meta, reddit_bytes)
-        .expect("save reddit");
+    seed_staging(&catalog, &blobs, &reddit_meta.to_candidate(), reddit_bytes).await;
 
-    // 2. Populate staging/generated
     let benchmark_meta = BenchmarkMetadata::new(
         "gen_bench_1",
         "openai/dall-e-3",
@@ -183,23 +193,13 @@ fn test_get_storage_stats_populated() {
         0.04,
     );
     let gen_bytes = b"\x89PNG\r\n\x1a\ngenerated-image-data-payload";
-    storage
-        .save_staging_generated(&benchmark_meta, gen_bytes)
-        .expect("save generated");
+    seed_staging(&catalog, &blobs, &benchmark_meta.to_candidate(), gen_bytes).await;
 
-    // 3. Populate direct staging root
-    let root_cand = Candidate::with_now(
-        "root_cand_1",
-        Source::Manual,
-        "root.png",
-        (2048, 2048),
-    );
+    let root_cand = Candidate::with_now("root_cand_1", Source::Manual, "root.png", (2048, 2048));
     let root_bytes = b"\x89PNG\r\n\x1a\nroot-candidate-data-payload";
-    storage
-        .save_staging(&root_cand, root_bytes)
-        .expect("save root staging");
+    seed_staging(&catalog, &blobs, &root_cand, root_bytes).await;
 
-    // 4. Populate curated themes: Dungeon & Wilderness
+    // 2. Populate curated themes: Dungeon & Wilderness.
     let dungeon_map = CuratedMap::with_now(
         "dungeon_map_1",
         Theme::Dungeon,
@@ -207,9 +207,7 @@ fn test_get_storage_stats_populated() {
         (1920, 1080),
     );
     let dungeon_bytes = b"\x89PNG\r\n\x1a\ncurated-dungeon-map-bytes";
-    storage
-        .save_curated(&dungeon_map, dungeon_bytes)
-        .expect("save curated dungeon");
+    seed_curated_ports(&catalog, &blobs, &dungeon_map, dungeon_bytes).await;
 
     let wilderness_map = CuratedMap::with_now(
         "wilderness_map_1",
@@ -218,42 +216,51 @@ fn test_get_storage_stats_populated() {
         (2048, 2048),
     );
     let wilderness_bytes = b"\x89PNG\r\n\x1a\ncurated-wilderness-map-bytes";
-    storage
-        .save_curated(&wilderness_map, wilderness_bytes)
-        .expect("save curated wilderness");
+    seed_curated_ports(&catalog, &blobs, &wilderness_map, wilderness_bytes).await;
 
-    // 5. Populate rejections.json
-    storage
-        .reject_candidate(
+    // 3. Populate the rejection log: the catalog holds the records, the log blob the bytes.
+    let rejections_payload = br#"{"records":[]}"#;
+    catalog
+        .log_rejection(
             "bad_candidate_1",
             RejectionReason::GridBurnedIn,
             Some("Burned in 50px grid"),
         )
+        .await
         .expect("reject candidate");
-    storage
-        .reject_candidate(
+    catalog
+        .log_rejection(
             "bad_candidate_2",
             RejectionReason::BlurryLowRes,
             Some("Only 300x300"),
         )
+        .await
         .expect("reject candidate");
+    blobs
+        .write_blob(&BlobKey::RejectionLog, rejections_payload)
+        .await
+        .expect("write rejection log");
 
-    // 6. Populate telemetry directory
-    let telemetry_dir = dir.path().join("telemetry");
-    std::fs::create_dir_all(&telemetry_dir).expect("telemetry dir");
+    // 4. Populate telemetry.
     let ledger_payload = br#"{"cumulative_spend": 0.08, "generation_count": 2}"#;
-    std::fs::write(telemetry_dir.join("cost_ledger.json"), ledger_payload)
+    blobs
+        .write_blob(
+            &BlobKey::TelemetryLog {
+                name: "cost_ledger.json".to_string(),
+            },
+            ledger_payload,
+        )
+        .await
         .expect("write telemetry");
 
-    // Compute stats
-    let stats = storage.get_storage_stats().expect("get storage stats");
+    let stats = StorageMaintenanceService::new(catalog, blobs)
+        .storage_stats()
+        .await
+        .expect("get storage stats");
 
-    // Validate Staging. `get_storage_stats` runs the startup flatten first, so the fixture's
-    // legacy `staging/{reddit,generated}/{id}/` bundles are now uniform `staging/{id}/` bundles:
-    // the entire footprint lands in the `root` bucket, while the pre-seeded `reddit`/`generated`
-    // buckets remain present (keeping the SPA-facing JSON shape stable) but empty.
+    // Staging is one uniform bundle layout: three layer blobs and no other blob.
     assert!(stats.staging.bytes > 0);
-    assert_eq!(stats.staging.file_count, 6); // 3 candidates, each bundle has 1 png + 1 manifest.json
+    assert_eq!(stats.staging.file_count, 3);
 
     let reddit_stats = stats.staging_breakdown.get("reddit").expect("reddit breakdown");
     assert_eq!(reddit_stats.bytes, 0);
@@ -265,7 +272,7 @@ fn test_get_storage_stats_populated() {
 
     let root_stats = stats.staging_breakdown.get("root").expect("root breakdown");
     assert_eq!(root_stats.bytes, stats.staging.bytes);
-    assert_eq!(root_stats.file_count, 6);
+    assert_eq!(root_stats.file_count, 3);
 
     assert_eq!(
         stats.staging.bytes,
@@ -276,33 +283,30 @@ fn test_get_storage_stats_populated() {
         reddit_stats.file_count + gen_stats.file_count + root_stats.file_count
     );
 
-    // Validate Curated
+    // Curated: two maps, one Ground layer blob each.
     assert!(stats.curated.bytes > 0);
-    assert!(stats.curated.file_count >= 4); // 2 curated maps, each bundle has layer image + manifest.json
+    assert_eq!(stats.curated.file_count, 2);
     let dungeon_theme_stats = stats.curated_by_theme.get(&Theme::Dungeon).expect("dungeon stats");
     assert_eq!(dungeon_theme_stats.map_count, 1);
     assert!(dungeon_theme_stats.bytes > 0);
-    assert!(dungeon_theme_stats.file_count >= 2);
+    assert_eq!(dungeon_theme_stats.file_count, 1);
 
     let wilderness_theme_stats = stats.curated_by_theme.get(&Theme::Wilderness).expect("wilderness stats");
     assert_eq!(wilderness_theme_stats.map_count, 1);
     assert!(wilderness_theme_stats.bytes > 0);
-    assert!(wilderness_theme_stats.file_count >= 2);
+    assert_eq!(wilderness_theme_stats.file_count, 1);
 
     let cave_theme_stats = stats.curated_by_theme.get(&Theme::Cave).expect("cave stats");
     assert_eq!(cave_theme_stats.map_count, 0);
     assert_eq!(cave_theme_stats.bytes, 0);
     assert_eq!(cave_theme_stats.file_count, 0);
 
-    // Validate Rejected
     assert_eq!(stats.rejected.file_count, 2);
-    assert!(stats.rejected.bytes > 0);
+    assert_eq!(stats.rejected.bytes, rejections_payload.len() as u64);
 
-    // Validate Telemetry
     assert_eq!(stats.telemetry.file_count, 1);
     assert_eq!(stats.telemetry.bytes, ledger_payload.len() as u64);
 
-    // Validate Totals
     assert_eq!(
         stats.total_bytes,
         stats.staging.bytes + stats.curated.bytes + stats.rejected.bytes + stats.telemetry.bytes
@@ -313,12 +317,11 @@ fn test_get_storage_stats_populated() {
     );
 }
 
-#[test]
-fn test_purge_staging_resets_staging_and_preserves_curated_rejected_telemetry() {
-    let dir = tempdir().expect("tempdir");
-    let storage = FilesystemStorage::new(dir.path());
+#[tokio::test]
+async fn test_purge_staging_resets_staging_and_preserves_curated_rejected_telemetry() {
+    let (catalog, blobs) = in_memory_ports();
 
-    // 1. Populate staging candidates across subfolders
+    // 1. Populate staging candidates.
     let reddit_meta = RedditSidecarMetadata {
         id: "reddit_purge_1".to_string(),
         source: Source::Reddit,
@@ -329,16 +332,18 @@ fn test_purge_staging_resets_staging_and_preserves_curated_rejected_telemetry() 
         parsed_dimensions: Some((1000, 1000)),
         created_at: chrono::Utc::now(),
     };
-    storage
-        .save_staging_reddit(&reddit_meta, b"reddit-image-data-payload-to-purge")
-        .expect("save reddit");
+    seed_staging(
+        &catalog,
+        &blobs,
+        &reddit_meta.to_candidate(),
+        b"reddit-image-data-payload-to-purge",
+    )
+    .await;
 
     let cand_root = Candidate::with_now("cand_root", Source::Manual, "root.png", (800, 800));
-    storage
-        .save_staging(&cand_root, b"root-image-data-payload-to-purge")
-        .expect("save root");
+    seed_staging(&catalog, &blobs, &cand_root, b"root-image-data-payload-to-purge").await;
 
-    // 2. Populate Curated Map with LoRA companion files
+    // 2. Populate a curated map: only its Ground layer blob may exist.
     let dungeon_map = CuratedMap::with_now(
         "curated_keep_1",
         Theme::Dungeon,
@@ -346,99 +351,119 @@ fn test_purge_staging_resets_staging_and_preserves_curated_rejected_telemetry() 
         (1920, 1080),
     );
     let curated_image_data = create_test_png(200, 200);
-    storage
-        .save_curated(&dungeon_map, &curated_image_data)
-        .expect("save curated");
+    seed_curated_ports(&catalog, &blobs, &dungeon_map, &curated_image_data).await;
+    let curated_keys_before = blobs
+        .list_prefix(&BlobKey::CuratedDir {
+            id: Some("curated_keep_1".to_string()),
+        })
+        .await
+        .expect("list curated blobs");
+    assert!(curated_keys_before
+        .iter()
+        .all(|key| !key.to_path().contains("lora1024")));
+    assert!(curated_keys_before
+        .iter()
+        .any(|key| key.to_path().ends_with("0_ground.png")));
 
-    // Verify curated files exist before purge and companion files are NOT on disk
-    let dungeon_bundle_dir = dir.path().join("curated/curated_keep_1");
-    let lora_png = dungeon_bundle_dir.join("curated_keep_1_lora1024.png");
-    let lora_txt = dungeon_bundle_dir.join("curated_keep_1_lora1024.txt");
-    assert!(!lora_png.exists(), "LoRA companion png should NOT exist on disk");
-    assert!(!lora_txt.exists(), "LoRA companion txt should NOT exist on disk");
-    assert!(dungeon_bundle_dir.join("manifest.json").is_file());
-    assert!(dungeon_bundle_dir.join("0_ground.png").is_file());
-
-    // 3. Populate Rejection Log
-    storage
-        .reject_candidate(
+    // 3. Populate the rejection log.
+    catalog
+        .log_rejection(
             "bad_rejected_keep",
             RejectionReason::BlurryLowRes,
             Some("Visible blur"),
         )
+        .await
         .expect("reject candidate");
-    let rejections_file = dir.path().join("rejected/rejections.json");
-    assert!(rejections_file.is_file(), "rejections.json must exist");
-    let rejections_content_before = std::fs::read_to_string(&rejections_file).expect("read rejections");
+    let rejections_payload = br#"{"records":[{"id":"bad_rejected_keep"}]}"#;
+    blobs
+        .write_blob(&BlobKey::RejectionLog, rejections_payload)
+        .await
+        .expect("write rejection log");
 
-    // 4. Populate Telemetry Ledger
-    let telemetry_file = dir.path().join("telemetry/cost_ledger.json");
-    std::fs::create_dir_all(telemetry_file.parent().unwrap()).expect("create telemetry dir");
+    // 4. Populate telemetry.
+    let telemetry_key = BlobKey::TelemetryLog {
+        name: "cost_ledger.json".to_string(),
+    };
     let ledger_content = br#"{"session_spend": 0.05, "total_spend": 1.25}"#;
-    std::fs::write(&telemetry_file, ledger_content).expect("write cost ledger");
+    blobs
+        .write_blob(&telemetry_key, ledger_content)
+        .await
+        .expect("write cost ledger");
 
-    // Check stats before purge
-    let stats_before = storage.get_storage_stats().expect("stats before");
-    assert!(stats_before.staging.file_count > 0);
+    let maintenance = StorageMaintenanceService::new(catalog.clone(), blobs.clone());
+    let stats_before = maintenance.storage_stats().await.expect("stats before");
+    assert_eq!(stats_before.staging.file_count, 2);
     assert!(stats_before.staging.bytes > 0);
     let expected_purged_files = stats_before.staging.file_count;
     let expected_reclaimed_bytes = stats_before.staging.bytes;
 
-    // Execute PURGE
-    let purge_result: PurgeStagingResult = storage.purge_staging().expect("purge succeeds");
+    // Execute PURGE.
+    let purge_result: PurgeStagingResult = maintenance.purge_staging().await.expect("purge succeeds");
 
     assert_eq!(purge_result.purged_files, expected_purged_files);
     assert_eq!(purge_result.reclaimed_bytes, expected_reclaimed_bytes);
     assert_eq!(purge_result.remaining_staging_files, 0);
 
-    // Verify Staging is completely empty
-    let staging_candidates = storage.list_staging().expect("list staging post-purge");
-    assert_eq!(staging_candidates.len(), 0);
+    assert!(catalog
+        .list_candidates(&CandidateFilter::default())
+        .await
+        .expect("list staging post-purge")
+        .is_empty());
+    assert!(blobs
+        .list_prefix(&BlobKey::StagingDir { id: None })
+        .await
+        .expect("list staging blobs")
+        .is_empty());
 
-    let stats_after = storage.get_storage_stats().expect("stats after");
+    let stats_after = maintenance.storage_stats().await.expect("stats after");
     assert_eq!(stats_after.staging.file_count, 0);
     assert_eq!(stats_after.staging.bytes, 0);
     assert_eq!(stats_after.staging_breakdown.get("root").unwrap().file_count, 0);
     assert_eq!(stats_after.staging_breakdown.get("reddit").unwrap().file_count, 0);
     assert_eq!(stats_after.staging_breakdown.get("generated").unwrap().file_count, 0);
 
-    // Verify Curated maps & companion files remain STRICTLY PRESERVED
-    let curated_retrieved = storage
-        .get_curated_image(&Theme::Dungeon, "curated_keep_1")
-        .expect("curated image still exists");
-    assert_eq!(curated_retrieved, curated_image_data);
-
-    let curated_list = storage.list_curated(Some(&Theme::Dungeon)).expect("list curated");
+    // Curated maps and their blobs remain strictly preserved.
+    let curated_ground = blobs
+        .read_blob(&curated_ground_key(&dungeon_map))
+        .await
+        .expect("curated Ground blob still exists");
+    assert_eq!(curated_ground, curated_image_data);
+    let curated_list = catalog
+        .list_curated(&curator::ports::catalog_repository::CuratedFilter {
+            theme: Some(Theme::Dungeon),
+            ..Default::default()
+        })
+        .await
+        .expect("list curated");
     assert_eq!(curated_list.len(), 1);
     assert_eq!(curated_list[0].id, "curated_keep_1");
-
-    assert!(!lora_png.exists(), "LoRA companion png should NOT exist on disk");
-    assert!(!lora_txt.exists(), "LoRA companion txt should NOT exist on disk");
-    assert!(dungeon_bundle_dir.join("manifest.json").is_file());
-    assert!(dungeon_bundle_dir.join("0_ground.png").is_file());
-
     assert_eq!(stats_after.curated.bytes, stats_before.curated.bytes);
     assert_eq!(stats_after.curated.file_count, stats_before.curated.file_count);
 
-    // Verify Rejection Catalog remains STRICTLY PRESERVED
-    assert!(storage.is_rejected("bad_rejected_keep").expect("is_rejected"));
-    assert!(rejections_file.is_file());
-    let rejections_content_after = std::fs::read_to_string(&rejections_file).expect("read rejections");
-    assert_eq!(rejections_content_before, rejections_content_after);
+    // Rejection catalog and its log blob remain strictly preserved.
+    assert!(catalog
+        .is_rejected("bad_rejected_keep")
+        .await
+        .expect("is_rejected"));
+    assert_eq!(
+        blobs.read_blob(&BlobKey::RejectionLog).await.expect("read rejection log"),
+        rejections_payload
+    );
     assert_eq!(stats_after.rejected.bytes, stats_before.rejected.bytes);
     assert_eq!(stats_after.rejected.file_count, stats_before.rejected.file_count);
 
-    // Verify Telemetry Ledger remains STRICTLY PRESERVED
-    assert!(telemetry_file.is_file());
-    let telemetry_content_after = std::fs::read(&telemetry_file).expect("read telemetry");
-    assert_eq!(telemetry_content_after, ledger_content);
+    // Telemetry remains strictly preserved.
+    assert_eq!(
+        blobs.read_blob(&telemetry_key).await.expect("read telemetry"),
+        ledger_content
+    );
     assert_eq!(stats_after.telemetry.bytes, stats_before.telemetry.bytes);
     assert_eq!(stats_after.telemetry.file_count, stats_before.telemetry.file_count);
 }
 
 #[tokio::test]
 async fn test_api_storage_stats_and_purge_endpoints() {
-    let (app, _storage, catalog, blobs, dir) = setup_test_app();
+    let (app, catalog, blobs) = setup_test_app();
 
     // 1. Initial GET /api/storage/stats should return empty stats
     let req = Request::builder()
@@ -635,10 +660,7 @@ async fn test_api_storage_stats_and_purge_endpoints() {
     assert_eq!(status_json["curated_count"], 1);
 
     // 6. The staging area is drained through the ports the purge acts on: no candidate row and no
-    //    staging blob is left. The drained state is asserted on those ports rather than on
-    //    `GET /api/staging`, which still reads the filesystem repository (cutting that listing over
-    //    is a later issue) while this test seeds only the ports: its filesystem tree is empty either
-    //    way, so asserting the endpoint's empty array would read as stronger than it is.
+    //    staging blob is left.
     assert!(catalog
         .list_candidates(&CandidateFilter::default())
         .await
@@ -692,6 +714,4 @@ async fn test_api_storage_stats_and_purge_endpoints() {
             + (ledger_payload.len() + audit_payload.len()) as u64
     );
     assert_eq!(stats_json["total_files"], 1 + 1 + 2);
-
-    let _ = dir;
 }

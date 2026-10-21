@@ -4,15 +4,13 @@ use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use serde_json::json;
-use tempfile::tempdir;
 
-use curator::ports::StorageRepository;
-use curator::adapters::{FilesystemStorage, InMemoryBlobStorage, InMemoryCatalogRepository};
+use curator::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
 use curator::api::create_router;
 use curator::api::routes::DescribeResponse;
 use curator::api::state::AppState;
 use curator::domain::{Candidate, Source};
-use curator::ports::blob_storage::BlobStorage;
+use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::CatalogRepository;
 use curator::services::description::{
     DescriptionError, DescriptionGenerator, DescriptionService,
@@ -27,6 +25,26 @@ fn in_memory_ports() -> (
         Arc::new(InMemoryCatalogRepository::new()),
         Arc::new(InMemoryBlobStorage::new()),
     )
+}
+
+/// Seeds a staging candidate and its primary layer blob into the ports.
+async fn seed_staging(
+    catalog: &Arc<dyn CatalogRepository + Send + Sync>,
+    blobs: &Arc<dyn BlobStorage + Send + Sync>,
+    candidate: &Candidate,
+    png: &[u8],
+) {
+    catalog.save_candidate(candidate).await.expect("save candidate");
+    blobs
+        .write_blob(
+            &BlobKey::StagingLayer {
+                id: candidate.id.clone(),
+                index: 0,
+            },
+            png,
+        )
+        .await
+        .expect("write staging blob");
 }
 
 /// Mock generator that can be configured to succeed, fail, or return empty text.
@@ -156,8 +174,6 @@ async fn test_description_service_empty_description_yields_error() {
 
 #[tokio::test]
 async fn test_api_staging_describe_strictly_fails_when_unconfigured() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
     let cand = Candidate::with_now(
         "cand_unconfigured_desc",
@@ -165,10 +181,10 @@ async fn test_api_staging_describe_strictly_fails_when_unconfigured() {
         "cand_unconfigured_desc.png",
         (1024, 1024),
     );
-    storage.save_staging(&cand, &create_test_png()).unwrap();
+    seed_staging(&catalog, &blobs, &cand, &create_test_png()).await;
 
     // AppState without OpenRouter / DescriptionService generator
-    let state = AppState::new(storage, catalog, blobs)
+    let state = AppState::new(catalog, blobs)
         .with_description_service(Arc::new(DescriptionService::new(None)));
     let app = create_router(state);
 
@@ -191,8 +207,6 @@ async fn test_api_staging_describe_strictly_fails_when_unconfigured() {
 
 #[tokio::test]
 async fn test_api_staging_describe_strictly_fails_when_upstream_errors() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
     let cand = Candidate::with_now(
         "cand_failing_desc",
@@ -200,13 +214,13 @@ async fn test_api_staging_describe_strictly_fails_when_upstream_errors() {
         "cand_failing_desc.png",
         (1024, 1024),
     );
-    storage.save_staging(&cand, &create_test_png()).unwrap();
+    seed_staging(&catalog, &blobs, &cand, &create_test_png()).await;
 
     let mock_gen = Arc::new(MockDescriptionGenerator::failing(
         DescriptionError::GenerationFailed("rate limit reached".into()),
     ));
     let service = Arc::new(DescriptionService::new(Some(mock_gen)));
-    let state = AppState::new(storage, catalog, blobs).with_description_service(service);
+    let state = AppState::new(catalog, blobs).with_description_service(service);
     let app = create_router(state);
 
     let req = Request::builder()
@@ -226,8 +240,6 @@ async fn test_api_staging_describe_strictly_fails_when_upstream_errors() {
 
 #[tokio::test]
 async fn test_api_staging_describe_succeeds_with_configured_service() {
-    let dir = tempdir().unwrap();
-    let storage = Arc::new(FilesystemStorage::new(dir.path()));
     let (catalog, blobs) = in_memory_ports();
     let cand = Candidate::with_now(
         "cand_success_desc",
@@ -235,13 +247,13 @@ async fn test_api_staging_describe_succeeds_with_configured_service() {
         "cand_success_desc.png",
         (1024, 1024),
     );
-    storage.save_staging(&cand, &create_test_png()).unwrap();
+    seed_staging(&catalog, &blobs, &cand, &create_test_png()).await;
 
     let mock_gen = Arc::new(MockDescriptionGenerator::succeeding(
         "Granite dungeon corridor with barred iron portcullis and damp flagstones.",
     ));
     let service = Arc::new(DescriptionService::new(Some(mock_gen)));
-    let state = AppState::new(storage, catalog, blobs).with_description_service(service);
+    let state = AppState::new(catalog, blobs).with_description_service(service);
     let app = create_router(state);
 
     let req = Request::builder()

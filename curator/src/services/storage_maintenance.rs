@@ -75,8 +75,8 @@ impl StorageMaintenanceService {
         // The rejection log's two numbers are measured independently and mean different things:
         // `bytes` is the log blob's file size (an absent log is zero, not an error) while
         // `file_count` is the number of rejection records the catalog holds. The latter matches the
-        // pre-cut-over `FilesystemStorage::get_storage_stats`, which filled the field with
-        // `read_rejections().len()` and which the operator UI renders as `N records`.
+        // pre-cut-over storage repository's stats implementation, which filled the field with the
+        // rejection record count and which the operator UI renders as `N records`.
         let rejected_bytes = match self.blobs.blob_size(&BlobKey::RejectionLog).await {
             Ok(bytes) => bytes,
             Err(StorageError::NotFound(_)) => 0,

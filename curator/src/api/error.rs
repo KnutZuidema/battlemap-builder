@@ -5,7 +5,7 @@ use axum::{
 };
 use serde_json::json;
 
-use crate::ports::storage::StorageError;
+use crate::ports::storage_error::StorageError;
 
 /// API error types converted into appropriate HTTP status codes and JSON payloads.
 #[derive(Debug)]

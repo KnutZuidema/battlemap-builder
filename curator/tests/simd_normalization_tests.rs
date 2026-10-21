@@ -1,17 +1,54 @@
 //! Integration tests for SIMD 1024x1024 Normalization and Kohya LoRA Captioning (Issue #29).
 
 use std::io::Cursor;
-use tempfile::tempdir;
+use std::sync::Arc;
 
-use curator::adapters::{FilesystemStorage, SimdImageProcessor};
+use async_trait::async_trait;
+use curator::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository, SimdImageProcessor};
 use curator::domain::{
-    Candidate, CandidateLayer, CaptionGenerator, CuratedMap, LayerRole, Source, Theme,
+    Candidate, CandidateLayer, CaptionGenerator, LayerRole, Source, Theme,
     TRIGGER_PHRASE,
 };
-use curator::ports::{
-    ImageProcessor, ResizeStrategy, StorageRepository, LORA_TARGET_SIZE, PADDING_COLOR_RGBA,
-};
-use image::{GenericImageView, ImageFormat, Rgba, RgbaImage};
+use curator::ports::blob_storage::{BlobKey, BlobStorage};
+use curator::ports::catalog_repository::CatalogRepository;
+use curator::ports::{ImageProcessor, ResizeStrategy, LORA_TARGET_SIZE, PADDING_COLOR_RGBA};
+use curator::services::curation::{CurationService, CurationWorkflow};
+use curator::services::description::{DescriptionError, DescriptionGenerator, DescriptionService};
+use image::{ImageFormat, Rgba, RgbaImage};
+
+/// Deterministic description generator so curation never calls a vision model.
+struct FixedDescriptionGen;
+
+#[async_trait]
+impl DescriptionGenerator for FixedDescriptionGen {
+    async fn generate_description(
+        &self,
+        _image_bytes: &[u8],
+        _filename: Option<&str>,
+        _tags: &[String],
+        _title: Option<&str>,
+    ) -> Result<String, DescriptionError> {
+        Ok("A stone crypt with sarcophagus and torches.".to_string())
+    }
+}
+
+fn in_memory_ports() -> (Arc<dyn CatalogRepository>, Arc<dyn BlobStorage>) {
+    (
+        Arc::new(InMemoryCatalogRepository::new()),
+        Arc::new(InMemoryBlobStorage::new()),
+    )
+}
+
+fn curation_service(
+    catalog: Arc<dyn CatalogRepository>,
+    blobs: Arc<dyn BlobStorage>,
+) -> CurationService {
+    CurationService::new(
+        catalog,
+        blobs,
+        Arc::new(DescriptionService::new(Some(Arc::new(FixedDescriptionGen)))),
+    )
+}
 
 /// Helper to create a solid-color test PNG with specified dimensions.
 fn create_colored_png(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
@@ -182,127 +219,108 @@ fn test_caption_generator_format_adherence() {
     assert!(!caption_scifi.contains("gridless, gridless"));
 }
 
-#[test]
-fn test_full_curation_workflow_bundle_lora_files() {
-    let dir = tempdir().unwrap();
-    let storage = FilesystemStorage::new(dir.path());
+#[tokio::test]
+async fn test_full_curation_workflow_bundle_lora_files() {
+    let (catalog, blobs) = in_memory_ports();
 
-    // 1. Create a staged multi-layer bundle with a real image for layer 0
+    // 1. Stage a multi-layer bundle with a real image for layer 0.
     // 1200x1200 spans 18x18 full Grid Cells at the default 64px cell size, so the ground
     // layer is curation-eligible and its first exact 16x16 Grid Cell section resolves.
     let test_png = create_colored_png(1200, 1200, [180, 100, 50, 255]);
-    let candidate = Candidate::with_now(
-        "crypt_bundle_1",
-        Source::Reddit,
-        "0.png",
-        (1200, 1200),
-    )
-    .with_title("Ancient Stone Crypt [30x30] with Sarcophagus and Torches")
-    .with_layers(vec![CandidateLayer::new(
-        0,
-        "0.png",
-        LayerRole::Ground,
-        Some(0),
-        (1200, 1200),
-    )]);
-
-    storage
-        .save_staging_bundle(None, &candidate, &[test_png])
+    let candidate = Candidate::with_now("crypt_bundle_1", Source::Reddit, "0.png", (1200, 1200))
+        .with_title("Ancient Stone Crypt [30x30] with Sarcophagus and Torches")
+        .with_layers(vec![CandidateLayer::new(
+            0,
+            "0.png",
+            LayerRole::Ground,
+            Some(0),
+            (1200, 1200),
+        )]);
+    blobs
+        .write_blob(
+            &BlobKey::StagingLayer {
+                id: "crypt_bundle_1".to_string(),
+                index: 0,
+            },
+            &test_png,
+        )
+        .await
         .unwrap();
+    catalog.save_candidate(&candidate).await.unwrap();
 
-    assert!(storage.is_in_staging("crypt_bundle_1").unwrap());
-    assert!(!storage.is_lora_normalized(&Theme::Dungeon, "crypt_bundle_1").unwrap());
+    let curated = curation_service(catalog.clone(), blobs.clone())
+        .curate(
+            "crypt_bundle_1",
+            vec!["crypt".into(), "stone".into()],
+            None,
+            None,
+        )
+        .await
+        .expect("curate bundle");
 
-    // 2. Curate candidate
-    let curated = CuratedMap::with_now(
-        "crypt_bundle_1",
-        Theme::Dungeon,
-        vec!["crypt".into(), "stone".into()],
-        (1200, 1200),
-    );
+    // 2. Staging is superseded by the curated bundle.
+    assert!(catalog.get_candidate("crypt_bundle_1").await.is_err());
+    assert!(catalog.get_curated("crypt_bundle_1").await.is_ok());
+    assert_eq!(curated.layers.len(), 1);
+    assert_eq!(curated.layers[0].filename, "0_ground.png");
 
-    storage.curate_staging(&curated).unwrap();
+    // 3. No LoRA companion blob is written: ADR-0007 derives samples on demand.
+    let curated_keys = blobs
+        .list_prefix(&BlobKey::CuratedDir {
+            id: Some("crypt_bundle_1".to_string()),
+        })
+        .await
+        .unwrap();
+    assert!(curated_keys.iter().all(|key| !key.to_path().contains("lora1024")));
+    assert!(curated_keys.iter().any(|key| key.to_path().ends_with("0_ground.png")));
 
-    // Staging must be cleaned up
-    assert!(!storage.is_in_staging("crypt_bundle_1").unwrap());
-    assert!(storage.is_curated("crypt_bundle_1").unwrap());
-
-    // 3. Verify LoRA companion files are NOT on disk
-    let bundle_dir = storage.curated_dir().join("crypt_bundle_1");
-    let bundle_lora_png = bundle_dir.join("crypt_bundle_1_lora1024.png");
-    let bundle_lora_txt = bundle_dir.join("crypt_bundle_1_lora1024.txt");
-
-    assert!(!bundle_lora_png.exists(), "bundle_lora_png must NOT exist in bundle dir");
-    assert!(!bundle_lora_txt.exists(), "bundle_lora_txt must NOT exist in bundle dir");
-    assert!(bundle_dir.join("manifest.json").is_file());
-    assert!(bundle_dir.join("0_ground.png").is_file());
-
-    // 4. Verify storage methods
-    assert!(storage.is_lora_normalized(&Theme::Dungeon, "crypt_bundle_1").unwrap());
-
-    let lora_bytes = storage
-        .get_curated_lora_image(&Theme::Dungeon, "crypt_bundle_1")
-        .expect("retrieve lora image");
-    let decoded = image::load_from_memory(&lora_bytes).expect("valid png bytes");
-    assert_eq!(decoded.dimensions(), (1024, 1024));
-
-    let caption = storage
-        .get_curated_lora_caption(&Theme::Dungeon, "crypt_bundle_1")
-        .expect("retrieve lora caption");
-    assert!(caption.starts_with(TRIGGER_PHRASE));
-    assert!(caption.contains("dungeon"));
-    assert!(caption.contains("sarcophagus"));
-    assert!(caption.contains("torches"));
+    let stored = catalog.get_curated("crypt_bundle_1").await.unwrap();
+    assert_eq!(stored.layers[0].role, LayerRole::Ground);
+    assert!(stored
+        .description
+        .as_deref()
+        .is_some_and(|description| description.contains("sarcophagus")));
 }
 
-#[test]
-fn test_full_curation_workflow_flat_candidate_lora_files() {
-    let dir = tempdir().unwrap();
-    let storage = FilesystemStorage::new(dir.path());
+#[tokio::test]
+async fn test_full_curation_workflow_flat_candidate_lora_files() {
+    let (catalog, blobs) = in_memory_ports();
 
-    // 1. Create a flat candidate in staging
+    // 1. Stage a flat (layer-less) candidate.
     // 1200x1200 spans 18x18 full Grid Cells at the default 64px cell size, so the curated
     // map is eligible and its first exact 16x16 Grid Cell section resolves.
     let test_png = create_colored_png(1200, 1200, [50, 120, 200, 255]);
-    let candidate = Candidate::with_now(
-        "tavern_map_42",
-        Source::Reddit,
-        "tavern_map_42.png",
-        (1200, 1200),
-    )
-    .with_title("Cozy Tavern with Hearth Fireplace and Wooden Tables [No Grid]");
-
-    storage.save_staging(&candidate, &test_png).unwrap();
-
-    // 2. Curate candidate
-    let curated = CuratedMap::with_now(
-        "tavern_map_42",
-        Theme::Tavern,
-        vec!["cozy".into()],
-        (1200, 1200),
-    );
-
-    storage.curate_staging(&curated).unwrap();
-
-    // 3. Verify companion files are NOT on disk and storage reports normalized
-    let bundle_dir = storage.curated_dir().join("tavern_map_42");
-    assert!(!bundle_dir.join("tavern_map_42_lora1024.png").exists());
-    assert!(!bundle_dir.join("tavern_map_42_lora1024.txt").exists());
-    assert!(bundle_dir.join("manifest.json").is_file());
-    assert!(bundle_dir.join("0_ground.png").is_file());
-    assert!(storage.is_lora_normalized(&Theme::Tavern, "tavern_map_42").unwrap());
-
-    let lora_png = storage
-        .get_curated_lora_image(&Theme::Tavern, "tavern_map_42")
+    let candidate =
+        Candidate::with_now("tavern_map_42", Source::Reddit, "tavern_map_42.png", (1200, 1200))
+            .with_title("Cozy Tavern with Hearth Fireplace and Wooden Tables [No Grid]");
+    blobs
+        .write_blob(
+            &BlobKey::StagingLayer {
+                id: "tavern_map_42".to_string(),
+                index: 0,
+            },
+            &test_png,
+        )
+        .await
         .unwrap();
-    let decoded = image::load_from_memory(&lora_png).unwrap();
-    assert_eq!(decoded.dimensions(), (1024, 1024));
+    catalog.save_candidate(&candidate).await.unwrap();
 
-    let lora_txt = storage
-        .get_curated_lora_caption(&Theme::Tavern, "tavern_map_42")
+    let curated = curation_service(catalog.clone(), blobs.clone())
+        .curate("tavern_map_42", vec!["cozy".into()], None, None)
+        .await
+        .expect("curate flat candidate");
+
+    // 2. No LoRA companions exist; the canonical Ground layer carries the sample source.
+    let curated_keys = blobs
+        .list_prefix(&BlobKey::CuratedDir {
+            id: Some("tavern_map_42".to_string()),
+        })
+        .await
         .unwrap();
-    assert!(lora_txt.starts_with(TRIGGER_PHRASE));
-    assert!(lora_txt.contains("tavern"));
-    assert!(lora_txt.contains("fireplace"));
-    assert!(lora_txt.contains("wooden tables"));
+    assert!(curated_keys.iter().all(|key| !key.to_path().contains("lora1024")));
+    assert!(curated_keys
+        .iter()
+        .any(|key| key.to_path().ends_with("0_ground.png")));
+    assert_eq!(curated.layers[0].filename, "0_ground.png");
+    assert_eq!(curated.layers[0].role, LayerRole::Ground);
 }

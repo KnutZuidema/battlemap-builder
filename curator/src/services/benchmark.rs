@@ -1,6 +1,5 @@
 //! Service layer for orchestrating AI model generation benchmarks and persistence.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -16,7 +15,8 @@ use crate::ports::blob_storage::BlobStorage;
 use crate::ports::catalog_repository::CatalogRepository;
 use crate::ports::cost_tracker::{CostTracker, CostTrackerError, GenerationCostRecord};
 use crate::ports::model_engine::{ModelEngine, ModelEngineError};
-use crate::ports::storage::{StorageError, StorageRepository};
+use crate::ports::storage_error::StorageError;
+use crate::services::library::LibraryService;
 use crate::services::reference_provider::{
     ReferenceProvenance, ReferenceProvider, ReferenceProviderError, ReferenceResolution,
 };
@@ -61,7 +61,7 @@ pub struct BenchmarkProgressUpdate {
 #[derive(Clone)]
 pub struct BenchmarkService {
     engine: Arc<dyn ModelEngine + Send + Sync>,
-    storage: Arc<dyn StorageRepository + Send + Sync>,
+    library: LibraryService,
     cost_tracker: Option<Arc<dyn CostTracker + Send + Sync>>,
     reference_provider: ReferenceProvider,
     reference_conditioning_enabled: bool,
@@ -71,14 +71,13 @@ impl BenchmarkService {
     /// Creates a new `BenchmarkService` with model engine and storage repository ports.
     pub fn new(
         engine: Arc<dyn ModelEngine + Send + Sync>,
-        storage: Arc<dyn StorageRepository + Send + Sync>,
         catalog: Arc<dyn CatalogRepository + Send + Sync>,
         blobs: Arc<dyn BlobStorage + Send + Sync>,
     ) -> Self {
-        let reference_provider = ReferenceProvider::new(catalog, blobs);
+        let reference_provider = ReferenceProvider::new(catalog.clone(), blobs.clone());
         Self {
             engine,
-            storage,
+            library: LibraryService::new(catalog, blobs),
             cost_tracker: None,
             reference_provider,
             reference_conditioning_enabled: true,
@@ -88,15 +87,14 @@ impl BenchmarkService {
     /// Creates a new `BenchmarkService` with an attached cost tracker port.
     pub fn with_cost_tracker(
         engine: Arc<dyn ModelEngine + Send + Sync>,
-        storage: Arc<dyn StorageRepository + Send + Sync>,
         cost_tracker: Arc<dyn CostTracker + Send + Sync>,
         catalog: Arc<dyn CatalogRepository + Send + Sync>,
         blobs: Arc<dyn BlobStorage + Send + Sync>,
     ) -> Self {
-        let reference_provider = ReferenceProvider::new(catalog, blobs);
+        let reference_provider = ReferenceProvider::new(catalog.clone(), blobs.clone());
         Self {
             engine,
-            storage,
+            library: LibraryService::new(catalog, blobs),
             cost_tracker: Some(cost_tracker),
             reference_provider,
             reference_conditioning_enabled: true,
@@ -158,9 +156,18 @@ impl BenchmarkService {
         &self.engine
     }
 
-    /// Reference to the underlying storage repository.
-    pub fn storage(&self) -> &Arc<dyn StorageRepository + Send + Sync> {
-        &self.storage
+    /// Reference to the library service persisting generated staging candidates.
+    pub fn library(&self) -> &LibraryService {
+        &self.library
+    }
+
+    /// Persist a generated image as a regular staging candidate (`staging/{id}/0.png` plus a
+    /// [`crate::domain::Candidate`] manifest), so the flat catalog can list and curate it.
+    async fn persist_generated(&self, result: &BenchmarkResult) -> Result<(), BenchmarkServiceError> {
+        self.library
+            .save_generated_candidate(&result.metadata, &result.image_bytes)
+            .await?;
+        Ok(())
     }
 
     /// Reference to the optional cost tracker.
@@ -219,8 +226,8 @@ impl BenchmarkService {
         Ok(result)
     }
 
-    /// Run a benchmark for a single archetype and model, persisting raster output to
-    /// `data/staging/generated/{id}.png` and metadata sidecar to `data/staging/generated/{id}.json`.
+    /// Run a benchmark for a single archetype and model, persisting the raster output as a
+    /// regular staging candidate at `staging/{id}/0.png` plus its `Candidate` manifest.
     #[instrument(skip(self), fields(model = %model, archetype = %archetype.name()))]
     pub async fn run_and_persist(
         &self,
@@ -234,11 +241,10 @@ impl BenchmarkService {
             archetype = %result.metadata.prompt_name,
             cost_usd = result.metadata.cost_usd,
             latency_ms = result.metadata.latency_ms,
-            "Persisting generated benchmark output to staging/generated/..."
+            "Persisting generated benchmark output to its staging bundle..."
         );
 
-        self.storage
-            .save_staging_generated(&result.metadata, &result.image_bytes)?;
+        self.persist_generated(&result).await?;
 
         Ok(result)
     }
@@ -266,8 +272,7 @@ impl BenchmarkService {
 
         for result in &results {
             self.record_cost(&result.metadata).await?;
-            self.storage
-                .save_staging_generated(&result.metadata, &result.image_bytes)?;
+            self.persist_generated(result).await?;
         }
 
         info!(
@@ -279,7 +284,7 @@ impl BenchmarkService {
     }
 
     /// Run the full standard benchmark suite (all 4 models x 6 archetypes = 24 combinations)
-    /// and persist all raster images and JSON sidecars to `data/staging/generated/`.
+    /// and persist every raster image as a regular staging candidate.
     pub async fn run_full_benchmark_and_persist(
         &self,
     ) -> Result<Vec<BenchmarkResult>, BenchmarkServiceError> {
@@ -335,8 +340,7 @@ impl BenchmarkService {
             self.record_cost(&bench_result.metadata).await?;
             bench_result
         };
-        self.storage
-            .save_staging_generated(&result.metadata, &result.image_bytes)?;
+        self.persist_generated(&result).await?;
 
         Ok(result)
     }
@@ -524,35 +528,12 @@ impl BenchmarkService {
     }
 }
 
-/// Helper function to atomically persist a generated raster output and companion JSON metadata
-/// directly to a staging directory:
-/// - `{staging_dir}/generated/{id}.png`
-/// - `{staging_dir}/generated/{id}.json`
-pub fn persist_generated_output(
-    staging_dir: &Path,
-    metadata: &BenchmarkMetadata,
-    image_bytes: &[u8],
-) -> Result<(), BenchmarkServiceError> {
-    let generated_dir = staging_dir.join("generated");
-    std::fs::create_dir_all(&generated_dir)?;
-
-    let image_path = generated_dir.join(format!("{}.png", metadata.id));
-    let sidecar_path = generated_dir.join(format!("{}.json", metadata.id));
-
-    std::fs::write(&image_path, image_bytes)?;
-
-    let json = serde_json::to_string_pretty(metadata)?;
-    std::fs::write(&sidecar_path, json.as_bytes())?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
     use crate::domain::GenerationResponse;
-    use crate::ports::storage::StorageRepository;
+    use crate::ports::blob_storage::BlobKey;
     use async_trait::async_trait;
     use tempfile::TempDir;
 
@@ -699,52 +680,45 @@ mod tests {
 
     #[tokio::test]
     async fn test_benchmark_service_run_and_persist() {
-        use crate::adapters::FilesystemStorage;
-
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let engine = Arc::new(MockEngine::new());
-        let (catalog, blobs) = reference_ports();
-        let service = BenchmarkService::new(engine, storage.clone(), catalog, blobs);
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let blobs = Arc::new(InMemoryBlobStorage::new());
+        let service = BenchmarkService::new(engine, catalog.clone(), blobs.clone());
 
         let result = service
             .run_and_persist("meta/muse-image", &BenchmarkArchetype::StoneCrypt)
             .await
             .expect("run and persist succeeds");
 
-        let generated_dir = temp_dir.path().join("staging").join("generated");
-        let bundle_dir = generated_dir.join(&result.metadata.id);
-        let png_file = if bundle_dir.join("0.png").is_file() {
-            bundle_dir.join("0.png")
-        } else {
-            generated_dir.join(format!("{}.png", result.metadata.id))
-        };
-        let json_file = if bundle_dir.join("manifest.json").is_file() {
-            bundle_dir.join("manifest.json")
-        } else {
-            generated_dir.join(format!("{}.json", result.metadata.id))
-        };
+        let image = blobs
+            .read_blob(&BlobKey::StagingLayer {
+                id: result.metadata.id.clone(),
+                index: 0,
+            })
+            .await
+            .expect("generated layer blob was written");
+        assert_eq!(image, result.image_bytes);
 
-        assert!(png_file.is_file(), "PNG file was created in staging/generated/");
-        assert!(json_file.is_file(), "JSON file was created in staging/generated/");
-
-        let json_content = std::fs::read_to_string(json_file).unwrap();
-        assert!(json_content.contains("\"model\": \"meta/muse-image\""));
-        assert!(json_content.contains("\"prompt_name\": \"Stone Crypt\""));
-
-        // Verify that list_staging in storage discovers it as a candidate
-        let candidates = storage.list_staging().expect("list staging succeeds");
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].id, result.metadata.id);
-        assert_eq!(candidates[0].source, crate::domain::Source::Generated);
+        let candidate = catalog
+            .get_candidate(&result.metadata.id)
+            .await
+            .expect("generated output is discoverable as a staging candidate");
+        assert_eq!(candidate.source, crate::domain::Source::Generated);
+        assert_eq!(candidate.author.as_deref(), Some("meta/muse-image"));
+        assert_eq!(
+            candidate.title.as_deref(),
+            Some("Stone Crypt: meta/muse-image")
+        );
+        assert_eq!(candidate.layers.len(), 1);
+        assert_eq!(candidate.layers[0].filename, "0.png");
+        assert_eq!(candidate.layers[0].role, crate::domain::LayerRole::Ground);
     }
 
     #[tokio::test]
     async fn test_benchmark_service_with_cost_tracker() {
-        use crate::adapters::{FileCostLedger, FilesystemStorage};
+        use crate::adapters::FileCostLedger;
 
         let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let engine = Arc::new(MockEngine::new());
         let ledger_path = temp_dir.path().join("telemetry").join("cost_ledger.json");
         let cost_tracker: Arc<dyn CostTracker + Send + Sync> =
@@ -752,7 +726,7 @@ mod tests {
 
         let (catalog, blobs) = reference_ports();
         let service =
-            BenchmarkService::with_cost_tracker(engine, storage, cost_tracker.clone(), catalog, blobs);
+            BenchmarkService::with_cost_tracker(engine, cost_tracker.clone(), catalog, blobs);
 
         let result = service
             .run_and_persist("meta/muse-image", &BenchmarkArchetype::StoneCrypt)
@@ -772,13 +746,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_benchmark_service_run_batch_with_progress() {
-        use crate::adapters::FilesystemStorage;
-
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let engine = Arc::new(MockEngine::new());
-        let (catalog, blobs) = reference_ports();
-        let service = BenchmarkService::new(engine, storage.clone(), catalog, blobs);
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let blobs = Arc::new(InMemoryBlobStorage::new());
+        let service = BenchmarkService::new(engine, catalog.clone(), blobs);
 
         let models = vec!["meta/muse-image".to_string()];
         let items = vec![
@@ -801,19 +772,18 @@ mod tests {
         assert!(updates.iter().any(|u| u.phase == "progress"));
         assert!(updates.iter().any(|u| u.phase == "complete"));
 
-        let candidates = storage.list_staging().expect("list staging succeeds");
+        let candidates = catalog
+            .list_candidates(&crate::ports::catalog_repository::CandidateFilter::default())
+            .await
+            .expect("list staging succeeds");
         assert_eq!(candidates.len(), 2);
     }
 
     #[tokio::test]
     async fn test_benchmark_service_cancellation() {
-        use crate::adapters::FilesystemStorage;
-
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let engine = Arc::new(MockEngine::new());
         let (catalog, blobs) = reference_ports();
-        let service = BenchmarkService::new(engine, storage.clone(), catalog, blobs);
+        let service = BenchmarkService::new(engine, catalog, blobs);
 
         let models = vec!["meta/muse-image".to_string(), "google/gemini-3.1-flash-image".to_string()];
         let items = vec![
@@ -842,14 +812,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_benchmark_service_visual_reference_static_fallback() {
-        use crate::adapters::FilesystemStorage;
         use crate::domain::SYSTEM_INSTRUCTION_GENERATE;
 
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let (engine, captured_requests) = RecordingMockEngine::new();
         let (catalog, blobs) = reference_ports();
-        let service = BenchmarkService::new(Arc::new(engine), storage, catalog, blobs);
+        let service = BenchmarkService::new(Arc::new(engine), catalog, blobs);
 
         let result = service
             .run_archetype("meta/muse-image", &BenchmarkArchetype::StoneCrypt)
@@ -888,13 +855,9 @@ mod tests {
     #[tokio::test]
     async fn test_benchmark_service_visual_reference_curated_prioritization() {
         use chrono::Utc;
-        use crate::adapters::FilesystemStorage;
         use crate::domain::{CuratedMap, LayerRole, Theme};
-        use crate::ports::blob_storage::BlobKey;
         use image::{ImageBuffer, Rgb};
 
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let (catalog, blobs) = reference_ports();
 
         // Save a curated map and its ground-layer blob in the Dungeon theme
@@ -927,7 +890,7 @@ mod tests {
             .unwrap();
 
         let (engine, captured_requests) = RecordingMockEngine::new();
-        let service = BenchmarkService::new(Arc::new(engine), storage, catalog, blobs);
+        let service = BenchmarkService::new(Arc::new(engine), catalog, blobs);
 
         let result = service
             .run_archetype("meta/muse-image", &BenchmarkArchetype::StoneCrypt)
@@ -957,13 +920,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_benchmark_service_custom_prompt_keyword_detection() {
-        use crate::adapters::FilesystemStorage;
-
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let (engine, captured_requests) = RecordingMockEngine::new();
         let (catalog, blobs) = reference_ports();
-        let service = BenchmarkService::new(Arc::new(engine), storage, catalog, blobs);
+        let service = BenchmarkService::new(Arc::new(engine), catalog, blobs);
 
         // 1. Custom prompt matching Tavern
         let tavern_item = BatchBenchmarkItem::new(
@@ -1001,13 +960,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_benchmark_service_reference_conditioning_toggle() {
-        use crate::adapters::FilesystemStorage;
-
-        let temp_dir = TempDir::new().unwrap();
-        let storage = Arc::new(FilesystemStorage::new(temp_dir.path()));
         let (engine, captured_requests) = RecordingMockEngine::new();
         let (catalog, blobs) = reference_ports();
-        let service = BenchmarkService::new(Arc::new(engine), storage, catalog, blobs)
+        let service = BenchmarkService::new(Arc::new(engine), catalog, blobs)
             .with_reference_conditioning(false);
 
         assert!(!service.reference_conditioning_enabled());

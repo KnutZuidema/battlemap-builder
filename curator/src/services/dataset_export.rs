@@ -6,7 +6,7 @@
 //! bytes read through [`BlobStorage`].
 //!
 //! The sample planning, cropping and readiness classification are pure functions shared with the
-//! legacy [`crate::adapters::FilesystemStorage`] repository, which resolves Ground layer bytes
+//! legacy monolithic storage repository, which resolved Ground layer bytes
 //! from the filesystem instead of the blob port. Both callers therefore ship identical archives.
 
 use std::collections::HashSet;

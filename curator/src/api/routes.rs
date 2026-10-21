@@ -20,12 +20,12 @@ use crate::domain::{
     normalize_tags, CuratedMap, CuratedMapUpdate, CustomPrompt, DatasetReadiness, LayerRole,
     PurgeStagingResult, RedditHarvestRequest, RejectionReason, StorageStats, Theme,
 };
-use crate::ports::storage::StorageError;
 use crate::ports::catalog_repository::{CandidateFilter, CuratedFilter};
 use crate::ports::cost_tracker::CostStats;
 use crate::services::sections::{describe_map_sections, SectionDescriptionContext};
 use crate::services::{
-    DatasetExportService, IngestionSummary, RedditIngestionService, StorageMaintenanceService,
+    DatasetExportService, IngestionSummary, LibraryService, RedditIngestionService,
+    StorageMaintenanceService,
 };
 use crate::adapters::clean_tags;
 pub use crate::services::description::detect_image_mime;
@@ -65,7 +65,10 @@ pub async fn get_status(State(state): State<AppState>) -> Result<Json<StatusResp
 pub async fn get_staging(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Candidate>>, ApiError> {
-    let candidates = state.storage.list_staging()?;
+    let candidates = state
+        .catalog
+        .list_candidates(&CandidateFilter::default())
+        .await?;
     Ok(Json(candidates))
 }
 
@@ -91,7 +94,11 @@ pub async fn get_curated(
     Query(query): Query<ThemeQuery>,
 ) -> Result<Json<Vec<CuratedMap>>, ApiError> {
     let theme = parse_optional_theme(query.theme.as_deref())?;
-    let maps = state.storage.list_curated(theme.as_ref())?;
+    let filter = CuratedFilter {
+        theme,
+        ..CuratedFilter::default()
+    };
+    let maps = state.catalog.list_curated(&filter).await?;
     Ok(Json(maps))
 }
 
@@ -105,12 +112,10 @@ pub async fn patch_curated(
         return Err(ApiError::bad_request("Curated map ID cannot be empty"));
     }
 
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+
     if let Some(new_grid) = update.grid {
-        let maps = state.storage.list_curated(None)?;
-        let current_map = maps
-            .into_iter()
-            .find(|m| m.id == id)
-            .ok_or_else(|| ApiError::not_found(format!("Curated map '{id}' not found")))?;
+        let current_map = state.catalog.get_curated(&id).await?;
 
         let ground_layer = current_map
             .layers
@@ -118,21 +123,12 @@ pub async fn patch_curated(
             .find(|l| l.role == LayerRole::Ground)
             .or_else(|| current_map.layers.first())
             .cloned();
-        let ground_layer_idx = ground_layer.as_ref().map(|l| l.index).unwrap_or(0);
 
-        let ground_bytes = state
-            .storage
-            .get_curated_layer_image_by_id(&id, ground_layer_idx)
-            .or_else(|_| state.storage.get_curated_image_by_id(&id))
-            .or_else(|_| {
-                for theme in Theme::ALL {
-                    if let Ok(b) = state.storage.get_curated_image(theme, &id) {
-                        return Ok(b);
-                    }
-                }
-                Err(StorageError::NotFound(format!("Ground layer image for '{id}' not found")))
-            })
-            .ok();
+        let ground_bytes = library
+            .curated_ground_image(&id)
+            .await
+            .ok()
+            .map(|(bytes, _)| bytes);
 
         let ground_img = ground_bytes.as_ref().and_then(|b| image::load_from_memory(b).ok());
         let (mut ground_w, mut ground_h) = ground_layer
@@ -198,7 +194,7 @@ pub async fn patch_curated(
         );
     }
 
-    let updated = state.storage.update_curated(&id, update)?;
+    let updated = library.update_curated(&id, update).await?;
     tracing::info!(id = %id, "Updated curated map metadata and layer assignments");
     Ok(Json(updated))
 }
@@ -229,7 +225,10 @@ pub async fn delete_curated(
     };
 
     let reason = req.reason.unwrap_or(RejectionReason::Unspecified);
-    state.storage.delete_curated(&id, reason, req.notes.as_deref())?;
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+    library
+        .delete_curated(&id, reason, req.notes.as_deref())
+        .await?;
 
     tracing::info!(id = %id, reason = ?reason, "Deleted curated map");
     Ok(StatusCode::NO_CONTENT)
@@ -250,9 +249,10 @@ pub async fn post_curated_bulk_delete(
     Json(payload): Json<BulkDeleteCuratedRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let reason = payload.reason.unwrap_or(RejectionReason::Unspecified);
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
     let mut count = 0;
     for id in &payload.ids {
-        if state.storage.delete_curated(id, reason, None).is_ok() {
+        if library.delete_curated(id, reason, None).await.is_ok() {
             count += 1;
         }
     }
@@ -343,29 +343,13 @@ pub async fn get_staging_image(
         return Err(ApiError::bad_request("Candidate ID cannot be empty"));
     }
 
-    let bytes = state.storage.get_staging_image(&id)?;
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+    let (bytes, filename) = library.staging_image(&id).await?;
+    let mime = detect_image_mime(&bytes, Some(&filename));
 
-    // Try finding candidate in staging to inspect filename for MIME
-    let filename = state
-        .storage
-        .list_staging()
-        .ok()
-        .and_then(|list| list.into_iter().find(|c| c.id == id).map(|c| c.filename));
-
-    let mime = detect_image_mime(&bytes, filename.as_deref());
-
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, HeaderValue::from_static(mime))
-        .header(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("public, max-age=3600"),
-        )
-        .body(Body::from(bytes))
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    Ok(response)
+    Ok(image_response(bytes, mime))
 }
+
 /// GET /api/image/staging/{id}/{layer_index} - Stream binary image bytes for a specific layer of a staged candidate.
 pub async fn get_staging_layer_image(
     State(state): State<AppState>,
@@ -375,31 +359,16 @@ pub async fn get_staging_layer_image(
         return Err(ApiError::bad_request("Candidate ID cannot be empty"));
     }
 
-    let bytes = state.storage.get_staging_layer_image(&id, layer_index)?;
-
-    // Inspect candidate layers to detect MIME type from layer filename
-    let filename = state
-        .storage
-        .list_staging()
-        .ok()
-        .and_then(|list| {
-            list.into_iter().find(|c| c.id == id).and_then(|c| {
-                let layers = c.resolved_layers();
-                layers
-                    .into_iter()
-                    .find(|l| l.index == layer_index)
-                    .map(|l| l.filename)
-                    .or(if layer_index == 0 {
-                        Some(c.filename)
-                    } else {
-                        None
-                    })
-            })
-        });
-
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+    let (bytes, filename) = library.staging_layer_image(&id, layer_index).await?;
     let mime = detect_image_mime(&bytes, filename.as_deref());
 
-    let response = Response::builder()
+    Ok(image_response(bytes, mime))
+}
+
+/// Builds an image response with the same MIME type and cache headers every image route emits.
+fn image_response(bytes: Vec<u8>, mime: &'static str) -> Response {
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, HeaderValue::from_static(mime))
         .header(
@@ -407,41 +376,10 @@ pub async fn get_staging_layer_image(
             HeaderValue::from_static("public, max-age=3600"),
         )
         .body(Body::from(bytes))
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    Ok(response)
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-
-/// GET /api/image/curated/{theme}/{id} - Stream binary image for a curated map.
-pub async fn get_curated_image(
-    State(state): State<AppState>,
-    Path((theme_str, id)): Path<(String, String)>,
-) -> Result<Response, ApiError> {
-    if id.trim().is_empty() {
-        return Err(ApiError::bad_request("Map ID cannot be empty"));
-    }
-
-    let theme: Theme = theme_str
-        .parse::<Theme>()
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
-
-    let bytes = state.storage.get_curated_image(&theme, &id)?;
-    let mime = detect_image_mime(&bytes, None);
-
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, HeaderValue::from_static(mime))
-        .header(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("public, max-age=3600"),
-        )
-        .body(Body::from(bytes))
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    Ok(response)
-}
-/// GET /api/image/curated/{id} - Stream binary image for a curated map by ID directly.
+/// GET /api/image/curated/{id} - Stream the Ground layer image of a curated map by ID.
 pub async fn get_curated_image_by_id(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -450,76 +388,14 @@ pub async fn get_curated_image_by_id(
         return Err(ApiError::bad_request("Map ID cannot be empty"));
     }
 
-    let bytes = match state.storage.get_curated_image_by_id(&id) {
-        Ok(b) => b,
-        Err(_) => {
-            let mut fallback = None;
-            for theme in Theme::ALL {
-                if let Ok(bytes) = state.storage.get_curated_image(theme, &id) {
-                    fallback = Some(bytes);
-                    break;
-                }
-            }
-            fallback.ok_or_else(|| ApiError::not_found(format!("Curated map '{id}' not found")))?
-        }
-    };
-    let mime = detect_image_mime(&bytes, None);
-
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, HeaderValue::from_static(mime))
-        .header(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("public, max-age=3600"),
-        )
-        .body(Body::from(bytes))
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    Ok(response)
-}
-/// GET /api/image/curated/{theme}/{id}/{layer_index} - Stream binary image bytes for a specific layer of a curated map.
-pub async fn get_curated_layer_image(
-    State(state): State<AppState>,
-    Path((theme_str, id, layer_index)): Path<(String, String, usize)>,
-) -> Result<Response, ApiError> {
-    if id.trim().is_empty() {
-        return Err(ApiError::bad_request("Map ID cannot be empty"));
-    }
-
-    let theme: Theme = theme_str
-        .parse::<Theme>()
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
-
-    let bytes = state.storage.get_curated_layer_image(&theme, &id, layer_index)?;
-
-    let filename = state
-        .storage
-        .list_curated(None)
-        .ok()
-        .and_then(|list| {
-            list.into_iter().find(|m| m.id == id).and_then(|m| {
-                m.layers
-                    .into_iter()
-                    .find(|l| l.index == layer_index)
-                    .map(|l| l.filename)
-            })
-        });
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+    let (bytes, filename) = library.curated_ground_image(&id).await?;
     let mime = detect_image_mime(&bytes, filename.as_deref());
 
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, HeaderValue::from_static(mime))
-        .header(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("public, max-age=3600"),
-        )
-        .body(Body::from(bytes))
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    Ok(response)
+    Ok(image_response(bytes, mime))
 }
 
-/// GET /api/image/curated/{id}/{layer_index} - Stream binary image bytes for a specific layer of a curated map directly by ID.
+/// GET /api/image/curated/{id}/{layer_index} - Stream binary image bytes for a specific layer of a curated map.
 pub async fn get_curated_layer_image_by_id(
     State(state): State<AppState>,
     Path((id, layer_index)): Path<(String, usize)>,
@@ -528,64 +404,25 @@ pub async fn get_curated_layer_image_by_id(
         return Err(ApiError::bad_request("Map ID cannot be empty"));
     }
 
-    let bytes = state
-        .storage
-        .get_curated_layer_image_by_id(&id, layer_index)?;
-
-    let filename = state
-        .storage
-        .list_curated(None)
-        .ok()
-        .and_then(|list| {
-            list.into_iter().find(|m| m.id == id).and_then(|m| {
-                m.layers
-                    .into_iter()
-                    .find(|l| l.index == layer_index)
-                    .map(|l| l.filename)
-            })
-        });
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+    let (bytes, filename) = library.curated_layer_image(&id, layer_index).await?;
     let mime = detect_image_mime(&bytes, filename.as_deref());
 
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, HeaderValue::from_static(mime))
-        .header(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("public, max-age=3600"),
-        )
-        .body(Body::from(bytes))
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    Ok(response)
+    Ok(image_response(bytes, mime))
 }
 
-/// Dispatcher for 2-segment curated image routes:
-/// GET /api/image/curated/{id}/{layer_index} or legacy GET /api/image/curated/{theme}/{id}.
+/// Dispatcher for GET /api/image/curated/{id}/{layer_index}: the second segment is always a
+/// layer index now that themes are a filter concept rather than a storage path.
 pub async fn get_curated_image_or_layer(
-    State(state): State<AppState>,
-    Path((first, second)): Path<(String, String)>,
+    state: State<AppState>,
+    Path((id, selector)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    if let Ok(layer_index) = second.parse::<usize>() {
-        match get_curated_layer_image_by_id(
-            State(state.clone()),
-            Path((first.clone(), layer_index)),
-        )
-        .await
-        {
-            Ok(resp) => return Ok(resp),
-            Err(ApiError::NotFound(_)) => {
-                if first.parse::<Theme>().is_ok() {
-                    return get_curated_image(State(state), Path((first, second))).await;
-                }
-                return Err(ApiError::not_found(format!(
-                    "Curated image layer {layer_index} for '{first}' not found"
-                )));
-            }
-            Err(err) => return Err(err),
-        }
-    }
-
-    get_curated_image(State(state), Path((first, second))).await
+    let layer_index = selector.parse::<usize>().map_err(|_| {
+        ApiError::not_found(format!(
+            "Curated image layer '{selector}' for '{id}' not found"
+        ))
+    })?;
+    get_curated_layer_image_by_id(state, Path((id, layer_index))).await
 }
 
 
@@ -685,7 +522,8 @@ pub async fn patch_staging_layers(
         return Err(ApiError::bad_request("Candidate ID cannot be empty"));
     }
 
-    let updated_candidate = state.storage.update_staging_layers(&id, payload.layers)?;
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+    let updated_candidate = library.update_staging_layers(&id, payload.layers).await?;
 
     Ok(Json(updated_candidate))
 }
@@ -699,7 +537,8 @@ pub async fn patch_staging_grid(
         return Err(ApiError::bad_request("Candidate ID cannot be empty"));
     }
 
-    let updated_candidate = state.storage.update_staging_grid(&id, payload)?;
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+    let updated_candidate = library.update_staging_grid(&id, payload).await?;
 
     Ok(Json(updated_candidate))
 }
@@ -713,7 +552,8 @@ pub async fn post_split_staging(
         return Err(ApiError::bad_request("Candidate ID cannot be empty"));
     }
 
-    let split_candidates = state.storage.split_staging_bundle(&id)?;
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+    let split_candidates = library.split_staging_bundle(&id).await?;
 
     Ok(Json(split_candidates))
 }
@@ -727,7 +567,8 @@ pub async fn post_regroup_staging(
         return Err(ApiError::bad_request("Parent ID cannot be empty"));
     }
 
-    let regrouped_candidate = state.storage.regroup_staging_bundle(&parent_id)?;
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+    let regrouped_candidate = library.regroup_staging_bundle(&parent_id).await?;
 
     Ok(Json(regrouped_candidate))
 }
@@ -760,8 +601,9 @@ pub async fn post_suggest_themes(
     }
 
     // 2. Load candidate image bytes from staging storage
-    let bytes = match state.storage.get_staging_image(&id) {
-        Ok(b) => b,
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+    let (bytes, filename) = match library.staging_image(&id).await {
+        Ok(loaded) => loaded,
         Err(err) => {
             tracing::warn!(candidate_id = %id, error = %err, "Candidate image not found in staging; returning empty suggestions");
             return Ok(Json(SuggestThemesResponse {
@@ -770,13 +612,7 @@ pub async fn post_suggest_themes(
             }));
         }
     };
-
-    let filename = state
-        .storage
-        .list_staging()
-        .ok()
-        .and_then(|list| list.into_iter().find(|c| c.id == id).map(|c| c.filename));
-    let mime = detect_image_mime(&bytes, filename.as_deref());
+    let mime = detect_image_mime(&bytes, Some(&filename));
 
     // 3. Invoke vision model if OpenRouter adapter is available
     let raw_suggestions = match state.openrouter_client() {
@@ -829,32 +665,11 @@ pub async fn post_curated_suggest_themes(
     }
 
     // 2. Load primary ground image bytes
-    let bytes = match state.storage.get_curated_image_by_id(&id) {
-        Ok(b) => b,
-        Err(_) => {
-            let mut fallback = None;
-            for theme in Theme::ALL {
-                if let Ok(b) = state.storage.get_curated_image(theme, &id) {
-                    fallback = Some(b);
-                    break;
-                }
-            }
-            fallback.ok_or_else(|| ApiError::not_found(format!("Curated map '{id}' not found")))?
-        }
-    };
-
-    let filename = state
-        .storage
-        .list_curated(None)
-        .ok()
-        .and_then(|list| {
-            list.into_iter().find(|m| m.id == id).and_then(|m| {
-                m.layers
-                    .into_iter()
-                    .find(|l| l.role == LayerRole::Ground || l.index == 0)
-                    .map(|l| l.filename)
-            })
-        });
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+    let (bytes, filename) = library
+        .curated_ground_image(&id)
+        .await
+        .map_err(|_| ApiError::not_found(format!("Curated map '{id}' not found")))?;
     let mime = detect_image_mime(&bytes, filename.as_deref());
 
     // 3. Invoke vision model if OpenRouter adapter is available
@@ -921,14 +736,15 @@ pub async fn post_describe_candidate(
     };
 
     // 1. Locate staging candidate
-    let candidates = state.storage.list_staging()?;
-    let candidate = candidates
-        .into_iter()
-        .find(|c| c.id == id)
-        .ok_or_else(|| ApiError::not_found(format!("Candidate '{id}' not found in staging")))?;
+    let candidate = state
+        .catalog
+        .get_candidate(&id)
+        .await
+        .map_err(|_| ApiError::not_found(format!("Candidate '{id}' not found in staging")))?;
 
     // 2. Read primary image bytes (from candidate layer 0 or candidate primary image)
-    let bytes = state.storage.get_staging_image(&id)?;
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+    let (bytes, _) = library.staging_image(&id).await?;
     let filename = candidate.resolved_filename();
 
     // 3. Resolve themes and tags (prefer payload themes/tags, fallback to cached suggestions).
@@ -974,32 +790,14 @@ pub async fn post_curated_describe(
             .unwrap_or_default()
     };
 
-    let curated_map = state
-        .storage
-        .list_curated(None)
-        .ok()
-        .and_then(|list| list.into_iter().find(|m| m.id == id));
+    let curated_map = state.catalog.get_curated(&id).await.ok();
 
-    let bytes = match state.storage.get_curated_image_by_id(&id) {
-        Ok(b) => b,
-        Err(_) => {
-            let mut fallback = None;
-            for theme in Theme::ALL {
-                if let Ok(b) = state.storage.get_curated_image(theme, &id) {
-                    fallback = Some(b);
-                    break;
-                }
-            }
-            fallback.ok_or_else(|| ApiError::not_found(format!("Curated map '{id}' not found")))?
-        }
-    };
-
-    let filename = curated_map.as_ref().and_then(|m| {
-        m.layers
-            .iter()
-            .find(|l| l.role == LayerRole::Ground || l.index == 0)
-            .map(|l| l.filename.as_str())
-    });
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+    let (bytes, filename) = library
+        .curated_ground_image(&id)
+        .await
+        .map_err(|_| ApiError::not_found(format!("Curated map '{id}' not found")))?;
+    let filename = filename.as_deref();
 
     let mut themes = req.themes.unwrap_or_default();
     if themes.is_empty() {

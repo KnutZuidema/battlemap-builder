@@ -1363,7 +1363,7 @@ mod tests {
         assert_eq!(parts[2]["type"], "image_url");
         assert_eq!(
             parts[2]["image_url"]["url"],
-            format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&[0x89, 0x50, 0x4e, 0x47]))
+            format!("data:image/png;base64,{}", BASE64_STANDARD.encode([0x89, 0x50, 0x4e, 0x47]))
         );
 
         // Part 3: image 2 label
@@ -1374,7 +1374,7 @@ mod tests {
         assert_eq!(parts[4]["type"], "image_url");
         assert_eq!(
             parts[4]["image_url"]["url"],
-            format!("data:image/jpeg;base64,{}", BASE64_STANDARD.encode(&[0xff, 0xd8, 0xff]))
+            format!("data:image/jpeg;base64,{}", BASE64_STANDARD.encode([0xff, 0xd8, 0xff]))
         );
     }
 
@@ -1424,12 +1424,12 @@ mod tests {
         assert_eq!(refs[0]["type"], "image_url");
         assert_eq!(
             refs[0]["image_url"]["url"],
-            format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&[1, 2, 3]))
+            format!("data:image/png;base64,{}", BASE64_STANDARD.encode([1, 2, 3]))
         );
         assert_eq!(refs[1]["type"], "image_url");
         assert_eq!(
             refs[1]["image_url"]["url"],
-            format!("data:image/webp;base64,{}", BASE64_STANDARD.encode(&[4, 5, 6]))
+            format!("data:image/webp;base64,{}", BASE64_STANDARD.encode([4, 5, 6]))
         );
     }
 

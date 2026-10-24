@@ -964,22 +964,28 @@ impl TrainingService {
                 ))
             })?;
 
-        let bytes = self
-            .blobs
-            .read_blob(&adapter_blob_key)
-            .await
-            .map_err(|e| {
-                TrainingServiceError::InvalidState(format!(
-                    "Checkpoint adapter artifact '{}' is unreadable in storage: {e}",
-                    adapter_blob_key.to_path()
-                ))
-            })?;
-
-        let sha256 = cp
+        // Prefer a digest already recorded on the checkpoint or by storage; only pay for a full
+        // read when neither knows the checksum.
+        let sha256 = match cp
             .artifact_sha256
             .filter(|s| !s.trim().is_empty())
             .or_else(|| stat.sha256.filter(|s| !s.trim().is_empty()))
-            .or_else(|| Some(crate::ports::blob_storage::sha256_digest(&bytes)));
+        {
+            Some(digest) => Some(digest),
+            None => {
+                let bytes = self
+                    .blobs
+                    .read_blob(&adapter_blob_key)
+                    .await
+                    .map_err(|e| {
+                        TrainingServiceError::InvalidState(format!(
+                            "Checkpoint adapter artifact '{}' is unreadable in storage: {e}",
+                            adapter_blob_key.to_path()
+                        ))
+                    })?;
+                Some(sha256_digest(&bytes))
+            }
+        };
 
         let size_bytes = cp.artifact_size.or(Some(stat.size));
 
@@ -1012,6 +1018,18 @@ impl TrainingService {
         Ok(adapter)
     }
 
+    /// Rejects a catalog record whose `id` does not encode its own `(run_id, step)` pair, guarding
+    /// against drift between the persisted fields and the canonical `{run_id}-s{step}` key.
+    fn verify_adapter_identity(adapter: &LoraAdapter) -> Result<(), TrainingServiceError> {
+        if LoraAdapter::parse_id(&adapter.id) != Some((adapter.run_id.as_str(), adapter.step)) {
+            return Err(TrainingServiceError::InvalidState(format!(
+                "LoRA adapter '{}' has an ID inconsistent with run '{}' step {}",
+                adapter.id, adapter.run_id, adapter.step
+            )));
+        }
+        Ok(())
+    }
+
     /// Lists LoRA adapters, optionally filtering only selectable/usable ones.
     /// An adapter whose underlying artifact is missing or unreadable is omitted when `selectable_only` is true.
     pub async fn list_adapters(
@@ -1019,6 +1037,9 @@ impl TrainingService {
         selectable_only: bool,
     ) -> Result<Vec<LoraAdapter>, TrainingServiceError> {
         let mut adapters = self.catalog.list_lora_adapters().await?;
+        for adapter in &adapters {
+            Self::verify_adapter_identity(adapter)?;
+        }
 
         if selectable_only {
             let mut usable = Vec::new();
@@ -1043,7 +1064,10 @@ impl TrainingService {
     /// Retrieves one LoRA adapter by ID.
     pub async fn get_adapter(&self, id: &str) -> Result<LoraAdapter, TrainingServiceError> {
         match self.catalog.get_lora_adapter(id).await {
-            Ok(a) => Ok(a),
+            Ok(a) => {
+                Self::verify_adapter_identity(&a)?;
+                Ok(a)
+            }
             Err(StorageError::NotFound(_)) => {
                 Err(TrainingServiceError::AdapterNotFound(id.to_string()))
             }
@@ -1064,6 +1088,7 @@ impl TrainingService {
             }
             Err(e) => return Err(TrainingServiceError::Storage(e)),
         };
+        Self::verify_adapter_identity(&adapter)?;
 
         if retired {
             adapter.retire();

@@ -411,11 +411,11 @@ impl LoraAdapter {
         format!("{run_id}-s{step}")
     }
 
-    /// Parse adapter ID formatted as `{run_id}-s{step}` (stripping optional `-edit` suffix if present),
-    /// returning the run ID and step number.
+    /// Parses an adapter ID formatted strictly as `{run_id}-s{step}` (the inverse of
+    /// [`LoraAdapter::format_id`]), returning the run ID and step number. Anything else — including
+    /// the engine's `-edit` suffix from #219 — is rejected so the catalog key stays canonical.
     pub fn parse_id(id: &str) -> Option<(&str, usize)> {
-        let base = id.strip_suffix("-edit").unwrap_or(id);
-        let (run_id, step_str) = base.rsplit_once("-s")?;
+        let (run_id, step_str) = id.rsplit_once("-s")?;
         if run_id.is_empty() {
             return None;
         }
@@ -468,17 +468,14 @@ mod tests {
     fn test_lora_adapter_id_formatting_and_parsing() {
         assert_eq!(LoraAdapter::format_id("run-123", 250), "run-123-s250");
         assert_eq!(LoraAdapter::parse_id("run-123-s250"), Some(("run-123", 250)));
-        assert_eq!(
-            LoraAdapter::parse_id("run-123-s250-edit"),
-            Some(("run-123", 250))
-        );
+        assert_eq!(LoraAdapter::parse_id("run-123-s250-edit"), None);
         assert_eq!(
             LoraAdapter::parse_id("run-complex-id-123-s500"),
             Some(("run-complex-id-123", 500))
         );
         assert_eq!(
             LoraAdapter::parse_id("run-complex-id-123-s500-edit"),
-            Some(("run-complex-id-123", 500))
+            None
         );
         assert_eq!(LoraAdapter::parse_id("invalid"), None);
         assert_eq!(LoraAdapter::parse_id("-s250"), None);

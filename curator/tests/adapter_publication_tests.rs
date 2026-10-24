@@ -491,43 +491,32 @@ fn test_traceable_adapter_identity_parse_id() {
         LoraAdapter::parse_id("run-123-s250"),
         Some(("run-123", 250))
     );
-    assert_eq!(
-        LoraAdapter::parse_id("run-123-s250-edit"),
-        Some(("run-123", 250))
-    );
+    // The `-edit` suffix belongs to the engine's job identity (#219), never an adapter ID (#217).
+    assert_eq!(LoraAdapter::parse_id("run-123-s250-edit"), None);
     assert_eq!(
         LoraAdapter::parse_id("run-20261024-abc-s1500"),
         Some(("run-20261024-abc", 1500))
     );
-    assert_eq!(
-        LoraAdapter::parse_id("run-20261024-abc-s1500-edit"),
-        Some(("run-20261024-abc", 1500))
-    );
+    assert_eq!(LoraAdapter::parse_id("run-20261024-abc-s1500-edit"), None);
     assert_eq!(
         LoraAdapter::parse_id("complex-id-with-s-letters-s42"),
         Some(("complex-id-with-s-letters", 42))
     );
     assert_eq!(
         LoraAdapter::parse_id("complex-id-with-s-letters-s42-edit"),
-        Some(("complex-id-with-s-letters", 42))
+        None
     );
     assert_eq!(
         LoraAdapter::parse_id("modal-job-42-s0"),
         Some(("modal-job-42", 0))
     );
-    assert_eq!(
-        LoraAdapter::parse_id("modal-job-42-s0-edit"),
-        Some(("modal-job-42", 0))
-    );
+    assert_eq!(LoraAdapter::parse_id("modal-job-42-s0-edit"), None);
 
     // Round-trip with format_id
     let formatted = LoraAdapter::format_id("run-xyz", 3000);
     assert_eq!(LoraAdapter::parse_id(&formatted), Some(("run-xyz", 3000)));
     let formatted_edit = format!("{formatted}-edit");
-    assert_eq!(
-        LoraAdapter::parse_id(&formatted_edit),
-        Some(("run-xyz", 3000))
-    );
+    assert_eq!(LoraAdapter::parse_id(&formatted_edit), None);
 
     // Invalid formats
     assert_eq!(LoraAdapter::parse_id(""), None);
@@ -709,7 +698,11 @@ impl BlobStorage for UnreadableBlobStorage {
     }
 
     async fn stat_blob(&self, key: &BlobKey) -> Result<BlobStat, StorageError> {
-        self.inner.stat_blob(key).await
+        // Mirrors a backend that records no digest, so publication must fall back to reading bytes.
+        Ok(BlobStat {
+            size: self.inner.blob_size(key).await?,
+            sha256: None,
+        })
     }
 
     async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
@@ -794,7 +787,8 @@ async fn test_missing_or_unreadable_or_unverified_artifact_refuses_publication()
     let err_mismatch = service.publish_adapter(run_id, step, None).await.unwrap_err();
     assert!(matches!(err_mismatch, TrainingServiceError::InvalidState(_)));
 
-    // Case 4: Artifact exists in stat, but reading blob returns I/O error
+    // Case 4: No digest on the checkpoint or in storage, so publication must read the blob and the
+    // read itself fails with an I/O error.
     let unreadable_blobs = Arc::new(UnreadableBlobStorage {
         inner: blobs.clone(),
     });
@@ -812,6 +806,7 @@ async fn test_missing_or_unreadable_or_unverified_artifact_refuses_publication()
     let mut run_verified = run_missing.clone();
     run_verified.checkpoints[0].artifact_verification =
         ArtifactVerification::verified("stat", None);
+    run_verified.checkpoints[0].artifact_sha256 = None;
     catalog.save_training_run(&run_verified).await.unwrap();
 
     let err_unreadable = unreadable_service

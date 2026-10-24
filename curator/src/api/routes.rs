@@ -19,7 +19,7 @@ use crate::domain::{
     BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
     normalize_tags, CuratedMap, CuratedMapUpdate, CustomPrompt, DatasetReadiness, DatasetSnapshot,
     LayerRole, LoraAdapter, PurgeStagingResult, RedditHarvestRequest, RejectionReason, StorageStats,
-    Theme, TrainingRun,
+    Theme, TrainingMetricSnapshot, TrainingRun,
 };
 use crate::services::CreateTrainingRunRequest;
 use crate::ports::catalog_repository::{CandidateFilter, CuratedFilter};
@@ -524,6 +524,15 @@ pub async fn post_training_run_verify(
 ) -> Result<Json<TrainingRun>, ApiError> {
     let run = state.training_service.verify_run_artifacts(&id).await?;
     Ok(Json(run))
+}
+
+/// GET /api/training/runs/{id}/metrics - Get chronological metric snapshots for a training run.
+pub async fn get_training_run_metrics(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<TrainingMetricSnapshot>>, ApiError> {
+    let metrics = state.training_service.get_run_metrics(&id).await?;
+    Ok(Json(metrics))
 }
 
 /// GET /api/training/adapters - List published LoRA adapter descriptors.

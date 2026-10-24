@@ -343,6 +343,10 @@ pub struct TrainingRun {
     pub last_polled_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_poll_error: Option<String>,
+    #[serde(default)]
+    pub consecutive_poll_failures: u32,
+    #[serde(default)]
+    pub poll_backoff_seconds: u64,
     pub step: usize,
     pub total_steps: usize,
     pub elapsed_seconds: f64,
@@ -355,7 +359,40 @@ pub struct TrainingRun {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<TrainingMetricSnapshot>,
 }
+impl Default for TrainingRun {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            remote_job_id: None,
+            state: TrainingRunState::Queued,
+            dataset_snapshot_id: String::new(),
+            dataset_digest: String::new(),
+            dataset_url: None,
+            recipe: TrainingRecipe::default(),
+            recipe_digest: String::new(),
+            created_at: Utc::now(),
+            started_at: None,
+            finished_at: None,
+            last_polled_at: None,
+            last_poll_error: None,
+            consecutive_poll_failures: 0,
+            poll_backoff_seconds: 0,
+            step: 0,
+            total_steps: 0,
+            elapsed_seconds: 0.0,
+            cost_usd: 0.0,
+            checkpoints: Vec::new(),
+            published_adapter_ids: Vec::new(),
+            error: None,
+            failure_code: None,
+            metrics: Vec::new(),
+        }
+    }
+}
+
 
 fn default_adapter_scale() -> f64 {
     0.75

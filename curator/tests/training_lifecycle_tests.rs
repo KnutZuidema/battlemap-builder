@@ -174,6 +174,9 @@ async fn test_catalog_persistence_filesystem_and_in_memory() {
             published_adapter_ids: vec![],
             error: None,
             failure_code: None,
+            consecutive_poll_failures: 0,
+            poll_backoff_seconds: 0,
+            metrics: vec![],
         };
 
         // 1. Save and retrieve TrainingRun
@@ -392,6 +395,9 @@ async fn test_modal_runner_lifecycle_dispatch_and_conflict() {
             published_adapter_ids: vec![],
             error: None,
             failure_code: None,
+            consecutive_poll_failures: 0,
+            poll_backoff_seconds: 0,
+            metrics: vec![],
         })
         .await;
     assert!(run1.is_ok());
@@ -419,6 +425,9 @@ async fn test_modal_runner_lifecycle_dispatch_and_conflict() {
             published_adapter_ids: vec![],
             error: None,
             failure_code: None,
+            consecutive_poll_failures: 0,
+            poll_backoff_seconds: 0,
+            metrics: vec![],
         })
         .await;
     assert!(run2.is_ok());
@@ -544,6 +553,9 @@ async fn test_artifact_verification_failure_and_success_flow() {
             published_adapter_ids: vec![],
             error: None,
             failure_code: None,
+            consecutive_poll_failures: 0,
+            poll_backoff_seconds: 0,
+            metrics: vec![],
         })
         .await
         .unwrap();
@@ -626,6 +638,9 @@ async fn test_artifact_verification_failure_and_success_flow() {
             published_adapter_ids: vec![],
             error: None,
             failure_code: None,
+            consecutive_poll_failures: 0,
+            poll_backoff_seconds: 0,
+            metrics: vec![],
         })
         .await
         .unwrap();
@@ -732,6 +747,9 @@ async fn test_lora_adapter_catalog_and_publication() {
         published_adapter_ids: vec![],
         error: None,
         failure_code: None,
+        consecutive_poll_failures: 0,
+        poll_backoff_seconds: 0,
+        metrics: vec![],
     };
     catalog.save_training_run(&run).await.unwrap();
 

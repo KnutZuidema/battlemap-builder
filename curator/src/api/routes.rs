@@ -18,8 +18,10 @@ use crate::api::state::AppState;
 use crate::domain::{
     BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
     normalize_tags, CuratedMap, CuratedMapUpdate, CustomPrompt, DatasetReadiness, DatasetSnapshot,
-    LayerRole, PurgeStagingResult, RedditHarvestRequest, RejectionReason, StorageStats, Theme,
+    LayerRole, LoraAdapter, PurgeStagingResult, RedditHarvestRequest, RejectionReason, StorageStats,
+    Theme, TrainingRun,
 };
+use crate::services::CreateTrainingRunRequest;
 use crate::ports::catalog_repository::{CandidateFilter, CuratedFilter};
 use crate::ports::cost_tracker::CostStats;
 use crate::services::sections::{describe_map_sections, SectionDescriptionContext};
@@ -428,6 +430,131 @@ pub async fn delete_training_dataset(
     export_service.delete_dataset_snapshot(&id).await?;
     tracing::info!(id = %id, "Deleted dataset snapshot");
     Ok(Json(json!({ "deleted": true, "id": id })))
+}
+
+/// Request payload for publishing an adapter from a training run checkpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishAdapterRequest {
+    pub step: usize,
+    #[serde(default)]
+    pub scale: Option<f64>,
+}
+
+/// Query parameters for listing LoRA adapters.
+#[derive(Debug, Default, Deserialize)]
+pub struct ListAdaptersQuery {
+    #[serde(default)]
+    pub selectable: Option<bool>,
+    #[serde(default)]
+    pub usable: Option<bool>,
+}
+
+/// Request payload for soft-retiring or restoring a LoRA adapter.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RetireAdapterRequest {
+    #[serde(default = "default_true")]
+    pub retired: bool,
+}
+
+/// POST /api/training/runs - Create a training run in queued state.
+pub async fn post_training_run(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateTrainingRunRequest>,
+) -> Result<(StatusCode, Json<TrainingRun>), ApiError> {
+    let run = state.training_service.create_training_run(payload).await?;
+    tracing::info!(id = %run.id, "Created training run in queued state");
+    Ok((StatusCode::CREATED, Json(run)))
+}
+
+/// GET /api/training/runs - List all training runs.
+pub async fn get_training_runs(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<TrainingRun>>, ApiError> {
+    let runs = state.training_service.list_runs().await?;
+    Ok(Json(runs))
+}
+
+/// GET /api/training/runs/{id} - Get training run detail and status.
+pub async fn get_training_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<TrainingRun>, ApiError> {
+    let run = state.training_service.get_run(&id).await?;
+    Ok(Json(run))
+}
+
+/// POST /api/training/runs/{id}/dispatch - Start a queued training run on Modal.
+pub async fn post_training_run_dispatch(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<TrainingRun>, ApiError> {
+    let run = state.training_service.dispatch_run(&id).await?;
+    tracing::info!(id = %run.id, "Dispatched training run to runner");
+    Ok(Json(run))
+}
+
+/// POST /api/training/runs/{id}/cancel - Cancel an active training run.
+pub async fn post_training_run_cancel(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<TrainingRun>, ApiError> {
+    let run = state.training_service.cancel_run(&id).await?;
+    tracing::info!(id = %run.id, "Cancelled training run");
+    Ok(Json(run))
+}
+
+/// POST /api/training/runs/{id}/publish - Publish an adapter descriptor from a checkpoint.
+pub async fn post_training_run_publish(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(payload): Json<PublishAdapterRequest>,
+) -> Result<Json<LoraAdapter>, ApiError> {
+    let adapter = state
+        .training_service
+        .publish_adapter(&id, payload.step, payload.scale)
+        .await?;
+    tracing::info!(adapter_id = %adapter.id, run_id = %id, step = payload.step, "Published LoRA adapter");
+    Ok(Json(adapter))
+}
+
+/// POST /api/training/runs/{id}/verify - Verify checkpoint artifacts in storage.
+pub async fn post_training_run_verify(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<TrainingRun>, ApiError> {
+    let run = state.training_service.verify_run_artifacts(&id).await?;
+    Ok(Json(run))
+}
+
+/// GET /api/training/adapters - List published LoRA adapter descriptors.
+pub async fn get_training_adapters(
+    State(state): State<AppState>,
+    Query(query): Query<ListAdaptersQuery>,
+) -> Result<Json<Vec<LoraAdapter>>, ApiError> {
+    let selectable_only = query.selectable.or(query.usable).unwrap_or(false);
+    let adapters = state.training_service.list_adapters(selectable_only).await?;
+    Ok(Json(adapters))
+}
+
+/// GET /api/training/adapters/{id} - Get one LoRA adapter descriptor.
+pub async fn get_training_adapter(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<LoraAdapter>, ApiError> {
+    let adapter = state.training_service.get_adapter(&id).await?;
+    Ok(Json(adapter))
+}
+
+/// POST /api/training/adapters/{id}/retire - Soft-retire or restore a LoRA adapter.
+pub async fn post_retire_training_adapter(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<RetireAdapterRequest>>,
+) -> Result<Json<LoraAdapter>, ApiError> {
+    let retired = body.map(|b| b.retired).unwrap_or(true);
+    let adapter = state.training_service.set_adapter_retired(&id, retired).await?;
+    tracing::info!(id = %id, retired = %retired, "Updated LoRA adapter retired status");
+    Ok(Json(adapter))
 }
 
 /// GET /api/image/staging/{id} - Stream binary image bytes with MIME type and Cache-Control.

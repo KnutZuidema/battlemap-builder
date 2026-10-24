@@ -6,7 +6,8 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use crate::domain::{
-    Candidate, CuratedMap, DatasetSnapshot, RejectionReason, RejectionRecord, Theme,
+    Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, RejectionReason, RejectionRecord, Theme,
+    TrainingMetricSnapshot, TrainingRun,
 };
 use crate::ports::blob_storage::{BlobKey, BlobStat, BlobStorage};
 use crate::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
@@ -130,6 +131,9 @@ pub struct InMemoryCatalogRepository {
     snapshots: RwLock<HashMap<String, DatasetSnapshot>>,
     referenced_snapshots: RwLock<HashSet<String>>,
     trashed_candidates: RwLock<HashMap<String, Candidate>>,
+    training_runs: RwLock<HashMap<String, TrainingRun>>,
+    lora_adapters: RwLock<HashMap<String, LoraAdapter>>,
+    training_metrics: RwLock<HashMap<String, Vec<TrainingMetricSnapshot>>>,
 }
 
 impl InMemoryCatalogRepository {
@@ -349,11 +353,107 @@ impl CatalogRepository for InMemoryCatalogRepository {
     }
 
     async fn is_dataset_snapshot_referenced(&self, id: &str) -> Result<bool, StorageError> {
-        Ok(self
+        if self
             .referenced_snapshots
             .read()
             .expect("in-memory catalog lock poisoned")
-            .contains(id))
+            .contains(id)
+        {
+            return Ok(true);
+        }
+        let referenced = self
+            .training_runs
+            .read()
+            .expect("in-memory catalog lock poisoned")
+            .values()
+            .any(|r| r.dataset_snapshot_id == id);
+        Ok(referenced)
+    }
+
+    async fn get_training_run(&self, id: &str) -> Result<TrainingRun, StorageError> {
+        self.training_runs
+            .read()
+            .expect("in-memory catalog lock poisoned")
+            .get(id)
+            .cloned()
+            .ok_or_else(|| StorageError::NotFound(format!("Training run '{id}' not found")))
+    }
+
+    async fn save_training_run(&self, run: &TrainingRun) -> Result<(), StorageError> {
+        self.training_runs
+            .write()
+            .expect("in-memory catalog lock poisoned")
+            .insert(run.id.clone(), run.clone());
+        Ok(())
+    }
+
+    async fn list_training_runs(&self) -> Result<Vec<TrainingRun>, StorageError> {
+        let mut runs: Vec<TrainingRun> = self
+            .training_runs
+            .read()
+            .expect("in-memory catalog lock poisoned")
+            .values()
+            .cloned()
+            .collect();
+        runs.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+        Ok(runs)
+    }
+
+    async fn append_training_metric(
+        &self,
+        run_id: &str,
+        metric: &TrainingMetricSnapshot,
+    ) -> Result<(), StorageError> {
+        self.training_metrics
+            .write()
+            .expect("in-memory catalog lock poisoned")
+            .entry(run_id.to_string())
+            .or_default()
+            .push(metric.clone());
+        Ok(())
+    }
+
+    async fn list_training_metrics(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<TrainingMetricSnapshot>, StorageError> {
+        let metrics = self
+            .training_metrics
+            .read()
+            .expect("in-memory catalog lock poisoned")
+            .get(run_id)
+            .cloned()
+            .unwrap_or_default();
+        Ok(metrics)
+    }
+
+    async fn get_lora_adapter(&self, id: &str) -> Result<LoraAdapter, StorageError> {
+        self.lora_adapters
+            .read()
+            .expect("in-memory catalog lock poisoned")
+            .get(id)
+            .cloned()
+            .ok_or_else(|| StorageError::NotFound(format!("LoRA adapter '{id}' not found")))
+    }
+
+    async fn save_lora_adapter(&self, adapter: &LoraAdapter) -> Result<(), StorageError> {
+        self.lora_adapters
+            .write()
+            .expect("in-memory catalog lock poisoned")
+            .insert(adapter.id.clone(), adapter.clone());
+        Ok(())
+    }
+
+    async fn list_lora_adapters(&self) -> Result<Vec<LoraAdapter>, StorageError> {
+        let mut adapters: Vec<LoraAdapter> = self
+            .lora_adapters
+            .read()
+            .expect("in-memory catalog lock poisoned")
+            .values()
+            .cloned()
+            .collect();
+        adapters.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+        Ok(adapters)
     }
 
     async fn save_trashed_candidate(&self, candidate: &Candidate) -> Result<(), StorageError> {

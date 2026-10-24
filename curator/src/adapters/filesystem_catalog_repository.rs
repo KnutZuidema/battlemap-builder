@@ -9,8 +9,8 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::domain::{
-    BenchmarkMetadata, Candidate, CuratedMap, DatasetSnapshot, RejectionReason, RejectionRecord,
-    Theme,
+    BenchmarkMetadata, Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, RejectionReason,
+    RejectionRecord, Theme, TrainingMetricSnapshot, TrainingRun,
 };
 use crate::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
 use crate::ports::storage_error::StorageError;
@@ -111,6 +111,82 @@ impl FilesystemCatalogRepository {
             }
         }
         Ok(entities)
+    }
+    /// Directory holding training runs: `root_dir/training`.
+    pub fn training_dir(&self) -> PathBuf {
+        self.root_dir.join("training")
+    }
+
+    /// Path to a training run manifest: `root_dir/training/{id}/run.json`.
+    pub fn training_run_manifest(&self, id: &str) -> PathBuf {
+        self.training_dir().join(id).join("run.json")
+    }
+
+    /// Path to a training run metrics log: `root_dir/training/{id}/metrics.jsonl`.
+    pub fn training_run_metrics(&self, id: &str) -> PathBuf {
+        self.training_dir().join(id).join("metrics.jsonl")
+    }
+
+    /// Directory holding published LoRA adapters: `root_dir/adapters`.
+    pub fn adapters_dir(&self) -> PathBuf {
+        self.root_dir.join("adapters")
+    }
+
+    /// Path to an adapter manifest: `root_dir/adapters/{id}/adapter.json`.
+    pub fn adapter_manifest(&self, id: &str) -> PathBuf {
+        self.adapters_dir().join(id).join("adapter.json")
+    }
+
+    fn scan_training_runs(dir: &Path) -> Result<Vec<TrainingRun>, StorageError> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(StorageError::Io(err)),
+        };
+        let mut runs = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let manifest = entry.path().join("run.json");
+            match Self::read_json::<TrainingRun>(&manifest, "training run") {
+                Ok(run) => runs.push(run),
+                Err(StorageError::NotFound(_)) => {}
+                Err(StorageError::InvalidData(msg)) => {
+                    tracing::warn!(path = %manifest.display(), %msg, "Skipping malformed training run manifest");
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        runs.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+        Ok(runs)
+    }
+
+    fn scan_lora_adapters(dir: &Path) -> Result<Vec<LoraAdapter>, StorageError> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(StorageError::Io(err)),
+        };
+        let mut adapters = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let manifest = entry.path().join("adapter.json");
+            match Self::read_json::<LoraAdapter>(&manifest, "lora adapter") {
+                Ok(adapter) => adapters.push(adapter),
+                Err(StorageError::NotFound(_)) => {}
+                Err(StorageError::InvalidData(msg)) => {
+                    tracing::warn!(path = %manifest.display(), %msg, "Skipping malformed adapter manifest");
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        adapters.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+        Ok(adapters)
     }
 
     /// Atomically replaces `path` with `data` via a uniquely named temporary file in the same
@@ -458,5 +534,70 @@ impl CatalogRepository for FilesystemCatalogRepository {
 
     async fn latest_rejection(&self) -> Result<Option<RejectionRecord>, StorageError> {
         Ok(self.rejection_records().await?.into_iter().last())
+    }
+
+    async fn get_training_run(&self, id: &str) -> Result<TrainingRun, StorageError> {
+        Self::read_json(&self.training_run_manifest(id), "training run")
+    }
+
+    async fn save_training_run(&self, run: &TrainingRun) -> Result<(), StorageError> {
+        Self::write_json(&self.training_run_manifest(&run.id), run)
+    }
+
+    async fn list_training_runs(&self) -> Result<Vec<TrainingRun>, StorageError> {
+        Self::scan_training_runs(&self.training_dir())
+    }
+
+    async fn append_training_metric(
+        &self,
+        run_id: &str,
+        metric: &TrainingMetricSnapshot,
+    ) -> Result<(), StorageError> {
+        let metrics_file = self.training_run_metrics(run_id);
+        if let Some(parent) = metrics_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let line = serde_json::to_string(metric)?;
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&metrics_file)?;
+        writeln!(file, "{}", line)?;
+        Ok(())
+    }
+
+    async fn list_training_metrics(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<TrainingMetricSnapshot>, StorageError> {
+        let metrics_file = self.training_run_metrics(run_id);
+        if !metrics_file.is_file() {
+            return Ok(Vec::new());
+        }
+        let content = std::fs::read_to_string(&metrics_file)?;
+        let mut metrics = Vec::new();
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let metric: TrainingMetricSnapshot = serde_json::from_str(trimmed)
+                .map_err(|e| StorageError::InvalidData(format!("Corrupt metric line: {e}")))?;
+            metrics.push(metric);
+        }
+        Ok(metrics)
+    }
+
+    async fn get_lora_adapter(&self, id: &str) -> Result<LoraAdapter, StorageError> {
+        Self::read_json(&self.adapter_manifest(id), "lora adapter")
+    }
+
+    async fn save_lora_adapter(&self, adapter: &LoraAdapter) -> Result<(), StorageError> {
+        Self::write_json(&self.adapter_manifest(&adapter.id), adapter)
+    }
+
+    async fn list_lora_adapters(&self) -> Result<Vec<LoraAdapter>, StorageError> {
+        Self::scan_lora_adapters(&self.adapters_dir())
     }
 }

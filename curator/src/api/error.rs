@@ -24,6 +24,10 @@ pub enum ApiError {
     SnapshotInUse {
         id: String,
     },
+    RunAlreadyActive {
+        active_run_id: String,
+    },
+    ModalNotConfigured(String),
 }
 
 impl ApiError {
@@ -127,6 +131,38 @@ impl From<crate::services::DeleteDatasetError> for ApiError {
         }
     }
 }
+impl From<crate::services::TrainingServiceError> for ApiError {
+    fn from(err: crate::services::TrainingServiceError) -> Self {
+        match err {
+            crate::services::TrainingServiceError::ModalNotConfigured(msg) => {
+                ApiError::ModalNotConfigured(msg)
+            }
+            crate::services::TrainingServiceError::RunAlreadyActive { active_run_id } => {
+                ApiError::RunAlreadyActive { active_run_id }
+            }
+            crate::services::TrainingServiceError::RunNotFound(id) => {
+                ApiError::NotFound(format!("Training run '{id}' not found"))
+            }
+            crate::services::TrainingServiceError::AdapterNotFound(id) => {
+                ApiError::NotFound(format!("LoRA adapter '{id}' not found"))
+            }
+            crate::services::TrainingServiceError::SnapshotNotFound(id) => {
+                ApiError::NotFound(format!("Dataset snapshot '{id}' not found"))
+            }
+            crate::services::TrainingServiceError::SnapshotBlobMissing(id) => {
+                ApiError::BadRequest(format!("Dataset snapshot '{id}' ZIP archive is missing from storage"))
+            }
+            crate::services::TrainingServiceError::InvalidState(msg) => ApiError::BadRequest(msg),
+            crate::services::TrainingServiceError::Conflict(msg) => ApiError::Conflict(msg),
+            crate::services::TrainingServiceError::Storage(err) => err.into(),
+            crate::services::TrainingServiceError::Runner(crate::ports::TrainingRunnerError::NotConfigured(msg)) => {
+                ApiError::ModalNotConfigured(msg)
+            }
+            crate::services::TrainingServiceError::Runner(err) => ApiError::BadGateway(err.to_string()),
+            crate::services::TrainingServiceError::Cost(err) => ApiError::Internal(err.to_string()),
+        }
+    }
+}
 
 
 impl IntoResponse for ApiError {
@@ -153,6 +189,23 @@ impl IntoResponse for ApiError {
                     "error": format!(
                         "Dataset snapshot '{id}' is referenced by one or more training runs and cannot be deleted"
                     ),
+                })),
+            )
+                .into_response(),
+            ApiError::RunAlreadyActive { active_run_id } => (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "code": "RUN_ALREADY_ACTIVE",
+                    "error": format!("Cannot dispatch training run: another run '{active_run_id}' is currently running"),
+                    "active_run_id": active_run_id,
+                })),
+            )
+                .into_response(),
+            ApiError::ModalNotConfigured(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "code": "MODAL_NOT_CONFIGURED",
+                    "error": msg,
                 })),
             )
                 .into_response(),

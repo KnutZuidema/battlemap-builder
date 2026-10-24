@@ -3,7 +3,8 @@
 use async_trait::async_trait;
 
 use crate::domain::{
-    Candidate, CuratedMap, DatasetSnapshot, RejectionReason, RejectionRecord, Source, Theme,
+    Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, RejectionReason, RejectionRecord, Source,
+    Theme, TrainingMetricSnapshot, TrainingRun,
 };
 use crate::ports::storage_error::StorageError;
 
@@ -114,6 +115,36 @@ pub trait CatalogRepository: Send + Sync {
 
     /// Returns the most recently logged rejection record, if any.
     async fn latest_rejection(&self) -> Result<Option<RejectionRecord>, StorageError>;
+    /// Load the training run with `id`.
+    async fn get_training_run(&self, id: &str) -> Result<TrainingRun, StorageError>;
+
+    /// Insert or overwrite the training run.
+    async fn save_training_run(&self, run: &TrainingRun) -> Result<(), StorageError>;
+
+    /// List all training runs ordered newest first (by created_at descending).
+    async fn list_training_runs(&self) -> Result<Vec<TrainingRun>, StorageError>;
+
+    /// Append a training metric snapshot to the run's metrics log.
+    async fn append_training_metric(
+        &self,
+        run_id: &str,
+        metric: &TrainingMetricSnapshot,
+    ) -> Result<(), StorageError>;
+
+    /// List all metric snapshots recorded for a training run in chronological order.
+    async fn list_training_metrics(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<TrainingMetricSnapshot>, StorageError>;
+
+    /// Load the published LoRA adapter with `id`.
+    async fn get_lora_adapter(&self, id: &str) -> Result<LoraAdapter, StorageError>;
+
+    /// Insert or overwrite the published LoRA adapter.
+    async fn save_lora_adapter(&self, adapter: &LoraAdapter) -> Result<(), StorageError>;
+
+    /// List all published LoRA adapters ordered newest first (by created_at descending).
+    async fn list_lora_adapters(&self) -> Result<Vec<LoraAdapter>, StorageError>;
 }
 
 #[async_trait]
@@ -208,5 +239,44 @@ impl<T: ?Sized + CatalogRepository> CatalogRepository for std::sync::Arc<T> {
 
     async fn latest_rejection(&self) -> Result<Option<RejectionRecord>, StorageError> {
         (**self).latest_rejection().await
+    }
+
+    async fn get_training_run(&self, id: &str) -> Result<TrainingRun, StorageError> {
+        (**self).get_training_run(id).await
+    }
+
+    async fn save_training_run(&self, run: &TrainingRun) -> Result<(), StorageError> {
+        (**self).save_training_run(run).await
+    }
+
+    async fn list_training_runs(&self) -> Result<Vec<TrainingRun>, StorageError> {
+        (**self).list_training_runs().await
+    }
+
+    async fn append_training_metric(
+        &self,
+        run_id: &str,
+        metric: &TrainingMetricSnapshot,
+    ) -> Result<(), StorageError> {
+        (**self).append_training_metric(run_id, metric).await
+    }
+
+    async fn list_training_metrics(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<TrainingMetricSnapshot>, StorageError> {
+        (**self).list_training_metrics(run_id).await
+    }
+
+    async fn get_lora_adapter(&self, id: &str) -> Result<LoraAdapter, StorageError> {
+        (**self).get_lora_adapter(id).await
+    }
+
+    async fn save_lora_adapter(&self, adapter: &LoraAdapter) -> Result<(), StorageError> {
+        (**self).save_lora_adapter(adapter).await
+    }
+
+    async fn list_lora_adapters(&self) -> Result<Vec<LoraAdapter>, StorageError> {
+        (**self).list_lora_adapters().await
     }
 }

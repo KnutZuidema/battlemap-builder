@@ -51,6 +51,18 @@ pub fn create_router(state: AppState) -> Router {
             "/api/training/datasets/{id}/download",
             get(get_training_dataset_archive),
         )
+        .route(
+            "/api/training/runs",
+            get(get_training_runs).post(post_training_run),
+        )
+        .route("/api/training/runs/{id}", get(get_training_run))
+        .route("/api/training/runs/{id}/dispatch", post(post_training_run_dispatch))
+        .route("/api/training/runs/{id}/cancel", post(post_training_run_cancel))
+        .route("/api/training/runs/{id}/publish", post(post_training_run_publish))
+        .route("/api/training/runs/{id}/verify", post(post_training_run_verify))
+        .route("/api/training/adapters", get(get_training_adapters))
+        .route("/api/training/adapters/{id}", get(get_training_adapter))
+        .route("/api/training/adapters/{id}/retire", post(post_retire_training_adapter))
         .route("/api/image/staging/{id}", get(get_staging_image))
         .route("/api/image/staging/{id}/{layer_index}", get(get_staging_layer_image))
         .route("/api/image/curated/{id}", get(get_curated_image_by_id))

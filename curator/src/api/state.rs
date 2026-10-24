@@ -4,16 +4,20 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 
-use crate::adapters::{FileCostLedger, OpenRouterAdapter, RedditCrawler, RoutingModelEngine, WaveSpeedAdapter};
+use crate::adapters::{
+    FileCostLedger, ModalTrainingRunner, OpenRouterAdapter, RedditCrawler, RoutingModelEngine,
+    WaveSpeedAdapter,
+};
 use crate::api::error::ApiError;
 use crate::ports::blob_storage::BlobStorage;
 use crate::ports::catalog_repository::CatalogRepository;
 use crate::ports::cost_tracker::CostTracker;
 use crate::ports::harvester::RedditHarvester;
+use crate::ports::training_runner::TrainingRunner;
 use crate::services::BenchmarkService;
 use crate::services::curation::{CurationService, CurationWorkflow};
 use crate::services::description::{DescriptionGenerator, DescriptionService};
-
+use crate::services::TrainingService;
 /// Shared application state for the Axum HTTP server.
 #[derive(Clone)]
 pub struct AppState {
@@ -28,6 +32,8 @@ pub struct AppState {
     pub wavespeed: Option<Arc<WaveSpeedAdapter>>,
     pub description_service: Arc<DescriptionService>,
     pub curation_service: Arc<dyn CurationWorkflow>,
+    pub training_service: Arc<TrainingService>,
+    pub training_runner: Option<Arc<dyn TrainingRunner + Send + Sync>>,
     pub start_time: Instant,
 }
 
@@ -44,6 +50,15 @@ impl AppState {
     ) -> Arc<dyn CurationWorkflow> {
         Arc::new(CurationService::new(catalog, blobs, description_service))
     }
+    fn default_training_service(
+        catalog: Arc<dyn CatalogRepository + Send + Sync>,
+        blobs: Arc<dyn BlobStorage + Send + Sync>,
+        cost_tracker: Arc<dyn CostTracker + Send + Sync>,
+        training_runner: Option<Arc<dyn TrainingRunner + Send + Sync>>,
+    ) -> Arc<TrainingService> {
+        Arc::new(TrainingService::new(catalog, blobs, training_runner, cost_tracker))
+    }
+
 
 
     /// Creates a new `AppState` over the catalog and blob ports with the default RedditCrawler.
@@ -61,6 +76,8 @@ impl AppState {
         let wavespeed = WaveSpeedAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
+        let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
+        let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
         Self {
             catalog,
             blobs,
@@ -73,6 +90,8 @@ impl AppState {
             wavespeed,
             description_service,
             curation_service,
+            training_service,
+            training_runner,
             start_time: Instant::now(),
         }
     }
@@ -93,6 +112,8 @@ impl AppState {
         let wavespeed = WaveSpeedAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
+        let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
+        let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
         Self {
             catalog,
             blobs,
@@ -105,6 +126,8 @@ impl AppState {
             wavespeed,
             description_service,
             curation_service,
+            training_service,
+            training_runner,
             start_time: Instant::now(),
         }
     }
@@ -124,6 +147,8 @@ impl AppState {
         let wavespeed = WaveSpeedAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
+        let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
+        let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
         Self {
             catalog,
             blobs,
@@ -136,6 +161,8 @@ impl AppState {
             wavespeed,
             description_service,
             curation_service,
+            training_service,
+            training_runner,
             start_time: Instant::now(),
         }
     }
@@ -156,6 +183,8 @@ impl AppState {
         let wavespeed = WaveSpeedAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
+        let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
+        let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
         Self {
             catalog,
             blobs,
@@ -168,6 +197,8 @@ impl AppState {
             wavespeed,
             description_service,
             curation_service,
+            training_service,
+            training_runner,
             start_time: Instant::now(),
         }
     }
@@ -183,6 +214,8 @@ impl AppState {
         let wavespeed = WaveSpeedAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
+        let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
+        let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
         Self {
             catalog,
             blobs,
@@ -195,6 +228,8 @@ impl AppState {
             wavespeed,
             description_service,
             curation_service,
+            training_service,
+            training_runner,
             start_time: Instant::now(),
         }
     }
@@ -230,6 +265,18 @@ impl AppState {
         self.curation_service = curation_service;
         self
     }
+    /// Creates a new `AppState` with an explicit training runner (ideal for testing).
+    pub fn with_training_runner(mut self, runner: Arc<dyn TrainingRunner + Send + Sync>) -> Self {
+        self.training_runner = Some(runner.clone());
+        self.training_service = Arc::new(TrainingService::new(
+            self.catalog.clone(),
+            self.blobs.clone(),
+            Some(runner),
+            self.cost_tracker.clone(),
+        ));
+        self
+    }
+
 
     /// Obtains reference to existing OpenRouter adapter or attempts on-demand resolution.
     pub fn openrouter_client(&self) -> Option<Arc<OpenRouterAdapter>> {

@@ -790,8 +790,8 @@ mod tests {
         assert!((stats.total_spend_usd - result.metadata.cost_usd).abs() < 1e-6);
         assert!((stats.session_spend_usd - result.metadata.cost_usd).abs() < 1e-6);
         assert_eq!(stats.history.len(), 1);
-        assert_eq!(stats.history[0].id, result.metadata.id);
-        assert_eq!(stats.history[0].prompt_name, "Stone Crypt");
+        assert_eq!(stats.history[0].as_generation().unwrap().id, result.metadata.id);
+        assert_eq!(stats.history[0].as_generation().unwrap().prompt_name, "Stone Crypt");
         assert!(stats.by_model.contains_key("meta/muse-image"));
     }
 

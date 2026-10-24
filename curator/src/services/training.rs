@@ -910,44 +910,90 @@ impl TrainingService {
             })?
             .clone();
 
-        if cp.artifact_verification.status == ArtifactVerificationState::Mismatch {
+        if cp.artifact_verification.status != ArtifactVerificationState::Verified {
             return Err(TrainingServiceError::InvalidState(format!(
-                "Checkpoint at step {} failed artifact verification",
+                "Checkpoint at step {} is not verified (status: {:?})",
+                step, cp.artifact_verification.status
+            )));
+        }
+
+        if !cp.has_sample_grid() {
+            return Err(TrainingServiceError::InvalidState(format!(
+                "Checkpoint at step {} has no sample grid URL and cannot be published",
                 step
             )));
         }
 
-        // Check that underlying adapter artifact exists in storage
-        let adapter_blob_key = BlobKey::CheckpointAdapter {
-            run_id: run.id.clone(),
-            step,
-        };
-        if self.blobs.stat_blob(&adapter_blob_key).await.is_err() {
+        if cp.sample_grid_verification.status == ArtifactVerificationState::Mismatch {
             return Err(TrainingServiceError::InvalidState(format!(
-                "Checkpoint adapter artifact '{}' is missing in storage",
-                adapter_blob_key.to_path()
+                "Checkpoint at step {} failed sample grid verification",
+                step
+            )));
+        }
+
+        let scale_val = scale.unwrap_or(0.75);
+        if scale_val <= 0.0 || scale_val.is_nan() {
+            return Err(TrainingServiceError::InvalidState(format!(
+                "Adapter scale must be positive and non-zero, got {}",
+                scale_val
             )));
         }
 
         let adapter_id = LoraAdapter::format_id(&run.id, step);
-        if self.catalog.get_lora_adapter(&adapter_id).await.is_ok() {
+        if run.published_adapter_ids.contains(&adapter_id)
+            || self.catalog.get_lora_adapter(&adapter_id).await.is_ok()
+        {
             return Err(TrainingServiceError::Conflict(format!(
                 "Adapter '{}' has already been published",
                 adapter_id
             )));
         }
 
+        let adapter_blob_key = BlobKey::CheckpointAdapter {
+            run_id: run.id.clone(),
+            step,
+        };
+        let stat = self
+            .blobs
+            .stat_blob(&adapter_blob_key)
+            .await
+            .map_err(|e| {
+                TrainingServiceError::InvalidState(format!(
+                    "Checkpoint adapter artifact '{}' is missing in storage: {e}",
+                    adapter_blob_key.to_path()
+                ))
+            })?;
+
+        let bytes = self
+            .blobs
+            .read_blob(&adapter_blob_key)
+            .await
+            .map_err(|e| {
+                TrainingServiceError::InvalidState(format!(
+                    "Checkpoint adapter artifact '{}' is unreadable in storage: {e}",
+                    adapter_blob_key.to_path()
+                ))
+            })?;
+
+        let sha256 = cp
+            .artifact_sha256
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| stat.sha256.filter(|s| !s.trim().is_empty()))
+            .or_else(|| Some(crate::ports::blob_storage::sha256_digest(&bytes)));
+
+        let size_bytes = cp.artifact_size.or(Some(stat.size));
+
         let adapter = LoraAdapter {
             id: adapter_id.clone(),
             run_id: run.id.clone(),
             step,
-            scale: scale.unwrap_or(0.75),
+            scale: scale_val,
             base_model: run.recipe.base_model.clone(),
             trigger_phrase: run.recipe.trigger_phrase.clone(),
             artifact_key: cp.artifact_key,
             artifact_url: cp.artifact_url,
-            sha256: cp.artifact_sha256,
-            size_bytes: cp.artifact_size,
+            sha256,
+            size_bytes,
             recipe_digest: run.recipe_digest.clone(),
             dataset_snapshot_id: run.dataset_snapshot_id.clone(),
             dataset_digest: run.dataset_digest.clone(),

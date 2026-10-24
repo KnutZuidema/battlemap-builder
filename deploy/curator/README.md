@@ -34,19 +34,33 @@ kubectl apply -f deploy/curator/namespace.yaml
 
 ### 2.2. Configure Application Secrets (`curator-secrets`)
 
-Curator requires API credentials for OpenRouter model benchmarking and Reddit community map harvesting.
+Curator requires credentials for model benchmarking, vision descriptions, gated model weights, cloud GPU training runs, R2 artifact storage, and serverless LoRA inference.
+
+#### Automated Interactive Setup (Recommended)
+
+Run the interactive provisioning wizard to walk step-by-step through generating keys, writing local `curator/.env`, creating `deploy/curator/secret.yaml`, verifying API connectivity, and applying the secret to your Kubernetes cluster:
+
+```bash
+./scripts/provision-credentials.sh
+```
+
+#### Manual Configuration
 
 1. Copy the secret template:
    ```bash
    cp deploy/curator/secret.yaml.template deploy/curator/secret.yaml
    ```
 
-2. Edit `deploy/curator/secret.yaml` and enter your credentials:
-   - `OPENROUTER_API_KEY`: API key used to generate benchmark maps across models.
-   - `REDDIT_CLIENT_ID`: Reddit script app client ID for harvesting `/r/battlemaps`.
-   - `REDDIT_CLIENT_SECRET`: Reddit script app client secret.
-   - `REDDIT_REFRESH_TOKEN`: User OAuth2 refresh token for API access.
-   - `REDDIT_USER_AGENT`: User agent identification string (e.g., `DungeonForge-Curator/1.0 (by /u/username)`).
+2. Edit `deploy/curator/secret.yaml` and configure credentials:
+   - `OPENROUTER_API_KEY`: API key for benchmark maps, theme suggestions, and vision descriptions.
+   - `HF_TOKEN`: Hugging Face User Access Token (read) for downloading gated `flux-3-image-klein-base` weights.
+   - `MODAL_TOKEN_ID` & `MODAL_TOKEN_SECRET`: Modal credentials for GPU training runners.
+   - `CURATOR_MODAL_ENDPOINT` & `CURATOR_MODAL_TOKEN`: URL and bearer auth token for the training runner FastAPI service.
+   - `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`: Cloudflare R2 S3 API credentials.
+   - `R2_BUCKET_NAME`: R2 bucket for dataset snapshots and adapter artifacts (e.g., `dungeonforge-artifacts`).
+   - `R2_ENDPOINT` & `R2_PUBLIC_URL`: S3 endpoint and public HTTPS base URL for artifact downloads.
+   - `WAVESPEED_API_KEY`: WaveSpeedAI API key for serverless FLUX 3 Klein LoRA inference.
+   - `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_REFRESH_TOKEN`, `REDDIT_USER_AGENT`: Reddit harvesting credentials.
 
 3. Apply the secret to the cluster:
    ```bash

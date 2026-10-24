@@ -29,6 +29,33 @@ tail-logs:
 port-forward:
     kubectl port-forward service/curator 3002:3002 -n curator
 
+
+# Run disk-to-S3 storage migration inside running pod
+migrate-storage:
+    kubectl exec -it -n curator deployment/curator -- curator migrate-disk-to-s3
+
+# Dry-run disk-to-S3 storage migration inside running pod
+migrate-storage-dry-run:
+    kubectl exec -it -n curator deployment/curator -- curator migrate-disk-to-s3 --dry-run
+
+# Run disk-to-S3 storage migration as a standalone Kubernetes Job (Option B)
+migrate-storage-job:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Scaling down deployment/curator to release ReadWriteOnce volume..."
+    kubectl scale deployment curator -n curator --replicas=0
+    cleanup() {
+        echo "Restoring deployment/curator replicas to 1..."
+        kubectl scale deployment curator -n curator --replicas=1
+        kubectl rollout status deployment/curator -n curator --timeout=180s
+    }
+    trap cleanup EXIT
+    kubectl delete job curator-storage-migration -n curator --ignore-not-found
+    echo "Submitting migration Job..."
+    kubectl apply -f job-migrate-storage.yaml
+    kubectl wait --for=condition=complete job/curator-storage-migration -n curator --timeout=300s
+    kubectl logs -n curator job/curator-storage-migration
+    kubectl delete job curator-storage-migration -n curator
 # Delete deployed manifests
 delete:
     kubectl delete -f service.yaml --ignore-not-found

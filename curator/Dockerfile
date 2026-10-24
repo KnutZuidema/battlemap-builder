@@ -43,11 +43,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/curator/target \
     if [ "$TARGETARCH" = "arm64" ]; then \
         CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
-        cargo build --release --target aarch64-unknown-linux-gnu --bin curator && \
-        cp target/aarch64-unknown-linux-gnu/release/curator /usr/local/bin/curator; \
+        cargo build --release --target aarch64-unknown-linux-gnu --bin curator --bin curator-migrate && \
+        cp target/aarch64-unknown-linux-gnu/release/curator /usr/local/bin/curator && \
+        cp target/aarch64-unknown-linux-gnu/release/curator-migrate /usr/local/bin/curator-migrate; \
     else \
-        cargo build --release --bin curator && \
-        cp target/release/curator /usr/local/bin/curator; \
+        cargo build --release --bin curator --bin curator-migrate && \
+        cp target/release/curator /usr/local/bin/curator && \
+        cp target/release/curator-migrate /usr/local/bin/curator-migrate; \
     fi
 
 # ==============================================================================
@@ -61,7 +63,7 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifi
 COPY --from=builder /etc/passwd /etc/passwd
 COPY --from=builder /etc/group /etc/group
 COPY --from=builder --chown=1000:1000 /tmp/data /data
-COPY --from=builder /usr/local/bin/curator /usr/local/bin/curator
+COPY --from=builder /usr/local/bin/curator* /usr/local/bin/
 
 # Set runtime environment variables
 ENV PORT=3002 \

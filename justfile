@@ -87,6 +87,10 @@ curator-rollout tag=image_tag:
 # Deploy this commit: publish the image, then roll the cluster onto that exact tag
 curator-deploy tag=image_tag: (curator-publish tag) (curator-rollout tag)
 
+# Run disk-to-S3 storage migration as a Kubernetes Job (Option B)
+curator-migrate-storage-job:
+    just --justfile "{{deploy_dir}}/justfile" migrate-storage-job
+
 # Port-forward the cluster Curator service to localhost:3002
 port-forward:
     just --justfile "{{deploy_dir}}/justfile" port-forward

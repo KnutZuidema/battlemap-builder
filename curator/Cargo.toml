@@ -3,6 +3,14 @@ name = "curator"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "curator"
+path = "src/main.rs"
+
+[[bin]]
+name = "curator-migrate"
+path = "src/bin/migrate.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"

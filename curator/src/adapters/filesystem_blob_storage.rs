@@ -174,5 +174,5 @@ impl BlobStorage for FilesystemBlobStorage {
 }
 
 fn key_from_relative_path(relative: &str) -> Option<BlobKey> {
-    BlobKey::from_path(relative)
+BlobKey::from_path(relative)
 }

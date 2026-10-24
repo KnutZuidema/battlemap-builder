@@ -26,6 +26,8 @@ use crate::ports::storage_error::StorageError;
 pub enum BlobKey {
     /// Staging bundle layer `staging/{id}/{index}.png`.
     StagingLayer { id: String, index: usize },
+    /// Trashed candidate layer stored at trash/{id}/{index}.png.
+    TrashLayer { id: String, index: usize },
     /// Curated bundle layer inside the flat `curated/{id}/` directory.
     CuratedLayer { id: String, index: usize, role: LayerRole, elevation: Option<i8> },
     /// ZIP archive containing an exported dataset, stored at `exports/{name}.zip`.
@@ -45,6 +47,8 @@ pub enum BlobKey {
     TelemetryLog { name: String },
     /// Directory prefix `staging/` (id=None) or `staging/{id}/`.
     StagingDir { id: Option<String> },
+    /// Directory prefix trash/ (id=None) or trash/{id}/.
+    TrashDir { id: Option<String> },
     /// Directory prefix `curated/` (id=None) or `curated/{id}/`.
     CuratedDir { id: Option<String> },
     /// Directory prefix `telemetry/`, used to enumerate every [`BlobKey::TelemetryLog`].
@@ -103,6 +107,7 @@ impl BlobKey {
     pub fn to_path(&self) -> String {
         match self {
             BlobKey::StagingLayer { id, index } => format!("staging/{id}/{index}.png"),
+            BlobKey::TrashLayer { id, index } => format!("trash/{id}/{index}.png"),
             BlobKey::CuratedLayer { id, index, role, elevation } => format!(
                 "curated/{id}/{}",
                 Layer::format_filename(*index, *role, *elevation, "png")
@@ -111,6 +116,7 @@ impl BlobKey {
             BlobKey::RejectionLog => "rejected/rejections.json".to_string(),
             BlobKey::TelemetryLog { name } => format!("telemetry/{name}"),
             BlobKey::StagingDir { id } => directory_prefix("staging", id.as_deref()),
+            BlobKey::TrashDir { id } => directory_prefix("trash", id.as_deref()),
             BlobKey::CuratedDir { id } => directory_prefix("curated", id.as_deref()),
             BlobKey::TelemetryDir => directory_prefix("telemetry", None),
             BlobKey::DatasetSnapshot { id } => format!("artifacts/datasets/{id}.zip"),
@@ -183,6 +189,8 @@ impl BlobKey {
             ["staging", id, ""] => BlobKey::StagingDir { id: Some((*id).to_string()) },
             ["curated", ""] => BlobKey::CuratedDir { id: None },
             ["curated", id, ""] => BlobKey::CuratedDir { id: Some((*id).to_string()) },
+            ["trash", ""] => BlobKey::TrashDir { id: None },
+            ["trash", id, ""] => BlobKey::TrashDir { id: Some((*id).to_string()) },
             ["telemetry", ""] => BlobKey::TelemetryDir,
             ["artifacts", ""] => BlobKey::ArtifactsDir,
             ["artifacts", "datasets", ""] => BlobKey::DatasetSnapshotsDir,
@@ -202,6 +210,13 @@ impl BlobKey {
             ["staging", id, file] => {
                 let index = parse_canonical_usize(file.strip_suffix(".png")?)?;
                 BlobKey::StagingLayer {
+                    id: (*id).to_string(),
+                    index,
+                }
+            }
+            ["trash", id, file] => {
+                let index = parse_canonical_usize(file.strip_suffix(".png")?)?;
+                BlobKey::TrashLayer {
                     id: (*id).to_string(),
                     index,
                 }

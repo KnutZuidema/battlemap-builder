@@ -492,6 +492,24 @@ mod tests {
 
         async fn is_dataset_snapshot_referenced(&self, id: &str) -> Result<bool, StorageError> {
             self.inner.is_dataset_snapshot_referenced(id).await
+        async fn save_trashed_candidate(&self, candidate: &Candidate) -> Result<(), StorageError> {
+            self.inner.save_trashed_candidate(candidate).await
+        }
+
+        async fn get_trashed_candidate(&self, id: &str) -> Result<Candidate, StorageError> {
+            self.inner.get_trashed_candidate(id).await
+        }
+
+        async fn delete_trashed_candidate(&self, id: &str) -> Result<(), StorageError> {
+            self.inner.delete_trashed_candidate(id).await
+        }
+
+        async fn remove_rejection(&self, id: &str) -> Result<(), StorageError> {
+            self.inner.remove_rejection(id).await
+        }
+
+        async fn latest_rejection(&self) -> Result<Option<RejectionRecord>, StorageError> {
+            self.inner.latest_rejection().await
         }
     }
 

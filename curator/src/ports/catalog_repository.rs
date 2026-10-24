@@ -188,6 +188,8 @@ impl<T: ?Sized + CatalogRepository> CatalogRepository for std::sync::Arc<T> {
 
     async fn is_dataset_snapshot_referenced(&self, id: &str) -> Result<bool, StorageError> {
         (**self).is_dataset_snapshot_referenced(id).await
+    }
+
     async fn save_trashed_candidate(&self, candidate: &Candidate) -> Result<(), StorageError> {
         (**self).save_trashed_candidate(candidate).await
     }

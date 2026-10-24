@@ -392,6 +392,9 @@ impl CatalogRepository for FilesystemCatalogRepository {
         Self::delete_manifest(&file)?;
         if let Some(parent) = file.parent() {
             let _ = std::fs::remove_dir(parent);
+        }
+        Ok(())
+    }
     async fn save_trashed_candidate(&self, candidate: &Candidate) -> Result<(), StorageError> {
         Self::write_json(&self.trash_candidate_manifest(&candidate.id), candidate)
     }
@@ -451,6 +454,8 @@ impl CatalogRepository for FilesystemCatalogRepository {
         }
 
         Ok(false)
+    }
+
     async fn latest_rejection(&self) -> Result<Option<RejectionRecord>, StorageError> {
         Ok(self.rejection_records().await?.into_iter().last())
     }

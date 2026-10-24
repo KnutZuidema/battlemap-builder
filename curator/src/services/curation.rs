@@ -566,6 +566,8 @@ mod tests {
 
         async fn is_dataset_snapshot_referenced(&self, id: &str) -> Result<bool, StorageError> {
             self.inner.is_dataset_snapshot_referenced(id).await
+        }
+
         async fn save_trashed_candidate(&self, candidate: &Candidate) -> Result<(), StorageError> {
             self.inner.save_trashed_candidate(candidate).await
         }

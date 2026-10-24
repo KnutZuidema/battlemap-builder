@@ -354,6 +354,7 @@ impl CatalogRepository for InMemoryCatalogRepository {
             .read()
             .expect("in-memory catalog lock poisoned")
             .contains(id))
+    }
 
     async fn save_trashed_candidate(&self, candidate: &Candidate) -> Result<(), StorageError> {
         self.trashed_candidates

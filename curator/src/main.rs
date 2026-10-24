@@ -160,6 +160,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let state = AppState::with_all(Arc::new(crawler), cost_tracker, catalog, blobs);
+
+    // Resume any active/running training runs across server restart
+    if let Err(e) = state.training_service.resume_non_terminal_runs().await {
+        tracing::warn!("Failed to resume non-terminal training runs on startup: {e}");
+    }
     let app = create_router(state);
 
     tracing::info!(

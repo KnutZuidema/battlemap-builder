@@ -969,6 +969,41 @@ pub async fn post_reject(
     }))
 }
 
+/// Request payload for undoing a candidate rejection.
+#[derive(Debug, Deserialize, Default)]
+pub struct UndoRejectRequest {
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// Response payload for undo reject endpoint.
+#[derive(Debug, Serialize)]
+pub struct UndoRejectResponse {
+    pub status: &'static str,
+    pub candidate: Candidate,
+}
+
+/// POST /api/reject/undo - Restore a rejected candidate to the staging queue.
+pub async fn post_undo_reject(
+    State(state): State<AppState>,
+    Json(payload): Json<UndoRejectRequest>,
+) -> Result<Json<UndoRejectResponse>, ApiError> {
+    let candidate = state
+        .curation_service
+        .undo_reject(payload.id.as_deref())
+        .await?;
+
+    tracing::info!(
+        id = %candidate.id,
+        "Candidate rejection undone, restored to staging"
+    );
+
+    Ok(Json(UndoRejectResponse {
+        status: "restored",
+        candidate,
+    }))
+}
+
 /// Response payload for harvest endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedditHarvestResponse {

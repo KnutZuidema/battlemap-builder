@@ -94,6 +94,7 @@ mod tests {
         assert!(html.contains("btn-grid-toggle"));
         assert!(html.contains("btn-fit-screen"));
         assert!(html.contains("btn-reject"));
+        assert!(html.contains("btn-undo-reject"));
         assert!(html.contains("btn-curate"));
         assert!(html.contains("title=\"Curate Candidate (Hotkey: Enter)\""));
         assert!(html.contains("title=\"Reject Candidate (Hotkey: Esc)\""));
@@ -146,6 +147,8 @@ mod tests {
         assert!(js.contains("/api/reject"));
         assert!(js.contains("curateCurrentCandidate"));
         assert!(js.contains("rejectCurrentCandidate"));
+        assert!(js.contains("/api/reject/undo"));
+        assert!(js.contains("undoRejectCandidate"));
 
         // Two-step labeling mode hotkeys & selectors
         assert!(js.contains("enterLabelingMode"));

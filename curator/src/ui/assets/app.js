@@ -45,7 +45,8 @@
         isHarvesting: false,
         // Candidate ids whose curation request is still in flight server-side.
         pendingCurationIds: new Set(),
-
+        // Rejection undo stack tracking { candidate, index }
+        rejectedStack: [],
         // Benchmark Drawer & Budget Guardrails
         benchmarkDrawerOpen: false,
         budgetGuardModalOpen: false,
@@ -166,7 +167,7 @@
     let statusIndicator, statusText;
     let candidateMetaBox, queueCounter, candidateId, candidateDimensions, candidateSource;
     let zoomLevelDisplay, hudPanZoom, hudGridStatus, hudLatticeStatus, hudResolution, hudPrefetchStatus;
-    let btnGridToggle, btnFitScreen, btnPrev, btnNext, btnReject, btnCurate;
+    let btnGridToggle, btnFitScreen, btnPrev, btnNext, btnUndoReject, btnReject, btnCurate;
     // Grid Adjustment DOM Elements
     let btnGridAdjust, gridAdjustPanel, btnCloseGridPanel;
     let btnGridSizeDec, btnGridSizeInc, gridSizeInput, gridSizeSlider;
@@ -320,6 +321,7 @@
         btnFitScreen = document.getElementById("btn-fit-screen");
         btnPrev = document.getElementById("btn-prev");
         btnNext = document.getElementById("btn-next");
+        btnUndoReject = document.getElementById("btn-undo-reject");
         btnReject = document.getElementById("btn-reject");
         btnCurate = document.getElementById("btn-curate");
 
@@ -2576,12 +2578,19 @@
         }
     }
 
+    function updateUndoRejectButtonState() {
+        if (btnUndoReject) {
+            btnUndoReject.disabled = !state.rejectedStack || state.rejectedStack.length === 0;
+        }
+    }
+
     async function rejectCurrentCandidate() {
         if (state.isSubmitting || state.currentIndex < 0 || state.currentIndex >= state.candidates.length) {
             return;
         }
 
         const candidate = state.candidates[state.currentIndex];
+        const removedIndex = state.currentIndex;
         state.isSubmitting = true;
 
         try {
@@ -2600,7 +2609,13 @@
                 throw new Error(errJson.message || `HTTP ${res.status}`);
             }
 
-            showToast(`Candidate #${candidate.id} rejected`, "danger");
+            state.rejectedStack.push({ candidate, index: removedIndex });
+            updateUndoRejectButtonState();
+
+            showToast(`Candidate #${candidate.id} rejected`, "danger", {
+                label: "Undo",
+                onClick: () => undoRejectCandidate(candidate.id),
+            });
 
             // Remove rejected item from local queue and cache
             state.imageCache.delete(candidate.id);
@@ -2619,6 +2634,75 @@
             fetchStatus();
         } catch (err) {
             showToast(`Rejection failed: ${err.message}`, "danger");
+        } finally {
+            state.isSubmitting = false;
+        }
+    }
+
+    async function undoRejectCandidate(candidateId = null) {
+        if (state.isSubmitting) return;
+
+        let stackEntry = null;
+        if (candidateId) {
+            const idx = state.rejectedStack.findIndex((e) => e.candidate.id === candidateId);
+            if (idx >= 0) {
+                stackEntry = state.rejectedStack.splice(idx, 1)[0];
+            }
+        } else if (state.rejectedStack.length > 0) {
+            stackEntry = state.rejectedStack.pop();
+        }
+
+        updateUndoRejectButtonState();
+
+        const targetId = candidateId || (stackEntry ? stackEntry.candidate.id : null);
+        if (!targetId) {
+            showToast("No rejected candidate to undo", "info");
+            return;
+        }
+
+        state.isSubmitting = true;
+        try {
+            const res = await fetch("/api/reject/undo", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ id: targetId }),
+            });
+
+            if (!res.ok) {
+                const errJson = await res.json().catch(() => ({}));
+                throw new Error(errJson.error || errJson.message || `HTTP ${res.status}`);
+            }
+
+            const data = await res.json();
+            const restoredCandidate = data.candidate || (stackEntry ? stackEntry.candidate : null);
+
+            if (restoredCandidate) {
+                const insertAt = stackEntry
+                    ? Math.min(Math.max(stackEntry.index, 0), state.candidates.length)
+                    : state.currentIndex >= 0
+                    ? state.currentIndex
+                    : 0;
+
+                if (!state.candidates.some((c) => c.id === restoredCandidate.id)) {
+                    state.candidates.splice(insertAt, 0, restoredCandidate);
+                }
+                const targetIndex = state.candidates.findIndex((c) => c.id === restoredCandidate.id);
+                if (targetIndex >= 0) {
+                    state.currentIndex = targetIndex;
+                    loadCandidate(state.currentIndex);
+                }
+                showToast(`Restored candidate #${restoredCandidate.id} to staging queue`, "success");
+            } else {
+                await fetchStagingQueue();
+                showToast(`Restored candidate #${targetId} to staging queue`, "success");
+            }
+            fetchStatus();
+        } catch (err) {
+            if (stackEntry) {
+                state.rejectedStack.push(stackEntry);
+                updateUndoRejectButtonState();
+            }
+            showToast(`Undo rejection failed: ${err.message}`, "danger");
         } finally {
             state.isSubmitting = false;
         }
@@ -7186,8 +7270,8 @@
         btnPrev.addEventListener("click", () => navigatePrev());
         btnNext.addEventListener("click", () => navigateNext());
         btnCurate.addEventListener("click", () => curateCurrentCandidate());
+        btnUndoReject?.addEventListener("click", () => undoRejectCandidate());
         btnReject.addEventListener("click", () => rejectCurrentCandidate());
-
         document.getElementById("btn-help").addEventListener("click", () => toggleHelpModal());
         document.getElementById("btn-close-help-modal").addEventListener("click", () => closeHelpModal());
         document.getElementById("btn-dismiss-help").addEventListener("click", () => closeHelpModal());
@@ -7636,6 +7720,13 @@
             e.preventDefault();
             return;
         }
+
+        // Undo candidate rejection: Z or Ctrl+Z / Cmd+Z
+        if (e.key === "z" || e.key === "Z") {
+            undoRejectCandidate();
+            e.preventDefault();
+            return;
+        }
     }
 
     function handleKeyup(e) {
@@ -7935,20 +8026,40 @@
         }
     }
 
-    function showToast(message, type = "info") {
+    function showToast(message, type = "info", action = null) {
         const container = document.getElementById("toast-container");
         if (!container) return;
 
         const toast = document.createElement("div");
         toast.className = `toast toast-${type}`;
-        toast.textContent = message;
+
+        const textSpan = document.createElement("span");
+        textSpan.className = "toast-message";
+        textSpan.textContent = message;
+        toast.appendChild(textSpan);
+
+        if (action && typeof action.onClick === "function") {
+            const actionBtn = document.createElement("button");
+            actionBtn.type = "button";
+            actionBtn.className = "toast-action";
+            actionBtn.textContent = action.label || "Undo";
+            actionBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                if (toast.parentElement) {
+                    toast.parentElement.removeChild(toast);
+                }
+                action.onClick();
+            });
+            toast.appendChild(actionBtn);
+        }
 
         container.appendChild(toast);
+        const duration = action ? 5000 : 3000;
         setTimeout(() => {
             if (toast.parentElement) {
                 toast.parentElement.removeChild(toast);
             }
-        }, 3000);
+        }, duration);
     }
 
     // Initialize when DOM is ready

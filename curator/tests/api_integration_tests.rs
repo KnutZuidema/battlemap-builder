@@ -2697,8 +2697,8 @@ async fn test_api_post_curate_delegates_to_curation_workflow_and_zero_store_scan
     struct SpyWorkflow {
         curate_calls: AtomicUsize,
         reject_calls: AtomicUsize,
+        undo_reject_calls: AtomicUsize,
     }
-
     #[async_trait]
     impl CurationWorkflow for SpyWorkflow {
         async fn curate(
@@ -2728,12 +2728,27 @@ async fn test_api_post_curate_delegates_to_curation_workflow_and_zero_store_scan
             self.reject_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+
+        async fn undo_reject(
+            &self,
+            _candidate_id: Option<&str>,
+        ) -> Result<Candidate, CurationWorkflowError> {
+            self.undo_reject_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Candidate::new(
+                "cand_spy_test",
+                curator::domain::Source::Generated,
+                "cand_spy_test.png",
+                (1000, 1000),
+                chrono::Utc::now(),
+            ))
+        }
     }
 
     let (catalog, blobs) = in_memory_ports();
     let spy = Arc::new(SpyWorkflow {
         curate_calls: AtomicUsize::new(0),
         reject_calls: AtomicUsize::new(0),
+        undo_reject_calls: AtomicUsize::new(0),
     });
 
     let state = AppState::new(catalog.clone(), blobs.clone()).with_curation_service(spy.clone());
@@ -2777,9 +2792,27 @@ async fn test_api_post_curate_delegates_to_curation_workflow_and_zero_store_scan
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(reject_payload.to_string()))
         .unwrap();
-    let resp_reject = app.oneshot(req_reject).await.unwrap();
+    let resp_reject = app.clone().oneshot(req_reject).await.unwrap();
     assert_eq!(resp_reject.status(), StatusCode::OK);
     assert_eq!(spy.reject_calls.load(Ordering::SeqCst), 1);
+
+    // Also verify undo_reject delegates to CurationWorkflow
+    let undo_payload = json!({
+        "id": "cand_spy_test"
+    });
+    let req_undo = Request::builder()
+        .uri("/api/reject/undo")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(undo_payload.to_string()))
+        .unwrap();
+    let resp_undo = app.oneshot(req_undo).await.unwrap();
+    assert_eq!(resp_undo.status(), StatusCode::OK);
+    let undo_body = to_bytes(resp_undo.into_body(), usize::MAX).await.unwrap();
+    let undo_json: Value = serde_json::from_slice(&undo_body).unwrap();
+    assert_eq!(undo_json["status"], "restored");
+    assert_eq!(undo_json["candidate"]["id"], "cand_spy_test");
+    assert_eq!(spy.undo_reject_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -3280,4 +3313,97 @@ async fn test_patch_curated_grid_validates_curation_gate_and_recomputes_sections
         updated_manifest.sections[0].description,
         "A sprawling subterranean temple complex."
     );
+}
+
+#[tokio::test]
+async fn test_api_reject_and_undo_reject_lifecycle() {
+    let (app, catalog, blobs) = setup_test_app();
+
+    // 1. Seed candidate in staging
+    let candidate = Candidate::with_now(
+        "cand_undo_lifecycle",
+        Source::Reddit,
+        "cand_undo.png",
+        (2048, 2048),
+    );
+    let test_img = create_test_png();
+    seed_staging(&catalog, &blobs, &candidate, &test_img).await;
+
+    // Verify candidate is visible in staging
+    let staging_req = Request::builder()
+        .uri("/api/staging")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let staging_resp = app.clone().oneshot(staging_req).await.unwrap();
+    assert_eq!(staging_resp.status(), StatusCode::OK);
+    let body = to_bytes(staging_resp.into_body(), usize::MAX).await.unwrap();
+    let candidates: Vec<Candidate> = serde_json::from_slice(&body).unwrap();
+    assert!(candidates.iter().any(|c| c.id == "cand_undo_lifecycle"));
+
+    // 2. Reject candidate
+    let reject_payload = json!({
+        "id": "cand_undo_lifecycle",
+        "reason": "BlurryLowRes",
+        "notes": "Test rejection"
+    });
+    let reject_req = Request::builder()
+        .uri("/api/reject")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(reject_payload.to_string()))
+        .unwrap();
+    let reject_resp = app.clone().oneshot(reject_req).await.unwrap();
+    assert_eq!(reject_resp.status(), StatusCode::OK);
+
+    // Verify candidate is no longer in staging
+    let staging_req2 = Request::builder()
+        .uri("/api/staging")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let staging_resp2 = app.clone().oneshot(staging_req2).await.unwrap();
+    let body2 = to_bytes(staging_resp2.into_body(), usize::MAX).await.unwrap();
+    let candidates2: Vec<Candidate> = serde_json::from_slice(&body2).unwrap();
+    assert!(!candidates2.iter().any(|c| c.id == "cand_undo_lifecycle"));
+    assert!(catalog.is_rejected("cand_undo_lifecycle").await.unwrap());
+
+    // 3. Undo rejection via POST /api/reject/undo
+    let undo_payload = json!({
+        "id": "cand_undo_lifecycle"
+    });
+    let undo_req = Request::builder()
+        .uri("/api/reject/undo")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(undo_payload.to_string()))
+        .unwrap();
+    let undo_resp = app.clone().oneshot(undo_req).await.unwrap();
+    assert_eq!(undo_resp.status(), StatusCode::OK);
+    let undo_body = to_bytes(undo_resp.into_body(), usize::MAX).await.unwrap();
+    let undo_json: Value = serde_json::from_slice(&undo_body).unwrap();
+    assert_eq!(undo_json["status"], "restored");
+    assert_eq!(undo_json["candidate"]["id"], "cand_undo_lifecycle");
+
+    // 4. Verify candidate is back in staging queue and rejection record removed
+    assert!(!catalog.is_rejected("cand_undo_lifecycle").await.unwrap());
+    let staging_req3 = Request::builder()
+        .uri("/api/staging")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let staging_resp3 = app.clone().oneshot(staging_req3).await.unwrap();
+    let body3 = to_bytes(staging_resp3.into_body(), usize::MAX).await.unwrap();
+    let candidates3: Vec<Candidate> = serde_json::from_slice(&body3).unwrap();
+    assert!(candidates3.iter().any(|c| c.id == "cand_undo_lifecycle"));
+
+    // 5. Verify image layer can be served from restored staging
+    let img_req = Request::builder()
+        .uri("/api/image/staging/cand_undo_lifecycle/0")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let img_resp = app.oneshot(img_req).await.unwrap();
+    assert_eq!(img_resp.status(), StatusCode::OK);
+    assert_eq!(img_resp.headers().get(header::CONTENT_TYPE).unwrap(), "image/png");
 }

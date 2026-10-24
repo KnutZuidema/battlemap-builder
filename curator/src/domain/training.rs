@@ -343,6 +343,10 @@ pub struct TrainingRun {
     pub last_polled_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_poll_error: Option<String>,
+    #[serde(default)]
+    pub consecutive_poll_failures: u32,
+    #[serde(default)]
+    pub poll_backoff_seconds: u64,
     pub step: usize,
     pub total_steps: usize,
     pub elapsed_seconds: f64,
@@ -355,6 +359,8 @@ pub struct TrainingRun {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<TrainingMetricSnapshot>,
 }
 
 fn default_adapter_scale() -> f64 {

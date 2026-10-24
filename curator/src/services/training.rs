@@ -10,7 +10,7 @@ use crate::domain::{
     ArtifactVerification, ArtifactVerificationState, CheckpointRecord, LoraAdapter,
     TrainingMetricSnapshot, TrainingRecipe, TrainingRun, TrainingRunState,
 };
-use crate::ports::blob_storage::{BlobKey, BlobStorage};
+use crate::ports::blob_storage::{sha256_digest, BlobKey, BlobStorage};
 use crate::ports::catalog_repository::CatalogRepository;
 use crate::ports::cost_tracker::{CostTracker, CostTrackerError, TrainingCostRecord};
 use crate::ports::storage_error::StorageError;
@@ -19,6 +19,52 @@ use crate::ports::training_runner::{
 };
 
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Computes exponential poll backoff in seconds for unreachable runner: 15 * 2^failures capped at 300s.
+pub fn compute_poll_backoff(consecutive_failures: u32) -> u64 {
+    if consecutive_failures == 0 {
+        return 0;
+    }
+    let multiplier = 1u64.checked_shl(consecutive_failures).unwrap_or(u64::MAX);
+    15u64.saturating_mul(multiplier).min(300)
+}
+
+/// Compares an artifact's observed size and checksum against its expectations and returns the
+/// resulting verification record.
+///
+/// A size mismatch is reported under `size_method`; a checksum mismatch under `sha_method`. A
+/// matching artifact is recorded as `sha_method`, falling back to `size_only` when no checksum
+/// could be compared and `allow_size_only` is set (HEAD verification without a stored digest).
+fn compare_artifact(
+    expected_size: Option<u64>,
+    expected_sha: Option<&str>,
+    actual_size: u64,
+    actual_sha: Option<&str>,
+    size_method: &str,
+    sha_method: &str,
+    allow_size_only: bool,
+) -> ArtifactVerification {
+    if let Some(expected_size) = expected_size {
+        if actual_size != expected_size {
+            return ArtifactVerification::mismatch(
+                size_method,
+                format!(
+                    "Size mismatch: expected {}, got {}",
+                    expected_size, actual_size
+                ),
+            );
+        }
+    }
+    match (expected_sha, actual_sha) {
+        (Some(expected), Some(actual)) if expected != actual => ArtifactVerification::mismatch(
+            sha_method,
+            format!("Checksum mismatch: expected {}, got {}", expected, actual),
+        ),
+        (_, Some(_)) => ArtifactVerification::verified(sha_method, None),
+        _ if allow_size_only => ArtifactVerification::verified("size_only", None),
+        _ => ArtifactVerification::verified(sha_method, None),
+    }
+}
 
 /// Errors originating from `TrainingService` operations.
 #[derive(Debug, Error)]
@@ -160,6 +206,8 @@ impl TrainingService {
             finished_at: None,
             last_polled_at: None,
             last_poll_error: None,
+            consecutive_poll_failures: 0,
+            poll_backoff_seconds: 0,
             step: 0,
             total_steps,
             elapsed_seconds: 0.0,
@@ -168,6 +216,7 @@ impl TrainingService {
             published_adapter_ids: Vec::new(),
             error: None,
             failure_code: None,
+            metrics: Vec::new(),
         };
 
         self.catalog.save_training_run(&run).await?;
@@ -218,7 +267,8 @@ impl TrainingService {
         run.started_at = Some(Utc::now());
         run.last_polled_at = Some(Utc::now());
         run.last_poll_error = None;
-
+        run.consecutive_poll_failures = 0;
+        run.poll_backoff_seconds = 0;
         self.catalog.save_training_run(&run).await?;
 
         // Record initial metric snapshot
@@ -231,6 +281,13 @@ impl TrainingService {
             state: TrainingRunState::Running,
         };
         let _ = self.catalog.append_training_metric(&run.id, &initial_metric).await;
+
+        // Start adaptive polling so a dispatched run advances without an external poller.
+        let service = self.clone();
+        let run_id = run.id.clone();
+        tokio::spawn(async move {
+            service.adaptive_polling_loop(&run_id).await;
+        });
 
         Ok(run)
     }
@@ -248,6 +305,7 @@ impl TrainingService {
         if run.state == TrainingRunState::Running {
             self.poll_active_run_internal(&mut run).await?;
         }
+        run.metrics = self.catalog.list_training_metrics(id).await.unwrap_or_default();
 
         Ok(run)
     }
@@ -265,6 +323,7 @@ impl TrainingService {
         if run.state == TrainingRunState::Running {
             self.poll_active_run_internal(&mut run).await?;
         }
+        run.metrics = self.catalog.list_training_metrics(id).await.unwrap_or_default();
 
         Ok(run)
     }
@@ -314,6 +373,84 @@ impl TrainingService {
         Ok(runs)
     }
 
+    /// Returns chronological metric snapshots recorded in `metrics.jsonl` for a training run.
+    pub async fn get_run_metrics(
+        &self,
+        id: &str,
+    ) -> Result<Vec<TrainingMetricSnapshot>, TrainingServiceError> {
+        match self.catalog.get_training_run(id).await {
+            Ok(_) => {}
+            Err(StorageError::NotFound(_)) => {
+                return Err(TrainingServiceError::RunNotFound(id.to_string()));
+            }
+            Err(e) => return Err(TrainingServiceError::Storage(e)),
+        }
+
+        let metrics = self.catalog.list_training_metrics(id).await?;
+        Ok(metrics)
+    }
+
+    /// Finds every non-terminal `running` run across restarts, re-polls it immediately,
+    /// and spawns/continues adaptive polling for runs that stay `running`.
+    pub async fn resume_non_terminal_runs(&self) -> Result<Vec<TrainingRun>, TrainingServiceError> {
+        let runs = self.catalog.list_training_runs().await?;
+        let mut resumed = Vec::new();
+
+        for mut run in runs {
+            if run.state.is_terminal() {
+                continue;
+            }
+            // A run with a remote job was dispatched: it must never be stranded in `queued`
+            // across a restart, so treat it as running and poll it immediately.
+            if run.state == TrainingRunState::Running || run.remote_job_id.is_some() {
+                run.state = TrainingRunState::Running;
+                // A single failing run MUST NOT abort the boot sweep for the remaining runs.
+                if let Err(err) = self.poll_active_run_internal(&mut run).await {
+                    tracing::warn!(
+                        run_id = %run.id,
+                        error = %err,
+                        "Failed to resume polling for training run; continuing sweep"
+                    );
+                }
+                if run.state == TrainingRunState::Running {
+                    let service = self.clone();
+                    let run_id = run.id.clone();
+                    tokio::spawn(async move {
+                        service.adaptive_polling_loop(&run_id).await;
+                    });
+                }
+                resumed.push(run);
+            }
+        }
+
+        Ok(resumed)
+    }
+
+    /// Background polling loop with exponential backoff for an active training run.
+    pub async fn adaptive_polling_loop(&self, run_id: &str) {
+        loop {
+            let run = match self.catalog.get_training_run(run_id).await {
+                Ok(r) => r,
+                Err(_) => break,
+            };
+            if run.state.is_terminal() {
+                break;
+            }
+            let delay_secs = if run.poll_backoff_seconds > 0 {
+                run.poll_backoff_seconds
+            } else {
+                15
+            };
+            tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
+
+            if let Ok(r) = self.poll_run(run_id).await {
+                if r.state.is_terminal() {
+                    break;
+                }
+            }
+        }
+    }
+
     /// Internal polling helper: polls runner, updates checkpoints and metrics, verifies on success.
     async fn poll_active_run_internal(
         &self,
@@ -322,8 +459,9 @@ impl TrainingService {
         let runner = match self.runner.as_ref() {
             Some(r) => r,
             None => {
-                run.last_polled_at = Some(Utc::now());
                 run.last_poll_error = Some("Modal runner is not configured".to_string());
+                run.consecutive_poll_failures = run.consecutive_poll_failures.saturating_add(1);
+                run.poll_backoff_seconds = compute_poll_backoff(run.consecutive_poll_failures);
                 self.catalog.save_training_run(run).await?;
                 return Ok(());
             }
@@ -336,13 +474,15 @@ impl TrainingService {
 
         let poll_resp = match runner.poll_run(remote_id).await {
             Ok(resp) => resp,
-            Err(TrainingRunnerError::NotFound(_)) => {
-                // Lost remote job terminates run as failed per ADR-0009
+            Err(TrainingRunnerError::NotFound(job_id)) => {
+                let job_name = if job_id.is_empty() { remote_id } else { &job_id };
                 run.state = TrainingRunState::Failed;
                 run.failure_code = Some("LOST_REMOTE".to_string());
-                run.error = Some("Remote job not found on training runner".to_string());
+                run.error = Some(format!("Remote runner job '{job_name}' not found"));
                 run.finished_at = Some(Utc::now());
                 run.last_polled_at = Some(Utc::now());
+                run.consecutive_poll_failures = 0;
+                run.poll_backoff_seconds = 0;
 
                 if run.cost_usd > 0.0 {
                     let cost_rec = TrainingCostRecord::new(
@@ -360,21 +500,23 @@ impl TrainingService {
                 return Ok(());
             }
             Err(err) => {
-                // Unreachable or error keeps run running, records error per ADR-0009
-                run.last_polled_at = Some(Utc::now());
                 run.last_poll_error = Some(err.to_string());
+                run.consecutive_poll_failures = run.consecutive_poll_failures.saturating_add(1);
+                run.poll_backoff_seconds = compute_poll_backoff(run.consecutive_poll_failures);
                 self.catalog.save_training_run(run).await?;
                 return Ok(());
             }
         };
 
-        // Update progress
+        // Successful poll: update progress, reset consecutive failures and backoff
         run.step = poll_resp.step;
         run.total_steps = poll_resp.total_steps;
         run.elapsed_seconds = poll_resp.elapsed_seconds;
         run.cost_usd = poll_resp.cost_usd;
         run.last_polled_at = Some(Utc::now());
         run.last_poll_error = None;
+        run.consecutive_poll_failures = 0;
+        run.poll_backoff_seconds = 0;
 
         // Append metric snapshot
         let metric = TrainingMetricSnapshot {
@@ -394,8 +536,15 @@ impl TrainingService {
         match poll_resp.state {
             TrainingRunState::Succeeded => {
                 // Verify all checkpoint adapter artifacts in BlobStorage
-                let mut all_valid = true;
-                let mut missing_artifact = None;
+                let mut first_failure: Option<(String, usize, String)> = None;
+
+                if run.checkpoints.is_empty() {
+                    first_failure = Some((
+                        "stat_missing".to_string(),
+                        0,
+                        "No checkpoints reported by training runner".to_string(),
+                    ));
+                }
 
                 for cp in &mut run.checkpoints {
                     let key = BlobKey::CheckpointAdapter {
@@ -405,60 +554,108 @@ impl TrainingService {
 
                     match self.blobs.stat_blob(&key).await {
                         Ok(stat) => {
-                            if let Some(expected_size) = cp.artifact_size {
-                                if stat.size != expected_size {
-                                    cp.artifact_verification = ArtifactVerification::mismatch(
-                                        "stat",
-                                        format!(
-                                            "Size mismatch: expected {}, got {}",
-                                            expected_size, stat.size
-                                        ),
-                                    );
-                                    all_valid = false;
-                                    missing_artifact = Some(key.to_path());
-                                    continue;
-                                }
+                            let expected_size = cp.artifact_size;
+                            let expected_sha = cp.artifact_sha256.clone();
+                            let verification = compare_artifact(
+                                expected_size,
+                                expected_sha.as_deref(),
+                                stat.size,
+                                stat.sha256.as_deref(),
+                                "head_size",
+                                "head_sha256",
+                                true,
+                            );
+                            // Adopt size/checksum discovered on the object when not yet known.
+                            if expected_size.is_none() {
+                                cp.artifact_size = Some(stat.size);
                             }
-                            if let (Some(expected_sha), Some(stat_sha)) =
-                                (&cp.artifact_sha256, &stat.sha256)
+                            if expected_sha.is_none() {
+                                cp.artifact_sha256 = stat.sha256.clone();
+                            }
+                            if verification.status == ArtifactVerificationState::Mismatch
+                                && first_failure.is_none()
                             {
-                                if expected_sha != stat_sha {
-                                    cp.artifact_verification = ArtifactVerification::mismatch(
-                                        "stat",
-                                        format!(
-                                            "Checksum mismatch: expected {}, got {}",
-                                            expected_sha, stat_sha
-                                        ),
-                                    );
-                                    all_valid = false;
-                                    missing_artifact = Some(key.to_path());
-                                    continue;
+                                if let (Some(method), Some(detail)) =
+                                    (verification.method.clone(), verification.detail.clone())
+                                {
+                                    first_failure = Some((method, cp.step, detail));
                                 }
                             }
-                            cp.artifact_verification =
-                                ArtifactVerification::verified("stat", None);
+                            let mismatch =
+                                verification.status == ArtifactVerificationState::Mismatch;
+                            cp.artifact_verification = verification;
+                            if mismatch {
+                                continue;
+                            }
                         }
                         Err(_) => {
+                            let msg = format!("Artifact missing in storage: {}", key.to_path());
                             cp.artifact_verification = ArtifactVerification::mismatch(
-                                "stat",
-                                "Artifact missing in storage".to_string(),
+                                "stat_missing",
+                                msg.clone(),
                             );
-                            all_valid = false;
-                            missing_artifact = Some(key.to_path());
+                            if first_failure.is_none() {
+                                first_failure =
+                                    Some(("stat_missing".to_string(), cp.step, msg));
+                            }
+                        }
+                    }
+
+                    if cp.sample_grid_url.is_some() {
+                        let sample_key = BlobKey::CheckpointSamples {
+                            run_id: run.id.clone(),
+                            step: cp.step,
+                        };
+                        match self.blobs.stat_blob(&sample_key).await {
+                            Ok(stat) => {
+                                let expected_size = cp.sample_grid_size;
+                                let expected_sha = cp.sample_grid_sha256.clone();
+                                cp.sample_grid_verification = compare_artifact(
+                                    expected_size,
+                                    expected_sha.as_deref(),
+                                    stat.size,
+                                    stat.sha256.as_deref(),
+                                    "head_size",
+                                    "head_sha256",
+                                    true,
+                                );
+                                if expected_size.is_none() {
+                                    cp.sample_grid_size = Some(stat.size);
+                                }
+                                if expected_sha.is_none() {
+                                    cp.sample_grid_sha256 = stat.sha256.clone();
+                                }
+                            }
+                            Err(_) => {
+                                cp.sample_grid_verification = ArtifactVerification::mismatch(
+                                    "stat_missing",
+                                    "Sample grid missing in storage".to_string(),
+                                );
+                            }
                         }
                     }
                 }
 
-                if all_valid && !run.checkpoints.is_empty() {
+                let any_unverified = run.checkpoints.iter().any(|c| {
+                    c.artifact_verification.status != ArtifactVerificationState::Verified
+                });
+
+                if !any_unverified && !run.checkpoints.is_empty() {
                     run.state = TrainingRunState::Succeeded;
                     run.finished_at = Some(Utc::now());
                 } else {
                     run.state = TrainingRunState::Failed;
                     run.failure_code = Some("ARTIFACT_VERIFICATION_FAILED".to_string());
-                    run.error = Some(format!(
-                        "Checkpoint adapter artifact missing or invalid: {}",
-                        missing_artifact.unwrap_or_else(|| "no checkpoints found".to_string())
-                    ));
+                    if let Some((method, step, detail)) = first_failure {
+                        run.error = Some(format!(
+                            "Checkpoint step {step} adapter verification failed ({method}): {detail}"
+                        ));
+                    } else {
+                        run.error = Some(
+                            "Checkpoint adapter artifact missing or invalid: unverified checkpoints remain"
+                                .to_string(),
+                        );
+                    }
                     run.finished_at = Some(Utc::now());
                 }
 
@@ -511,7 +708,9 @@ impl TrainingService {
                 }
             }
             TrainingRunState::Running | TrainingRunState::Queued => {
-                run.state = poll_resp.state;
+                // A dispatched run stays `running` even while the runner reports `queued`
+                // during its startup window; never regress it.
+                run.state = TrainingRunState::Running;
             }
         }
 
@@ -574,43 +773,104 @@ impl TrainingService {
             Err(e) => return Err(TrainingServiceError::Storage(e)),
         };
 
+        let mut first_failed_adapter: Option<(String, usize, String)> = None;
+
         for cp in &mut run.checkpoints {
             let key = BlobKey::CheckpointAdapter {
                 run_id: run.id.clone(),
                 step: cp.step,
             };
 
-            match self.blobs.stat_blob(&key).await {
-                Ok(stat) => {
-                    if let Some(size) = cp.artifact_size {
-                        if stat.size != size {
-                            cp.artifact_verification = ArtifactVerification::mismatch(
-                                "stat",
-                                format!("Size mismatch: expected {}, got {}", size, stat.size),
-                            );
-                            continue;
+            // Full download and hash verification
+            match self.blobs.read_blob(&key).await {
+                Ok(bytes) => {
+                    let actual_size = bytes.len() as u64;
+                    let computed_sha = sha256_digest(&bytes);
+
+                    let expected_size = cp.artifact_size;
+                    let expected_sha = cp.artifact_sha256.clone();
+                    let verification = compare_artifact(
+                        expected_size,
+                        expected_sha.as_deref(),
+                        actual_size,
+                        Some(&computed_sha),
+                        "download_size",
+                        "download_sha256",
+                        false,
+                    );
+                    if verification.status == ArtifactVerificationState::Verified {
+                        cp.artifact_sha256 = Some(computed_sha);
+                        cp.artifact_size = Some(actual_size);
+                    } else if first_failed_adapter.is_none() {
+                        if let (Some(method), Some(detail)) =
+                            (verification.method.clone(), verification.detail.clone())
+                        {
+                            first_failed_adapter = Some((method, cp.step, detail));
                         }
                     }
-                    if let (Some(sha), Some(stat_sha)) = (&cp.artifact_sha256, &stat.sha256) {
-                        if sha != stat_sha {
-                            cp.artifact_verification = ArtifactVerification::mismatch(
-                                "stat",
-                                format!("Checksum mismatch: expected {}, got {}", sha, stat_sha),
-                            );
-                            continue;
-                        }
-                    }
-                    cp.artifact_verification = ArtifactVerification::verified("stat", None);
+                    cp.artifact_verification = verification;
                 }
                 Err(_) => {
+                    let msg = format!("Adapter artifact missing in storage: {}", key.to_path());
                     cp.artifact_verification = ArtifactVerification::mismatch(
-                        "stat",
-                        "Artifact missing in storage".to_string(),
+                        "stat_missing",
+                        msg.clone(),
                     );
+                    if first_failed_adapter.is_none() {
+                        first_failed_adapter =
+                            Some(("stat_missing".to_string(), cp.step, msg));
+                    }
+                }
+            }
+
+            // Full download of sample grid if present
+            let sample_key = BlobKey::CheckpointSamples {
+                run_id: run.id.clone(),
+                step: cp.step,
+            };
+            if cp.sample_grid_url.is_some() || self.blobs.stat_blob(&sample_key).await.is_ok() {
+                match self.blobs.read_blob(&sample_key).await {
+                    Ok(sample_bytes) => {
+                        let sample_size = sample_bytes.len() as u64;
+                        let sample_sha = sha256_digest(&sample_bytes);
+                        let expected_size = cp.sample_grid_size;
+                        let expected_sha = cp.sample_grid_sha256.clone();
+                        cp.sample_grid_verification = compare_artifact(
+                            expected_size,
+                            expected_sha.as_deref(),
+                            sample_size,
+                            Some(&sample_sha),
+                            "download_size",
+                            "download_sha256",
+                            false,
+                        );
+                        if cp.sample_grid_verification.status
+                            == ArtifactVerificationState::Verified
+                        {
+                            cp.sample_grid_sha256 = Some(sample_sha);
+                            cp.sample_grid_size = Some(sample_size);
+                        }
+                    }
+                    Err(_) => {
+                        if cp.sample_grid_url.is_some() {
+                            cp.sample_grid_verification = ArtifactVerification::mismatch(
+                                "stat_missing",
+                                format!("Sample grid missing in storage: {}", sample_key.to_path()),
+                            );
+                        }
+                    }
                 }
             }
         }
 
+        if let Some((failed_method, failed_step, reason)) = first_failed_adapter {
+            run.state = TrainingRunState::Failed;
+            run.failure_code = Some("ARTIFACT_VERIFICATION_FAILED".to_string());
+            run.error = Some(format!(
+                "Checkpoint step {failed_step} adapter verification failed ({failed_method}): {reason}"
+            ));
+            run.finished_at = Some(Utc::now());
+        }
         self.catalog.save_training_run(&run).await?;
         Ok(run)
     }

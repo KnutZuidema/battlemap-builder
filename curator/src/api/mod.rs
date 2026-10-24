@@ -60,6 +60,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/training/runs/{id}/cancel", post(post_training_run_cancel))
         .route("/api/training/runs/{id}/publish", post(post_training_run_publish))
         .route("/api/training/runs/{id}/verify", post(post_training_run_verify))
+        .route("/api/training/runs/{id}/metrics", get(get_training_run_metrics))
         .route("/api/training/adapters", get(get_training_adapters))
         .route("/api/training/adapters/{id}", get(get_training_adapter))
         .route("/api/training/adapters/{id}/retire", post(post_retire_training_adapter))

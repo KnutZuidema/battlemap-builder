@@ -15,7 +15,7 @@ pub use curation::*;
 
 pub use benchmark::*;
 pub use dataset_export::{DatasetExportService, DeleteDatasetError, FreezeDatasetError};
-pub use training::{CreateTrainingRunRequest, TrainingService, TrainingServiceError};
+pub use training::{compute_poll_backoff, CreateTrainingRunRequest, TrainingService, TrainingServiceError};
 pub use storage_maintenance::StorageMaintenanceService;
 pub use storage_migration::{
     discover_disk_blobs, is_migration_completed, run_storage_migration, MigrationOptions,

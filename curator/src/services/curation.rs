@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::domain::{
-    normalize_tags, validate_layers_for_curation, CuratedMap, Layer, RejectionReason,
+    normalize_tags, validate_layers_for_curation, Candidate, CuratedMap, Layer, RejectionReason,
 };
 use crate::ports::blob_storage::{BlobKey, BlobStorage};
 use crate::ports::catalog_repository::CatalogRepository;
@@ -57,6 +57,13 @@ pub trait CurationWorkflow: Send + Sync {
         reason: RejectionReason,
         notes: Option<&str>,
     ) -> Result<(), CurationWorkflowError>;
+
+    /// Undoes the rejection of a candidate, restoring its layers and manifest back to staging.
+    /// If `candidate_id` is None, restores the most recently rejected candidate.
+    async fn undo_reject(
+        &self,
+        candidate_id: Option<&str>,
+    ) -> Result<Candidate, CurationWorkflowError>;
 }
 
 /// Domain service orchestrating candidate curation and rejection workflows.
@@ -349,9 +356,76 @@ impl CurationWorkflow for CurationService {
             ));
         }
 
+        match self.catalog.get_candidate(id).await {
+            Ok(candidate) => {
+                self.catalog.save_trashed_candidate(&candidate).await?;
+                let staging_prefix = BlobKey::StagingDir {
+                    id: Some(id.to_string()),
+                };
+                let keys = self.blobs.list_prefix(&staging_prefix).await?;
+                for key in keys {
+                    if let BlobKey::StagingLayer { id: blob_id, index } = &key {
+                        let bytes = self.blobs.read_blob(&key).await?;
+                        let trash_key = BlobKey::TrashLayer {
+                            id: blob_id.clone(),
+                            index: *index,
+                        };
+                        self.blobs.write_blob(&trash_key, &bytes).await?;
+                        self.blobs.delete_blob(&key).await?;
+                    }
+                }
+                self.catalog.delete_candidate(id).await?;
+            }
+            Err(StorageError::NotFound(_)) => {}
+            Err(err) => return Err(err.into()),
+        }
+
         self.catalog.log_rejection(id, reason, notes).await?;
         self.purge_staging(id).await;
         Ok(())
+    }
+
+    async fn undo_reject(
+        &self,
+        candidate_id: Option<&str>,
+    ) -> Result<Candidate, CurationWorkflowError> {
+        let id = match candidate_id.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(id) => id.to_string(),
+            None => {
+                let latest = self.catalog.latest_rejection().await?;
+                match latest {
+                    Some(rec) => rec.id,
+                    None => {
+                        return Err(CurationWorkflowError::ValidationFailed(
+                            "No rejected candidate to undo".to_string(),
+                        ));
+                    }
+                }
+            }
+        };
+
+        let candidate = self.catalog.get_trashed_candidate(&id).await?;
+
+        let trash_prefix = BlobKey::TrashDir {
+            id: Some(id.clone()),
+        };
+        let trash_keys = self.blobs.list_prefix(&trash_prefix).await?;
+        for key in trash_keys {
+            if let BlobKey::TrashLayer { id: blob_id, index } = &key {
+                let bytes = self.blobs.read_blob(&key).await?;
+                let staging_key = BlobKey::StagingLayer {
+                    id: blob_id.clone(),
+                    index: *index,
+                };
+                self.blobs.write_blob(&staging_key, &bytes).await?;
+                self.blobs.delete_blob(&key).await?;
+            }
+        }
+
+        self.catalog.save_candidate(&candidate).await?;
+        self.catalog.delete_trashed_candidate(&id).await?;
+        self.catalog.remove_rejection(&id).await?;
+        Ok(candidate)
     }
 }
 
@@ -492,6 +566,26 @@ mod tests {
 
         async fn is_dataset_snapshot_referenced(&self, id: &str) -> Result<bool, StorageError> {
             self.inner.is_dataset_snapshot_referenced(id).await
+        }
+
+        async fn save_trashed_candidate(&self, candidate: &Candidate) -> Result<(), StorageError> {
+            self.inner.save_trashed_candidate(candidate).await
+        }
+
+        async fn get_trashed_candidate(&self, id: &str) -> Result<Candidate, StorageError> {
+            self.inner.get_trashed_candidate(id).await
+        }
+
+        async fn delete_trashed_candidate(&self, id: &str) -> Result<(), StorageError> {
+            self.inner.delete_trashed_candidate(id).await
+        }
+
+        async fn remove_rejection(&self, id: &str) -> Result<(), StorageError> {
+            self.inner.remove_rejection(id).await
+        }
+
+        async fn latest_rejection(&self) -> Result<Option<RejectionRecord>, StorageError> {
+            self.inner.latest_rejection().await
         }
     }
 
@@ -712,6 +806,19 @@ mod tests {
             .map(|key| key.to_path())
             .collect()
     }
+    /// Canonical paths of every trashed blob of `id`, ordered by canonical path.
+    async fn trash_paths(blobs: &impl BlobStorage, id: &str) -> Vec<String> {
+        blobs
+            .list_prefix(&BlobKey::TrashDir {
+                id: Some(id.to_string()),
+            })
+            .await
+            .unwrap()
+            .iter()
+            .map(|key| key.to_path())
+            .collect()
+    }
+
 
     fn ground_bytes() -> Vec<u8> {
         b"\x89PNG\r\n\x1a\nfake_ground_bytes".to_vec()
@@ -1212,6 +1319,95 @@ mod tests {
         assert!(staging_paths(&blobs, "cand_1").await.is_empty());
         // A rejection never produces curated artifacts.
         assert!(curated_paths(&blobs, "cand_1").await.is_empty());
+    }
+    #[tokio::test]
+    async fn test_reject_and_undo_restores_candidate_to_staging() {
+        let (catalog, blobs) = staged_ports(
+            sample_candidate(),
+            &[(0, ground_bytes()), (1, upper_bytes())],
+        )
+        .await;
+        let desc_service = Arc::new(DescriptionService::new(None));
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
+
+        service
+            .reject("cand_1", RejectionReason::BlurryLowRes, Some("Too blurry"))
+            .await
+            .expect("rejection should succeed");
+
+        assert!(catalog.is_rejected("cand_1").await.unwrap());
+        assert!(catalog.get_candidate("cand_1").await.is_err());
+        assert!(staging_paths(&blobs, "cand_1").await.is_empty());
+        assert_eq!(
+            trash_paths(&blobs, "cand_1").await,
+            vec!["trash/cand_1/0.png", "trash/cand_1/1.png"]
+        );
+        assert!(catalog.get_trashed_candidate("cand_1").await.is_ok());
+
+        let restored = service
+            .undo_reject(Some("cand_1"))
+            .await
+            .expect("undo reject should succeed");
+
+        assert_eq!(restored.id, "cand_1");
+        assert!(!catalog.is_rejected("cand_1").await.unwrap());
+        let staging_cand = catalog
+            .get_candidate("cand_1")
+            .await
+            .expect("candidate should be back in staging catalog");
+        assert_eq!(staging_cand.id, "cand_1");
+        assert_eq!(
+            staging_paths(&blobs, "cand_1").await,
+            vec!["staging/cand_1/0.png", "staging/cand_1/1.png"]
+        );
+        assert!(trash_paths(&blobs, "cand_1").await.is_empty());
+        assert!(catalog.get_trashed_candidate("cand_1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_undo_reject_latest_when_id_omitted() {
+        let (catalog, blobs) = staged_ports(
+            sample_candidate(),
+            &[(0, ground_bytes()), (1, upper_bytes())],
+        )
+        .await;
+        let desc_service = Arc::new(DescriptionService::new(None));
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
+
+        service
+            .reject("cand_1", RejectionReason::BlurryLowRes, Some("Too blurry"))
+            .await
+            .expect("rejection should succeed");
+
+        assert!(catalog.is_rejected("cand_1").await.unwrap());
+        assert!(staging_paths(&blobs, "cand_1").await.is_empty());
+
+        let restored = service
+            .undo_reject(None)
+            .await
+            .expect("undo reject with None should restore latest rejection");
+
+        assert_eq!(restored.id, "cand_1");
+        assert!(!catalog.is_rejected("cand_1").await.unwrap());
+        assert!(catalog.get_candidate("cand_1").await.is_ok());
+        assert_eq!(
+            staging_paths(&blobs, "cand_1").await,
+            vec!["staging/cand_1/0.png", "staging/cand_1/1.png"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_undo_reject_nonexistent_fails() {
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let blobs = Arc::new(InMemoryBlobStorage::new());
+        let desc_service = Arc::new(DescriptionService::new(None));
+        let service = CurationService::new(catalog.clone(), blobs.clone(), desc_service);
+
+        let result = service.undo_reject(Some("missing")).await;
+        assert!(result.is_err());
+
+        let result_none = service.undo_reject(None).await;
+        assert!(result_none.is_err());
     }
 
     #[tokio::test]

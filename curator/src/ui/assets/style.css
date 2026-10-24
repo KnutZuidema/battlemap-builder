@@ -381,6 +381,25 @@ kbd {
     background: var(--bg-surface-hover);
 }
 
+.btn-undo-reject {
+    background: var(--bg-surface-card);
+    border-color: var(--border-light);
+    color: var(--text-secondary);
+    transition: opacity var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.btn-undo-reject:hover:not(:disabled) {
+    background: var(--bg-surface-hover);
+    border-color: var(--border-medium);
+    color: var(--text-primary);
+}
+
+.btn-undo-reject:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
 .btn-danger {
     background: rgba(244, 63, 94, 0.15);
     border-color: rgba(244, 63, 94, 0.4);
@@ -1654,6 +1673,29 @@ kbd {
 
 .toast.toast-info {
     border-left: 3px solid var(--accent-cyan);
+}
+
+.toast-message {
+    flex: 1;
+}
+
+.toast-action {
+    margin-left: 0.5rem;
+    padding: 0.2rem 0.65rem;
+    background: var(--bg-surface-elevated);
+    border: 1px solid var(--border-light);
+    border-radius: 4px;
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+    outline: none;
+}
+
+.toast-action:hover {
+    background: var(--bg-surface-hover);
+    border-color: var(--border-medium);
 }
 
 @keyframes toast-in {

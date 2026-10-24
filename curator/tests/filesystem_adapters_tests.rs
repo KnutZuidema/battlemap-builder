@@ -682,3 +682,38 @@ async fn catalog_repository_is_usable_as_trait_object() {
         .unwrap();
     assert_eq!(storage.get_candidate("cand-1").await.unwrap().id, "cand-1");
 }
+
+#[tokio::test]
+async fn filesystem_catalog_trash_and_unreject_lifecycle() {
+    let dir = tempdir().unwrap();
+    let storage = FilesystemCatalogRepository::new(dir.path());
+
+    let cand = candidate("cand-trash-1", Source::Reddit, None);
+
+    // 1. Save to trash
+    storage.save_trashed_candidate(&cand).await.unwrap();
+    let loaded = storage.get_trashed_candidate("cand-trash-1").await.unwrap();
+    assert_eq!(loaded.id, "cand-trash-1");
+
+    // 2. Log rejection and query latest
+    assert!(!storage.is_rejected("cand-trash-1").await.unwrap());
+    storage
+        .log_rejection("cand-trash-1", RejectionReason::BlurryLowRes, Some("too blurry"))
+        .await
+        .unwrap();
+    assert!(storage.is_rejected("cand-trash-1").await.unwrap());
+    let latest = storage.latest_rejection().await.unwrap().expect("rejection record exists");
+    assert_eq!(latest.id, "cand-trash-1");
+
+    // 3. Remove rejection (unreject)
+    storage.remove_rejection("cand-trash-1").await.unwrap();
+    assert!(!storage.is_rejected("cand-trash-1").await.unwrap());
+    assert!(storage.latest_rejection().await.unwrap().is_none());
+
+    // 4. Delete trashed candidate
+    storage.delete_trashed_candidate("cand-trash-1").await.unwrap();
+    assert!(matches!(
+        storage.get_trashed_candidate("cand-trash-1").await,
+        Err(StorageError::NotFound(_))
+    ));
+}

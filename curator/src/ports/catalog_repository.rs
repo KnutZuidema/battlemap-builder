@@ -100,6 +100,20 @@ pub trait CatalogRepository: Send + Sync {
 
     /// Returns whether any TrainingRun references the dataset snapshot with `id`.
     async fn is_dataset_snapshot_referenced(&self, id: &str) -> Result<bool, StorageError>;
+    /// Save candidate to trash.
+    async fn save_trashed_candidate(&self, candidate: &Candidate) -> Result<(), StorageError>;
+
+    /// Retrieve a trashed candidate.
+    async fn get_trashed_candidate(&self, id: &str) -> Result<Candidate, StorageError>;
+
+    /// Delete a candidate from trash. Succeeds when not found.
+    async fn delete_trashed_candidate(&self, id: &str) -> Result<(), StorageError>;
+
+    /// Remove rejection record for `id` from rejection log. Succeeds when not found.
+    async fn remove_rejection(&self, id: &str) -> Result<(), StorageError>;
+
+    /// Returns the most recently logged rejection record, if any.
+    async fn latest_rejection(&self) -> Result<Option<RejectionRecord>, StorageError>;
 }
 
 #[async_trait]
@@ -174,5 +188,25 @@ impl<T: ?Sized + CatalogRepository> CatalogRepository for std::sync::Arc<T> {
 
     async fn is_dataset_snapshot_referenced(&self, id: &str) -> Result<bool, StorageError> {
         (**self).is_dataset_snapshot_referenced(id).await
+    }
+
+    async fn save_trashed_candidate(&self, candidate: &Candidate) -> Result<(), StorageError> {
+        (**self).save_trashed_candidate(candidate).await
+    }
+
+    async fn get_trashed_candidate(&self, id: &str) -> Result<Candidate, StorageError> {
+        (**self).get_trashed_candidate(id).await
+    }
+
+    async fn delete_trashed_candidate(&self, id: &str) -> Result<(), StorageError> {
+        (**self).delete_trashed_candidate(id).await
+    }
+
+    async fn remove_rejection(&self, id: &str) -> Result<(), StorageError> {
+        (**self).remove_rejection(id).await
+    }
+
+    async fn latest_rejection(&self) -> Result<Option<RejectionRecord>, StorageError> {
+        (**self).latest_rejection().await
     }
 }

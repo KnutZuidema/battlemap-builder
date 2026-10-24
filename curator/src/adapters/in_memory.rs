@@ -129,6 +129,7 @@ pub struct InMemoryCatalogRepository {
     rejections: RwLock<Vec<RejectionRecord>>,
     snapshots: RwLock<HashMap<String, DatasetSnapshot>>,
     referenced_snapshots: RwLock<HashSet<String>>,
+    trashed_candidates: RwLock<HashMap<String, Candidate>>,
 }
 
 impl InMemoryCatalogRepository {
@@ -353,6 +354,47 @@ impl CatalogRepository for InMemoryCatalogRepository {
             .read()
             .expect("in-memory catalog lock poisoned")
             .contains(id))
+    }
+
+    async fn save_trashed_candidate(&self, candidate: &Candidate) -> Result<(), StorageError> {
+        self.trashed_candidates
+            .write()
+            .expect("in-memory catalog lock poisoned")
+            .insert(candidate.id.clone(), candidate.clone());
+        Ok(())
+    }
+
+    async fn get_trashed_candidate(&self, id: &str) -> Result<Candidate, StorageError> {
+        self.trashed_candidates
+            .read()
+            .expect("in-memory catalog lock poisoned")
+            .get(id)
+            .cloned()
+            .ok_or_else(|| StorageError::NotFound(format!("Trashed candidate '{id}' not found")))
+    }
+
+    async fn delete_trashed_candidate(&self, id: &str) -> Result<(), StorageError> {
+        self.trashed_candidates
+            .write()
+            .expect("in-memory catalog lock poisoned")
+            .remove(id);
+        Ok(())
+    }
+    async fn remove_rejection(&self, id: &str) -> Result<(), StorageError> {
+        self.rejections
+            .write()
+            .expect("in-memory catalog lock poisoned")
+            .retain(|r| r.id != id);
+        Ok(())
+    }
+
+    async fn latest_rejection(&self) -> Result<Option<RejectionRecord>, StorageError> {
+        Ok(self
+            .rejections
+            .read()
+            .expect("in-memory catalog lock poisoned")
+            .last()
+            .cloned())
     }
 }
 

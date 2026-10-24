@@ -57,6 +57,10 @@ impl FilesystemCatalogRepository {
         self.curated_dir().join(id).join("manifest.json")
     }
 
+    fn trash_candidate_manifest(&self, id: &str) -> PathBuf {
+        self.root_dir.join("trash").join(id).join("manifest.json")
+    }
+
     /// Full path to the `rejections.json` log file.
     fn rejections_file(&self) -> PathBuf {
         self.root_dir.join("rejected").join("rejections.json")
@@ -391,6 +395,30 @@ impl CatalogRepository for FilesystemCatalogRepository {
         }
         Ok(())
     }
+    async fn save_trashed_candidate(&self, candidate: &Candidate) -> Result<(), StorageError> {
+        Self::write_json(&self.trash_candidate_manifest(&candidate.id), candidate)
+    }
+
+    async fn get_trashed_candidate(&self, id: &str) -> Result<Candidate, StorageError> {
+        Self::read_json(
+            &self.trash_candidate_manifest(id),
+            &format!("Trashed candidate '{id}'"),
+        )
+    }
+
+    async fn delete_trashed_candidate(&self, id: &str) -> Result<(), StorageError> {
+        Self::delete_manifest(&self.trash_candidate_manifest(id))
+    }
+
+    async fn remove_rejection(&self, id: &str) -> Result<(), StorageError> {
+        let mut records = self.rejection_records().await?;
+        let initial_len = records.len();
+        records.retain(|r| r.id != id);
+        if records.len() != initial_len {
+            Self::write_json(&self.rejections_file(), &records)?;
+        }
+        Ok(())
+    }
 
     async fn is_dataset_snapshot_referenced(&self, id: &str) -> Result<bool, StorageError> {
         if self
@@ -426,5 +454,9 @@ impl CatalogRepository for FilesystemCatalogRepository {
         }
 
         Ok(false)
+    }
+
+    async fn latest_rejection(&self) -> Result<Option<RejectionRecord>, StorageError> {
+        Ok(self.rejection_records().await?.into_iter().last())
     }
 }

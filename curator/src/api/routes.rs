@@ -16,10 +16,10 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{
-    BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
-    normalize_tags, CuratedMap, CuratedMapUpdate, CustomPrompt, DatasetReadiness, DatasetSnapshot,
-    LayerRole, LoraAdapter, PurgeStagingResult, RedditHarvestRequest, RejectionReason, StorageStats,
-    Theme, TrainingMetricSnapshot, TrainingRun,
+    BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, BenchmarkModelSpec, Candidate,
+    CandidateLayer, normalize_tags, CuratedMap, CuratedMapUpdate, CustomPrompt, DatasetReadiness,
+    DatasetSnapshot, LayerRole, LoraAdapter, ModelDescriptor, PurgeStagingResult,
+    RedditHarvestRequest, RejectionReason, StorageStats, Theme, TrainingMetricSnapshot, TrainingRun,
 };
 use crate::services::CreateTrainingRunRequest;
 use crate::ports::catalog_repository::{CandidateFilter, CuratedFilter};
@@ -447,6 +447,10 @@ pub struct ListAdaptersQuery {
     pub selectable: Option<bool>,
     #[serde(default)]
     pub usable: Option<bool>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Request payload for soft-retiring or restoring a LoRA adapter.
@@ -1258,6 +1262,14 @@ pub async fn post_reset_cost_session(
     }))
 }
 
+/// GET /api/models - Returns the list of selectable model descriptors (ADR-0010).
+pub async fn get_models(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ModelDescriptor>>, ApiError> {
+    let models = state.model_registry.list_selectable().await?;
+    Ok(Json(models))
+}
+
 /// Request payload for initiating a batch AI benchmark run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkRunRequest {
@@ -1267,16 +1279,30 @@ pub struct BenchmarkRunRequest {
     pub archetypes: Vec<String>,
     #[serde(default)]
     pub custom_prompts: Vec<CustomPrompt>,
-    #[serde(default = "default_true")]
-    pub use_reference_conditioning: bool,
+    #[serde(default)]
+    pub use_reference_conditioning: Option<bool>,
+    #[serde(default)]
+    pub use_reference_image: Option<bool>,
+    #[serde(default)]
+    pub reference_conditioning: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_scale: Option<f64>,
 }
 
-fn default_true() -> bool {
-    true
+impl BenchmarkRunRequest {
+    pub fn is_reference_conditioning_requested(&self) -> bool {
+        self.use_reference_conditioning == Some(true)
+            || self.use_reference_image == Some(true)
+            || self.reference_conditioning == Some(true)
+    }
+
+    pub fn reference_conditioning_enabled(&self) -> bool {
+        !(self.use_reference_conditioning == Some(false)
+            || self.use_reference_image == Some(false)
+            || self.reference_conditioning == Some(false))
+    }
 }
 
 /// Response payload for completed non-streaming benchmark runs.
@@ -1337,11 +1363,37 @@ pub async fn post_benchmark_run(
         ));
     }
 
+    // Model validation and reference conditioning capability gate (ADR-0010)
+    let is_ref_requested = payload.is_reference_conditioning_requested();
+    for model_id in &payload.models {
+        let selectable_desc = state.model_registry.find(model_id).await?;
+        let desc = match selectable_desc {
+            Some(d) => d,
+            None => {
+                if let Ok(Some(_)) = state.model_registry.find_including_retired(model_id).await {
+                    return Err(ApiError::bad_request(format!(
+                        "Model '{model_id}' is retired or unselectable for new benchmark runs"
+                    )));
+                } else if let Some(spec) = BenchmarkModelSpec::find(model_id) {
+                    spec.into()
+                } else {
+                    return Err(ApiError::bad_request(format!(
+                        "Unknown or unselectable benchmark model: '{model_id}'"
+                    )));
+                }
+            }
+        };
+
+        if is_ref_requested && !desc.supports_reference_image {
+            return Err(ApiError::model_not_reference_capable(model_id));
+        }
+    }
+
     let mut service = state
         .get_or_create_benchmark_service()?
         .as_ref()
         .clone()
-        .with_reference_conditioning(payload.use_reference_conditioning);
+        .with_reference_conditioning(payload.reference_conditioning_enabled());
 
     if let Some(path) = payload.lora_path.filter(|p| !p.trim().is_empty()) {
         let scale = payload.lora_scale.unwrap_or(0.75);

@@ -12,9 +12,20 @@ Curator operates as a standalone service running on port `3002`:
 - **Frontend**: A zero-dependency embedded single-page application (`rust_embed`) with a high-performance 2D HTML5 canvas viewport, 64px VTT grid overlay, multi-layer filmstrip deck, and an interactive decision modal.
 - **Ingestion Sources**:
   - Automated Reddit harvesting from `/r/battlemaps` with OAuth2 authentication and multi-image gallery bundle assembly.
-  - Benchmark generation runs evaluating image models via OpenRouter (e.g. Gemini, Seedream, Muse).
+  - Benchmark generation runs across the OpenRouter baselines (e.g. Gemini, Seedream, Muse) and published WaveSpeed LoRA adapters, driven by the derived model registry (`GET /api/models`).
   - Manual staging ingestion via the Ingestion Drawer.
 - **Multi-Layer Bundle Support**: Staged maps support multi-level floorplans (Ground, Upper Floor, Basement, Roof, Variant, Exclude) with floor elevation tagging, split/regroup operations, and onion-skin comparison.
+
+### Derived Model Registry (`GET /api/models`)
+
+Model identity is computed at read time and never persisted (ADR-0010). The endpoint returns the OpenRouter specification entries plus, for every published and non-retired `LoRA Adapter` whose checkpoint artifact exists in storage, two entries:
+
+- `{adapter.id}` — the text-to-image engine (`$0.015/image`, `supports_reference_image: false`)
+- `{adapter.id}-edit` — the edit engine (`$0.021/image`, `supports_reference_image: true`)
+
+Each descriptor carries `id`, `display_name`, `provider`, `api_type`, `has_vision`, `supports_reference_image`, `pricing` and `estimated_cost_per_image`; adapter entries additionally carry `adapter_id`, `run_id`, `step`, `lora_path` and `lora_scale`. Publishing or retiring an adapter changes the list on the next request, with no restart.
+
+The Benchmark Drawer renders its checklist and pre-flight cost projection from this endpoint, and the benchmark runner resolves `{run_id}-s{step}[-edit]` through the registry, so a run uses that adapter's exact weights URL and scale and records cost under that exact id. Requesting reference conditioning for an entry with `supports_reference_image: false` is refused with `422 MODEL_NOT_REFERENCE_CAPABLE` (the drawer surfaces the blocked combination as an inline warning); retired adapters are absent and refused for new runs, but still resolve for recorded results and cost entries.
 
 ---
 

@@ -18,14 +18,6 @@ pub const MODEL_GEMINI_31_FLASH_LITE: &str = "google/gemini-3.1-flash-lite-image
 pub const MODEL_MUSE: &str = "meta/muse-image";
 pub const MODEL_SEEDREAM_50_FLASH: &str = "bytedance-seed/seedream-5-0-flash";
 
-/// All standard benchmark models.
-pub const ALL_BENCHMARK_MODELS: &[&str] = &[
-    MODEL_GEMINI_31_FLASH,
-    MODEL_GEMINI_31_FLASH_LITE,
-    MODEL_MUSE,
-    MODEL_SEEDREAM_50_FLASH,
-];
-
 /// WaveSpeed AI model identifiers for FLUX 3 Klein LoRA serving (ADR-0008, ADR-0010).
 pub const MODEL_WAVESPEED_KLEIN_T2I_LORA: &str =
     "wavespeed-ai/flux-3-klein-image-distilled/text-to-image-lora";
@@ -104,6 +96,14 @@ impl ModelPricing {
         }
     }
 
+    pub const fn per_image(image_output: f64) -> Self {
+        Self {
+            input_per_million: 0.0,
+            output_per_million: 0.0,
+            image_output,
+        }
+    }
+
     /// Calculate estimated cost in USD given prompt tokens and completion tokens.
     pub fn calculate_cost(&self, prompt_tokens: Option<u32>, completion_tokens: Option<u32>) -> f64 {
         if self.input_per_million == 0.0 && self.output_per_million == 0.0 && self.image_output > 0.0 {
@@ -162,7 +162,7 @@ impl BenchmarkModelSpec {
                 label: "Meta Muse Image".to_string(),
                 provider: ModelProvider::OpenRouter,
                 api_type: ModelApiType::Images,
-                pricing: ModelPricing::new(0.0, 0.0, 0.01),
+                pricing: ModelPricing::per_image(0.01),
                 has_vision: true,
                 supports_reference_image: true,
             }),
@@ -171,7 +171,7 @@ impl BenchmarkModelSpec {
                 label: "ByteDance Seedream 5.0 Flash".to_string(),
                 provider: ModelProvider::OpenRouter,
                 api_type: ModelApiType::Images,
-                pricing: ModelPricing::new(0.0, 0.0, 0.018),
+                pricing: ModelPricing::per_image(0.018),
                 has_vision: true,
                 supports_reference_image: true,
             }),
@@ -180,7 +180,7 @@ impl BenchmarkModelSpec {
                 label: "FLUX 3 Klein Distilled Text-to-Image LoRA".to_string(),
                 provider: ModelProvider::WaveSpeed,
                 api_type: ModelApiType::Images,
-                pricing: ModelPricing::new(0.0, 0.0, 0.015),
+                pricing: ModelPricing::per_image(0.015),
                 has_vision: false,
                 supports_reference_image: false,
             }),
@@ -189,7 +189,7 @@ impl BenchmarkModelSpec {
                 label: "FLUX 3 Klein Distilled Edit LoRA".to_string(),
                 provider: ModelProvider::WaveSpeed,
                 api_type: ModelApiType::Images,
-                pricing: ModelPricing::new(0.0, 0.0, 0.021),
+                pricing: ModelPricing::per_image(0.021),
                 has_vision: true,
                 supports_reference_image: true,
             }),
@@ -215,6 +215,57 @@ impl BenchmarkModelSpec {
         }
     }
 }
+
+/// Detailed descriptor for a model derived from the model registry (ADR-0010).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelDescriptor {
+    pub id: String,
+    pub display_name: String,
+    pub provider: ModelProvider,
+    pub api_type: ModelApiType,
+    pub has_vision: bool,
+    pub supports_reference_image: bool,
+    pub pricing: ModelPricing,
+    pub estimated_cost_per_image: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_scale: Option<f64>,
+}
+
+impl From<BenchmarkModelSpec> for ModelDescriptor {
+    fn from(spec: BenchmarkModelSpec) -> Self {
+        let estimated_cost_per_image = spec.estimated_cost_per_map();
+        Self {
+            id: spec.id.clone(),
+            display_name: spec.label,
+            provider: spec.provider,
+            api_type: spec.api_type,
+            has_vision: spec.has_vision,
+            supports_reference_image: spec.supports_reference_image,
+            pricing: spec.pricing,
+            estimated_cost_per_image,
+            adapter_id: None,
+            run_id: None,
+            step: None,
+            lora_path: None,
+            lora_scale: None,
+        }
+    }
+}
+
+impl From<&BenchmarkModelSpec> for ModelDescriptor {
+    fn from(spec: &BenchmarkModelSpec) -> Self {
+        spec.clone().into()
+    }
+}
+
 
 /// The 6 standard battlemap benchmark archetypes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -660,23 +711,36 @@ mod tests {
 
     #[test]
     fn test_model_specs() {
-        assert_eq!(ALL_BENCHMARK_MODELS.len(), 4);
-        for model_id in ALL_BENCHMARK_MODELS {
+        let openrouter_models = [
+            MODEL_GEMINI_31_FLASH,
+            MODEL_GEMINI_31_FLASH_LITE,
+            MODEL_MUSE,
+            MODEL_SEEDREAM_50_FLASH,
+        ];
+        for model_id in openrouter_models {
             let spec = BenchmarkModelSpec::find(model_id).expect("model spec found");
-            assert_eq!(&spec.id, model_id);
+            assert_eq!(spec.id, model_id);
+            assert_eq!(spec.provider, ModelProvider::OpenRouter);
             assert!(!spec.label.is_empty());
-            assert!(spec.has_vision());
-            assert!(spec.has_vision);
         }
 
         let flash = BenchmarkModelSpec::find(MODEL_GEMINI_31_FLASH).unwrap();
         assert_eq!(flash.api_type, ModelApiType::Chat);
+        assert!(flash.has_vision());
+        assert!(flash.supports_reference_image);
 
         let muse = BenchmarkModelSpec::find(MODEL_MUSE).unwrap();
         assert_eq!(muse.api_type, ModelApiType::Images);
         assert_eq!(muse.pricing.calculate_cost(None, None), 0.01);
-    }
+        assert!(muse.has_vision());
+        assert!(muse.supports_reference_image);
 
+        let seedream = BenchmarkModelSpec::find(MODEL_SEEDREAM_50_FLASH).unwrap();
+        assert_eq!(seedream.api_type, ModelApiType::Images);
+        assert_eq!(seedream.pricing.calculate_cost(None, None), 0.018);
+        assert!(seedream.has_vision());
+        assert!(seedream.supports_reference_image);
+    }
     #[test]
     fn test_benchmark_metadata_serialization() {
         let meta = BenchmarkMetadata::new(

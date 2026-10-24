@@ -1331,66 +1331,7 @@
                             </div>
                         </div>
                         <div class="checklist-container" id="benchmark-models-list">
-                            <label class="check-item-card">
-                                <input type="checkbox" name="benchmark-model" value="google/gemini-3.1-flash-image" checked>
-                                <div class="check-item-info">
-                                    <div class="check-item-title-row">
-                                        <span class="check-item-name">Google Gemini 3.1 Flash Image</span>
-                                        <span class="pricing-badge badge-flash">Flash (~$0.07/map)</span>
-                                    </div>
-                                    <span class="check-item-desc mono">google/gemini-3.1-flash-image</span>
-                                </div>
-                            </label>
-                            <label class="check-item-card">
-                                <input type="checkbox" name="benchmark-model" value="google/gemini-3.1-flash-lite-image" checked>
-                                <div class="check-item-info">
-                                    <div class="check-item-title-row">
-                                        <span class="check-item-name">Google Gemini 3.1 Flash Lite</span>
-                                        <span class="pricing-badge badge-flash-lite">Flash Lite (~$0.035/map)</span>
-                                    </div>
-                                    <span class="check-item-desc mono">google/gemini-3.1-flash-lite-image</span>
-                                </div>
-                            </label>
-                            <label class="check-item-card">
-                                <input type="checkbox" name="benchmark-model" value="meta/muse-image" checked>
-                                <div class="check-item-info">
-                                    <div class="check-item-title-row">
-                                        <span class="check-item-name">Meta Muse Image</span>
-                                        <span class="pricing-badge badge-muse">Muse ($0.01/map)</span>
-                                    </div>
-                                    <span class="check-item-desc mono">meta/muse-image</span>
-                                </div>
-                            </label>
-                            <label class="check-item-card">
-                                <input type="checkbox" name="benchmark-model" value="bytedance-seed/seedream-5-0-flash" checked>
-                                <div class="check-item-info">
-                                    <div class="check-item-title-row">
-                                        <span class="check-item-name">ByteDance Seedream 5.0 Flash</span>
-                                        <span class="pricing-badge badge-seedream">Seedream ($0.018/map)</span>
-                                    </div>
-                                    <span class="check-item-desc mono">bytedance-seed/seedream-5-0-flash</span>
-                                </div>
-                            </label>
-                            <label class="check-item-card">
-                                <input type="checkbox" name="benchmark-model" value="wavespeed-ai/flux-3-klein-image-distilled/text-to-image-lora" checked>
-                                <div class="check-item-info">
-                                    <div class="check-item-title-row">
-                                        <span class="check-item-name">FLUX 3 Klein T2I LoRA</span>
-                                        <span class="pricing-badge badge-wavespeed">Klein ($0.015/map)</span>
-                                    </div>
-                                    <span class="check-item-desc mono">wavespeed-ai/flux-3-klein-image-distilled/text-to-image-lora</span>
-                                </div>
-                            </label>
-                            <label class="check-item-card">
-                                <input type="checkbox" name="benchmark-model" value="wavespeed-ai/flux-3-klein-image-distilled/edit-lora">
-                                <div class="check-item-info">
-                                    <div class="check-item-title-row">
-                                        <span class="check-item-name">FLUX 3 Klein Edit LoRA</span>
-                                        <span class="pricing-badge badge-wavespeed">Klein Edit ($0.021/map)</span>
-                                    </div>
-                                    <span class="check-item-desc mono">wavespeed-ai/flux-3-klein-image-distilled/edit-lora</span>
-                                </div>
-                            </label>
+                            <div class="check-item-desc mono">Loading model registry…</div>
                         </div>
                     </div>
 
@@ -1474,6 +1415,7 @@
                             <input type="checkbox" id="benchmark-enable-reference" checked>
                             <span class="toggle-text">Virtuous Cycle Reference Conditioning (5★ Curated / Static Fallback)</span>
                         </label>
+                        <div id="benchmark-reference-warning" class="calc-note hidden" role="alert"></div>
                     </div>
 
                     <!-- Custom LoRA Adapter Configuration Option -->

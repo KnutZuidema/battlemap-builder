@@ -16,15 +16,14 @@ use curator::adapters::{
     InMemoryBlobStorage, InMemoryCatalogRepository, OpenRouterAdapter,
 };
 use curator::domain::{
-    BenchmarkArchetype, GenerationRequest, ModelApiType,
-    ALL_BENCHMARK_MODELS, MODEL_GEMINI_31_FLASH, MODEL_GEMINI_31_FLASH_LITE, MODEL_MUSE,
-    MODEL_SEEDREAM_50_FLASH,
+    BenchmarkArchetype, GenerationRequest, ModelApiType, ModelProvider, MODEL_GEMINI_31_FLASH,
+    MODEL_GEMINI_31_FLASH_LITE, MODEL_MUSE, MODEL_SEEDREAM_50_FLASH,
 };
 use curator::domain::{Candidate, Source};
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::{CatalogRepository, CandidateFilter};
 use curator::ports::model_engine::{ModelEngine, ModelEngineError};
-use curator::services::BenchmarkService;
+use curator::services::{BenchmarkService, ModelRegistry};
 
 const TEST_PNG_BASE64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
@@ -259,11 +258,17 @@ fn test_standard_benchmark_archetypes_suite() {
 
 #[test]
 fn test_target_models_catalog() {
-    assert_eq!(ALL_BENCHMARK_MODELS.len(), 4);
-    assert!(ALL_BENCHMARK_MODELS.contains(&MODEL_GEMINI_31_FLASH));
-    assert!(ALL_BENCHMARK_MODELS.contains(&MODEL_GEMINI_31_FLASH_LITE));
-    assert!(ALL_BENCHMARK_MODELS.contains(&MODEL_MUSE));
-    assert!(ALL_BENCHMARK_MODELS.contains(&MODEL_SEEDREAM_50_FLASH));
+    // The OpenRouter baseline identity comes from the derived registry, not a static list.
+    let baseline = ModelRegistry::openrouter_models();
+    let ids: Vec<&str> = baseline.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids.len(), 4);
+    assert!(ids.contains(&MODEL_GEMINI_31_FLASH));
+    assert!(ids.contains(&MODEL_GEMINI_31_FLASH_LITE));
+    assert!(ids.contains(&MODEL_MUSE));
+    assert!(ids.contains(&MODEL_SEEDREAM_50_FLASH));
+    assert!(baseline
+        .iter()
+        .all(|m| m.provider == ModelProvider::OpenRouter));
 
     assert_eq!(
         OpenRouterAdapter::endpoint_type_for_model(MODEL_GEMINI_31_FLASH),

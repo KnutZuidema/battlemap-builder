@@ -165,3 +165,17 @@ _Avoid_: Frozen dataset, dataset ZIP, export artifact
 **Checkpoint**:
 A LoRA Adapter weight state saved at a training step, inspectable by the curator and selectable for publication.
 _Avoid_: Epoch state, save point, intermediate weights
+
+## Model Registry & Inference
+
+**Model Registry**:
+The selectable set of inference models derived at read time from the OpenRouter specification constants plus every published, non-retired LoRA Adapter whose checkpoint artifact exists, served by `GET /api/models`.
+_Avoid_: Model catalog file, model list, persisted registry
+
+**Model Descriptor**:
+One selectable (LoRA Adapter, inference engine) pair or baseline model: its id, provider kind, API kind, capability flags, pricing and, for an adapter entry, the adapter's weights URL and scale.
+_Avoid_: Model spec, model entry, catalog row
+
+**Routing Model Engine**:
+The inference engine that dispatches a Model Descriptor's request to OpenRouter or WaveSpeed by its provider kind.
+_Avoid_: Model dispatcher, provider selector, model multiplexer

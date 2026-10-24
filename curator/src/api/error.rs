@@ -28,6 +28,9 @@ pub enum ApiError {
         active_run_id: String,
     },
     ModalNotConfigured(String),
+    ModelNotReferenceCapable {
+        model: String,
+    },
 }
 
 impl ApiError {
@@ -45,6 +48,12 @@ impl ApiError {
 
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::Internal(msg.into())
+    }
+
+    pub fn model_not_reference_capable(model: impl Into<String>) -> Self {
+        Self::ModelNotReferenceCapable {
+            model: model.into(),
+        }
     }
 }
 
@@ -206,6 +215,15 @@ impl IntoResponse for ApiError {
                 Json(json!({
                     "code": "MODAL_NOT_CONFIGURED",
                     "error": msg,
+                })),
+            )
+                .into_response(),
+            ApiError::ModelNotReferenceCapable { model } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "code": "MODEL_NOT_REFERENCE_CAPABLE",
+                    "error": format!("Model '{model}' does not support reference conditioning"),
+                    "model": model,
                 })),
             )
                 .into_response(),

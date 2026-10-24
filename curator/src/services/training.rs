@@ -910,44 +910,96 @@ impl TrainingService {
             })?
             .clone();
 
-        if cp.artifact_verification.status == ArtifactVerificationState::Mismatch {
+        if cp.artifact_verification.status != ArtifactVerificationState::Verified {
             return Err(TrainingServiceError::InvalidState(format!(
-                "Checkpoint at step {} failed artifact verification",
+                "Checkpoint at step {} is not verified (status: {:?})",
+                step, cp.artifact_verification.status
+            )));
+        }
+
+        if !cp.has_sample_grid() {
+            return Err(TrainingServiceError::InvalidState(format!(
+                "Checkpoint at step {} has no sample grid URL and cannot be published",
                 step
             )));
         }
 
-        // Check that underlying adapter artifact exists in storage
-        let adapter_blob_key = BlobKey::CheckpointAdapter {
-            run_id: run.id.clone(),
-            step,
-        };
-        if self.blobs.stat_blob(&adapter_blob_key).await.is_err() {
+        if cp.sample_grid_verification.status == ArtifactVerificationState::Mismatch {
             return Err(TrainingServiceError::InvalidState(format!(
-                "Checkpoint adapter artifact '{}' is missing in storage",
-                adapter_blob_key.to_path()
+                "Checkpoint at step {} failed sample grid verification",
+                step
+            )));
+        }
+
+        let scale_val = scale.unwrap_or(0.75);
+        if scale_val <= 0.0 || scale_val.is_nan() {
+            return Err(TrainingServiceError::InvalidState(format!(
+                "Adapter scale must be positive and non-zero, got {}",
+                scale_val
             )));
         }
 
         let adapter_id = LoraAdapter::format_id(&run.id, step);
-        if self.catalog.get_lora_adapter(&adapter_id).await.is_ok() {
+        if run.published_adapter_ids.contains(&adapter_id)
+            || self.catalog.get_lora_adapter(&adapter_id).await.is_ok()
+        {
             return Err(TrainingServiceError::Conflict(format!(
                 "Adapter '{}' has already been published",
                 adapter_id
             )));
         }
 
+        let adapter_blob_key = BlobKey::CheckpointAdapter {
+            run_id: run.id.clone(),
+            step,
+        };
+        let stat = self
+            .blobs
+            .stat_blob(&adapter_blob_key)
+            .await
+            .map_err(|e| {
+                TrainingServiceError::InvalidState(format!(
+                    "Checkpoint adapter artifact '{}' is missing in storage: {e}",
+                    adapter_blob_key.to_path()
+                ))
+            })?;
+
+        // Prefer a digest already recorded on the checkpoint or by storage; only pay for a full
+        // read when neither knows the checksum.
+        let sha256 = match cp
+            .artifact_sha256
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| stat.sha256.filter(|s| !s.trim().is_empty()))
+        {
+            Some(digest) => Some(digest),
+            None => {
+                let bytes = self
+                    .blobs
+                    .read_blob(&adapter_blob_key)
+                    .await
+                    .map_err(|e| {
+                        TrainingServiceError::InvalidState(format!(
+                            "Checkpoint adapter artifact '{}' is unreadable in storage: {e}",
+                            adapter_blob_key.to_path()
+                        ))
+                    })?;
+                Some(sha256_digest(&bytes))
+            }
+        };
+
+        let size_bytes = cp.artifact_size.or(Some(stat.size));
+
         let adapter = LoraAdapter {
             id: adapter_id.clone(),
             run_id: run.id.clone(),
             step,
-            scale: scale.unwrap_or(0.75),
+            scale: scale_val,
             base_model: run.recipe.base_model.clone(),
             trigger_phrase: run.recipe.trigger_phrase.clone(),
             artifact_key: cp.artifact_key,
             artifact_url: cp.artifact_url,
-            sha256: cp.artifact_sha256,
-            size_bytes: cp.artifact_size,
+            sha256,
+            size_bytes,
             recipe_digest: run.recipe_digest.clone(),
             dataset_snapshot_id: run.dataset_snapshot_id.clone(),
             dataset_digest: run.dataset_digest.clone(),
@@ -966,6 +1018,18 @@ impl TrainingService {
         Ok(adapter)
     }
 
+    /// Rejects a catalog record whose `id` does not encode its own `(run_id, step)` pair, guarding
+    /// against drift between the persisted fields and the canonical `{run_id}-s{step}` key.
+    fn verify_adapter_identity(adapter: &LoraAdapter) -> Result<(), TrainingServiceError> {
+        if LoraAdapter::parse_id(&adapter.id) != Some((adapter.run_id.as_str(), adapter.step)) {
+            return Err(TrainingServiceError::InvalidState(format!(
+                "LoRA adapter '{}' has an ID inconsistent with run '{}' step {}",
+                adapter.id, adapter.run_id, adapter.step
+            )));
+        }
+        Ok(())
+    }
+
     /// Lists LoRA adapters, optionally filtering only selectable/usable ones.
     /// An adapter whose underlying artifact is missing or unreadable is omitted when `selectable_only` is true.
     pub async fn list_adapters(
@@ -973,6 +1037,9 @@ impl TrainingService {
         selectable_only: bool,
     ) -> Result<Vec<LoraAdapter>, TrainingServiceError> {
         let mut adapters = self.catalog.list_lora_adapters().await?;
+        for adapter in &adapters {
+            Self::verify_adapter_identity(adapter)?;
+        }
 
         if selectable_only {
             let mut usable = Vec::new();
@@ -997,7 +1064,10 @@ impl TrainingService {
     /// Retrieves one LoRA adapter by ID.
     pub async fn get_adapter(&self, id: &str) -> Result<LoraAdapter, TrainingServiceError> {
         match self.catalog.get_lora_adapter(id).await {
-            Ok(a) => Ok(a),
+            Ok(a) => {
+                Self::verify_adapter_identity(&a)?;
+                Ok(a)
+            }
             Err(StorageError::NotFound(_)) => {
                 Err(TrainingServiceError::AdapterNotFound(id.to_string()))
             }
@@ -1018,6 +1088,7 @@ impl TrainingService {
             }
             Err(e) => return Err(TrainingServiceError::Storage(e)),
         };
+        Self::verify_adapter_identity(&adapter)?;
 
         if retired {
             adapter.retire();

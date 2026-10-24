@@ -310,6 +310,17 @@ pub struct CheckpointRecord {
     pub sample_grid_verification: ArtifactVerification,
 }
 
+impl CheckpointRecord {
+    /// Returns true if the checkpoint record has a non-empty sample grid URL.
+    pub fn has_sample_grid(&self) -> bool {
+        self.sample_grid_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some()
+    }
+}
+
 /// Appended telemetry metric snapshot tracked in `metrics.jsonl`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrainingMetricSnapshot {
@@ -400,6 +411,18 @@ impl LoraAdapter {
         format!("{run_id}-s{step}")
     }
 
+    /// Parses an adapter ID formatted strictly as `{run_id}-s{step}` (the inverse of
+    /// [`LoraAdapter::format_id`]), returning the run ID and step number. Anything else — including
+    /// the engine's `-edit` suffix from #219 — is rejected so the catalog key stays canonical.
+    pub fn parse_id(id: &str) -> Option<(&str, usize)> {
+        let (run_id, step_str) = id.rsplit_once("-s")?;
+        if run_id.is_empty() {
+            return None;
+        }
+        let step = step_str.parse::<usize>().ok()?;
+        Some((run_id, step))
+    }
+
     /// Mark this adapter as retired.
     pub fn retire(&mut self) {
         self.retired = true;
@@ -442,7 +465,23 @@ mod tests {
     }
 
     #[test]
-    fn test_lora_adapter_id_formatting() {
+    fn test_lora_adapter_id_formatting_and_parsing() {
         assert_eq!(LoraAdapter::format_id("run-123", 250), "run-123-s250");
+        assert_eq!(LoraAdapter::parse_id("run-123-s250"), Some(("run-123", 250)));
+        assert_eq!(LoraAdapter::parse_id("run-123-s250-edit"), None);
+        assert_eq!(
+            LoraAdapter::parse_id("run-complex-id-123-s500"),
+            Some(("run-complex-id-123", 500))
+        );
+        assert_eq!(
+            LoraAdapter::parse_id("run-complex-id-123-s500-edit"),
+            None
+        );
+        assert_eq!(LoraAdapter::parse_id("invalid"), None);
+        assert_eq!(LoraAdapter::parse_id("-s250"), None);
+        assert_eq!(LoraAdapter::parse_id("run-s"), None);
+        assert_eq!(LoraAdapter::parse_id("run-s-edit"), None);
+        assert_eq!(LoraAdapter::parse_id("run-sabc"), None);
+        assert_eq!(LoraAdapter::parse_id("run-s250-unknown"), None);
     }
 }

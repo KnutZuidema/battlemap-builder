@@ -4485,7 +4485,7 @@
             ? map.description.trim()
             : (map.layers && map.layers[0] && map.layers[0].caption
                 ? map.layers[0].caption
-                : `ttrpg battlemap, flat 2D plan view, perpendicular orthographic camera, poché cut walls, strictly gridless, ${primaryTheme}`);
+                : `dungeonforge battlemap, ${primaryTheme}`);
 
         card.innerHTML = `
             <div class="curated-thumb-box">

@@ -199,8 +199,7 @@ async fn test_caption_contaminated_section_description_is_flagged_not_neutral() 
     let (_app, catalog, blobs) = setup_test_app();
     // Exactly what the retired per-section caption fallback persisted into a Map Section
     // description: the Trigger Phrase plus camera directives inside a Physical Description.
-    let contaminated = format!("{TRIGGER_PHRASE}, dungeon, crypt, obsidian altar");
-
+    let contaminated = format!("{TRIGGER_PHRASE}, flat 2d plan view, perpendicular orthographic camera, dungeon, crypt, obsidian altar");
     let map = CuratedMap::with_now(
         "contaminated",
         Theme::Dungeon,
@@ -238,7 +237,7 @@ async fn test_caption_contaminated_section_description_is_flagged_not_neutral() 
     let mut archive = ZipArchive::new(Cursor::new(&zip_bytes)).unwrap();
     let caption = caption_in_archive(&mut archive, "dungeon/contaminated_c0_r0_lora1024.txt");
     assert_eq!(caption.matches(TRIGGER_PHRASE).count(), 1, "{caption}");
-    assert_eq!(caption.matches("orthographic").count(), 1, "{caption}");
+    assert!(!caption.contains("orthographic"), "orthographic should be stripped from caption body: {caption}");
 }
 
 #[tokio::test]

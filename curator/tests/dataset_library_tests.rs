@@ -259,7 +259,7 @@ async fn test_storage_export_lora_dataset_paired_png_and_txt() {
         .unwrap();
     let mut caption_content = String::new();
     std::io::Read::read_to_string(&mut txt_file, &mut caption_content).unwrap();
-    assert!(caption_content.contains("ttrpg battlemap"));
+    assert!(caption_content.contains("dungeonforge battlemap"));
     assert!(caption_content.contains("dungeon"));
 
     // Verify filtered export for Theme::Dungeon only
@@ -488,7 +488,7 @@ async fn test_multisection_map_export_produces_four_distinct_pairs_with_per_sect
         let mut txt_entry = archive.by_name(txt_name).unwrap();
         let mut text = String::new();
         std::io::Read::read_to_string(&mut txt_entry, &mut text).unwrap();
-        assert!(text.contains("ttrpg battlemap"));
+        assert!(text.contains("dungeonforge battlemap"));
         assert!(text.contains("dungeon"));
         assert!(text.contains(keyword), "Caption {txt_name} should contain '{keyword}', got: {text}");
     }

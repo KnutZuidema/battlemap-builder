@@ -24,7 +24,7 @@ use crate::domain::MapSection;
 /// leaked into the dataset's descriptive field.
 static NON_NEUTRAL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\b(ttrpg|battlemap|battlemaps|flat\s+2d|2d|top[\s-]?down|bird'?s[\s-]?eye|isometric|aerial|orthographic|perpendicular|camera|plan\s+view|perspective|poch[eé]|cut\s+walls?|gridless|no\s+grid|grid|photorealistic|digital\s+art|concept\s+art|highly\s+detailed|4k|8k)\b",
+        r"(?i)\b(dungeonforge|ttrpg|battlemap|battlemaps|flat\s+2d|2d|top[\s-]?down|bird'?s[\s-]?eye|isometric|aerial|orthographic|perpendicular|camera|plan\s+view|perspective|poch[eé]|cut\s+walls?|gridless|no\s+grid|grid|photorealistic|digital\s+art|concept\s+art|highly\s+detailed|4k|8k)\b",
     )
     .expect("valid non-neutral description regex")
 });
@@ -168,6 +168,7 @@ mod tests {
     #[test]
     fn test_perspective_neutral_rejects_camera_style_and_grid_directives() {
         for contaminated in [
+            "dungeonforge battlemap",
             "ttrpg battlemap, flat 2D plan view, perpendicular orthographic camera, poché cut walls, strictly gridless",
             "Top-down view of a stone crypt with a sarcophagus",
             "Highly detailed digital art of a tavern interior",

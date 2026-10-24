@@ -10,8 +10,7 @@ use crate::domain::{Candidate, CuratedMap, Theme};
 ///
 /// Every caption is `"{TRIGGER_PHRASE}, {theme}, {details}"`, so the phrase is applied exactly
 /// once and only here — it is never stored inside a `Physical Description` (ADR-0002, ADR-0007).
-pub const TRIGGER_PHRASE: &str =
-    "ttrpg battlemap, flat 2D plan view, perpendicular orthographic camera, poché cut walls, strictly gridless";
+pub const TRIGGER_PHRASE: &str = "dungeonforge battlemap";
 
 /// Known architectural feature patterns to detect in candidate prompts, titles, or tags.
 pub const ARCHITECTURAL_FEATURES: &[(&str, &[&str])] = &[
@@ -56,7 +55,7 @@ static DIMENSION_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 static REDUNDANT_TERMS_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\b(ttrpg|battlemap|battlemaps|flat\s+2d|2d|plan\s+view|perpendicular|orthographic|camera|poch[eé]|cut\s+walls?|strictly|gridless|no\s+grid|without\s+grid|gridded|grid)\b",
+        r"(?i)\b(dungeonforge|ttrpg|battlemap|battlemaps|flat\s+2d|2d|plan\s+view|perpendicular|orthographic|camera|poch[eé]|cut\s+walls?|strictly|gridless|no\s+grid|without\s+grid|gridded|grid)\b",
     )
     .expect("valid redundant terms regex")
 });
@@ -73,7 +72,7 @@ pub struct CaptionGenerator;
 
 impl CaptionGenerator {
     /// Generates a standardized LoRA caption string adhering to Kohya / AI-Toolkit format:
-    /// `ttrpg battlemap, flat 2D plan view, perpendicular orthographic camera, poché cut walls, strictly gridless, {theme}, {sanitized_tags_or_prompt}`
+    /// `dungeonforge battlemap, {theme}, {sanitized_tags_or_prompt}`
     pub fn generate_with_theme_str(theme_str: &str, tags: &[String], prompt_or_title: Option<&str>) -> String {
         let mut tokens: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
@@ -81,9 +80,10 @@ impl CaptionGenerator {
         // Seed seen with theme and prefix terms so they are never duplicated in the suffix
         seen.insert(theme_str.to_lowercase());
         for word in &[
-            "ttrpg", "battlemap", "battlemaps", "flat", "2d", "plan", "view",
-            "perpendicular", "orthographic", "camera", "poché", "poche", "cut",
-            "walls", "wall", "strictly", "gridless", "grid", "no grid",
+            "dungeonforge", "ttrpg", "battlemap", "battlemaps", "flat", "2d",
+            "plan", "view", "perpendicular", "orthographic", "camera", "poché",
+            "poche", "cut", "walls", "wall", "strictly", "gridless", "grid",
+            "no grid",
         ] {
             seen.insert((*word).to_string());
         }
@@ -209,10 +209,7 @@ mod tests {
     #[test]
     fn test_caption_generator_format_and_prefix() {
         let caption = CaptionGenerator::generate(&Theme::Dungeon, &[], None);
-        assert_eq!(
-            caption,
-            "ttrpg battlemap, flat 2D plan view, perpendicular orthographic camera, poché cut walls, strictly gridless, dungeon"
-        );
+        assert_eq!(caption, "dungeonforge battlemap, dungeon");
     }
 
     #[test]
@@ -245,11 +242,10 @@ mod tests {
         let legacy = format!("{TRIGGER_PHRASE}, dungeon, obsidian altar, iron braziers");
         let caption =
             CaptionGenerator::generate_with_description("dungeon", &["crypt".into()], Some(&legacy));
-
         assert!(caption.starts_with(TRIGGER_PHRASE), "{caption}");
         assert_eq!(caption.matches(TRIGGER_PHRASE).count(), 1, "{caption}");
-        // "orthographic" survives only inside the single applied Trigger Phrase.
-        assert_eq!(caption.matches("orthographic").count(), 1, "{caption}");
+        // "dungeonforge" survives only inside the single applied Trigger Phrase.
+        assert_eq!(caption.matches("dungeonforge").count(), 1, "{caption}");
         assert!(caption.contains("obsidian altar"), "{caption}");
     }
 
@@ -277,10 +273,7 @@ mod tests {
         assert!(caption.contains("doors"));
 
         let no_desc = CaptionGenerator::generate_with_description("cave", &[], None);
-        assert_eq!(
-            no_desc,
-            "ttrpg battlemap, flat 2D plan view, perpendicular orthographic camera, poché cut walls, strictly gridless, cave"
-        );
+        assert_eq!(no_desc, "dungeonforge battlemap, cave");
     }
 
     #[test]

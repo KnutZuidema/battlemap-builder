@@ -425,8 +425,11 @@
 (() => {
   "use strict";
 
-  // Kohya / AI-Toolkit Trigger Phrase (LORA_CAPTION_PREFIX) written by curator/src/domain/caption.rs.
-  const CAPTION_PREFIX_TOKENS = 5;
+  // Kohya / AI-Toolkit Trigger Phrase written by curator/src/domain/caption.rs.
+  // New format: single comma token "dungeonforge battlemap" (1 comma token).
+  // Legacy format: 5 comma tokens ("ttrpg battlemap", "flat 2D plan view", ...).
+  const TRIGGER_PHRASE = "dungeonforge battlemap";
+  const LEGACY_PREFIX_TOKENS = 5;
   const GRID_CELLS = 16;          // LoRA sections are 16x16 grid cells.
   const CELL_PX = 64;             // Overview scale: 16 cells per 1024px section crop.
   const THUMB_PX = 192;
@@ -1148,9 +1151,14 @@
       `${inMap} section${inMap === 1 ? "" : "s"} in map · ${words} caption words · ${sample.zip}`;
 
     const tokens = sample.caption ? sample.caption.split(",").map((t) => t.trim()).filter(Boolean) : [];
+    const isLegacyPrefix = tokens.length >= LEGACY_PREFIX_TOKENS &&
+      tokens[0].toLowerCase() === "ttrpg battlemap";
+    const prefixTokenCount = (tokens.length > 0 && tokens[0].toLowerCase() === TRIGGER_PHRASE)
+      ? 1
+      : (isLegacyPrefix ? LEGACY_PREFIX_TOKENS : 0);
     const chips = tokens.map((token, i) => {
       const el = document.createElement("span");
-      el.className = i < CAPTION_PREFIX_TOKENS ? "tok prefix" : "tok";
+      el.className = i < prefixTokenCount ? "tok prefix" : "tok";
       el.textContent = token;
       return el;
     });

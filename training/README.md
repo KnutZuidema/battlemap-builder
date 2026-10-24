@@ -37,6 +37,32 @@ python3 -m dungeonforge_training /path/to/dataset_dir --policy full --format jso
 python3 -m dungeonforge_training /path/to/dataset.zip --recipe recipe.json -o job.yaml
 ```
 
+## Modal Runner & FastAPI Service
+
+The package includes the Modal runner and FastAPI service conforming to ADR-0008 and ADR-0009:
+
+### Endpoints (authenticated via `Authorization: Bearer <CURATOR_MODAL_TOKEN>`)
+
+- `POST /run`: Accepts `{ "dataset_url": "...", "recipe": { ... } }` (or top-level recipe fields). Initializes run record, returns `run_id`, and spawns the training worker asynchronously on a Modal L40S GPU.
+- `GET /run/{id}`: Reports `run_id`, `state` (`queued` | `running` | `succeeded` | `failed` | `cancelled`), `step`, `total_steps`, `elapsed_seconds`, `cost_usd` (accumulated L40S rate: $1.95/hr), `checkpoints`, and `error`. Returns 404 for unknown run IDs.
+- `POST /run/{id}/cancel`: Cancels an active non-terminal run and stops the worker.
+
+### Checkpoint Publishing & R2 Storage
+
+At each 250-step checkpoint produced by `ai-toolkit`:
+- Locates checkpoint weights `.safetensors`.
+- Stitches sample preview images into a 2x2 grid image `samples.png`.
+- Computes SHA-256 digests and byte sizes.
+- Atomically uploads to Cloudflare R2 under `artifacts/runs/{run_id}/checkpoints/step-{step}/` with `x-amz-meta-sha256` metadata.
+- Cleans up any partial or corrupt upload on failure.
+
+### Deploying to Modal
+
+```bash
+# Deploy FastAPI web endpoint and L40S GPU worker to Modal
+modal deploy dungeonforge_training/app.py
+```
+
 ## Running Tests
 
 Zero external network access, zero GPU, and zero credentials required:

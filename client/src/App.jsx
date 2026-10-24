@@ -644,7 +644,8 @@ export default function App() {
   const handleRetryRef = useRef(handleRetry);
   const handleUndoRef = useRef(handleUndo);
   const handleRedoRef = useRef(handleRedo);
-  const handleSaveMapRef = useRef(handleSaveMapToDisk);
+  // handleSaveMapToDisk is declared further down: never reference it here (TDZ), the effect assigns it.
+  const handleSaveMapRef = useRef(null);
   const handleToggleViewRef = useRef(() => {
     setCurrentView((prev) => (prev === 'library' ? 'studio' : 'library'));
   });

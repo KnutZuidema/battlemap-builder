@@ -28,6 +28,10 @@ _Avoid_: Padding, empty canvas, background
 A 16×16 Grid Cell Map Section extracted from a Curated Map and attached to a generation request to condition the model on orthographic plan-view perspective and 5-foot prop proportions.
 _Avoid_: Style image, seed image, template
 
+**Reference Conditioning**:
+Conditioning a generation on a Reference Image, a capability a generation model either has or does not.
+_Avoid_: Reference prompting, image prompting, in-context learning
+
 ## Canvas & Forging
 
 **Selection**:
@@ -149,3 +153,15 @@ _Avoid_: LoRA weights, fine-tune, custom model, adapter file
 **Training Run**:
 A single execution of the fine-tuning pipeline against a Training Dataset and hyperparameter configuration that produces a LoRA Adapter.
 _Avoid_: Fine-tuning job, training session, epoch run
+
+**Training Recipe**:
+The exact Base Model and hyperparameter configuration a Training Run dispatches, recorded with the run so it can be replayed field for field.
+_Avoid_: Train config, hyperparameter set, preset
+
+**Dataset Snapshot**:
+An immutable frozen copy of a Training Dataset carrying a content digest, so a Training Run can be identified against the samples it actually consumed.
+_Avoid_: Frozen dataset, dataset ZIP, export artifact
+
+**Checkpoint**:
+A LoRA Adapter weight state saved at a training step, inspectable by the curator and selectable for publication.
+_Avoid_: Epoch state, save point, intermediate weights

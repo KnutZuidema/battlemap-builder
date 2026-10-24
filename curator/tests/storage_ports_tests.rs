@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use curator::adapters::filesystem_blob_storage::FilesystemBlobStorage;
 use curator::adapters::in_memory::{InMemoryBlobStorage, InMemoryCatalogRepository};
+use curator::adapters::s3_blob_storage::{BlobBackend, S3ConfigError};
 use curator::domain::{Candidate, CuratedMap, LayerRole, RejectionReason, Source, Theme};
-use curator::ports::blob_storage::{BlobKey, BlobStorage};
+use curator::ports::blob_storage::{sha256_digest, BlobKey, BlobStorage};
 use curator::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
 use curator::ports::storage_error::StorageError;
 use tempfile::tempdir;
@@ -787,4 +788,301 @@ async fn doubles_are_usable_through_arc_dyn_ports() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn test_blob_key_artifact_paths_and_public_urls() {
+    let snap = BlobKey::DatasetSnapshot {
+        id: "snap-123".into(),
+    };
+    assert_eq!(snap.to_path(), "artifacts/datasets/snap-123.zip");
+    assert!(snap.is_public_artifact());
+    assert_eq!(
+        snap.public_url("https://pub-r2.dev"),
+        Some("https://pub-r2.dev/artifacts/datasets/snap-123.zip".into())
+    );
+    assert_eq!(
+        snap.public_url("https://pub-r2.dev/"),
+        Some("https://pub-r2.dev/artifacts/datasets/snap-123.zip".into())
+    );
+
+    let ckpt_adapter = BlobKey::CheckpointAdapter {
+        run_id: "run-abc".into(),
+        step: 500,
+    };
+    assert_eq!(
+        ckpt_adapter.to_path(),
+        "artifacts/runs/run-abc/checkpoints/step-500/adapter.safetensors"
+    );
+    assert!(ckpt_adapter.is_public_artifact());
+
+    let ckpt_samples = BlobKey::CheckpointSamples {
+        run_id: "run-abc".into(),
+        step: 500,
+    };
+    assert_eq!(
+        ckpt_samples.to_path(),
+        "artifacts/runs/run-abc/checkpoints/step-500/samples.png"
+    );
+    assert!(ckpt_samples.is_public_artifact());
+
+    let pub_adapter = BlobKey::PublishedAdapter {
+        id: "run-abc-s500".into(),
+    };
+    assert_eq!(
+        pub_adapter.to_path(),
+        "artifacts/adapters/run-abc-s500.safetensors"
+    );
+    assert!(pub_adapter.is_public_artifact());
+
+    // Non-artifact keys must stay outside artifacts/ and must not be public
+    let staging = BlobKey::StagingLayer {
+        id: "cand-1".into(),
+        index: 0,
+    };
+    assert!(!staging.is_public_artifact());
+    assert_eq!(staging.public_url("https://pub-r2.dev"), None);
+
+    let curated = BlobKey::CuratedLayer {
+        id: "map-1".into(),
+        index: 0,
+        role: LayerRole::Ground,
+        elevation: Some(0),
+    };
+    assert!(!curated.is_public_artifact());
+    assert_eq!(curated.public_url("https://pub-r2.dev"), None);
+
+    // Prefix matching
+    assert!(BlobKey::ArtifactsDir.is_prefix_of(&snap));
+    assert!(BlobKey::ArtifactsDir.is_prefix_of(&ckpt_adapter));
+    assert!(BlobKey::ArtifactsDir.is_prefix_of(&ckpt_samples));
+    assert!(BlobKey::ArtifactsDir.is_prefix_of(&pub_adapter));
+    assert!(!BlobKey::ArtifactsDir.is_prefix_of(&staging));
+    assert!(!BlobKey::ArtifactsDir.is_prefix_of(&curated));
+
+    assert!(BlobKey::DatasetSnapshotsDir.is_prefix_of(&snap));
+    assert!(!BlobKey::DatasetSnapshotsDir.is_prefix_of(&ckpt_adapter));
+
+    assert!(BlobKey::RunsDir.is_prefix_of(&ckpt_adapter));
+    assert!(BlobKey::RunCheckpointsDir {
+        run_id: "run-abc".into()
+    }
+    .is_prefix_of(&ckpt_adapter));
+    assert!(BlobKey::CheckpointDir {
+        run_id: "run-abc".into(),
+        step: 500
+    }
+    .is_prefix_of(&ckpt_adapter));
+    assert!(!BlobKey::CheckpointDir {
+        run_id: "run-abc".into(),
+        step: 250
+    }
+    .is_prefix_of(&ckpt_adapter));
+    assert!(BlobKey::PublishedAdaptersDir.is_prefix_of(&pub_adapter));
+
+    // from_path round trips
+    assert_eq!(BlobKey::from_path(&snap.to_path()), Some(snap));
+    assert_eq!(
+        BlobKey::from_path(&ckpt_adapter.to_path()),
+        Some(ckpt_adapter)
+    );
+    assert_eq!(
+        BlobKey::from_path(&ckpt_samples.to_path()),
+        Some(ckpt_samples)
+    );
+    assert_eq!(
+        BlobKey::from_path(&pub_adapter.to_path()),
+        Some(pub_adapter)
+    );
+    assert_eq!(BlobKey::from_path(&staging.to_path()), Some(staging));
+    assert_eq!(BlobKey::from_path(&curated.to_path()), Some(curated));
+}
+
+#[tokio::test]
+async fn test_stat_blob_and_write_with_sha256_on_doubles() {
+    let dir = tempdir().unwrap();
+    let fs = FilesystemBlobStorage::new(dir.path());
+    let mem = InMemoryBlobStorage::new();
+    let adapters: [&dyn BlobStorage; 2] = [&fs, &mem];
+
+    let key = BlobKey::DatasetSnapshot {
+        id: "snapshot-test".into(),
+    };
+    let data = b"dataset-content-bytes";
+    let expected_sha256 = sha256_digest(data);
+
+    for storage in adapters {
+        assert!(!storage.exists_blob(&key).await.unwrap());
+        assert!(matches!(
+            storage.stat_blob(&key).await,
+            Err(StorageError::NotFound(_))
+        ));
+
+        // write_blob attaches sha256
+        storage.write_blob(&key, data).await.unwrap();
+
+        assert!(storage.exists_blob(&key).await.unwrap());
+        let stat = storage.stat_blob(&key).await.unwrap();
+        assert_eq!(stat.size, data.len() as u64);
+        assert_eq!(stat.sha256, Some(expected_sha256.clone()));
+
+        // read_blob returns identical bytes
+        let read = storage.read_blob(&key).await.unwrap();
+        assert_eq!(read, data);
+
+        // write_blob_with_sha256 with explicit sha
+        let custom_sha = "custom-declared-sha256";
+        storage
+            .write_blob_with_sha256(&key, data, Some(custom_sha))
+            .await
+            .unwrap();
+        let stat2 = storage.stat_blob(&key).await.unwrap();
+        assert_eq!(stat2.size, data.len() as u64);
+
+        storage.delete_blob(&key).await.unwrap();
+        assert!(!storage.exists_blob(&key).await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn test_artifact_keys_round_trip_and_list_prefix_on_both_adapters() {
+    let dir = tempdir().unwrap();
+    let fs = FilesystemBlobStorage::new(dir.path());
+    let mem = InMemoryBlobStorage::new();
+    let adapters: [&dyn BlobStorage; 2] = [&fs, &mem];
+
+    let snap = BlobKey::DatasetSnapshot {
+        id: "snap-1".into(),
+    };
+    let adapter = BlobKey::CheckpointAdapter {
+        run_id: "run-1".into(),
+        step: 100,
+    };
+    let samples = BlobKey::CheckpointSamples {
+        run_id: "run-1".into(),
+        step: 100,
+    };
+    let pub_adapter = BlobKey::PublishedAdapter {
+        id: "adapter-1".into(),
+    };
+
+    for storage in adapters {
+        storage.write_blob(&snap, b"snap").await.unwrap();
+        storage.write_blob(&adapter, b"adapter").await.unwrap();
+        storage.write_blob(&samples, b"samples").await.unwrap();
+        storage.write_blob(&pub_adapter, b"pub").await.unwrap();
+
+        let all_artifacts = storage.list_prefix(&BlobKey::ArtifactsDir).await.unwrap();
+        assert_eq!(all_artifacts.len(), 4);
+        assert!(all_artifacts.contains(&snap));
+        assert!(all_artifacts.contains(&adapter));
+        assert!(all_artifacts.contains(&samples));
+        assert!(all_artifacts.contains(&pub_adapter));
+
+        let snapshots = storage
+            .list_prefix(&BlobKey::DatasetSnapshotsDir)
+            .await
+            .unwrap();
+        assert_eq!(snapshots, vec![snap.clone()]);
+
+        let run_checkpoints = storage
+            .list_prefix(&BlobKey::RunCheckpointsDir {
+                run_id: "run-1".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(run_checkpoints.len(), 2);
+        assert!(run_checkpoints.contains(&adapter));
+        assert!(run_checkpoints.contains(&samples));
+
+        let published = storage
+            .list_prefix(&BlobKey::PublishedAdaptersDir)
+            .await
+            .unwrap();
+        assert_eq!(published, vec![pub_adapter.clone()]);
+
+        // Cleanup
+        storage.delete_blob(&snap).await.unwrap();
+        storage.delete_blob(&adapter).await.unwrap();
+        storage.delete_blob(&samples).await.unwrap();
+        storage.delete_blob(&pub_adapter).await.unwrap();
+    }
+}
+
+static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn test_blob_backend_loud_failure_on_missing_config() {
+    let _guard = ENV_MUTEX.lock().unwrap();
+
+    let all_keys = [
+        "CURATOR_BLOB_BACKEND",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+        "R2_BUCKET_NAME",
+        "R2_ENDPOINT",
+        "R2_ACCOUNT_ID",
+        "R2_PUBLIC_URL",
+    ];
+
+    let clear_all = || {
+        for k in all_keys {
+            std::env::remove_var(k);
+        }
+    };
+
+    // When no R2 variables are set at all, defaults to filesystem
+    clear_all();
+    let res = BlobBackend::from_env().unwrap();
+    assert_eq!(res, BlobBackend::Filesystem);
+
+    // When CURATOR_BLOB_BACKEND=s3 is requested, missing keys fail loudly naming the missing key
+    clear_all();
+    std::env::set_var("CURATOR_BLOB_BACKEND", "s3");
+    let res = BlobBackend::from_env();
+    assert_eq!(res, Err(S3ConfigError::MissingKey("R2_ACCESS_KEY_ID")));
+
+    // When R2_BUCKET_NAME is set without credentials, it is treated as S3 requested and fails loudly
+    clear_all();
+    std::env::set_var("R2_BUCKET_NAME", "dungeonforge-artifacts");
+    let res = BlobBackend::from_env();
+    assert_eq!(res, Err(S3ConfigError::MissingKey("R2_ACCESS_KEY_ID")));
+
+    // When R2_ACCESS_KEY_ID is set but R2_SECRET_ACCESS_KEY is missing
+    clear_all();
+    std::env::set_var("R2_ACCESS_KEY_ID", "test-key");
+    std::env::set_var("R2_BUCKET_NAME", "dungeonforge-artifacts");
+    std::env::set_var("R2_ENDPOINT", "http://localhost:9000");
+    let res = BlobBackend::from_env();
+    assert_eq!(res, Err(S3ConfigError::MissingKey("R2_SECRET_ACCESS_KEY")));
+
+    // When endpoint is missing but account_id is provided, endpoint is synthesized
+    clear_all();
+    std::env::set_var("CURATOR_BLOB_BACKEND", "s3");
+    std::env::set_var("R2_ACCESS_KEY_ID", "test-key");
+    std::env::set_var("R2_SECRET_ACCESS_KEY", "test-secret");
+    std::env::set_var("R2_BUCKET_NAME", "test-bucket");
+    std::env::set_var("R2_ACCOUNT_ID", "acc123");
+    std::env::set_var("R2_PUBLIC_URL", "https://pub-r2.dev");
+    let res = BlobBackend::from_env().unwrap();
+    match res {
+        BlobBackend::S3(config) => {
+            assert_eq!(config.endpoint, "https://acc123.r2.cloudflarestorage.com");
+            assert_eq!(config.bucket_name, "test-bucket");
+            assert_eq!(config.access_key_id, "test-key");
+            assert_eq!(config.secret_access_key, "test-secret");
+            assert_eq!(config.public_url, Some("https://pub-r2.dev".to_string()));
+        }
+        BlobBackend::Filesystem => panic!("Expected S3 backend"),
+    }
+
+    // When CURATOR_BLOB_BACKEND=filesystem is explicitly set, it chooses filesystem even if R2 keys exist
+    clear_all();
+    std::env::set_var("CURATOR_BLOB_BACKEND", "filesystem");
+    std::env::set_var("R2_ACCESS_KEY_ID", "test-key");
+    let res = BlobBackend::from_env().unwrap();
+    assert_eq!(res, BlobBackend::Filesystem);
+
+    // Cleanup
+    clear_all();
 }

@@ -9,6 +9,7 @@ pub mod reddit;
 pub mod simd_image;
 pub mod wavespeed;
 pub mod routing;
+pub mod s3_blob_storage;
 #[allow(unused_imports)]
 pub use cost_ledger::*;
 #[allow(unused_imports)]
@@ -26,3 +27,4 @@ pub use wavespeed::*;
 pub use simd_image::*;
 #[allow(unused_imports)]
 pub use routing::*;
+pub use s3_blob_storage::*;

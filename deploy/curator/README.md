@@ -266,6 +266,33 @@ All persistent state is stored under `/data` on the Hetzner CSI block volume.
 | `/data/rejected/rejections.json` | JSON audit trail of discarded candidates with reasons. |
 | `/data/telemetry/cost_ledger.json` | Persistent ledger recording token usage, model generation costs, and API spend. |
 
+
+### 5.4. Object Storage & Training Artifact Layout (Cloudflare R2 / S3)
+
+Curator manages dataset snapshots and LoRA fine-tuning artifacts via S3-compatible object storage (Cloudflare R2 in cluster, MinIO in dev and CI).
+
+#### Backend Selection
+
+- **Automatic Selection**: When any `R2_*` variable is set in the environment, Curator automatically configures the S3 blob backend. If required credentials (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, and `R2_ENDPOINT` or `R2_ACCOUNT_ID`) are missing or incomplete, Curator **fails loudly on boot**, naming the missing key rather than silently falling back.
+- **Explicit Selection**: `CURATOR_BLOB_BACKEND=s3` enforces S3/R2 storage, while `CURATOR_BLOB_BACKEND=filesystem` forces the local filesystem backend below `DATA_DIR`.
+
+#### Object Storage Layout & Public Artifacts
+
+All training artifacts destined for public or unauthenticated consumption land under the **`artifacts/`** prefix, matching the Cloudflare R2 public read policy:
+
+| Object Key | Type / Purpose | Public URL |
+|------------|----------------|------------|
+| `artifacts/datasets/{id}.zip` | Frozen `Dataset Snapshot` ZIP archive | `{R2_PUBLIC_URL}/artifacts/datasets/{id}.zip` |
+| `artifacts/runs/{run_id}/checkpoints/step-{step}/adapter.safetensors` | LoRA Adapter weights per training checkpoint | `{R2_PUBLIC_URL}/artifacts/runs/{run_id}/checkpoints/step-{step}/adapter.safetensors` |
+| `artifacts/runs/{run_id}/checkpoints/step-{step}/samples.png` | Validation image sample grid per checkpoint | `{R2_PUBLIC_URL}/artifacts/runs/{run_id}/checkpoints/step-{step}/samples.png` |
+| `artifacts/adapters/{id}.safetensors` | Published LoRA Adapter artifact (`{run_id}-s{step}`) | `{R2_PUBLIC_URL}/artifacts/adapters/{id}.safetensors` |
+
+Internal objects (`staging/`, `curated/`, `rejected/`, `telemetry/`) remain strictly outside the `artifacts/` prefix and cannot be resolved via public URLs.
+
+#### Integrity Verification & Upload Chunking
+
+- **Metadata Checksums**: Writes automatically compute the SHA-256 digest and attach it as S3 user metadata (`x-amz-meta-sha256`). Subsequent `stat_blob` operations query byte size and checksum via S3 `HEAD` without downloading the object payload.
+- **Multipart Uploads**: Payloads larger than 5 MiB automatically use S3 multipart uploads in 5 MiB chunks, with automatic cancellation (`abort_multipart_upload`) on transfer failure.
 #### Persistence Verification Procedure
 
 To verify that data survives across pod restarts and recreations on Hetzner CSI storage:

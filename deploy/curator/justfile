@@ -1,5 +1,9 @@
 set shell := ["bash", "-uc"]
 
+
+# Run the interactive credentials setup wizard
+provision-secrets:
+    ../../scripts/provision-credentials.sh
 # Apply all manifests and wait for rollout
 deploy:
     kubectl apply -f namespace.yaml

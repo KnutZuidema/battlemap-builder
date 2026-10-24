@@ -55,6 +55,78 @@ spec:
                   name: curator-secrets
                   key: OPENROUTER_API_KEY
                   optional: true
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: curator-secrets
+                  key: HF_TOKEN
+                  optional: true
+            - name: MODAL_TOKEN_ID
+              valueFrom:
+                secretKeyRef:
+                  name: curator-secrets
+                  key: MODAL_TOKEN_ID
+                  optional: true
+            - name: MODAL_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: curator-secrets
+                  key: MODAL_TOKEN_SECRET
+                  optional: true
+            - name: CURATOR_MODAL_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: curator-secrets
+                  key: CURATOR_MODAL_ENDPOINT
+                  optional: true
+            - name: CURATOR_MODAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: curator-secrets
+                  key: CURATOR_MODAL_TOKEN
+                  optional: true
+            - name: R2_ACCOUNT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: curator-secrets
+                  key: R2_ACCOUNT_ID
+                  optional: true
+            - name: R2_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: curator-secrets
+                  key: R2_ACCESS_KEY_ID
+                  optional: true
+            - name: R2_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: curator-secrets
+                  key: R2_SECRET_ACCESS_KEY
+                  optional: true
+            - name: R2_BUCKET_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: curator-secrets
+                  key: R2_BUCKET_NAME
+                  optional: true
+            - name: R2_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: curator-secrets
+                  key: R2_ENDPOINT
+                  optional: true
+            - name: R2_PUBLIC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: curator-secrets
+                  key: R2_PUBLIC_URL
+                  optional: true
+            - name: WAVESPEED_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: curator-secrets
+                  key: WAVESPEED_API_KEY
+                  optional: true
             - name: REDDIT_CLIENT_ID
               valueFrom:
                 secretKeyRef:

@@ -34,6 +34,10 @@ deploy_dir := "deploy/curator"
 default:
     @just --list
 
+# Run the interactive credentials provisioning wizard for local dev & k8s
+provision-secrets:
+    ./scripts/provision-credentials.sh
+
 # Log in to GHCR using the GitHub CLI token (the curator package is private)
 curator-login:
     #!/usr/bin/env bash

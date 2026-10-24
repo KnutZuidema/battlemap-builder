@@ -60,6 +60,11 @@
         // LoRA Training Dataset Readiness audit (Issue #184)
         datasetReadinessModalOpen: false,
         isAuditingDataset: false,
+        // Frozen Dataset Snapshots (Issue #216)
+        isFreezingSnapshot: false,
+        isFetchingSnapshots: false,
+        snapshotsCollapsed: false,
+        snapshots: [],
         // Harvesting parameters
         harvestSort: "hot",
         harvestTime: "all",
@@ -208,6 +213,9 @@
     let librarySearchInput, libraryTagPills, libraryGrid, libraryEmpty, libraryFilterEmpty, libraryCountBadge;
     let librarySortSelect, libraryDensityGroup, libraryFacetFilters;
     let btnExportLora, btnExportLabel, btnRefreshLibrary, btnSwitchToTriage, btnClearLibraryFilters;
+    let btnFreezeSnapshot, btnFreezeLabel;
+    let datasetSnapshotsPanel, snapshotsList, snapshotsEmpty, snapshotsCountBadge;
+    let btnRefreshSnapshots, btnToggleSnapshots, toggleSnapshotsText, snapshotsShelf;
     let btnDatasetReadiness, datasetReadinessLabel;
     let datasetReadinessModal, datasetReadinessSummary, datasetReadinessIssues, datasetReadinessIcon;
 
@@ -434,6 +442,16 @@
         btnRefreshLibrary = document.getElementById("btn-refresh-library");
         btnSwitchToTriage = document.getElementById("btn-switch-to-triage");
         btnClearLibraryFilters = document.getElementById("btn-clear-library-filters");
+        btnFreezeSnapshot = document.getElementById("btn-freeze-snapshot");
+        btnFreezeLabel = document.getElementById("btn-freeze-label");
+        datasetSnapshotsPanel = document.getElementById("dataset-snapshots-panel");
+        snapshotsList = document.getElementById("snapshots-list");
+        snapshotsEmpty = document.getElementById("snapshots-empty");
+        snapshotsCountBadge = document.getElementById("snapshots-count-badge");
+        btnRefreshSnapshots = document.getElementById("btn-refresh-snapshots");
+        btnToggleSnapshots = document.getElementById("btn-toggle-snapshots");
+        toggleSnapshotsText = document.getElementById("toggle-snapshots-text");
+        snapshotsShelf = document.getElementById("snapshots-shelf");
         btnDatasetReadiness = document.getElementById("btn-dataset-readiness");
         datasetReadinessLabel = document.getElementById("dataset-readiness-label");
         datasetReadinessModal = document.getElementById("dataset-readiness-modal");
@@ -3773,6 +3791,7 @@
             state.curatedMaps = maps;
 
             applyLibraryFilters();
+            fetchDatasetSnapshots();
         } catch (err) {
             showToast(`Failed to load dataset library: ${err.message}`, "danger");
         } finally {
@@ -3927,6 +3946,7 @@
         }
         state.libraryActiveTag = null;
         setLibraryFacet("all");
+        fetchDatasetSnapshots();
     }
 
     function toggleCardSelection(id) {
@@ -4326,6 +4346,7 @@
         allBtn.addEventListener("click", () => {
             state.libraryActiveTag = null;
             applyLibraryFilters();
+            fetchDatasetSnapshots();
         });
         fragment.appendChild(allBtn);
 
@@ -4346,6 +4367,7 @@
                     state.libraryActiveTag = displayName;
                 }
                 applyLibraryFilters();
+                fetchDatasetSnapshots();
             });
 
             fragment.appendChild(pill);
@@ -4732,6 +4754,15 @@
         physical_description_not_neutral: "Physical Description not neutral",
     };
 
+    const DATASET_ISSUE_REMEDIATIONS = {
+        ground_layer_missing: "Restore 0_ground.png in data/curated/<id>/",
+        ground_image_unreadable: "Re-ingest the map; an export would skip it entirely",
+        grid_below_minimum: "Recalibrate the grid (PATCH /api/curated/{id} with a grid that fits the Ground layer)",
+        section_unresolvable: "Regrid, or re-curate the map; the export skips that section",
+        physical_description_missing: "POST /api/curated/{id}/describe, then PATCH the description",
+        physical_description_not_neutral: "Regenerate the description, then PATCH /api/curated/{id} with a grid so section descriptions are recomputed per crop",
+    };
+
     function datasetIssueLabel(code) {
         return DATASET_ISSUE_LABELS[code] || code;
     }
@@ -4791,7 +4822,11 @@
         datasetReadinessIssues.innerHTML = flagged
             .map(map => {
                 const rows = map.issues
-                    .map(issue => `<li><span class="readiness-issue-code mono">${escapeHtml(datasetIssueLabel(issue.code))}</span> ${escapeHtml(issue.detail)}</li>`)
+                    .map(issue => {
+                        const rem = DATASET_ISSUE_REMEDIATIONS[issue.code];
+                        const remHtml = rem ? `<span class="readiness-issue-remediation">Fix: ${escapeHtml(rem)}</span>` : "";
+                        return `<li><div><span class="readiness-issue-code mono">${escapeHtml(datasetIssueLabel(issue.code))}</span> ${escapeHtml(issue.detail)}</div>${remHtml}</li>`;
+                    })
                     .join("");
                 const counts = `${map.ready_sections} / ${map.sections} sections ready`;
                 return `<div class="readiness-map-issue"><div class="readiness-map-head"><span class="readiness-map-id mono">${escapeHtml(map.id)}</span><span class="readiness-map-theme">${escapeHtml(map.theme)}</span><span class="readiness-map-count mono">${escapeHtml(counts)}</span></div><ul class="readiness-issue-list">${rows}</ul></div>`;
@@ -4824,6 +4859,8 @@
         state.datasetReadinessModalOpen = true;
         datasetReadinessModal?.classList.remove("hidden");
         fetchDatasetReadiness();
+        const titleEl = document.getElementById("dataset-readiness-title");
+        if (titleEl) titleEl.textContent = "LoRA Training Dataset Readiness";
     }
 
     function closeDatasetReadinessModal() {
@@ -4841,6 +4878,211 @@
         datasetReadinessModal?.addEventListener("click", (e) => {
             if (e.target === datasetReadinessModal) closeDatasetReadinessModal();
         });
+    }
+
+    // ==========================================================================
+    // Frozen Dataset Snapshots (Issue #216)
+    // ==========================================================================
+
+    function showFreezeRefusalModal(refusal) {
+        if (!datasetReadinessModal || !datasetReadinessSummary || !datasetReadinessIssues) {
+            showToast(`Freeze Refused: ${refusal.error || "Dataset is not ready"}`, "danger");
+            return;
+        }
+        state.datasetReadinessModalOpen = true;
+        datasetReadinessModal.classList.remove("hidden");
+        if (datasetReadinessIcon) {
+            datasetReadinessIcon.textContent = "✕";
+            datasetReadinessIcon.className = "readiness-icon has-issues";
+        }
+        const titleEl = document.getElementById("dataset-readiness-title");
+        if (titleEl) {
+            titleEl.textContent = "Freeze Refused: Dataset Not Ready";
+        }
+        const blocking = refusal.blocking_issues || [];
+        datasetReadinessSummary.innerHTML = `
+            <div class="readiness-stat">
+                <span class="readiness-stat-label">Status</span>
+                <span class="readiness-stat-value mono" style="color: #f87171;">DATASET_NOT_READY</span>
+            </div>
+            <div class="readiness-stat">
+                <span class="readiness-stat-label">Blocking Issue Kinds</span>
+                <span class="readiness-stat-value mono">${blocking.length}</span>
+            </div>
+            <div class="readiness-stat">
+                <span class="readiness-stat-label">Scope</span>
+                <span class="readiness-stat-value mono">${escapeHtml(datasetScopeTheme() || "all themes")}</span>
+            </div>
+        `;
+        if (blocking.length === 0) {
+            datasetReadinessIssues.innerHTML = `<div class="readiness-clean">${escapeHtml(refusal.error || "Dataset scope is not ready to be frozen.")}</div>`;
+        } else {
+            datasetReadinessIssues.innerHTML = blocking.map(b => {
+                const mapsText = b.maps && b.maps.length > 0 ? `Affected map(s): ${b.maps.join(", ")}` : "No curated maps in scope";
+                return `
+                    <div class="readiness-map-issue">
+                        <div class="readiness-map-head">
+                            <span class="readiness-issue-code mono">${escapeHtml(datasetIssueLabel(b.code))}</span>
+                            <span class="readiness-map-count mono">${b.count > 0 ? `${b.count} occurrence(s)` : ""}</span>
+                        </div>
+                        <div style="font-size: 0.8rem; color: var(--text-secondary); margin: 0.35rem 0;">${escapeHtml(mapsText)}</div>
+                        <span class="readiness-issue-remediation">Fix: ${escapeHtml(b.remediation)}</span>
+                    </div>
+                `;
+            }).join("");
+        }
+        showToast(`Freeze Refused: ${refusal.error || "Dataset scope has blocking issues"}`, "danger");
+    }
+
+    async function fetchDatasetSnapshots() {
+        if (state.isFetchingSnapshots) return;
+        state.isFetchingSnapshots = true;
+        try {
+            const res = await fetch(`/api/training/datasets${datasetScopeQuery()}`);
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                throw new Error(errData.error || `HTTP ${res.status}`);
+            }
+            const snapshots = await res.json();
+            state.snapshots = snapshots;
+            renderDatasetSnapshots(snapshots);
+        } catch (err) {
+            console.error("Failed to fetch dataset snapshots:", err);
+        } finally {
+            state.isFetchingSnapshots = false;
+        }
+    }
+
+    function renderDatasetSnapshots(snapshots) {
+        if (!snapshotsList || !snapshotsCountBadge) return;
+        const total = (snapshots && snapshots.length) || 0;
+        snapshotsCountBadge.textContent = `${total} Snapshot${total === 1 ? "" : "s"}`;
+
+        if (!snapshots || snapshots.length === 0) {
+            snapshotsList.innerHTML = "";
+            snapshotsEmpty?.classList.remove("hidden");
+            return;
+        }
+
+        snapshotsEmpty?.classList.add("hidden");
+        snapshotsList.innerHTML = snapshots.map(s => {
+            const id = escapeHtml(s.id);
+            const themeLabel = s.theme ? escapeHtml(s.theme) : "All Themes";
+            const shaHead = s.sha256 ? escapeHtml(s.sha256.substring(0, 12)) : "";
+            const shaFull = escapeHtml(s.sha256 || "");
+            const counts = `${s.samples_count} sample${s.samples_count === 1 ? "" : "s"} (${s.maps_count} map${s.maps_count === 1 ? "" : "s"})`;
+            const sizeStr = formatBytes(s.size_bytes);
+            const dateStr = s.created_at ? new Date(s.created_at).toLocaleString() : "";
+            const downloadUrl = `/api/training/datasets/${encodeURIComponent(s.id)}/archive`;
+
+            return `
+                <div class="snapshot-card" data-id="${id}">
+                    <div class="snapshot-card-head">
+                        <span class="snapshot-id mono" title="${id}">${id}</span>
+                        <span class="snapshot-theme-badge">${themeLabel}</span>
+                    </div>
+                    <div class="snapshot-meta-row">
+                        <span class="snapshot-sha256 mono" title="SHA-256: ${shaFull}">SHA: ${shaHead}…</span>
+                        <span class="snapshot-counts mono">${counts}</span>
+                        <span class="snapshot-size mono">${sizeStr}</span>
+                    </div>
+                    <div class="snapshot-meta-row">
+                        <span class="snapshot-time mono">${escapeHtml(dateStr)}</span>
+                    </div>
+                    <div class="snapshot-card-actions">
+                        <a href="${downloadUrl}" download="${id}.zip" class="btn btn-secondary btn-xs" title="Download ZIP Archive">
+                            Download ZIP
+                        </a>
+                        <button type="button" class="btn btn-danger btn-xs btn-delete-snapshot" data-id="${id}" title="Delete Snapshot">
+                            Delete
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join("");
+
+        snapshotsList.querySelectorAll(".btn-delete-snapshot").forEach(btn => {
+            btn.addEventListener("click", () => {
+                const id = btn.getAttribute("data-id");
+                if (id) deleteDatasetSnapshot(id);
+            });
+        });
+    }
+
+    function toggleSnapshotsShelf() {
+        state.snapshotsCollapsed = !state.snapshotsCollapsed;
+        if (snapshotsShelf) {
+            snapshotsShelf.classList.toggle("collapsed", state.snapshotsCollapsed);
+        }
+        if (btnToggleSnapshots) {
+            btnToggleSnapshots.setAttribute("aria-expanded", String(!state.snapshotsCollapsed));
+        }
+        if (toggleSnapshotsText) {
+            toggleSnapshotsText.textContent = state.snapshotsCollapsed ? "Expand" : "Collapse";
+        }
+    }
+
+    async function freezeDatasetSnapshot() {
+        if (state.isFreezingSnapshot) return;
+        state.isFreezingSnapshot = true;
+        if (btnFreezeSnapshot) btnFreezeSnapshot.disabled = true;
+        if (btnFreezeLabel) btnFreezeLabel.textContent = "Freezing...";
+
+        const scopeTheme = datasetScopeTheme();
+        const scopeLabel = scopeTheme ? `theme '${scopeTheme}'` : "all themes";
+        showToast(`Auditing readiness & freezing snapshot (${scopeLabel})...`, "info");
+
+        try {
+            const body = scopeTheme ? { theme: scopeTheme } : {};
+            const res = await fetch("/api/training/datasets", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                if (res.status === 400 || res.status === 422 || errData.code === "DATASET_NOT_READY") {
+                    showFreezeRefusalModal(errData);
+                    return;
+                }
+                throw new Error(errData.error || `HTTP ${res.status}`);
+            }
+
+            const snapshot = await res.json();
+            showToast(`Frozen Dataset Snapshot '${snapshot.id}' created (${snapshot.samples_count} samples, ${snapshot.maps_count} maps)!`, "success");
+            fetchDatasetSnapshots();
+        } catch (err) {
+            showToast(`Freeze error: ${err.message}`, "danger");
+        } finally {
+            state.isFreezingSnapshot = false;
+            if (btnFreezeSnapshot) btnFreezeSnapshot.disabled = false;
+            if (btnFreezeLabel) btnFreezeLabel.textContent = "Freeze Snapshot";
+        }
+    }
+
+    async function deleteDatasetSnapshot(id) {
+        if (!id) return;
+        if (!confirm(`Are you sure you want to permanently delete frozen dataset snapshot '${id}'? This will remove its archive from blob storage.`)) {
+            return;
+        }
+        try {
+            const res = await fetch(`/api/training/datasets/${encodeURIComponent(id)}`, {
+                method: "DELETE",
+            });
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                if (res.status === 409 || errData.code === "SNAPSHOT_IN_USE") {
+                    showToast(`Cannot delete snapshot: ${errData.error || "Snapshot is in use by one or more training runs"}`, "danger");
+                    return;
+                }
+                throw new Error(errData.error || `HTTP ${res.status}`);
+            }
+            showToast(`Dataset snapshot '${id}' deleted`, "info");
+            fetchDatasetSnapshots();
+        } catch (err) {
+            showToast(`Failed to delete snapshot: ${err.message}`, "danger");
+        }
     }
 
     // ==========================================================================
@@ -6664,6 +6906,9 @@
         btnRefreshLibrary?.addEventListener("click", () => fetchLibraryMaps());
         btnExportLora?.addEventListener("click", () => exportLoraDataset());
         btnClearLibraryFilters?.addEventListener("click", () => clearLibraryFilters());
+        btnFreezeSnapshot?.addEventListener("click", () => freezeDatasetSnapshot());
+        btnRefreshSnapshots?.addEventListener("click", () => fetchDatasetSnapshots());
+        btnToggleSnapshots?.addEventListener("click", () => toggleSnapshotsShelf());
 
         librarySearchInput?.addEventListener("input", (e) => {
             state.librarySearchQuery = e.target.value;

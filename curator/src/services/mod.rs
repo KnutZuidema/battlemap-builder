@@ -12,7 +12,7 @@ pub use sections::{describe_map_sections, SectionDescriptionContext};
 pub use curation::*;
 
 pub use benchmark::*;
-pub use dataset_export::DatasetExportService;
+pub use dataset_export::{DatasetExportService, DeleteDatasetError, FreezeDatasetError};
 pub use storage_maintenance::StorageMaintenanceService;
 pub use library::LibraryService;
 pub use ingestion::{

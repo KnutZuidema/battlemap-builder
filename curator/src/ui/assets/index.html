@@ -421,6 +421,12 @@
                         </svg>
                         <span id="btn-export-label">Export LoRA Dataset</span>
                     </button>
+                    <button type="button" id="btn-freeze-snapshot" class="btn btn-secondary btn-freeze" title="Freeze an immutable Dataset Snapshot for the active theme scope">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M4.93 19.07l14.14-14.14"/>
+                        </svg>
+                        <span id="btn-freeze-label">Freeze Snapshot</span>
+                    </button>
                     <button type="button" id="btn-refresh-library" class="btn btn-secondary btn-icon-only" title="Refresh Library">
                         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                             <polyline points="23 4 23 10 17 10"/>
@@ -433,6 +439,37 @@
 
             <!-- Library Cards Scroll Container -->
             <div class="library-scroll-container">
+                <!-- Frozen Dataset Snapshots Panel -->
+                <div id="dataset-snapshots-panel" class="dataset-snapshots-panel">
+                    <div class="snapshots-panel-header">
+                        <div class="snapshots-panel-title-group">
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M4.93 19.07l14.14-14.14"/>
+                            </svg>
+                            <h3 class="snapshots-panel-title">Frozen Dataset Snapshots</h3>
+                            <span id="snapshots-count-badge" class="snapshots-count-badge mono">0</span>
+                        </div>
+                        <div class="snapshots-panel-actions">
+                            <button type="button" id="btn-refresh-snapshots" class="btn btn-secondary btn-xs btn-icon-only" title="Refresh Snapshots">
+                                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="23 4 23 10 17 10"/>
+                                    <polyline points="1 20 1 14 7 14"/>
+                                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                                </svg>
+                            </button>
+                            <button type="button" id="btn-toggle-snapshots" class="btn btn-secondary btn-xs" aria-expanded="true" title="Toggle Snapshots">
+                                <span id="toggle-snapshots-text">Collapse</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div id="snapshots-shelf" class="snapshots-shelf">
+                        <div id="snapshots-list" class="snapshots-list"></div>
+                        <div id="snapshots-empty" class="snapshots-empty hidden">
+                            <p>No frozen snapshots for this theme scope yet. Click <strong>Freeze Snapshot</strong> to create one.</p>
+                        </div>
+                    </div>
+                </div>
+
                 <div id="library-grid" class="curated-grid" role="feed" aria-busy="false">
                     <!-- Populated dynamically by app.js -->
                 </div>

@@ -16,6 +16,14 @@ pub enum ApiError {
     Internal(String),
     BadGateway(String),
     ServiceUnavailable(String),
+    DatasetNotReady {
+        error: String,
+        blocking_issues: Vec<crate::domain::BlockingIssue>,
+        readiness: Box<crate::domain::DatasetReadiness>,
+    },
+    SnapshotInUse {
+        id: String,
+    },
 }
 
 impl ApiError {
@@ -94,18 +102,78 @@ impl From<crate::services::curation::CurationWorkflowError> for ApiError {
     }
 }
 
+impl From<crate::services::FreezeDatasetError> for ApiError {
+    fn from(err: crate::services::FreezeDatasetError) -> Self {
+        match err {
+            crate::services::FreezeDatasetError::NotReady {
+                summary,
+                blocking_issues,
+                readiness,
+            } => ApiError::DatasetNotReady {
+                error: summary,
+                blocking_issues,
+                readiness: Box::new(readiness),
+            },
+            crate::services::FreezeDatasetError::Storage(storage_err) => storage_err.into(),
+        }
+    }
+}
+
+impl From<crate::services::DeleteDatasetError> for ApiError {
+    fn from(err: crate::services::DeleteDatasetError) -> Self {
+        match err {
+            crate::services::DeleteDatasetError::Referenced(id) => ApiError::SnapshotInUse { id },
+            crate::services::DeleteDatasetError::Storage(storage_err) => storage_err.into(),
+        }
+    }
+}
+
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
-            ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
-            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
-            ApiError::BadGateway(msg) => (StatusCode::BAD_GATEWAY, msg),
-            ApiError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
-        };
-
-        (status, Json(json!({ "error": message }))).into_response()
+        match self {
+            ApiError::DatasetNotReady {
+                error,
+                blocking_issues,
+                readiness,
+            } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "code": "DATASET_NOT_READY",
+                    "error": error,
+                    "blocking_issues": blocking_issues,
+                    "readiness": *readiness,
+                })),
+            )
+                .into_response(),
+            ApiError::SnapshotInUse { id } => (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "code": "SNAPSHOT_IN_USE",
+                    "error": format!(
+                        "Dataset snapshot '{id}' is referenced by one or more training runs and cannot be deleted"
+                    ),
+                })),
+            )
+                .into_response(),
+            ApiError::NotFound(msg) => {
+                (StatusCode::NOT_FOUND, Json(json!({ "error": msg }))).into_response()
+            }
+            ApiError::BadRequest(msg) => {
+                (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
+            }
+            ApiError::Conflict(msg) => {
+                (StatusCode::CONFLICT, Json(json!({ "error": msg }))).into_response()
+            }
+            ApiError::Internal(msg) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": msg }))).into_response()
+            }
+            ApiError::BadGateway(msg) => {
+                (StatusCode::BAD_GATEWAY, Json(json!({ "error": msg }))).into_response()
+            }
+            ApiError::ServiceUnavailable(msg) => {
+                (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": msg }))).into_response()
+            }
+        }
     }
 }

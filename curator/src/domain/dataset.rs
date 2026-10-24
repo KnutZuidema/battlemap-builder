@@ -14,7 +14,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::MapSection;
+use crate::domain::{MapSection, Theme};
 
 /// Camera angles, perspective directives, art-style meta-prompts and grid mechanics that are
 /// renderer-owned and therefore never allowed inside a `Physical Description` (ADR-0002).
@@ -86,6 +86,26 @@ impl DatasetIssueCode {
             Self::PhysicalDescriptionNotNeutral => "physical_description_not_neutral",
         }
     }
+
+    /// Remediation instruction to resolve this defect.
+    pub fn remediation(&self) -> &'static str {
+        match self {
+            Self::GroundLayerMissing => "Restore 0_ground.png in data/curated/<id>/",
+            Self::GroundImageUnreadable => "Re-ingest the map; an export would skip it entirely",
+            Self::GridBelowMinimum => {
+                "Recalibrate the grid (PATCH /api/curated/{id} with a grid that fits the Ground layer)"
+            }
+            Self::SectionUnresolvable => {
+                "Regrid, or re-curate the map; the export skips that section"
+            }
+            Self::PhysicalDescriptionMissing => {
+                "POST /api/curated/{id}/describe, then PATCH the description"
+            }
+            Self::PhysicalDescriptionNotNeutral => {
+                "Regenerate the description, then PATCH /api/curated/{id} with a grid so section descriptions are recomputed per crop"
+            }
+        }
+    }
 }
 
 /// A single dataset defect with the operator-facing detail needed to locate it.
@@ -149,6 +169,122 @@ impl DatasetReadiness {
             maps_ready,
             sections_total,
             sections_ready,
+        }
+    }
+
+    /// Extracts aggregated blocking issues with remediation advice.
+    pub fn blocking_issues(&self) -> Vec<BlockingIssue> {
+        if self.maps_total == 0 {
+            return vec![BlockingIssue {
+                code: "empty_dataset".to_string(),
+                remediation: "Curate at least one battlemap with 16×16 Map Sections in this scope before freezing a dataset snapshot".to_string(),
+                count: 0,
+                maps: Vec::new(),
+            }];
+        }
+
+        let mut issues_by_code: std::collections::BTreeMap<&'static str, (usize, Vec<String>)> =
+            std::collections::BTreeMap::new();
+
+        for map in &self.maps {
+            for issue in &map.issues {
+                let entry = issues_by_code
+                    .entry(issue.code.as_str())
+                    .or_insert_with(|| (0, Vec::new()));
+                entry.0 += 1;
+                if !entry.1.contains(&map.id) {
+                    entry.1.push(map.id.clone());
+                }
+            }
+        }
+
+        issues_by_code
+            .into_iter()
+            .map(|(code_str, (count, maps))| {
+                let remediation = match code_str {
+                    "ground_layer_missing" => DatasetIssueCode::GroundLayerMissing.remediation(),
+                    "ground_image_unreadable" => DatasetIssueCode::GroundImageUnreadable.remediation(),
+                    "grid_below_minimum" => DatasetIssueCode::GridBelowMinimum.remediation(),
+                    "section_unresolvable" => DatasetIssueCode::SectionUnresolvable.remediation(),
+                    "physical_description_missing" => DatasetIssueCode::PhysicalDescriptionMissing.remediation(),
+                    "physical_description_not_neutral" => DatasetIssueCode::PhysicalDescriptionNotNeutral.remediation(),
+                    _ => "Review and fix dataset issues in the Curated Library",
+                };
+                BlockingIssue {
+                    code: code_str.to_string(),
+                    remediation: remediation.to_string(),
+                    count,
+                    maps,
+                }
+            })
+            .collect()
+    }
+}
+
+/// A blocking issue preventing a dataset scope from being frozen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockingIssue {
+    /// Machine-readable snake_case issue code.
+    pub code: String,
+    /// Remediation instruction to resolve the issue.
+    pub remediation: String,
+    /// Number of occurrences of this issue across all affected maps.
+    pub count: usize,
+    /// IDs of curated maps affected by this issue.
+    pub maps: Vec<String>,
+}
+
+/// An immutable frozen copy of a Training Dataset carrying a content digest (ADR-0009).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatasetSnapshot {
+    /// Unique snapshot identifier (e.g. `ds-dungeon-20261024-180000-001`).
+    pub id: String,
+    /// Frozen scope theme (`None` means all themes).
+    pub theme: Option<Theme>,
+    /// Creation timestamp (UTC).
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Hex-encoded SHA-256 content digest of the exported dataset ZIP archive.
+    pub sha256: String,
+    /// Size of the ZIP archive in bytes.
+    pub size_bytes: u64,
+    /// Number of ready curated maps included in the snapshot.
+    pub maps_count: usize,
+    /// Number of 16×16 Map Section samples included in the ZIP archive.
+    pub samples_count: usize,
+    /// Trigger Phrase prepended to captions (`TRIGGER_PHRASE`).
+    pub trigger_phrase: String,
+    /// Storage blob key path (`artifacts/datasets/{id}.zip`).
+    pub artifact_key: String,
+    /// Public URL for the artifact (when configured with R2_PUBLIC_URL), or None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_url: Option<String>,
+}
+
+impl DatasetSnapshot {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: impl Into<String>,
+        theme: Option<Theme>,
+        created_at: chrono::DateTime<chrono::Utc>,
+        sha256: impl Into<String>,
+        size_bytes: u64,
+        maps_count: usize,
+        samples_count: usize,
+        trigger_phrase: impl Into<String>,
+        artifact_key: impl Into<String>,
+        artifact_url: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            theme,
+            created_at,
+            sha256: sha256.into(),
+            size_bytes,
+            maps_count,
+            samples_count,
+            trigger_phrase: trigger_phrase.into(),
+            artifact_key: artifact_key.into(),
+            artifact_url,
         }
     }
 }

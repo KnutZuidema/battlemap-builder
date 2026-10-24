@@ -11,16 +11,17 @@
 
 use std::collections::HashSet;
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
 
 use crate::domain::{
     crop_section_box, is_perspective_neutral, sample_description, synthesize_map_sections,
-    CaptionGenerator, CuratedMap, DatasetIssue, DatasetIssueCode, DatasetReadiness, GridConfig,
-    LayerRole, MapDatasetReadiness, MapSection, Theme,
+    BlockingIssue, CaptionGenerator, CuratedMap, DatasetIssue, DatasetIssueCode, DatasetReadiness,
+    DatasetSnapshot, GridConfig, LayerRole, MapDatasetReadiness, MapSection, Theme, TRIGGER_PHRASE,
 };
-use crate::ports::blob_storage::{BlobKey, BlobStorage};
+use crate::ports::blob_storage::{sha256_digest, BlobKey, BlobStorage};
 use crate::ports::catalog_repository::{CatalogRepository, CuratedFilter};
 use crate::ports::storage_error::StorageError;
 
@@ -364,6 +365,30 @@ fn curated_ground_blob_key(map: &CuratedMap) -> BlobKey {
     }
 }
 
+static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Error returned when attempting to freeze a dataset snapshot.
+#[derive(Debug, thiserror::Error)]
+pub enum FreezeDatasetError {
+    #[error("Dataset scope is not ready: {summary}")]
+    NotReady {
+        summary: String,
+        blocking_issues: Vec<BlockingIssue>,
+        readiness: DatasetReadiness,
+    },
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+/// Error returned when attempting to delete a dataset snapshot.
+#[derive(Debug, thiserror::Error)]
+pub enum DeleteDatasetError {
+    #[error("Dataset snapshot '{0}' is referenced by one or more training runs")]
+    Referenced(String),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
 /// Service exporting curated maps as LoRA training archives and auditing dataset readiness.
 ///
 /// Stateless: it borrows the catalog and blob ports, so handlers construct it per request from
@@ -447,5 +472,120 @@ impl DatasetExportService {
             sources.push((map.clone(), ground_bytes));
         }
         create_lora_zip(sources)
+    }
+
+    /// Freezes an immutable dataset snapshot for the given scope, gated on dataset readiness.
+    pub async fn freeze_dataset_snapshot(
+        &self,
+        theme: Option<&Theme>,
+        custom_id: Option<String>,
+    ) -> Result<DatasetSnapshot, FreezeDatasetError> {
+        let readiness = self.audit_dataset_readiness(theme).await?;
+        if !readiness.ready {
+            let blocking_issues = readiness.blocking_issues();
+            let summary = if readiness.maps_total == 0 {
+                "Dataset scope is not ready: no curated maps exist in the requested scope".to_string()
+            } else {
+                format!(
+                    "Dataset scope is not ready: {} blocking issue(s) across {} map(s)",
+                    blocking_issues.iter().map(|b| b.count).sum::<usize>(),
+                    readiness.maps_total - readiness.maps_ready
+                )
+            };
+            return Err(FreezeDatasetError::NotReady {
+                summary,
+                blocking_issues,
+                readiness,
+            });
+        }
+
+        let curated_maps = self.list_curated(theme).await?;
+        let zip_bytes = self.create_lora_zip(&curated_maps).await?;
+        let sha256 = sha256_digest(&zip_bytes);
+        let size_bytes = zip_bytes.len() as u64;
+
+        let id = custom_id.unwrap_or_else(|| {
+            let theme_slug = theme.map(|t| t.as_str()).unwrap_or("all");
+            let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+            let counter = SNAPSHOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+            format!("ds_{theme_slug}_{ts}_{counter:02}")
+        });
+
+        let blob_key = BlobKey::DatasetSnapshot { id: id.clone() };
+        self.blobs
+            .write_blob_with_sha256(&blob_key, &zip_bytes, Some(&sha256))
+            .await?;
+
+        let artifact_key = blob_key.to_path();
+        let artifact_url = std::env::var("R2_PUBLIC_URL")
+            .ok()
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty())
+            .and_then(|u| blob_key.public_url(&u));
+
+        let snapshot = DatasetSnapshot {
+            id: id.clone(),
+            theme: theme.copied(),
+            created_at: chrono::Utc::now(),
+            sha256,
+            size_bytes,
+            maps_count: readiness.maps_ready,
+            samples_count: readiness.sections_ready,
+            trigger_phrase: TRIGGER_PHRASE.to_string(),
+            artifact_key,
+            artifact_url,
+        };
+
+        if let Err(err) = self.catalog.save_dataset_snapshot(&snapshot).await {
+            let _ = self.blobs.delete_blob(&blob_key).await;
+            return Err(FreezeDatasetError::Storage(err));
+        }
+
+        Ok(snapshot)
+    }
+
+    /// Loads the snapshot record by id.
+    pub async fn get_dataset_snapshot(&self, id: &str) -> Result<DatasetSnapshot, StorageError> {
+        self.catalog.get_dataset_snapshot(id).await
+    }
+
+    /// Lists snapshot records matching `theme`, ordered newest first.
+    pub async fn list_dataset_snapshots(
+        &self,
+        theme: Option<&Theme>,
+    ) -> Result<Vec<DatasetSnapshot>, StorageError> {
+        self.catalog.list_dataset_snapshots(theme).await
+    }
+
+    /// Reads the raw ZIP archive bytes of the dataset snapshot.
+    pub async fn read_dataset_snapshot_archive(&self, id: &str) -> Result<Vec<u8>, StorageError> {
+        // Ensure snapshot exists in the catalog before reading blob
+        self.catalog.get_dataset_snapshot(id).await?;
+        self.blobs
+            .read_blob(&BlobKey::DatasetSnapshot {
+                id: id.to_string(),
+            })
+            .await
+    }
+
+    /// Deletes the dataset snapshot if unreferenced by any training run.
+    pub async fn delete_dataset_snapshot(&self, id: &str) -> Result<(), DeleteDatasetError> {
+        // Ensure snapshot exists
+        self.catalog.get_dataset_snapshot(id).await?;
+
+        if self.catalog.is_dataset_snapshot_referenced(id).await? {
+            return Err(DeleteDatasetError::Referenced(id.to_string()));
+        }
+
+        // Delete blob from storage first
+        self.blobs
+            .delete_blob(&BlobKey::DatasetSnapshot {
+                id: id.to_string(),
+            })
+            .await?;
+
+        // Delete catalog record
+        self.catalog.delete_dataset_snapshot(id).await?;
+        Ok(())
     }
 }

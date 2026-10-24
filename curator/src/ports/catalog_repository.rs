@@ -2,7 +2,9 @@
 
 use async_trait::async_trait;
 
-use crate::domain::{Candidate, CuratedMap, RejectionReason, RejectionRecord, Source, Theme};
+use crate::domain::{
+    Candidate, CuratedMap, DatasetSnapshot, RejectionReason, RejectionRecord, Source, Theme,
+};
 use crate::ports::storage_error::StorageError;
 
 /// Query filter for staging candidates. Every populated field must match (conjunction).
@@ -80,6 +82,24 @@ pub trait CatalogRepository: Send + Sync {
         reason: RejectionReason,
         notes: Option<&str>,
     ) -> Result<(), StorageError>;
+
+    /// Load the frozen dataset snapshot with `id`.
+    async fn get_dataset_snapshot(&self, id: &str) -> Result<DatasetSnapshot, StorageError>;
+
+    /// Insert or overwrite the dataset snapshot.
+    async fn save_dataset_snapshot(&self, snapshot: &DatasetSnapshot) -> Result<(), StorageError>;
+
+    /// List frozen dataset snapshots matching `theme` (or all if `None`), ordered by `created_at` descending.
+    async fn list_dataset_snapshots(
+        &self,
+        theme: Option<&Theme>,
+    ) -> Result<Vec<DatasetSnapshot>, StorageError>;
+
+    /// Delete the dataset snapshot with `id`. Succeeds when it does not exist (idempotent).
+    async fn delete_dataset_snapshot(&self, id: &str) -> Result<(), StorageError>;
+
+    /// Returns whether any TrainingRun references the dataset snapshot with `id`.
+    async fn is_dataset_snapshot_referenced(&self, id: &str) -> Result<bool, StorageError>;
 }
 
 #[async_trait]
@@ -131,5 +151,28 @@ impl<T: ?Sized + CatalogRepository> CatalogRepository for std::sync::Arc<T> {
         notes: Option<&str>,
     ) -> Result<(), StorageError> {
         (**self).log_rejection(id, reason, notes).await
+    }
+
+    async fn get_dataset_snapshot(&self, id: &str) -> Result<DatasetSnapshot, StorageError> {
+        (**self).get_dataset_snapshot(id).await
+    }
+
+    async fn save_dataset_snapshot(&self, snapshot: &DatasetSnapshot) -> Result<(), StorageError> {
+        (**self).save_dataset_snapshot(snapshot).await
+    }
+
+    async fn list_dataset_snapshots(
+        &self,
+        theme: Option<&Theme>,
+    ) -> Result<Vec<DatasetSnapshot>, StorageError> {
+        (**self).list_dataset_snapshots(theme).await
+    }
+
+    async fn delete_dataset_snapshot(&self, id: &str) -> Result<(), StorageError> {
+        (**self).delete_dataset_snapshot(id).await
+    }
+
+    async fn is_dataset_snapshot_referenced(&self, id: &str) -> Result<bool, StorageError> {
+        (**self).is_dataset_snapshot_referenced(id).await
     }
 }

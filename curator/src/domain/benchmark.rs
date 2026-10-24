@@ -26,6 +26,45 @@ pub const ALL_BENCHMARK_MODELS: &[&str] = &[
     MODEL_SEEDREAM_50_FLASH,
 ];
 
+/// WaveSpeed AI model identifiers for FLUX 3 Klein LoRA serving (ADR-0008, ADR-0010).
+pub const MODEL_WAVESPEED_KLEIN_T2I_LORA: &str =
+    "wavespeed-ai/flux-3-klein-image-distilled/text-to-image-lora";
+pub const MODEL_WAVESPEED_KLEIN_EDIT_LORA: &str =
+    "wavespeed-ai/flux-3-klein-image-distilled/edit-lora";
+
+/// Trigger phrase required by FLUX 3 Klein LoRA checkpoints (ADR-0008).
+pub const WAVESPEED_TRIGGER_PHRASE: &str = "dungeonforge battlemap";
+
+/// Formats a physical description into a full-scene prompt prefixed with the Klein LoRA trigger phrase.
+pub fn build_wavespeed_prompt(description: &str) -> String {
+    let trimmed = description.trim();
+    if trimmed.is_empty() {
+        WAVESPEED_TRIGGER_PHRASE.to_string()
+    } else if trimmed.starts_with(WAVESPEED_TRIGGER_PHRASE) {
+        trimmed.to_string()
+    } else {
+        format!("{WAVESPEED_TRIGGER_PHRASE}, {trimmed}")
+    }
+}
+
+/// Provider backend responsible for serving model inference requests (ADR-0010).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelProvider {
+    #[default]
+    OpenRouter,
+    WaveSpeed,
+}
+
+impl fmt::Display for ModelProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OpenRouter => write!(f, "openrouter"),
+            Self::WaveSpeed => write!(f, "wavespeed"),
+        }
+    }
+}
+
 /// The API endpoint kind used by OpenRouter for a given model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -87,10 +126,14 @@ impl ModelPricing {
 pub struct BenchmarkModelSpec {
     pub id: String,
     pub label: String,
+    #[serde(default)]
+    pub provider: ModelProvider,
     pub api_type: ModelApiType,
     pub pricing: ModelPricing,
     #[serde(default)]
     pub has_vision: bool,
+    #[serde(default)]
+    pub supports_reference_image: bool,
 }
 
 impl BenchmarkModelSpec {
@@ -99,30 +142,56 @@ impl BenchmarkModelSpec {
             MODEL_GEMINI_31_FLASH => Some(Self {
                 id: MODEL_GEMINI_31_FLASH.to_string(),
                 label: "Google Gemini 3.1 Flash Image".to_string(),
+                provider: ModelProvider::OpenRouter,
                 api_type: ModelApiType::Chat,
                 pricing: ModelPricing::new(0.50, 3.00, 0.00006),
                 has_vision: true,
+                supports_reference_image: true,
             }),
             MODEL_GEMINI_31_FLASH_LITE => Some(Self {
                 id: MODEL_GEMINI_31_FLASH_LITE.to_string(),
                 label: "Google Gemini 3.1 Flash Lite Image".to_string(),
+                provider: ModelProvider::OpenRouter,
                 api_type: ModelApiType::Chat,
                 pricing: ModelPricing::new(0.25, 1.50, 0.00003),
                 has_vision: true,
+                supports_reference_image: true,
             }),
             MODEL_MUSE => Some(Self {
                 id: MODEL_MUSE.to_string(),
                 label: "Meta Muse Image".to_string(),
+                provider: ModelProvider::OpenRouter,
                 api_type: ModelApiType::Images,
                 pricing: ModelPricing::new(0.0, 0.0, 0.01),
                 has_vision: true,
+                supports_reference_image: true,
             }),
             MODEL_SEEDREAM_50_FLASH => Some(Self {
                 id: MODEL_SEEDREAM_50_FLASH.to_string(),
                 label: "ByteDance Seedream 5.0 Flash".to_string(),
+                provider: ModelProvider::OpenRouter,
                 api_type: ModelApiType::Images,
                 pricing: ModelPricing::new(0.0, 0.0, 0.018),
                 has_vision: true,
+                supports_reference_image: true,
+            }),
+            MODEL_WAVESPEED_KLEIN_T2I_LORA => Some(Self {
+                id: MODEL_WAVESPEED_KLEIN_T2I_LORA.to_string(),
+                label: "FLUX 3 Klein Distilled Text-to-Image LoRA".to_string(),
+                provider: ModelProvider::WaveSpeed,
+                api_type: ModelApiType::Images,
+                pricing: ModelPricing::new(0.0, 0.0, 0.015),
+                has_vision: false,
+                supports_reference_image: false,
+            }),
+            MODEL_WAVESPEED_KLEIN_EDIT_LORA => Some(Self {
+                id: MODEL_WAVESPEED_KLEIN_EDIT_LORA.to_string(),
+                label: "FLUX 3 Klein Distilled Edit LoRA".to_string(),
+                provider: ModelProvider::WaveSpeed,
+                api_type: ModelApiType::Images,
+                pricing: ModelPricing::new(0.0, 0.0, 0.021),
+                has_vision: true,
+                supports_reference_image: true,
             }),
             _ => None,
         }
@@ -140,6 +209,8 @@ impl BenchmarkModelSpec {
             MODEL_GEMINI_31_FLASH_LITE => 0.035,
             MODEL_MUSE => 0.01,
             MODEL_SEEDREAM_50_FLASH => 0.018,
+            MODEL_WAVESPEED_KLEIN_T2I_LORA => 0.015,
+            MODEL_WAVESPEED_KLEIN_EDIT_LORA => 0.021,
             _ => 0.05,
         }
     }
@@ -252,8 +323,29 @@ impl FromStr for BenchmarkArchetype {
     }
 }
 
+/// LoRA weight configuration for model inference (ADR-0008, ADR-0010).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoraWeight {
+    pub path: String,
+    #[serde(default = "default_lora_scale")]
+    pub scale: f64,
+}
+
+fn default_lora_scale() -> f64 {
+    0.75
+}
+
+impl LoraWeight {
+    pub fn new(path: impl Into<String>, scale: f64) -> Self {
+        Self {
+            path: path.into(),
+            scale,
+        }
+    }
+}
+
 /// Request to generate an image via a model engine.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GenerationRequest {
     pub model: String,
     pub prompt: String,
@@ -263,6 +355,10 @@ pub struct GenerationRequest {
     pub aspect_ratio: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ReferenceImage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<LoraWeight>,
+    #[serde(default)]
+    pub enable_prompt_expansion: bool,
 }
 
 fn default_aspect_ratio() -> String {
@@ -277,9 +373,10 @@ impl GenerationRequest {
             system_instruction: None,
             aspect_ratio: default_aspect_ratio(),
             images: Vec::new(),
+            loras: Vec::new(),
+            enable_prompt_expansion: false,
         }
     }
-
     pub fn with_system_instruction(mut self, instruction: impl Into<String>) -> Self {
         self.system_instruction = Some(instruction.into());
         self
@@ -297,6 +394,21 @@ impl GenerationRequest {
 
     pub fn with_images(mut self, images: impl IntoIterator<Item = ReferenceImage>) -> Self {
         self.images.extend(images);
+        self
+    }
+
+    pub fn with_lora(mut self, path: impl Into<String>, scale: f64) -> Self {
+        self.loras.push(LoraWeight::new(path, scale));
+        self
+    }
+
+    pub fn with_loras(mut self, loras: impl IntoIterator<Item = LoraWeight>) -> Self {
+        self.loras.extend(loras);
+        self
+    }
+
+    pub fn with_prompt_expansion(mut self, enable: bool) -> Self {
+        self.enable_prompt_expansion = enable;
         self
     }
 
@@ -370,7 +482,11 @@ impl BenchmarkMetadata {
             filename: format!("{}.png", self.id),
             dimensions: (1024, 1024),
             created_at: Utc::now(),
-            source_url: Some(format!("openrouter://{}", self.model)),
+            source_url: Some(if self.model.starts_with("wavespeed") {
+                format!("wavespeed://{}", self.model)
+            } else {
+                format!("openrouter://{}", self.model)
+            }),
             title: Some(format!("{}: {}", self.prompt_name, self.model)),
             author: Some(self.model.clone()),
             parsed_gridless: Some(true),
@@ -673,5 +789,71 @@ mod tests {
         // Serialized without images should omit images field
         let json_no_images = serde_json::to_string(&req_alias).expect("serialize");
         assert!(!json_no_images.contains("\"images\""));
+    }
+
+    #[test]
+    fn test_wavespeed_model_specs_and_pricing() {
+        let t2i = BenchmarkModelSpec::find(MODEL_WAVESPEED_KLEIN_T2I_LORA).expect("t2i spec");
+        assert_eq!(t2i.provider, ModelProvider::WaveSpeed);
+        assert_eq!(t2i.api_type, ModelApiType::Images);
+        assert_eq!(t2i.pricing.image_output, 0.015);
+        assert_eq!(t2i.pricing.calculate_cost(None, None), 0.015);
+        assert_eq!(t2i.estimated_cost_per_map(), 0.015);
+        assert!(!t2i.has_vision);
+        assert!(!t2i.supports_reference_image);
+
+        let edit = BenchmarkModelSpec::find(MODEL_WAVESPEED_KLEIN_EDIT_LORA).expect("edit spec");
+        assert_eq!(edit.provider, ModelProvider::WaveSpeed);
+        assert_eq!(edit.api_type, ModelApiType::Images);
+        assert_eq!(edit.pricing.image_output, 0.021);
+        assert_eq!(edit.pricing.calculate_cost(None, None), 0.021);
+        assert_eq!(edit.estimated_cost_per_map(), 0.021);
+        assert!(edit.has_vision);
+        assert!(edit.supports_reference_image);
+    }
+
+    #[test]
+    fn test_build_wavespeed_prompt() {
+        assert_eq!(
+            build_wavespeed_prompt("Stone crypt with sarcophagus"),
+            "dungeonforge battlemap, Stone crypt with sarcophagus"
+        );
+        assert_eq!(
+            build_wavespeed_prompt("dungeonforge battlemap, ancient temple"),
+            "dungeonforge battlemap, ancient temple"
+        );
+        assert_eq!(build_wavespeed_prompt("   "), "dungeonforge battlemap");
+    }
+
+    #[test]
+    fn test_generation_request_loras_and_candidate_source_url() {
+        let req = GenerationRequest::new(MODEL_WAVESPEED_KLEIN_T2I_LORA, "crypt")
+            .with_lora("https://example.com/lora.safetensors", 0.75)
+            .with_prompt_expansion(false);
+
+        assert_eq!(req.loras.len(), 1);
+        assert_eq!(req.loras[0].path, "https://example.com/lora.safetensors");
+        assert_eq!(req.loras[0].scale, 0.75);
+        assert!(!req.enable_prompt_expansion);
+
+        let json = serde_json::to_string(&req).expect("serialize");
+        assert!(json.contains("\"loras\":["));
+        assert!(json.contains("\"enable_prompt_expansion\":false"));
+
+        let meta = BenchmarkMetadata::new(
+            "bench_ws_123",
+            MODEL_WAVESPEED_KLEIN_T2I_LORA,
+            "Stone Crypt",
+            "dungeonforge battlemap, Stone Crypt",
+            None,
+            None,
+            1200,
+            0.015,
+        );
+        let candidate = meta.to_candidate();
+        assert_eq!(
+            candidate.source_url.as_deref(),
+            Some("wavespeed://wavespeed-ai/flux-3-klein-image-distilled/text-to-image-lora")
+        );
     }
 }

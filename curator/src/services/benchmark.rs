@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, instrument};
 
 use crate::domain::{
-    build_battlemap_prompt, generate_benchmark_id, BatchBenchmarkItem, BenchmarkArchetype,
-    BenchmarkMetadata, BenchmarkResult, GenerationRequest, ALL_BENCHMARK_MODELS,
+    build_battlemap_prompt, build_wavespeed_prompt, generate_benchmark_id, BatchBenchmarkItem,
+    BenchmarkArchetype, BenchmarkMetadata, BenchmarkModelSpec, BenchmarkResult, GenerationRequest,
+    LoraWeight, ALL_BENCHMARK_MODELS,
 };
 use crate::ports::blob_storage::BlobStorage;
 use crate::ports::catalog_repository::CatalogRepository;
@@ -65,6 +66,7 @@ pub struct BenchmarkService {
     cost_tracker: Option<Arc<dyn CostTracker + Send + Sync>>,
     reference_provider: ReferenceProvider,
     reference_conditioning_enabled: bool,
+    lora_weight: Option<LoraWeight>,
 }
 
 impl BenchmarkService {
@@ -81,6 +83,7 @@ impl BenchmarkService {
             cost_tracker: None,
             reference_provider,
             reference_conditioning_enabled: true,
+            lora_weight: None,
         }
     }
 
@@ -98,6 +101,7 @@ impl BenchmarkService {
             cost_tracker: Some(cost_tracker),
             reference_provider,
             reference_conditioning_enabled: true,
+            lora_weight: None,
         }
     }
 
@@ -121,6 +125,17 @@ impl BenchmarkService {
     /// Whether reference conditioning is currently enabled.
     pub fn reference_conditioning_enabled(&self) -> bool {
         self.reference_conditioning_enabled
+    }
+
+    /// Configures custom LoRA weights and scale applied to generation requests.
+    pub fn with_lora(mut self, path: impl Into<String>, scale: f64) -> Self {
+        self.lora_weight = Some(LoraWeight::new(path, scale));
+        self
+    }
+
+    /// Reference to configured custom LoRA weights if set.
+    pub fn lora_weight(&self) -> Option<&LoraWeight> {
+        self.lora_weight.as_ref()
     }
 
     /// Resolve reference image for a given batch item if reference conditioning is enabled.
@@ -190,10 +205,28 @@ impl BenchmarkService {
         model: &str,
         archetype: &BenchmarkArchetype,
     ) -> Result<BenchmarkResult, BenchmarkServiceError> {
-        let prompt = build_battlemap_prompt(archetype.prompt());
-        let mut request = GenerationRequest::new(model, prompt).with_battlemap_defaults();
+        let is_wavespeed = model.starts_with("wavespeed")
+            || BenchmarkModelSpec::find(model)
+                .is_some_and(|s| s.provider == crate::domain::ModelProvider::WaveSpeed);
+        let prompt = if is_wavespeed {
+            build_wavespeed_prompt(archetype.prompt())
+        } else {
+            build_battlemap_prompt(archetype.prompt())
+        };
+        let mut request = GenerationRequest::new(model, prompt);
+        if !is_wavespeed {
+            request = request.with_battlemap_defaults();
+        }
+        if let Some(lw) = &self.lora_weight {
+            request = request.with_lora(&lw.path, lw.scale);
+        }
 
-        if self.reference_conditioning_enabled {
+
+        let supports_ref = BenchmarkModelSpec::find(model)
+            .map(|s| s.supports_reference_image)
+            .unwrap_or(true);
+
+        if self.reference_conditioning_enabled && supports_ref {
             let theme = archetype.default_theme();
             if let Ok(Some(resolution)) = self
                 .reference_provider
@@ -307,10 +340,28 @@ impl BenchmarkService {
         {
             self.run_archetype(model, &archetype).await?
         } else {
-            let prompt = build_battlemap_prompt(&item.prompt);
-            let mut request = GenerationRequest::new(model, prompt).with_battlemap_defaults();
+            let is_wavespeed = model.starts_with("wavespeed")
+                || BenchmarkModelSpec::find(model)
+                    .is_some_and(|s| s.provider == crate::domain::ModelProvider::WaveSpeed);
+            let prompt = if is_wavespeed {
+                build_wavespeed_prompt(&item.prompt)
+            } else {
+                build_battlemap_prompt(&item.prompt)
+            };
+            let mut request = GenerationRequest::new(model, prompt);
+            if !is_wavespeed {
+                request = request.with_battlemap_defaults();
+            }
 
-            if self.reference_conditioning_enabled {
+            if let Some(lw) = &self.lora_weight {
+                request = request.with_lora(&lw.path, lw.scale);
+            }
+
+            let supports_ref = BenchmarkModelSpec::find(model)
+                .map(|s| s.supports_reference_image)
+                .unwrap_or(true);
+
+            if self.reference_conditioning_enabled && supports_ref {
                 if let Ok(Some(resolution)) = self
                     .reference_provider
                     .resolve_reference_for_prompt(&item.prompt)

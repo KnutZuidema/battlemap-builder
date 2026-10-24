@@ -139,6 +139,8 @@
         "google/gemini-3.1-flash-lite-image": 0.035,
         "meta/muse-image": 0.01,
         "bytedance-seed/seedream-5-0-flash": 0.018,
+        "wavespeed-ai/flux-3-klein-image-distilled/text-to-image-lora": 0.015,
+        "wavespeed-ai/flux-3-klein-image-distilled/edit-lora": 0.021,
     };
     const BUDGET_GUARDRAIL_THRESHOLD = 2.00;
     const CANONICAL_THEMES = [
@@ -184,6 +186,7 @@
     let benchmarkDrawer, btnCloseBenchmarkDrawer, btnCancelBenchmarkDrawer;
     let btnModelsSelectAll, btnModelsSelectNone, btnPromptsSelectAll, btnPromptsSelectNone;
     let benchmarkEnableCustom, customPromptFields, benchmarkCustomName, benchmarkCustomPrompt, benchmarkEnableReference;
+    let benchmarkEnableCustomLora, benchmarkCustomLoraFields, benchmarkCustomLoraPath, benchmarkCustomLoraScale;
     let calcBadgeCost, calcFormulaDisplay, calcWarningNote;
     let btnStartBenchmark, btnStartBenchmarkText;
     let benchmarkProgressContainer, benchmarkProgressBar, benchmarkProgressText, btnCancelBenchmarkRun;
@@ -367,6 +370,10 @@
         benchmarkCustomName = document.getElementById("benchmark-custom-name");
         benchmarkCustomPrompt = document.getElementById("benchmark-custom-prompt");
         benchmarkEnableReference = document.getElementById("benchmark-enable-reference");
+        benchmarkEnableCustomLora = document.getElementById("benchmark-enable-custom-lora");
+        benchmarkCustomLoraFields = document.getElementById("benchmark-custom-lora-fields");
+        benchmarkCustomLoraPath = document.getElementById("benchmark-custom-lora-path");
+        benchmarkCustomLoraScale = document.getElementById("benchmark-custom-lora-scale");
 
         calcBadgeCost = document.getElementById("calc-badge-cost");
         calcFormulaDisplay = document.getElementById("calc-formula-display");
@@ -3138,6 +3145,13 @@
             custom_prompts: customPrompts,
             use_reference_conditioning: benchmarkEnableReference ? benchmarkEnableReference.checked : true,
         };
+        if (benchmarkEnableCustomLora?.checked && benchmarkCustomLoraPath?.value.trim()) {
+            payload.lora_path = benchmarkCustomLoraPath.value.trim();
+            const scale = parseFloat(benchmarkCustomLoraScale?.value);
+            if (!isNaN(scale)) {
+                payload.lora_scale = scale;
+            }
+        }
 
         try {
             const res = await fetch("/api/benchmark/run", {
@@ -3500,6 +3514,9 @@
         benchmarkCustomName?.addEventListener("input", () => updatePreflightCost());
         benchmarkCustomPrompt?.addEventListener("input", () => updatePreflightCost());
 
+        benchmarkEnableCustomLora?.addEventListener("change", () => {
+            benchmarkCustomLoraFields?.classList.toggle("hidden", !benchmarkEnableCustomLora.checked);
+        });
         btnStartBenchmark?.addEventListener("click", () => handleStartBenchmarkClick());
         btnCancelBenchmarkRun?.addEventListener("click", () => cancelBenchmarkExecution());
 

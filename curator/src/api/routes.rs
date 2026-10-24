@@ -1002,6 +1002,10 @@ pub struct BenchmarkRunRequest {
     pub custom_prompts: Vec<CustomPrompt>,
     #[serde(default = "default_true")]
     pub use_reference_conditioning: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_scale: Option<f64>,
 }
 
 fn default_true() -> bool {
@@ -1066,11 +1070,16 @@ pub async fn post_benchmark_run(
         ));
     }
 
-    let service = state
+    let mut service = state
         .get_or_create_benchmark_service()?
         .as_ref()
         .clone()
         .with_reference_conditioning(payload.use_reference_conditioning);
+
+    if let Some(path) = payload.lora_path.filter(|p| !p.trim().is_empty()) {
+        let scale = payload.lora_scale.unwrap_or(0.75);
+        service = service.with_lora(path, scale);
+    }
 
     let is_sse = headers
         .get(header::ACCEPT)

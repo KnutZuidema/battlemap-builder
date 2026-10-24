@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 
-use crate::adapters::{FileCostLedger, OpenRouterAdapter, RedditCrawler};
+use crate::adapters::{FileCostLedger, OpenRouterAdapter, RedditCrawler, RoutingModelEngine, WaveSpeedAdapter};
 use crate::api::error::ApiError;
 use crate::ports::blob_storage::BlobStorage;
 use crate::ports::catalog_repository::CatalogRepository;
@@ -25,6 +25,7 @@ pub struct AppState {
     pub benchmark_cancelled: Arc<AtomicBool>,
     pub theme_suggestions_cache: Arc<RwLock<HashMap<String, Vec<String>>>>,
     pub openrouter: Option<Arc<OpenRouterAdapter>>,
+    pub wavespeed: Option<Arc<WaveSpeedAdapter>>,
     pub description_service: Arc<DescriptionService>,
     pub curation_service: Arc<dyn CurationWorkflow>,
     pub start_time: Instant,
@@ -57,6 +58,7 @@ impl AppState {
             blobs.clone(),
         );
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
+        let wavespeed = WaveSpeedAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
@@ -68,6 +70,7 @@ impl AppState {
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
             theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
             openrouter,
+            wavespeed,
             description_service,
             curation_service,
             start_time: Instant::now(),
@@ -87,6 +90,7 @@ impl AppState {
             blobs.clone(),
         );
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
+        let wavespeed = WaveSpeedAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
@@ -98,6 +102,7 @@ impl AppState {
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
             theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
             openrouter,
+            wavespeed,
             description_service,
             curation_service,
             start_time: Instant::now(),
@@ -116,6 +121,7 @@ impl AppState {
             blobs.clone(),
         );
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
+        let wavespeed = WaveSpeedAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
@@ -127,6 +133,7 @@ impl AppState {
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
             theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
             openrouter,
+            wavespeed,
             description_service,
             curation_service,
             start_time: Instant::now(),
@@ -146,6 +153,7 @@ impl AppState {
             blobs.clone(),
         );
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
+        let wavespeed = WaveSpeedAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
@@ -157,6 +165,7 @@ impl AppState {
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
             theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
             openrouter,
+            wavespeed,
             description_service,
             curation_service,
             start_time: Instant::now(),
@@ -171,6 +180,7 @@ impl AppState {
         blobs: Arc<dyn BlobStorage + Send + Sync>,
     ) -> Self {
         let openrouter = OpenRouterAdapter::from_env().ok().map(Arc::new);
+        let wavespeed = WaveSpeedAdapter::from_env().ok().map(Arc::new);
         let description_service = Self::default_description_service(openrouter.as_ref());
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         Self {
@@ -182,6 +192,7 @@ impl AppState {
             benchmark_cancelled: Arc::new(AtomicBool::new(false)),
             theme_suggestions_cache: Arc::new(RwLock::new(HashMap::new())),
             openrouter,
+            wavespeed,
             description_service,
             curation_service,
             start_time: Instant::now(),
@@ -228,22 +239,40 @@ impl AppState {
         OpenRouterAdapter::from_env().ok().map(Arc::new)
     }
 
-    /// Helper to try instantiating OpenRouterAdapter from environment if keys are present.
+    /// Obtains reference to existing WaveSpeed adapter or attempts on-demand resolution.
+    pub fn wavespeed_client(&self) -> Option<Arc<WaveSpeedAdapter>> {
+        if let Some(adapter) = &self.wavespeed {
+            return Some(adapter.clone());
+        }
+        WaveSpeedAdapter::from_env().ok().map(Arc::new)
+    }
+
+    /// Helper to try instantiating RoutingModelEngine from environment if keys are present.
     fn default_benchmark_service(
         cost_tracker: Arc<dyn CostTracker + Send + Sync>,
         catalog: Arc<dyn CatalogRepository + Send + Sync>,
         blobs: Arc<dyn BlobStorage + Send + Sync>,
     ) -> Option<Arc<BenchmarkService>> {
-        OpenRouterAdapter::from_env()
-            .ok()
-            .map(|adapter| {
-                Arc::new(BenchmarkService::with_cost_tracker(
-                    Arc::new(adapter),
-                    cost_tracker,
-                    catalog,
-                    blobs,
-                ))
-            })
+        let openrouter_ok = OpenRouterAdapter::from_env().is_ok();
+        let wavespeed_ok = WaveSpeedAdapter::from_env().is_ok();
+
+        if !openrouter_ok && !wavespeed_ok {
+            return None;
+        }
+
+        let openrouter = OpenRouterAdapter::from_env().unwrap_or_else(|_| OpenRouterAdapter::new(""));
+        let wavespeed = WaveSpeedAdapter::from_env().unwrap_or_else(|_| WaveSpeedAdapter::new(""));
+        let routing_engine = Arc::new(RoutingModelEngine::new(
+            Arc::new(openrouter),
+            Arc::new(wavespeed),
+        ));
+
+        Some(Arc::new(BenchmarkService::with_cost_tracker(
+            routing_engine,
+            cost_tracker,
+            catalog,
+            blobs,
+        )))
     }
 
     /// Obtains reference to existing benchmark service or attempts on-demand resolution.
@@ -261,7 +290,7 @@ impl AppState {
         }
 
         Err(ApiError::bad_request(
-            "Benchmark engine not available: OPENROUTER_API_KEY is not configured in server/.env or environment",
+            "Benchmark engine not available: neither OPENROUTER_API_KEY nor WAVESPEED_API_KEY is configured in server/.env or environment",
         ))
     }
 }

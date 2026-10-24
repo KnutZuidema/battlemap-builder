@@ -7,6 +7,8 @@ pub mod in_memory;
 pub mod openrouter;
 pub mod reddit;
 pub mod simd_image;
+pub mod wavespeed;
+pub mod routing;
 #[allow(unused_imports)]
 pub use cost_ledger::*;
 #[allow(unused_imports)]
@@ -20,4 +22,7 @@ pub use openrouter::*;
 #[allow(unused_imports)]
 pub use reddit::*;
 #[allow(unused_imports)]
+pub use wavespeed::*;
 pub use simd_image::*;
+#[allow(unused_imports)]
+pub use routing::*;

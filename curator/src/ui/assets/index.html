@@ -1329,6 +1329,26 @@
                                     <span class="check-item-desc mono">bytedance-seed/seedream-5-0-flash</span>
                                 </div>
                             </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-model" value="wavespeed-ai/flux-3-klein-image-distilled/text-to-image-lora" checked>
+                                <div class="check-item-info">
+                                    <div class="check-item-title-row">
+                                        <span class="check-item-name">FLUX 3 Klein T2I LoRA</span>
+                                        <span class="pricing-badge badge-wavespeed">Klein ($0.015/map)</span>
+                                    </div>
+                                    <span class="check-item-desc mono">wavespeed-ai/flux-3-klein-image-distilled/text-to-image-lora</span>
+                                </div>
+                            </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-model" value="wavespeed-ai/flux-3-klein-image-distilled/edit-lora">
+                                <div class="check-item-info">
+                                    <div class="check-item-title-row">
+                                        <span class="check-item-name">FLUX 3 Klein Edit LoRA</span>
+                                        <span class="pricing-badge badge-wavespeed">Klein Edit ($0.021/map)</span>
+                                    </div>
+                                    <span class="check-item-desc mono">wavespeed-ai/flux-3-klein-image-distilled/edit-lora</span>
+                                </div>
+                            </label>
                         </div>
                     </div>
 
@@ -1412,6 +1432,24 @@
                             <input type="checkbox" id="benchmark-enable-reference" checked>
                             <span class="toggle-text">Virtuous Cycle Reference Conditioning (5★ Curated / Static Fallback)</span>
                         </label>
+                    </div>
+
+                    <!-- Custom LoRA Adapter Configuration Option -->
+                    <div class="custom-prompt-section lora-override-section" style="margin-top: 1rem;">
+                        <label class="custom-prompt-toggle-label" for="benchmark-enable-custom-lora">
+                            <input type="checkbox" id="benchmark-enable-custom-lora">
+                            <span class="toggle-text">Custom LoRA Adapter (FLUX 3 Klein)</span>
+                        </label>
+                        <div id="benchmark-custom-lora-fields" class="custom-prompt-fields hidden">
+                            <div class="form-group">
+                                <label for="benchmark-custom-lora-path">LoRA Weights URL or Path</label>
+                                <input type="text" id="benchmark-custom-lora-path" class="text-input" placeholder="https://pub-xxx.r2.dev/artifacts/adapter.safetensors">
+                            </div>
+                            <div class="form-group">
+                                <label for="benchmark-custom-lora-scale">LoRA Scale (Default: 0.75)</label>
+                                <input type="number" id="benchmark-custom-lora-scale" class="text-input" min="0" max="4" step="0.05" value="0.75">
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Dynamic Pre-Flight Cost Calculator Card -->

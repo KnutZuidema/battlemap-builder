@@ -17,8 +17,8 @@ use crate::api::error::ApiError;
 use crate::api::state::AppState;
 use crate::domain::{
     BatchBenchmarkItem, BenchmarkArchetype, BenchmarkMetadata, Candidate, CandidateLayer,
-    normalize_tags, CuratedMap, CuratedMapUpdate, CustomPrompt, DatasetReadiness, LayerRole,
-    PurgeStagingResult, RedditHarvestRequest, RejectionReason, StorageStats, Theme,
+    normalize_tags, CuratedMap, CuratedMapUpdate, CustomPrompt, DatasetReadiness, DatasetSnapshot,
+    LayerRole, PurgeStagingResult, RedditHarvestRequest, RejectionReason, StorageStats, Theme,
 };
 use crate::ports::catalog_repository::{CandidateFilter, CuratedFilter};
 use crate::ports::cost_tracker::CostStats;
@@ -332,6 +332,102 @@ pub async fn post_dataset_export_selected(
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(response)
+}
+
+/// Request payload for freezing an immutable dataset snapshot.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct FreezeDatasetRequest {
+    #[serde(default)]
+    pub theme: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// POST /api/training/datasets - Freeze a scope into an immutable DatasetSnapshot.
+pub async fn post_training_dataset(
+    State(state): State<AppState>,
+    Query(query): Query<ThemeQuery>,
+    body: Option<Json<FreezeDatasetRequest>>,
+) -> Result<(StatusCode, Json<DatasetSnapshot>), ApiError> {
+    let req = body.map(|b| b.0).unwrap_or_default();
+    let theme_str = req.theme.as_deref().or(query.theme.as_deref());
+    let theme = parse_optional_theme(theme_str)?;
+    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
+    let snapshot = export_service
+        .freeze_dataset_snapshot(theme.as_ref(), req.id)
+        .await?;
+    tracing::info!(
+        id = %snapshot.id,
+        sha256 = %snapshot.sha256,
+        samples = snapshot.samples_count,
+        maps = snapshot.maps_count,
+        "Frozen dataset snapshot created"
+    );
+    Ok((StatusCode::CREATED, Json(snapshot)))
+}
+
+/// GET /api/training/datasets - List frozen dataset snapshots, optionally filtered by theme.
+pub async fn get_training_datasets(
+    State(state): State<AppState>,
+    Query(query): Query<ThemeQuery>,
+) -> Result<Json<Vec<DatasetSnapshot>>, ApiError> {
+    let theme = parse_optional_theme(query.theme.as_deref())?;
+    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
+    let snapshots = export_service.list_dataset_snapshots(theme.as_ref()).await?;
+    Ok(Json(snapshots))
+}
+
+/// GET /api/training/datasets/{id} - Get frozen dataset snapshot metadata by ID.
+pub async fn get_training_dataset(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<DatasetSnapshot>, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Snapshot ID cannot be empty"));
+    }
+    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
+    let snapshot = export_service.get_dataset_snapshot(&id).await?;
+    Ok(Json(snapshot))
+}
+
+/// GET /api/training/datasets/{id}/archive - Download the frozen dataset snapshot ZIP archive.
+pub async fn get_training_dataset_archive(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Snapshot ID cannot be empty"));
+    }
+    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
+    let bytes = export_service.read_dataset_snapshot_archive(&id).await?;
+    let filename = format!("{id}.zip");
+    let disposition = format!("attachment; filename=\"{filename}\"");
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"))
+        .header(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::try_from(disposition).map_err(|e| ApiError::internal(e.to_string()))?,
+        )
+        .body(Body::from(bytes))
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    Ok(response)
+}
+
+/// DELETE /api/training/datasets/{id} - Delete an unreferenced dataset snapshot and its blob.
+pub async fn delete_training_dataset(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Snapshot ID cannot be empty"));
+    }
+    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
+    export_service.delete_dataset_snapshot(&id).await?;
+    tracing::info!(id = %id, "Deleted dataset snapshot");
+    Ok(Json(json!({ "deleted": true, "id": id })))
 }
 
 /// GET /api/image/staging/{id} - Stream binary image bytes with MIME type and Cache-Control.

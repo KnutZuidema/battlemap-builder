@@ -464,6 +464,35 @@ mod tests {
         ) -> Result<(), StorageError> {
             self.inner.log_rejection(id, reason, notes).await
         }
+
+        async fn get_dataset_snapshot(
+            &self,
+            id: &str,
+        ) -> Result<crate::domain::DatasetSnapshot, StorageError> {
+            self.inner.get_dataset_snapshot(id).await
+        }
+
+        async fn save_dataset_snapshot(
+            &self,
+            snapshot: &crate::domain::DatasetSnapshot,
+        ) -> Result<(), StorageError> {
+            self.inner.save_dataset_snapshot(snapshot).await
+        }
+
+        async fn list_dataset_snapshots(
+            &self,
+            theme: Option<&crate::domain::Theme>,
+        ) -> Result<Vec<crate::domain::DatasetSnapshot>, StorageError> {
+            self.inner.list_dataset_snapshots(theme).await
+        }
+
+        async fn delete_dataset_snapshot(&self, id: &str) -> Result<(), StorageError> {
+            self.inner.delete_dataset_snapshot(id).await
+        }
+
+        async fn is_dataset_snapshot_referenced(&self, id: &str) -> Result<bool, StorageError> {
+            self.inner.is_dataset_snapshot_referenced(id).await
+        }
     }
 
     /// [`BlobStorage`] double whose writes fail from the `fail_writes_from`-th write on.

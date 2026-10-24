@@ -1,14 +1,16 @@
 //! Filesystem-backed [`CatalogRepository`] storing one JSON manifest per staging/curated bundle.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-
+use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::domain::{
-    BenchmarkMetadata, Candidate, CuratedMap, RejectionReason, RejectionRecord, Theme,
+    BenchmarkMetadata, Candidate, CuratedMap, DatasetSnapshot, RejectionReason, RejectionRecord,
+    Theme,
 };
 use crate::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
 use crate::ports::storage_error::StorageError;
@@ -22,6 +24,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone)]
 pub struct FilesystemCatalogRepository {
     root_dir: PathBuf,
+    referenced_snapshots: Arc<RwLock<HashSet<String>>>,
 }
 
 impl FilesystemCatalogRepository {
@@ -29,6 +32,7 @@ impl FilesystemCatalogRepository {
     pub fn new(root_dir: impl Into<PathBuf>) -> Self {
         Self {
             root_dir: root_dir.into(),
+            referenced_snapshots: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -56,6 +60,53 @@ impl FilesystemCatalogRepository {
     /// Full path to the `rejections.json` log file.
     fn rejections_file(&self) -> PathBuf {
         self.root_dir.join("rejected").join("rejections.json")
+    }
+
+    fn datasets_dir(&self) -> PathBuf {
+        self.root_dir.join("datasets")
+    }
+
+    fn snapshot_manifest(&self, id: &str) -> PathBuf {
+        self.datasets_dir().join(id).join("snapshot.json")
+    }
+
+    /// Explicitly registers a reference to `snapshot_id` (e.g. for testing training run lifecycle).
+    pub fn register_snapshot_reference(&self, snapshot_id: impl Into<String>) {
+        self.referenced_snapshots
+            .write()
+            .expect("poisoned lock")
+            .insert(snapshot_id.into());
+    }
+
+    /// Removes an explicit reference to `snapshot_id`.
+    pub fn unregister_snapshot_reference(&self, snapshot_id: &str) {
+        self.referenced_snapshots
+            .write()
+            .expect("poisoned lock")
+            .remove(snapshot_id);
+    }
+
+    /// Scans `datasets/*/snapshot.json`, silently skipping unreadable snapshots.
+    fn scan_snapshot_manifests(dir: &Path) -> Result<Vec<DatasetSnapshot>, StorageError> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(StorageError::Io(err)),
+        };
+        let mut entities = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let manifest = entry.path().join("snapshot.json");
+            match Self::read_json::<DatasetSnapshot>(&manifest, "dataset snapshot") {
+                Ok(entity) => entities.push(entity),
+                Err(StorageError::NotFound(_)) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(entities)
     }
 
     /// Atomically replaces `path` with `data` via a uniquely named temporary file in the same
@@ -310,5 +361,70 @@ impl CatalogRepository for FilesystemCatalogRepository {
             notes.map(str::to_string),
         ));
         Self::write_json(&self.rejections_file(), &records)
+    }
+
+    async fn get_dataset_snapshot(&self, id: &str) -> Result<DatasetSnapshot, StorageError> {
+        Self::read_json(&self.snapshot_manifest(id), "dataset snapshot")
+    }
+
+    async fn save_dataset_snapshot(&self, snapshot: &DatasetSnapshot) -> Result<(), StorageError> {
+        Self::write_json(&self.snapshot_manifest(&snapshot.id), snapshot)
+    }
+
+    async fn list_dataset_snapshots(
+        &self,
+        theme: Option<&Theme>,
+    ) -> Result<Vec<DatasetSnapshot>, StorageError> {
+        let mut snapshots = Self::scan_snapshot_manifests(&self.datasets_dir())?;
+        if let Some(theme) = theme {
+            snapshots.retain(|s| s.theme.as_ref() == Some(theme));
+        }
+        snapshots.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+        Ok(snapshots)
+    }
+
+    async fn delete_dataset_snapshot(&self, id: &str) -> Result<(), StorageError> {
+        let file = self.snapshot_manifest(id);
+        Self::delete_manifest(&file)?;
+        if let Some(parent) = file.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+        Ok(())
+    }
+
+    async fn is_dataset_snapshot_referenced(&self, id: &str) -> Result<bool, StorageError> {
+        if self
+            .referenced_snapshots
+            .read()
+            .expect("poisoned lock")
+            .contains(id)
+        {
+            return Ok(true);
+        }
+
+        let training_dir = self.root_dir.join("training");
+        if training_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&training_dir) {
+                for entry in entries.flatten() {
+                    let run_file = entry.path().join("run.json");
+                    if run_file.is_file() {
+                        if let Ok(content) = std::fs::read_to_string(&run_file) {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                                if val.get("dataset_snapshot_id").and_then(|v| v.as_str()) == Some(id)
+                                    || val.get("dataset_id").and_then(|v| v.as_str()) == Some(id)
+                                    || val.get("dataset").and_then(|v| v.as_str()) == Some(id)
+                                    || val.get("dataset").and_then(|v| v.get("id")).and_then(|v| v.as_str()) == Some(id)
+                                    || val.get("snapshot_id").and_then(|v| v.as_str()) == Some(id)
+                                {
+                                    return Ok(true);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(false)
     }
 }

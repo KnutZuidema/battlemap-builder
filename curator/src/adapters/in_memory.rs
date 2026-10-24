@@ -1,11 +1,13 @@
 //! Pure in-memory test doubles for the storage ports: no filesystem access, no temp dirs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 use async_trait::async_trait;
 
-use crate::domain::{Candidate, CuratedMap, RejectionReason, RejectionRecord, Theme};
+use crate::domain::{
+    Candidate, CuratedMap, DatasetSnapshot, RejectionReason, RejectionRecord, Theme,
+};
 use crate::ports::blob_storage::{BlobKey, BlobStat, BlobStorage};
 use crate::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
 use crate::ports::storage_error::StorageError;
@@ -125,6 +127,8 @@ pub struct InMemoryCatalogRepository {
     candidates: RwLock<HashMap<String, Candidate>>,
     curated: RwLock<HashMap<String, CuratedMap>>,
     rejections: RwLock<Vec<RejectionRecord>>,
+    snapshots: RwLock<HashMap<String, DatasetSnapshot>>,
+    referenced_snapshots: RwLock<HashSet<String>>,
 }
 
 impl InMemoryCatalogRepository {
@@ -132,8 +136,23 @@ impl InMemoryCatalogRepository {
     pub fn new() -> Self {
         Self::default()
     }
-}
 
+    /// Explicitly registers a reference to `snapshot_id` (e.g. for testing training run lifecycle).
+    pub fn register_snapshot_reference(&self, snapshot_id: impl Into<String>) {
+        self.referenced_snapshots
+            .write()
+            .expect("in-memory catalog lock poisoned")
+            .insert(snapshot_id.into());
+    }
+
+    /// Removes an explicit reference to `snapshot_id`.
+    pub fn unregister_snapshot_reference(&self, snapshot_id: &str) {
+        self.referenced_snapshots
+            .write()
+            .expect("in-memory catalog lock poisoned")
+            .remove(snapshot_id);
+    }
+}
 /// A curated map matches a theme when any of its tags parses to that theme, mirroring the
 /// tag-based theme resolution of the on-disk storage layout.
 fn matches_theme(map: &CuratedMap, theme: Theme) -> bool {
@@ -277,6 +296,63 @@ impl CatalogRepository for InMemoryCatalogRepository {
             .expect("in-memory catalog lock poisoned")
             .push(RejectionRecord::with_now(id, reason, notes.map(str::to_string)));
         Ok(())
+    }
+
+    async fn get_dataset_snapshot(&self, id: &str) -> Result<DatasetSnapshot, StorageError> {
+        self.snapshots
+            .read()
+            .expect("in-memory catalog lock poisoned")
+            .get(id)
+            .cloned()
+            .ok_or_else(|| StorageError::NotFound(format!("Dataset snapshot '{id}' not found")))
+    }
+
+    async fn save_dataset_snapshot(&self, snapshot: &DatasetSnapshot) -> Result<(), StorageError> {
+        self.snapshots
+            .write()
+            .expect("in-memory catalog lock poisoned")
+            .insert(snapshot.id.clone(), snapshot.clone());
+        Ok(())
+    }
+
+    async fn list_dataset_snapshots(
+        &self,
+        theme: Option<&Theme>,
+    ) -> Result<Vec<DatasetSnapshot>, StorageError> {
+        let snapshots = self
+            .snapshots
+            .read()
+            .expect("in-memory catalog lock poisoned");
+        let mut matched: Vec<DatasetSnapshot> = snapshots
+            .values()
+            .filter(|snapshot| {
+                if let Some(theme) = theme {
+                    if snapshot.theme.as_ref() != Some(theme) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+        matched.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| a.id.cmp(&b.id)));
+        Ok(matched)
+    }
+
+    async fn delete_dataset_snapshot(&self, id: &str) -> Result<(), StorageError> {
+        self.snapshots
+            .write()
+            .expect("in-memory catalog lock poisoned")
+            .remove(id);
+        Ok(())
+    }
+
+    async fn is_dataset_snapshot_referenced(&self, id: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .referenced_snapshots
+            .read()
+            .expect("in-memory catalog lock poisoned")
+            .contains(id))
     }
 }
 

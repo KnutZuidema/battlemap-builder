@@ -3761,6 +3761,171 @@ kbd {
     font-size: 0.7rem;
 }
 
+.readiness-issue-remediation {
+    display: block;
+    margin-top: 0.35rem;
+    padding: 0.35rem 0.6rem;
+    border-radius: 6px;
+    background: rgba(59, 130, 246, 0.1);
+    border: 1px solid rgba(59, 130, 246, 0.25);
+    color: #93c5fd;
+    font-size: 0.75rem;
+}
+
+/* Frozen Dataset Snapshots Panel (Issue #216) */
+.btn-freeze {
+    gap: 0.4rem;
+}
+
+.dataset-snapshots-panel {
+    background: rgba(15, 23, 42, 0.65);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    margin-bottom: 1.25rem;
+    overflow: hidden;
+    backdrop-filter: blur(8px);
+}
+
+.snapshots-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    background: rgba(255, 255, 255, 0.03);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.snapshots-panel-title-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.snapshots-panel-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.snapshots-count-badge {
+    font-size: 0.7rem;
+    padding: 2px 7px;
+    border-radius: 9999px;
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-secondary);
+}
+
+.snapshots-panel-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.snapshots-shelf {
+    padding: 0.75rem 1rem;
+}
+
+.snapshots-shelf.collapsed {
+    display: none;
+}
+
+.snapshots-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    gap: 0.75rem;
+}
+
+.snapshot-card {
+    background: rgba(30, 41, 59, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 8px;
+    padding: 0.75rem 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    transition: border-color 0.15s ease;
+}
+
+.snapshot-card:hover {
+    border-color: rgba(59, 130, 246, 0.4);
+}
+
+.snapshot-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.snapshot-id {
+    font-weight: 700;
+    font-size: 0.8rem;
+    color: #38bdf8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.snapshot-theme-badge {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(99, 102, 241, 0.2);
+    color: #a5b4fc;
+    border: 1px solid rgba(99, 102, 241, 0.35);
+}
+
+.snapshot-meta-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+.snapshot-sha256 {
+    color: #94a3b8;
+    font-size: 0.68rem;
+    background: rgba(0, 0, 0, 0.25);
+    padding: 1px 5px;
+    border-radius: 4px;
+}
+
+.snapshot-counts {
+    color: #34d399;
+}
+
+.snapshot-size {
+    color: #cbd5e1;
+}
+
+.snapshot-time {
+    color: #64748b;
+}
+
+.snapshot-card-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 0.2rem;
+    padding-top: 0.4rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.snapshots-empty {
+    padding: 1rem;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
 /* Cards Grid & Area */
 .library-scroll-container {
     flex: 1;

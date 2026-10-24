@@ -7721,8 +7721,8 @@
             return;
         }
 
-        // Undo candidate rejection: Z or Ctrl+Z / Cmd+Z
-        if (e.key === "z" || e.key === "Z") {
+        // Undo candidate rejection: Z or Ctrl+Z / Cmd+Z (without Alt)
+        if (!e.altKey && (e.key === "z" || e.key === "Z")) {
             undoRejectCandidate();
             e.preventDefault();
             return;

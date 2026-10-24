@@ -382,15 +382,15 @@ kbd {
 }
 
 .btn-undo-reject {
-    background: rgba(148, 163, 184, 0.12);
-    border-color: rgba(148, 163, 184, 0.3);
+    background: var(--bg-surface-card);
+    border-color: var(--border-light);
     color: var(--text-secondary);
     transition: opacity var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
 }
 
 .btn-undo-reject:hover:not(:disabled) {
-    background: rgba(148, 163, 184, 0.22);
-    border-color: rgba(148, 163, 184, 0.5);
+    background: var(--bg-surface-hover);
+    border-color: var(--border-medium);
     color: var(--text-primary);
 }
 
@@ -1682,10 +1682,10 @@ kbd {
 .toast-action {
     margin-left: 0.5rem;
     padding: 0.2rem 0.65rem;
-    background: rgba(255, 255, 255, 0.15);
-    border: 1px solid rgba(255, 255, 255, 0.3);
+    background: var(--bg-surface-elevated);
+    border: 1px solid var(--border-light);
     border-radius: 4px;
-    color: #ffffff;
+    color: var(--text-primary);
     font-size: 0.8rem;
     font-weight: 600;
     cursor: pointer;
@@ -1694,8 +1694,8 @@ kbd {
 }
 
 .toast-action:hover {
-    background: rgba(255, 255, 255, 0.28);
-    border-color: rgba(255, 255, 255, 0.5);
+    background: var(--bg-surface-hover);
+    border-color: var(--border-medium);
 }
 
 @keyframes toast-in {

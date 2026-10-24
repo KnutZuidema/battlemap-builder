@@ -356,26 +356,28 @@ impl CurationWorkflow for CurationService {
             ));
         }
 
-        if let Ok(candidate) = self.catalog.get_candidate(id).await {
-            self.catalog.save_trashed_candidate(&candidate).await?;
-            let staging_prefix = BlobKey::StagingDir {
-                id: Some(id.to_string()),
-            };
-            if let Ok(keys) = self.blobs.list_prefix(&staging_prefix).await {
+        match self.catalog.get_candidate(id).await {
+            Ok(candidate) => {
+                self.catalog.save_trashed_candidate(&candidate).await?;
+                let staging_prefix = BlobKey::StagingDir {
+                    id: Some(id.to_string()),
+                };
+                let keys = self.blobs.list_prefix(&staging_prefix).await?;
                 for key in keys {
                     if let BlobKey::StagingLayer { id: blob_id, index } = &key {
-                        if let Ok(bytes) = self.blobs.read_blob(&key).await {
-                            let trash_key = BlobKey::TrashLayer {
-                                id: blob_id.clone(),
-                                index: *index,
-                            };
-                            let _ = self.blobs.write_blob(&trash_key, &bytes).await;
-                        }
-                        let _ = self.blobs.delete_blob(&key).await;
+                        let bytes = self.blobs.read_blob(&key).await?;
+                        let trash_key = BlobKey::TrashLayer {
+                            id: blob_id.clone(),
+                            index: *index,
+                        };
+                        self.blobs.write_blob(&trash_key, &bytes).await?;
+                        self.blobs.delete_blob(&key).await?;
                     }
                 }
+                self.catalog.delete_candidate(id).await?;
             }
-            let _ = self.catalog.delete_candidate(id).await;
+            Err(StorageError::NotFound(_)) => {}
+            Err(err) => return Err(err.into()),
         }
 
         self.catalog.log_rejection(id, reason, notes).await?;
@@ -410,21 +412,19 @@ impl CurationWorkflow for CurationService {
         let trash_keys = self.blobs.list_prefix(&trash_prefix).await?;
         for key in trash_keys {
             if let BlobKey::TrashLayer { id: blob_id, index } = &key {
-                if let Ok(bytes) = self.blobs.read_blob(&key).await {
-                    let staging_key = BlobKey::StagingLayer {
-                        id: blob_id.clone(),
-                        index: *index,
-                    };
-                    self.blobs.write_blob(&staging_key, &bytes).await?;
-                }
-                let _ = self.blobs.delete_blob(&key).await;
+                let bytes = self.blobs.read_blob(&key).await?;
+                let staging_key = BlobKey::StagingLayer {
+                    id: blob_id.clone(),
+                    index: *index,
+                };
+                self.blobs.write_blob(&staging_key, &bytes).await?;
+                self.blobs.delete_blob(&key).await?;
             }
         }
 
         self.catalog.save_candidate(&candidate).await?;
-        let _ = self.catalog.delete_trashed_candidate(&id).await;
+        self.catalog.delete_trashed_candidate(&id).await?;
         self.catalog.remove_rejection(&id).await?;
-
         Ok(candidate)
     }
 }

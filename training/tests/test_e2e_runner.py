@@ -32,9 +32,14 @@ from dungeonforge_training.app import (
     set_active_uploader,
 )
 from dungeonforge_training.errors import TrainingError
-from dungeonforge_training.runner import InMemoryRunStore, LocalRunnerManager, RunState
+from dungeonforge_training.recipe import TrainingRecipe
+from dungeonforge_training.runner import (
+    InMemoryRunStore,
+    LocalRunnerManager,
+    RunState,
+    execute_training_run,
+)
 from dungeonforge_training.storage import R2ArtifactUploader
-
 
 @pytest.fixture(scope="module")
 def local_dataset_server(tmp_path_factory):
@@ -408,3 +413,144 @@ def test_e2e_cancel_active_run(e2e_env, local_dataset_server):
     poll_resp = client.get(f"/run/{run_id}", headers=auth_headers)
     assert poll_resp.status_code == 200
     assert poll_resp.json()["state"] == RunState.CANCELLED.value
+
+
+def test_execute_training_run_respects_existing_cancelled_state(tmp_path: Path):
+    """Defend queued cancellation: execute_training_run must halt immediately if state is cancelled."""
+    store = InMemoryRunStore()
+    run_id = "test-queued-cancelled"
+    store.set(
+        run_id,
+        {
+            "run_id": run_id,
+            "state": RunState.CANCELLED.value,
+            "started_at": 100.0,
+            "finished_at": 105.0,
+            "elapsed_seconds": 5.0,
+            "cost_usd": 0.0027,
+            "step": 0,
+            "total_steps": 250,
+        },
+    )
+
+    recipe = TrainingRecipe(steps=250)
+    # Call execute_training_run
+    execute_training_run(
+        run_id=run_id,
+        dataset_url="http://invalid-url-should-never-be-fetched.example/dataset.zip",
+        recipe=recipe,
+        store=store,
+    )
+
+    # State must still be CANCELLED, not transitioned to RUNNING or FAILED
+    data = store.get(run_id)
+    assert data is not None
+    assert data["state"] == RunState.CANCELLED.value
+    assert data["elapsed_seconds"] == 5.0
+
+
+def test_run_aitoolkit_subprocess_drains_pipes_without_deadlock(tmp_path: Path):
+    """Defend against subprocess pipe buffer exhaustion (>64KB stdout/stderr without deadlock)."""
+    import sys
+    from dungeonforge_training.runner import _run_aitoolkit_subprocess
+
+    # Script that writes 128KB to stdout and 128KB to stderr
+    script_file = tmp_path / "noisy_job.py"
+    script_file.write_text(
+        "import sys\n"
+        "sys.stdout.write('O' * (128 * 1024))\n"
+        "sys.stdout.flush()\n"
+        "sys.stderr.write('E' * (128 * 1024))\n"
+        "sys.stderr.flush()\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    config_file = tmp_path / "dummy_config.yaml"
+    config_file.write_text("dummy: true\n", encoding="utf-8")
+
+    # We monkeypatch subprocess command candidates by passing script_file as run.py in cwd or running via custom run_py
+    # In _run_aitoolkit_subprocess: cmd = ["python3", str(run_py), str(config_path)]
+    import dungeonforge_training.runner as runner_mod
+    orig_popen = runner_mod.subprocess.Popen
+
+    def mock_popen(*args, **kwargs):
+        # Intercept and run noisy_job.py
+        cmd = [sys.executable, str(script_file)]
+        return orig_popen(cmd, **kwargs)
+
+    runner_mod.subprocess.Popen = mock_popen
+    try:
+        callback_calls = []
+        _run_aitoolkit_subprocess(
+            config_path=config_file,
+            job_dir=job_dir,
+            checkpoint_steps=[250],
+            checkpoint_callback=lambda step: callback_calls.append(step),
+            cancel_event=None,
+        )
+    finally:
+        runner_mod.subprocess.Popen = orig_popen
+
+
+def test_run_aitoolkit_subprocess_waits_for_samples(tmp_path: Path):
+    """Defend awaiting sample images before invoking checkpoint callback."""
+    import sys
+    from dungeonforge_training.runner import _run_aitoolkit_subprocess
+
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    samples_dir = job_dir / "samples"
+    samples_dir.mkdir()
+    config_file = tmp_path / "dummy_config.yaml"
+    config_file.write_text("dummy: true\n", encoding="utf-8")
+
+    # Write weights immediately
+    weights_file = job_dir / "test_250.safetensors"
+    weights_file.write_bytes(b"dummy_weights")
+
+    # A subprocess that runs for a moment while we observe callback not firing until samples exist
+    script_file = tmp_path / "slow_sampler.py"
+    script_file.write_text(
+        "import time\n"
+        "time.sleep(1.2)\n",
+        encoding="utf-8",
+    )
+
+    callback_invocations = []
+
+    import dungeonforge_training.runner as runner_mod
+    orig_popen = runner_mod.subprocess.Popen
+
+    def mock_popen(*args, **kwargs):
+        return orig_popen([sys.executable, str(script_file)], **kwargs)
+
+    runner_mod.subprocess.Popen = mock_popen
+
+    # Start a background thread that creates the samples after 0.5s
+    def delayed_writer():
+        time.sleep(0.4)
+        for idx in range(4):
+            sample = samples_dir / f"test_prompt_{idx}_00000250.png"
+            sample.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    writer_th = threading.Thread(target=delayed_writer)
+    writer_th.start()
+
+    try:
+        _run_aitoolkit_subprocess(
+            config_path=config_file,
+            job_dir=job_dir,
+            checkpoint_steps=[250],
+            checkpoint_callback=lambda step: callback_invocations.append(step),
+            cancel_event=None,
+            samples_dir=samples_dir,
+            expected_sample_count=4,
+        )
+    finally:
+        runner_mod.subprocess.Popen = orig_popen
+        writer_th.join()
+
+    assert callback_invocations == [250]

@@ -60,3 +60,22 @@ def test_find_and_compose_step_grid_not_found(tmp_path: Path):
     out = tmp_path / "not_found.png"
     result = find_and_compose_step_grid(tmp_path, step=999, output_path=out)
     assert result is None
+
+def test_find_step_sample_images_stem_end_matching(tmp_path: Path):
+    """Defend stem matching when step number is at the end of the stem (e.g. prompt_0001_00000250.png)."""
+    p1 = tmp_path / "prompt_0001_00000250.png"
+    p2 = tmp_path / "prompt_0002_00000250.png"
+    p_other = tmp_path / "prompt_0001_00000500.png"
+    for p in (p1, p2, p_other):
+        p.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+    # Standard step int 250 matches prompt_0001_00000250.png via (?:[_\-\. ]|$|\.png$) or {step:08d}
+    matched_250 = find_step_sample_images(tmp_path, step=250)
+    assert len(matched_250) == 2
+    assert set(matched_250) == {p1, p2}
+
+    # Also test step format without 8 zero-pads, e.g. prompt_0001_250.png
+    p3 = tmp_path / "prompt_0001_250.png"
+    p3.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    matched_250_with_p3 = find_step_sample_images(tmp_path, step=250)
+    assert p3 in matched_250_with_p3

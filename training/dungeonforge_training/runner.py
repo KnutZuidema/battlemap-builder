@@ -24,9 +24,10 @@ import urllib.request
 import httpx
 
 from dungeonforge_training.config import build_aitoolkit_config, emit_config
+from dungeonforge_training.constants import DEFAULT_SAMPLE_PROMPTS
 from dungeonforge_training.dataset import extract_dataset_if_archive, validate_dataset
 from dungeonforge_training.errors import DatasetValidationError, TrainingError
-from dungeonforge_training.grid import find_and_compose_step_grid
+from dungeonforge_training.grid import find_and_compose_step_grid, find_step_sample_images
 from dungeonforge_training.recipe import TrainingRecipe
 from dungeonforge_training.storage import CheckpointArtifact, R2ArtifactUploader
 
@@ -239,6 +240,15 @@ def execute_training_run(
     started_at = time.time()
     uploader = uploader or R2ArtifactUploader()
 
+    # Check if run was cancelled or cancel requested while queued
+    existing_run = store.get(run_id)
+    if existing_run and existing_run.get("state") in (
+        RunState.CANCELLED.value,
+        "cancel_requested",
+    ):
+        logger.info("Run %s is already %s before worker start; aborting execution", run_id, existing_run.get("state"))
+        return
+
     # Transition to running
     store.update(
         run_id,
@@ -362,14 +372,16 @@ def execute_training_run(
             )
         else:
             # Standard ai-toolkit execution
+            expected_samples = len(recipe.get_sample_prompts()) if hasattr(recipe, "get_sample_prompts") else len(DEFAULT_SAMPLE_PROMPTS)
             _run_aitoolkit_subprocess(
                 config_path=config_path,
                 job_dir=job_dir,
                 checkpoint_steps=checkpoint_steps,
                 checkpoint_callback=checkpoint_callback,
                 cancel_event=cancel_event,
+                samples_dir=samples_dir,
+                expected_sample_count=expected_samples,
             )
-
         if cancel_event and cancel_event.is_set():
             _handle_cancellation(run_id, started_at, store)
             return
@@ -405,6 +417,8 @@ def _run_aitoolkit_subprocess(
     checkpoint_steps: list[int],
     checkpoint_callback: Callable[[int], None],
     cancel_event: Optional[threading.Event],
+    samples_dir: Optional[Path] = None,
+    expected_sample_count: int = len(DEFAULT_SAMPLE_PROMPTS),
 ) -> None:
     """Execute ai-toolkit CLI as a subprocess and monitor checkpoint outputs."""
     # Locate run.py
@@ -427,40 +441,79 @@ def _run_aitoolkit_subprocess(
         text=True,
     )
 
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    def _reader(pipe, dest: list[str]) -> None:
+        try:
+            for line in iter(pipe.readline, ""):
+                dest.append(line)
+        finally:
+            pipe.close()
+
+    stdout_thread = threading.Thread(target=_reader, args=(proc.stdout, stdout_chunks), daemon=True)
+    stderr_thread = threading.Thread(target=_reader, args=(proc.stderr, stderr_chunks), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+
     processed_steps: set[int] = set()
 
-    while proc.poll() is None:
-        if cancel_event and cancel_event.is_set():
-            proc.terminate()
-            try:
-                proc.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-            return
+    try:
+        while proc.poll() is None:
+            if cancel_event and cancel_event.is_set():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                return
 
-        # Poll for new checkpoint steps
+            # Poll for new checkpoint steps
+            for idx, step in enumerate(checkpoint_steps):
+                if step not in processed_steps:
+                    weights = find_step_weights(job_dir, step, checkpoint_steps[-1])
+                    if weights:
+                        # Ensure sample images have finished generating before invoking callback
+                        samples_ready = True
+                        if samples_dir is not None and expected_sample_count > 0:
+                            sample_imgs = find_step_sample_images(samples_dir, step)
+                            if len(sample_imgs) < expected_sample_count:
+                                # Check if a subsequent step has already started writing weights
+                                subsequent_weights = any(
+                                    find_step_weights(job_dir, next_step, checkpoint_steps[-1])
+                                    for next_step in checkpoint_steps[idx + 1:]
+                                )
+                                if not subsequent_weights:
+                                    samples_ready = False
+
+                        if samples_ready:
+                            checkpoint_callback(step)
+                            processed_steps.add(step)
+
+            time.sleep(0.5)
+
+        # Process finished; ensure reader threads finish
+        stdout_thread.join(timeout=5.0)
+        stderr_thread.join(timeout=5.0)
+
+        stdout = "".join(stdout_chunks)
+        stderr = "".join(stderr_chunks)
+
+        if proc.returncode != 0:
+            error_details = stderr.strip() or stdout.strip() or f"Process exited with code {proc.returncode}"
+            raise TrainingError("aitoolkit_failed", f"ai-toolkit failed (code {proc.returncode}): {error_details}")
+
+        # Process any final remaining checkpoints now that process cleanly exited
         for step in checkpoint_steps:
             if step not in processed_steps:
                 weights = find_step_weights(job_dir, step, checkpoint_steps[-1])
                 if weights:
                     checkpoint_callback(step)
                     processed_steps.add(step)
-
-        time.sleep(1.0)
-
-    # Process finished, capture returncode & output
-    stdout, stderr = proc.communicate()
-    if proc.returncode != 0:
-        error_details = stderr.strip() or stdout.strip() or f"Process exited with code {proc.returncode}"
-        raise TrainingError("aitoolkit_failed", f"ai-toolkit failed (code {proc.returncode}): {error_details}")
-
-    # Process any final remaining checkpoints
-    for step in checkpoint_steps:
-        if step not in processed_steps:
-            weights = find_step_weights(job_dir, step, checkpoint_steps[-1])
-            if weights:
-                checkpoint_callback(step)
-                processed_steps.add(step)
+    finally:
+        # Guarantee reader threads are joined and process isn't left orphan
+        stdout_thread.join(timeout=1.0)
+        stderr_thread.join(timeout=1.0)
 
 
 def _handle_cancellation(run_id: str, started_at: float, store: RunStore) -> None:

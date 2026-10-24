@@ -109,9 +109,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let catalog: Arc<dyn CatalogRepository + Send + Sync> = Arc::new(catalog_repository);
-    let blobs: Arc<dyn BlobStorage + Send + Sync> =
-        Arc::new(FilesystemBlobStorage::new(&data_dir));
-
+    let blob_backend = curator::adapters::BlobBackend::from_env()?;
+    let blobs: Arc<dyn BlobStorage + Send + Sync> = match blob_backend {
+        curator::adapters::BlobBackend::Filesystem => {
+            tracing::info!(
+                data_dir = %data_dir.display(),
+                "Initializing filesystem blob storage"
+            );
+            Arc::new(FilesystemBlobStorage::new(&data_dir))
+        }
+        curator::adapters::BlobBackend::S3(config) => {
+            tracing::info!(
+                bucket = %config.bucket_name,
+                endpoint = %config.endpoint,
+                region = %config.region,
+                public_url = ?config.public_url,
+                "Initializing S3/R2 blob storage"
+            );
+            Arc::new(curator::adapters::S3BlobStorage::new(config))
+        }
+    };
     let cost_ledger_path = data_dir.join("telemetry/cost_ledger.json");
     tracing::info!(
         path = %cost_ledger_path.display(),

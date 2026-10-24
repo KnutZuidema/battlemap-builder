@@ -5,8 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 
-use crate::domain::LayerRole;
-use crate::ports::blob_storage::{BlobKey, BlobStorage};
+use crate::ports::blob_storage::{BlobKey, BlobStat, BlobStorage};
 use crate::ports::storage_error::StorageError;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -99,12 +98,44 @@ impl BlobStorage for FilesystemBlobStorage {
             Err(err) => Err(StorageError::Io(err)),
         }
     }
+    async fn stat_blob(&self, key: &BlobKey) -> Result<BlobStat, StorageError> {
+        let path = self.path_for(key);
+        match std::fs::metadata(&path) {
+            Ok(metadata) => {
+                let size = metadata.len();
+                let sha256 = match std::fs::read(&path) {
+                    Ok(bytes) => Some(crate::ports::blob_storage::sha256_digest(&bytes)),
+                    Err(_) => None,
+                };
+                Ok(BlobStat { size, sha256 })
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(StorageError::NotFound(
+                format!("Blob '{}' not found", key.to_path()),
+            )),
+            Err(err) => Err(StorageError::Io(err)),
+        }
+    }
+
+    async fn write_blob_with_sha256(
+        &self,
+        key: &BlobKey,
+        bytes: &[u8],
+        _sha256: Option<&str>,
+    ) -> Result<(), StorageError> {
+        self.write_blob(key, bytes).await
+    }
 
     async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
         let start = match prefix {
-            BlobKey::StagingDir { .. } | BlobKey::CuratedDir { .. } | BlobKey::TelemetryDir => {
-                self.root_dir.join(prefix.to_path())
-            }
+            BlobKey::StagingDir { .. }
+            | BlobKey::CuratedDir { .. }
+            | BlobKey::TelemetryDir
+            | BlobKey::ArtifactsDir
+            | BlobKey::DatasetSnapshotsDir
+            | BlobKey::RunsDir
+            | BlobKey::RunCheckpointsDir { .. }
+            | BlobKey::CheckpointDir { .. }
+            | BlobKey::PublishedAdaptersDir => self.root_dir.join(prefix.to_path()),
             _ => self.root_dir.clone(),
         };
 
@@ -142,78 +173,6 @@ impl BlobStorage for FilesystemBlobStorage {
     }
 }
 
-/// Parses a canonical storage-relative path back into the [`BlobKey`] that produces it.
-///
-/// Returns `None` for files that no [`BlobKey`] variant addresses (manifests, foreign files) and
-/// for hidden files, and verifies the canonical round-trip so every returned key satisfies
-/// `key.to_path() == relative`.
-///
-/// Hidden files are skipped because the writers drop their in-flight atomic-write temp files into
-/// the very directory they are about to replace, e.g. `telemetry/.cost_ledger_{pid}_{n}.tmp`, and
-/// [`BlobStorage::list_prefix`] lists dotfiles. Such a temp file is not a blob; counting it would
-/// inflate the telemetry footprint and a rename racing the size read would fail the whole listing.
 fn key_from_relative_path(relative: &str) -> Option<BlobKey> {
-    let parts: Vec<&str> = relative.split('/').collect();
-    let key = match parts.as_slice() {
-        ["staging", id, file] => {
-            let index = parse_canonical_usize(file.strip_suffix(".png")?)?;
-            BlobKey::StagingLayer {
-                id: (*id).to_string(),
-                index,
-            }
-        }
-        ["curated", id, file] => {
-            let (index, role, elevation) = parse_curated_filename(file)?;
-            BlobKey::CuratedLayer {
-                id: (*id).to_string(),
-                index,
-                role,
-                elevation,
-            }
-        }
-        ["exports", file] => BlobKey::ExportArchive {
-            name: file.strip_suffix(".zip")?.to_string(),
-        },
-        ["rejected", "rejections.json"] => BlobKey::RejectionLog,
-        // Hidden temp files (`.{name}.{pid}.{n}.tmp`) are excluded, like the retired directory
-        // walk did: they are not telemetry ledgers.
-        ["telemetry", name] if !name.starts_with('.') => BlobKey::TelemetryLog {
-            name: (*name).to_string(),
-        },
-        _ => return None,
-    };
-    (key.to_path() == relative).then_some(key)
-}
-
-/// Parses a canonical curated layer filename (`{index}_{slug}.png`) back into its components.
-fn parse_curated_filename(file: &str) -> Option<(usize, LayerRole, Option<i8>)> {
-    let stem = file.strip_suffix(".png")?;
-    let (index, slug) = stem.split_once('_')?;
-    let index = parse_canonical_usize(index)?;
-    let (role, elevation) = match slug {
-        "ground" => (LayerRole::Ground, Some(0)),
-        "roof" => (LayerRole::Roof, None),
-        "variant" => (LayerRole::Variant, None),
-        "exclude" => (LayerRole::Exclude, None),
-        "unassigned" => (LayerRole::Unassigned, None),
-        _ => {
-            if let Some(level) = slug.strip_prefix("upper_") {
-                let level = parse_canonical_usize(level)?;
-                (LayerRole::UpperFloor, Some(i8::try_from(level).ok()?))
-            } else {
-                let level = parse_canonical_usize(slug.strip_prefix("basement_")?)?;
-                (
-                    LayerRole::Basement,
-                    Some(i8::try_from(level).ok()?.checked_neg()?),
-                )
-            }
-        }
-    };
-    Some((index, role, elevation))
-}
-
-/// Parses `value` only when it is the canonical decimal rendering of the number (no padding).
-fn parse_canonical_usize(value: &str) -> Option<usize> {
-    let parsed: usize = value.parse().ok()?;
-    (parsed.to_string() == value).then_some(parsed)
+    BlobKey::from_path(relative)
 }

@@ -6,14 +6,20 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use crate::domain::{Candidate, CuratedMap, RejectionReason, RejectionRecord, Theme};
-use crate::ports::blob_storage::{BlobKey, BlobStorage};
+use crate::ports::blob_storage::{BlobKey, BlobStat, BlobStorage};
 use crate::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
 use crate::ports::storage_error::StorageError;
+
+#[derive(Debug, Clone)]
+struct StoredBlob {
+    bytes: Vec<u8>,
+    sha256: Option<String>,
+}
 
 /// [`BlobStorage`] double keeping every blob in a process-local map.
 #[derive(Debug, Default)]
 pub struct InMemoryBlobStorage {
-    blobs: RwLock<HashMap<BlobKey, Vec<u8>>>,
+    blobs: RwLock<HashMap<BlobKey, StoredBlob>>,
 }
 
 impl InMemoryBlobStorage {
@@ -30,15 +36,33 @@ impl BlobStorage for InMemoryBlobStorage {
             .read()
             .expect("in-memory blob store lock poisoned")
             .get(key)
-            .cloned()
+            .map(|b| b.bytes.clone())
             .ok_or_else(|| StorageError::NotFound(format!("Blob '{}' not found", key.to_path())))
     }
 
     async fn write_blob(&self, key: &BlobKey, bytes: &[u8]) -> Result<(), StorageError> {
+        self.write_blob_with_sha256(key, bytes, None).await
+    }
+
+    async fn write_blob_with_sha256(
+        &self,
+        key: &BlobKey,
+        bytes: &[u8],
+        sha256: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let sha256_val = sha256
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| crate::ports::blob_storage::sha256_digest(bytes));
         self.blobs
             .write()
             .expect("in-memory blob store lock poisoned")
-            .insert(key.clone(), bytes.to_vec());
+            .insert(
+                key.clone(),
+                StoredBlob {
+                    bytes: bytes.to_vec(),
+                    sha256: Some(sha256_val),
+                },
+            );
         Ok(())
     }
 
@@ -63,10 +87,21 @@ impl BlobStorage for InMemoryBlobStorage {
             .read()
             .expect("in-memory blob store lock poisoned")
             .get(key)
-            .map(|bytes| bytes.len() as u64)
+            .map(|b| b.bytes.len() as u64)
             .ok_or_else(|| StorageError::NotFound(format!("Blob '{}' not found", key.to_path())))
     }
 
+    async fn stat_blob(&self, key: &BlobKey) -> Result<BlobStat, StorageError> {
+        self.blobs
+            .read()
+            .expect("in-memory blob store lock poisoned")
+            .get(key)
+            .map(|b| BlobStat {
+                size: b.bytes.len() as u64,
+                sha256: b.sha256.clone(),
+            })
+            .ok_or_else(|| StorageError::NotFound(format!("Blob '{}' not found", key.to_path())))
+    }
     async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
         let blobs = self
             .blobs

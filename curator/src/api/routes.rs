@@ -1292,16 +1292,18 @@ pub struct BenchmarkRunRequest {
 }
 
 impl BenchmarkRunRequest {
+    pub fn explicit_reference_conditioning(&self) -> Option<bool> {
+        self.use_reference_conditioning
+            .or(self.use_reference_image)
+            .or(self.reference_conditioning)
+    }
+
     pub fn is_reference_conditioning_requested(&self) -> bool {
-        self.use_reference_conditioning == Some(true)
-            || self.use_reference_image == Some(true)
-            || self.reference_conditioning == Some(true)
+        self.explicit_reference_conditioning() == Some(true)
     }
 
     pub fn reference_conditioning_enabled(&self) -> bool {
-        !(self.use_reference_conditioning == Some(false)
-            || self.use_reference_image == Some(false)
-            || self.reference_conditioning == Some(false))
+        self.explicit_reference_conditioning().unwrap_or(true)
     }
 }
 
@@ -1364,7 +1366,6 @@ pub async fn post_benchmark_run(
     }
 
     // Model validation and reference conditioning capability gate (ADR-0010)
-    let is_ref_requested = payload.is_reference_conditioning_requested();
     for model_id in &payload.models {
         let selectable_desc = state.model_registry.find(model_id).await?;
         let desc = match selectable_desc {
@@ -1384,7 +1385,7 @@ pub async fn post_benchmark_run(
             }
         };
 
-        if is_ref_requested && !desc.supports_reference_image {
+        if payload.reference_conditioning_enabled() && !desc.supports_reference_image {
             return Err(ApiError::model_not_reference_capable(model_id));
         }
     }

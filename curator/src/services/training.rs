@@ -29,6 +29,43 @@ pub fn compute_poll_backoff(consecutive_failures: u32) -> u64 {
     15u64.saturating_mul(multiplier).min(300)
 }
 
+/// Compares an artifact's observed size and checksum against its expectations and returns the
+/// resulting verification record.
+///
+/// A size mismatch is reported under `size_method`; a checksum mismatch under `sha_method`. A
+/// matching artifact is recorded as `sha_method`, falling back to `size_only` when no checksum
+/// could be compared and `allow_size_only` is set (HEAD verification without a stored digest).
+fn compare_artifact(
+    expected_size: Option<u64>,
+    expected_sha: Option<&str>,
+    actual_size: u64,
+    actual_sha: Option<&str>,
+    size_method: &str,
+    sha_method: &str,
+    allow_size_only: bool,
+) -> ArtifactVerification {
+    if let Some(expected_size) = expected_size {
+        if actual_size != expected_size {
+            return ArtifactVerification::mismatch(
+                size_method,
+                format!(
+                    "Size mismatch: expected {}, got {}",
+                    expected_size, actual_size
+                ),
+            );
+        }
+    }
+    match (expected_sha, actual_sha) {
+        (Some(expected), Some(actual)) if expected != actual => ArtifactVerification::mismatch(
+            sha_method,
+            format!("Checksum mismatch: expected {}, got {}", expected, actual),
+        ),
+        (_, Some(_)) => ArtifactVerification::verified(sha_method, None),
+        _ if allow_size_only => ArtifactVerification::verified("size_only", None),
+        _ => ArtifactVerification::verified(sha_method, None),
+    }
+}
+
 /// Errors originating from `TrainingService` operations.
 #[derive(Debug, Error)]
 pub enum TrainingServiceError {
@@ -245,6 +282,13 @@ impl TrainingService {
         };
         let _ = self.catalog.append_training_metric(&run.id, &initial_metric).await;
 
+        // Start adaptive polling so a dispatched run advances without an external poller.
+        let service = self.clone();
+        let run_id = run.id.clone();
+        tokio::spawn(async move {
+            service.adaptive_polling_loop(&run_id).await;
+        });
+
         Ok(run)
     }
 
@@ -353,8 +397,21 @@ impl TrainingService {
         let mut resumed = Vec::new();
 
         for mut run in runs {
-            if run.state == TrainingRunState::Running {
-                self.poll_active_run_internal(&mut run).await?;
+            if run.state.is_terminal() {
+                continue;
+            }
+            // A run with a remote job was dispatched: it must never be stranded in `queued`
+            // across a restart, so treat it as running and poll it immediately.
+            if run.state == TrainingRunState::Running || run.remote_job_id.is_some() {
+                run.state = TrainingRunState::Running;
+                // A single failing run MUST NOT abort the boot sweep for the remaining runs.
+                if let Err(err) = self.poll_active_run_internal(&mut run).await {
+                    tracing::warn!(
+                        run_id = %run.id,
+                        error = %err,
+                        "Failed to resume polling for training run; continuing sweep"
+                    );
+                }
                 if run.state == TrainingRunState::Running {
                     let service = self.clone();
                     let run_id = run.id.clone();
@@ -497,53 +554,38 @@ impl TrainingService {
 
                     match self.blobs.stat_blob(&key).await {
                         Ok(stat) => {
-                            if let Some(expected_size) = cp.artifact_size {
-                                if stat.size != expected_size {
-                                    let msg = format!(
-                                        "Size mismatch: expected {}, got {}",
-                                        expected_size, stat.size
-                                    );
-                                    cp.artifact_verification = ArtifactVerification::mismatch(
-                                        "head_size",
-                                        msg.clone(),
-                                    );
-                                    if first_failure.is_none() {
-                                        first_failure =
-                                            Some(("head_size".to_string(), cp.step, msg));
-                                    }
-                                    continue;
-                                }
-                            } else {
+                            let expected_size = cp.artifact_size;
+                            let expected_sha = cp.artifact_sha256.clone();
+                            let verification = compare_artifact(
+                                expected_size,
+                                expected_sha.as_deref(),
+                                stat.size,
+                                stat.sha256.as_deref(),
+                                "head_size",
+                                "head_sha256",
+                                true,
+                            );
+                            // Adopt size/checksum discovered on the object when not yet known.
+                            if expected_size.is_none() {
                                 cp.artifact_size = Some(stat.size);
                             }
-
-                            if let (Some(expected_sha), Some(stat_sha)) =
-                                (&cp.artifact_sha256, &stat.sha256)
+                            if expected_sha.is_none() {
+                                cp.artifact_sha256 = stat.sha256.clone();
+                            }
+                            if verification.status == ArtifactVerificationState::Mismatch
+                                && first_failure.is_none()
                             {
-                                if expected_sha != stat_sha {
-                                    let msg = format!(
-                                        "Checksum mismatch: expected {}, got {}",
-                                        expected_sha, stat_sha
-                                    );
-                                    cp.artifact_verification = ArtifactVerification::mismatch(
-                                        "head_sha256",
-                                        msg.clone(),
-                                    );
-                                    if first_failure.is_none() {
-                                        first_failure =
-                                            Some(("head_sha256".to_string(), cp.step, msg));
-                                    }
-                                    continue;
+                                if let (Some(method), Some(detail)) =
+                                    (verification.method.clone(), verification.detail.clone())
+                                {
+                                    first_failure = Some((method, cp.step, detail));
                                 }
-                                cp.artifact_verification =
-                                    ArtifactVerification::verified("head_sha256", None);
-                            } else if let Some(stat_sha) = &stat.sha256 {
-                                cp.artifact_sha256 = Some(stat_sha.clone());
-                                cp.artifact_verification =
-                                    ArtifactVerification::verified("head_sha256", None);
-                            } else {
-                                cp.artifact_verification =
-                                    ArtifactVerification::verified("size_only", None);
+                            }
+                            let mismatch =
+                                verification.status == ArtifactVerificationState::Mismatch;
+                            cp.artifact_verification = verification;
+                            if mismatch {
+                                continue;
                             }
                         }
                         Err(_) => {
@@ -566,46 +608,23 @@ impl TrainingService {
                         };
                         match self.blobs.stat_blob(&sample_key).await {
                             Ok(stat) => {
-                                if let Some(expected_size) = cp.sample_grid_size {
-                                    if stat.size != expected_size {
-                                        cp.sample_grid_verification =
-                                             ArtifactVerification::mismatch(
-                                                 "head_size",
-                                                 format!(
-                                                     "Size mismatch: expected {}, got {}",
-                                                     expected_size, stat.size
-                                                 ),
-                                             );
-                                         continue;
-                                     }
-                                 } else {
-                                     cp.sample_grid_size = Some(stat.size);
-                                 }
-
-                                 if let (Some(expected_sha), Some(stat_sha)) =
-                                     (&cp.sample_grid_sha256, &stat.sha256)
-                                 {
-                                     if expected_sha != stat_sha {
-                                         cp.sample_grid_verification =
-                                             ArtifactVerification::mismatch(
-                                                 "head_sha256",
-                                                 format!(
-                                                     "Checksum mismatch: expected {}, got {}",
-                                                     expected_sha, stat_sha
-                                                 ),
-                                             );
-                                         continue;
-                                     }
-                                     cp.sample_grid_verification =
-                                         ArtifactVerification::verified("head_sha256", None);
-                                 } else if let Some(stat_sha) = &stat.sha256 {
-                                     cp.sample_grid_sha256 = Some(stat_sha.clone());
-                                     cp.sample_grid_verification =
-                                         ArtifactVerification::verified("head_sha256", None);
-                                 } else {
-                                     cp.sample_grid_verification =
-                                         ArtifactVerification::verified("size_only", None);
-                                 }
+                                let expected_size = cp.sample_grid_size;
+                                let expected_sha = cp.sample_grid_sha256.clone();
+                                cp.sample_grid_verification = compare_artifact(
+                                    expected_size,
+                                    expected_sha.as_deref(),
+                                    stat.size,
+                                    stat.sha256.as_deref(),
+                                    "head_size",
+                                    "head_sha256",
+                                    true,
+                                );
+                                if expected_size.is_none() {
+                                    cp.sample_grid_size = Some(stat.size);
+                                }
+                                if expected_sha.is_none() {
+                                    cp.sample_grid_sha256 = stat.sha256.clone();
+                                }
                             }
                             Err(_) => {
                                 cp.sample_grid_verification = ArtifactVerification::mismatch(
@@ -689,7 +708,9 @@ impl TrainingService {
                 }
             }
             TrainingRunState::Running | TrainingRunState::Queued => {
-                run.state = poll_resp.state;
+                // A dispatched run stays `running` even while the runner reports `queued`
+                // during its startup window; never regress it.
+                run.state = TrainingRunState::Running;
             }
         }
 
@@ -766,72 +787,28 @@ impl TrainingService {
                     let actual_size = bytes.len() as u64;
                     let computed_sha = sha256_digest(&bytes);
 
-                    if let Some(expected_size) = cp.artifact_size {
-                        if actual_size != expected_size {
-                            let msg = format!(
-                                "Size mismatch: expected {}, got {}",
-                                 expected_size, actual_size
-                             );
-                            cp.artifact_verification = ArtifactVerification::mismatch(
-                                "download_size",
-                                msg.clone(),
-                            );
-                            if first_failed_adapter.is_none() {
-                                first_failed_adapter =
-                                    Some(("download_size".to_string(), cp.step, msg));
-                            }
-                        } else if let Some(expected_sha) = &cp.artifact_sha256 {
-                            if expected_sha != &computed_sha {
-                                let msg = format!(
-                                    "Checksum mismatch: expected {}, got {}",
-                                    expected_sha, computed_sha
-                                );
-                                cp.artifact_verification = ArtifactVerification::mismatch(
-                                    "download_sha256",
-                                    msg.clone(),
-                                );
-                                if first_failed_adapter.is_none() {
-                                    first_failed_adapter =
-                                        Some(("download_sha256".to_string(), cp.step, msg));
-                                }
-                            } else {
-                                cp.artifact_verification =
-                                    ArtifactVerification::verified("download_sha256", None);
-                                cp.artifact_sha256 = Some(computed_sha);
-                                cp.artifact_size = Some(actual_size);
-                            }
-                        } else {
-                            cp.artifact_verification =
-                                ArtifactVerification::verified("download_sha256", None);
-                            cp.artifact_sha256 = Some(computed_sha);
-                            cp.artifact_size = Some(actual_size);
-                        }
-                    } else if let Some(expected_sha) = &cp.artifact_sha256 {
-                        if expected_sha != &computed_sha {
-                            let msg = format!(
-                                "Checksum mismatch: expected {}, got {}",
-                                expected_sha, computed_sha
-                            );
-                            cp.artifact_verification = ArtifactVerification::mismatch(
-                                "download_sha256",
-                                msg.clone(),
-                            );
-                            if first_failed_adapter.is_none() {
-                                first_failed_adapter =
-                                    Some(("download_sha256".to_string(), cp.step, msg));
-                            }
-                        } else {
-                            cp.artifact_verification =
-                                ArtifactVerification::verified("download_sha256", None);
-                            cp.artifact_sha256 = Some(computed_sha);
-                            cp.artifact_size = Some(actual_size);
-                        }
-                    } else {
-                        cp.artifact_verification =
-                            ArtifactVerification::verified("download_sha256", None);
+                    let expected_size = cp.artifact_size;
+                    let expected_sha = cp.artifact_sha256.clone();
+                    let verification = compare_artifact(
+                        expected_size,
+                        expected_sha.as_deref(),
+                        actual_size,
+                        Some(&computed_sha),
+                        "download_size",
+                        "download_sha256",
+                        false,
+                    );
+                    if verification.status == ArtifactVerificationState::Verified {
                         cp.artifact_sha256 = Some(computed_sha);
                         cp.artifact_size = Some(actual_size);
+                    } else if first_failed_adapter.is_none() {
+                        if let (Some(method), Some(detail)) =
+                            (verification.method.clone(), verification.detail.clone())
+                        {
+                            first_failed_adapter = Some((method, cp.step, detail));
+                        }
                     }
+                    cp.artifact_verification = verification;
                 }
                 Err(_) => {
                     let msg = format!("Adapter artifact missing in storage: {}", key.to_path());
@@ -856,55 +833,20 @@ impl TrainingService {
                     Ok(sample_bytes) => {
                         let sample_size = sample_bytes.len() as u64;
                         let sample_sha = sha256_digest(&sample_bytes);
-
-                        if let Some(expected_size) = cp.sample_grid_size {
-                            if sample_size != expected_size {
-                                cp.sample_grid_verification = ArtifactVerification::mismatch(
-                                    "download_size",
-                                    format!(
-                                        "Size mismatch: expected {}, got {}",
-                                        expected_size, sample_size
-                                    ),
-                                );
-                            } else if let Some(expected_sha) = &cp.sample_grid_sha256 {
-                                if expected_sha != &sample_sha {
-                                    cp.sample_grid_verification = ArtifactVerification::mismatch(
-                                        "download_sha256",
-                                        format!(
-                                            "Checksum mismatch: expected {}, got {}",
-                                            expected_sha, sample_sha
-                                        ),
-                                    );
-                                } else {
-                                    cp.sample_grid_verification =
-                                        ArtifactVerification::verified("download_sha256", None);
-                                    cp.sample_grid_sha256 = Some(sample_sha);
-                                    cp.sample_grid_size = Some(sample_size);
-                                }
-                            } else {
-                                cp.sample_grid_verification =
-                                    ArtifactVerification::verified("download_sha256", None);
-                                cp.sample_grid_sha256 = Some(sample_sha);
-                                cp.sample_grid_size = Some(sample_size);
-                            }
-                        } else if let Some(expected_sha) = &cp.sample_grid_sha256 {
-                            if expected_sha != &sample_sha {
-                                cp.sample_grid_verification = ArtifactVerification::mismatch(
-                                    "download_sha256",
-                                    format!(
-                                        "Checksum mismatch: expected {}, got {}",
-                                        expected_sha, sample_sha
-                                    ),
-                                );
-                            } else {
-                                cp.sample_grid_verification =
-                                    ArtifactVerification::verified("download_sha256", None);
-                                cp.sample_grid_sha256 = Some(sample_sha);
-                                cp.sample_grid_size = Some(sample_size);
-                            }
-                        } else {
-                            cp.sample_grid_verification =
-                                ArtifactVerification::verified("download_sha256", None);
+                        let expected_size = cp.sample_grid_size;
+                        let expected_sha = cp.sample_grid_sha256.clone();
+                        cp.sample_grid_verification = compare_artifact(
+                            expected_size,
+                            expected_sha.as_deref(),
+                            sample_size,
+                            Some(&sample_sha),
+                            "download_size",
+                            "download_sha256",
+                            false,
+                        );
+                        if cp.sample_grid_verification.status
+                            == ArtifactVerificationState::Verified
+                        {
                             cp.sample_grid_sha256 = Some(sample_sha);
                             cp.sample_grid_size = Some(sample_size);
                         }

@@ -966,3 +966,182 @@ async fn test_artifact_verification_head_checks_and_full_download() {
         "mismatch"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Criterion 7: Dispatched runs survive runner startup `queued` and restart resume
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_queued_startup_keeps_dispatched_run_running_and_resumes() {
+    let mock_server = MockServer::start().await;
+
+    let (catalog, blobs) = (
+        Arc::new(InMemoryCatalogRepository::new()) as Arc<dyn CatalogRepository + Send + Sync>,
+        Arc::new(InMemoryBlobStorage::new()) as Arc<dyn BlobStorage + Send + Sync>,
+    );
+    let ledger_dir = tempdir().unwrap();
+    let cost_tracker: Arc<dyn CostTracker + Send + Sync> = Arc::new(FileCostLedger::new(
+        ledger_dir.path().join("telemetry/cost_ledger.json"),
+    ));
+
+    let token = "test_modal_token";
+    let modal_runner: Arc<dyn TrainingRunner + Send + Sync> =
+        Arc::new(ModalTrainingRunner::new(mock_server.uri(), token));
+
+    let state = AppState::with_cost_tracker(cost_tracker.clone(), catalog.clone(), blobs.clone())
+        .with_training_runner(modal_runner.clone());
+
+    let snapshot = create_mock_snapshot(&catalog, &blobs, "ds-queued-startup").await;
+
+    // A dispatched run whose runner still reports `queued` during its startup window.
+    catalog
+        .save_training_run(&TrainingRun {
+            id: "run-starting".to_string(),
+            remote_job_id: Some("job-starting".to_string()),
+            state: TrainingRunState::Running,
+            dataset_snapshot_id: snapshot.id.clone(),
+            dataset_digest: snapshot.sha256.clone(),
+            dataset_url: snapshot.artifact_url.clone(),
+            recipe: TrainingRecipe::calibration(),
+            recipe_digest: TrainingRecipe::calibration().digest(),
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: None,
+            last_polled_at: None,
+            last_poll_error: None,
+            consecutive_poll_failures: 0,
+            poll_backoff_seconds: 0,
+            step: 0,
+            total_steps: 1500,
+            elapsed_seconds: 0.0,
+            cost_usd: 0.0,
+            checkpoints: vec![],
+            published_adapter_ids: vec![],
+            error: None,
+            failure_code: None,
+            metrics: vec![],
+        })
+        .await
+        .unwrap();
+
+    // A run caught mid-restart: dispatched (remote_job_id) but persisted as `queued`.
+    catalog
+        .save_training_run(&TrainingRun {
+            id: "run-stranded".to_string(),
+            remote_job_id: Some("job-stranded".to_string()),
+            state: TrainingRunState::Queued,
+            dataset_snapshot_id: snapshot.id.clone(),
+            dataset_digest: snapshot.sha256.clone(),
+            dataset_url: snapshot.artifact_url.clone(),
+            recipe: TrainingRecipe::calibration(),
+            recipe_digest: TrainingRecipe::calibration().digest(),
+            created_at: Utc::now(),
+            started_at: Some(Utc::now()),
+            finished_at: None,
+            last_polled_at: None,
+            last_poll_error: None,
+            consecutive_poll_failures: 0,
+            poll_backoff_seconds: 0,
+            step: 0,
+            total_steps: 1500,
+            elapsed_seconds: 0.0,
+            cost_usd: 0.0,
+            checkpoints: vec![],
+            published_adapter_ids: vec![],
+            error: None,
+            failure_code: None,
+            metrics: vec![],
+        })
+        .await
+        .unwrap();
+
+    // A plain queued run that was never dispatched: must NOT be resumed.
+    catalog
+        .save_training_run(&TrainingRun {
+            id: "run-undispatched".to_string(),
+            remote_job_id: None,
+            state: TrainingRunState::Queued,
+            dataset_snapshot_id: snapshot.id.clone(),
+            dataset_digest: snapshot.sha256.clone(),
+            dataset_url: snapshot.artifact_url.clone(),
+            recipe: TrainingRecipe::calibration(),
+            recipe_digest: TrainingRecipe::calibration().digest(),
+            created_at: Utc::now(),
+            started_at: None,
+            finished_at: None,
+            last_polled_at: None,
+            last_poll_error: None,
+            consecutive_poll_failures: 0,
+            poll_backoff_seconds: 0,
+            step: 0,
+            total_steps: 1500,
+            elapsed_seconds: 0.0,
+            cost_usd: 0.0,
+            checkpoints: vec![],
+            published_adapter_ids: vec![],
+            error: None,
+            failure_code: None,
+            metrics: vec![],
+        })
+        .await
+        .unwrap();
+
+    // job-starting reports `queued` (runner startup window).
+    Mock::given(method("GET"))
+        .and(path("/run/job-starting"))
+        .and(bearer_token(token))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "run_id": "job-starting",
+            "state": "queued",
+            "step": 0,
+            "total_steps": 1500,
+            "elapsed_seconds": 0.0,
+            "cost_usd": 0.0,
+            "checkpoints": [],
+            "error": null
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // job-stranded reports running with progress.
+    Mock::given(method("GET"))
+        .and(path("/run/job-stranded"))
+        .and(bearer_token(token))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "run_id": "job-stranded",
+            "state": "running",
+            "step": 250,
+            "total_steps": 1500,
+            "elapsed_seconds": 45.0,
+            "cost_usd": 0.08,
+            "checkpoints": [],
+            "error": null
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // 1. Polling a dispatched run during the runner's startup `queued` window keeps it running.
+    let polled = state.training_service.poll_run("run-starting").await.unwrap();
+    assert_eq!(
+        polled.state,
+        TrainingRunState::Running,
+        "runner startup `queued` must not regress a dispatched run"
+    );
+
+    // 2. Resume sweeps the restart-stranded dispatched run and ignores never-dispatched runs.
+    let resumed = state.training_service.resume_non_terminal_runs().await.unwrap();
+    let resumed_ids: Vec<&str> = resumed.iter().map(|r| r.id.as_str()).collect();
+    assert!(resumed_ids.contains(&"run-starting"));
+    assert!(resumed_ids.contains(&"run-stranded"));
+    assert!(!resumed_ids.contains(&"run-undispatched"));
+
+    let stranded = catalog.get_training_run("run-stranded").await.unwrap();
+    assert_eq!(stranded.state, TrainingRunState::Running);
+    assert_eq!(stranded.step, 250);
+
+    let starting = catalog.get_training_run("run-starting").await.unwrap();
+    assert_eq!(starting.state, TrainingRunState::Running);
+
+    let undispatched = catalog.get_training_run("run-undispatched").await.unwrap();
+    assert_eq!(undispatched.state, TrainingRunState::Queued);
+}

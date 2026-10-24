@@ -551,7 +551,7 @@ async fn test_get_dataset_export_stays_pure_read() {
 
     // Verify ZipArchive contains samples
     let archive = ZipArchive::new(Cursor::new(&export_bytes)).expect("valid zip");
-    assert!(archive.len() > 0);
+    assert!(!archive.is_empty());
 
     // Verify strictly NO dataset snapshot was written or mutated in catalog or blob storage
     let after_snapshots = catalog.list_dataset_snapshots(None).await.unwrap();

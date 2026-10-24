@@ -7,6 +7,7 @@ pub mod library;
 pub mod reference_provider;
 pub mod sections;
 pub mod storage_maintenance;
+pub mod storage_migration;
 pub use description::*;
 pub use sections::{describe_map_sections, SectionDescriptionContext};
 pub use curation::*;
@@ -14,6 +15,10 @@ pub use curation::*;
 pub use benchmark::*;
 pub use dataset_export::{DatasetExportService, DeleteDatasetError, FreezeDatasetError};
 pub use storage_maintenance::StorageMaintenanceService;
+pub use storage_migration::{
+    discover_disk_blobs, is_migration_completed, run_storage_migration, MigrationOptions,
+    MigrationReport, MIGRATION_MARKER_FILE,
+};
 pub use library::LibraryService;
 pub use ingestion::{
     candidate_id_for_post, IngestionError, IngestionOutcome, IngestionProgress, IngestionSummary,

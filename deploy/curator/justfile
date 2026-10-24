@@ -29,6 +29,14 @@ tail-logs:
 port-forward:
     kubectl port-forward service/curator 3002:3002 -n curator
 
+
+# Run disk-to-S3 storage migration inside running pod
+migrate-storage:
+    kubectl exec -it -n curator deployment/curator -- curator migrate-disk-to-s3
+
+# Dry-run disk-to-S3 storage migration inside running pod
+migrate-storage-dry-run:
+    kubectl exec -it -n curator deployment/curator -- curator migrate-disk-to-s3 --dry-run
 # Delete deployed manifests
 delete:
     kubectl delete -f service.yaml --ignore-not-found

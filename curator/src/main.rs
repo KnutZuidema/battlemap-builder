@@ -89,6 +89,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load environment file from candidate paths
     let _ = load_dotenv();
 
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "migrate-disk-to-s3" || arg == "--migrate-disk-to-s3") {
+        let force = args.iter().any(|arg| arg == "--force" || arg == "-f");
+        let dry_run = args.iter().any(|arg| arg == "--dry-run" || arg == "-n");
+        return run_migration_cli(force, dry_run).await;
+    }
+
     let port = resolve_port();
     let data_dir = resolve_data_dir();
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -163,6 +170,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+async fn run_migration_cli(force: bool, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let data_dir = resolve_data_dir();
+    tracing::info!(data_dir = %data_dir.display(), force, dry_run, "Connecting to S3 storage for migration...");
+
+    let s3_config = curator::adapters::S3StorageConfig::from_env()?;
+    tracing::info!(
+        bucket = %s3_config.bucket_name,
+        endpoint = %s3_config.endpoint,
+        region = %s3_config.region,
+        "Connected to S3 storage"
+    );
+
+    let target = Arc::new(curator::adapters::S3BlobStorage::new(s3_config));
+    let options = curator::services::storage_migration::MigrationOptions {
+        force,
+        dry_run,
+        ..Default::default()
+    };
+
+    let report = curator::services::storage_migration::run_storage_migration(&data_dir, target, options).await?;
+
+    println!("==================================================");
+    println!("Storage Migration Report");
+    println!("==================================================");
+    println!("Status:             SUCCESS");
+    println!("Total Discovered:   {}", report.total_discovered);
+    println!("Migrated:           {}", report.migrated_count);
+    println!("Skipped (in S3):    {}", report.skipped_count);
+    println!("Total Bytes:        {} bytes", report.total_bytes_migrated);
+    println!("Dry Run:            {}", report.dry_run);
+    println!("Completed At:       {}", report.completed_at);
+    println!("==================================================");
 
     Ok(())
 }

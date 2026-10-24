@@ -293,6 +293,40 @@ Internal objects (`staging/`, `curated/`, `rejected/`, `telemetry/`) remain stri
 
 - **Metadata Checksums**: Writes automatically compute the SHA-256 digest and attach it as S3 user metadata (`x-amz-meta-sha256`). Subsequent `stat_blob` operations query byte size and checksum via S3 `HEAD` without downloading the object payload.
 - **Multipart Uploads**: Payloads larger than 5 MiB automatically use S3 multipart uploads in 5 MiB chunks, with automatic cancellation (`abort_multipart_upload`) on transfer failure.
+
+#### Disk-to-S3 Storage Migration Job
+
+When transitioning an existing installation with local filesystem images (`/data/staging`, `/data/curated`) to S3/Cloudflare R2, Curator provides an offline one-time migration command: `curator migrate-disk-to-s3` (or `curator-migrate`).
+
+##### Option A: Run inside active pod via `kubectl exec` (Zero Downtime)
+
+Because the active pod already has `/data` mounted and S3 credentials injected:
+
+```bash
+# Dry-run preview:
+kubectl exec -it -n curator deployment/curator -- curator migrate-disk-to-s3 --dry-run
+
+# Execute migration:
+kubectl exec -it -n curator deployment/curator -- curator migrate-disk-to-s3
+```
+
+##### Option B: Run as a standalone Kubernetes Job
+
+```bash
+# 1. Scale down deployment to release ReadWriteOnce volume
+kubectl scale deployment curator -n curator --replicas=0
+
+# 2. Run migration Job
+kubectl apply -f deploy/curator/job-migrate-storage.yaml
+kubectl wait --for=condition=complete job/curator-storage-migration -n curator --timeout=300s
+kubectl logs -n curator job/curator-storage-migration
+
+# 3. Clean up Job and scale deployment back up
+kubectl delete job curator-storage-migration -n curator
+kubectl scale deployment curator -n curator --replicas=1
+```
+
+The migration is fully idempotent: it checks `exists_blob` for each object, skips already uploaded blobs, and records a `.disk_to_s3_migrated` marker file in `/data`. Use `--force` to re-run.
 #### Persistence Verification Procedure
 
 To verify that data survives across pod restarts and recreations on Hetzner CSI storage:

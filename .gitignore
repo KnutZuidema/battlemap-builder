@@ -28,3 +28,11 @@ data/telemetry/
 
 # Persistent map storage
 data/maps/
+
+# Python build and test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.venv/

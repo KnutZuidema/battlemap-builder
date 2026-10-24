@@ -46,7 +46,7 @@ A `Training Run` is a Curator-owned entity persisted one directory per run (`dat
 
 ## Consequences
 
-- Implementation is blocked behind the port decomposition (`CatalogRepository` / `BlobStorage`) and the R2 `S3StorageAdapter`; `Training Run`s, `Dataset Snapshot`s and adapter descriptors arrive as catalog entities addressed by typed `BlobKey`s, and `curator/docs/storage_s3_r2_plan.md` (stale: theme-nested curated paths, star ratings, `rejections.json`, `_lora1024` files) is deleted rather than corrected.
+- The port decomposition has landed (`CatalogRepository` / `BlobStorage` with filesystem and in-memory adapters, the monolithic `StorageRepository` deleted and the stale `storage_s3_r2_plan.md` removed), so `Training Run`s, `Dataset Snapshot`s and adapter descriptors arrive as catalog entities addressed by typed `BlobKey`s. What remains is the R2 object storage adapter (#215), which every artifact path depends on.
 - The digest in `adapter.json` is a claim whenever the uploader declared no checksum: integrity is size-only for those objects.
 - The `Trigger Phrase` shrinking to two tokens breaks `curator/tools/lora-viewer.html`'s hardcoded five-token prefix highlight, and ZIPs exported before the change stay captioned with the old phrase.
 - Amortized cost per generated `Battlemap` (the metric the rollout verdict rests on) becomes computable per registry entry.

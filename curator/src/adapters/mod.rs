@@ -10,6 +10,7 @@ pub mod simd_image;
 pub mod wavespeed;
 pub mod routing;
 pub mod s3_blob_storage;
+pub mod modal_runner;
 #[allow(unused_imports)]
 pub use cost_ledger::*;
 #[allow(unused_imports)]
@@ -28,3 +29,4 @@ pub use simd_image::*;
 #[allow(unused_imports)]
 pub use routing::*;
 pub use s3_blob_storage::*;
+pub use modal_runner::*;

@@ -587,6 +587,45 @@ mod tests {
         async fn latest_rejection(&self) -> Result<Option<RejectionRecord>, StorageError> {
             self.inner.latest_rejection().await
         }
+
+        async fn get_training_run(&self, id: &str) -> Result<crate::domain::TrainingRun, StorageError> {
+            self.inner.get_training_run(id).await
+        }
+
+        async fn save_training_run(&self, run: &crate::domain::TrainingRun) -> Result<(), StorageError> {
+            self.inner.save_training_run(run).await
+        }
+
+        async fn list_training_runs(&self) -> Result<Vec<crate::domain::TrainingRun>, StorageError> {
+            self.inner.list_training_runs().await
+        }
+
+        async fn append_training_metric(
+            &self,
+            run_id: &str,
+            metric: &crate::domain::TrainingMetricSnapshot,
+        ) -> Result<(), StorageError> {
+            self.inner.append_training_metric(run_id, metric).await
+        }
+
+        async fn list_training_metrics(
+            &self,
+            run_id: &str,
+        ) -> Result<Vec<crate::domain::TrainingMetricSnapshot>, StorageError> {
+            self.inner.list_training_metrics(run_id).await
+        }
+
+        async fn get_lora_adapter(&self, id: &str) -> Result<crate::domain::LoraAdapter, StorageError> {
+            self.inner.get_lora_adapter(id).await
+        }
+
+        async fn save_lora_adapter(&self, adapter: &crate::domain::LoraAdapter) -> Result<(), StorageError> {
+            self.inner.save_lora_adapter(adapter).await
+        }
+
+        async fn list_lora_adapters(&self) -> Result<Vec<crate::domain::LoraAdapter>, StorageError> {
+            self.inner.list_lora_adapters().await
+        }
     }
 
     /// [`BlobStorage`] double whose writes fail from the `fail_writes_from`-th write on.

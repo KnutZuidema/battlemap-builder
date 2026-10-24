@@ -7,6 +7,7 @@ pub mod harvester;
 pub mod image_processor;
 pub mod model_engine;
 pub mod storage_error;
+pub mod training_runner;
 
 #[allow(unused_imports)]
 pub use blob_storage::*;
@@ -21,4 +22,5 @@ pub use image_processor::*;
 #[allow(unused_imports)]
 pub use model_engine::*;
 #[allow(unused_imports)]
+pub use training_runner::*;
 pub use storage_error::*;

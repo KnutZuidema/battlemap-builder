@@ -12,7 +12,8 @@
     "lint": "npm --prefix client run lint",
     "prepare": "git config core.hooksPath .githooks 2>/dev/null || true",
     "curator": "cargo run --manifest-path curator/Cargo.toml --release",
-    "curator:dev": "cargo run --manifest-path curator/Cargo.toml"
+    "curator:dev": "cargo run --manifest-path curator/Cargo.toml",
+    "prototype:training": "python3 -m http.server 3003 --directory curator/src/ui/assets"
   },
   "keywords": [
     "ttrpg",

@@ -81,6 +81,30 @@ mod tests {
     }
 
     #[test]
+    fn test_embedded_assets_contain_training_prototype() {
+        assert!(Assets::get("training-prototype.js").is_some());
+        assert!(Assets::get("training-prototype.css").is_some());
+
+        let index_file = Assets::get("index.html").expect("index.html must be embedded");
+        let html = std::str::from_utf8(index_file.data.as_ref()).expect("index.html must be valid utf8");
+        assert!(html.contains("training-prototype.css"));
+        assert!(html.contains("training-prototype.js"));
+
+        let proto_file = Assets::get("training-prototype.js").expect("training-prototype.js must be embedded");
+        let js = std::str::from_utf8(proto_file.data.as_ref()).expect("training-prototype.js must be valid utf8");
+        assert!(js.contains("VARIANTS"));
+        assert!(js.contains("proto-switcher-bar"));
+        assert!(js.contains("vA-drawer"));
+        assert!(js.contains("vB-workbench-view"));
+        assert!(js.contains("vC-dynamic-island"));
+        assert!(js.contains("dungeonforge battlemap"));
+        assert!(js.contains("black-forest-labs/FLUX.1-dev"));
+        assert!(js.contains("publishAdapterFromCheckpoint"));
+        assert!(js.contains("edit-lora"));
+        assert!(js.contains("text-to-image-lora"));
+    }
+
+    #[test]
     fn test_embedded_index_html_contains_triage_deck_elements() {
         let file = Assets::get("index.html").expect("index.html must be embedded");
         let html = std::str::from_utf8(file.data.as_ref()).expect("index.html must be valid utf8");
@@ -606,6 +630,17 @@ mod tests {
                 .unwrap(),
             "text/css"
         );
+    }
+
+    #[tokio::test]
+    async fn test_static_handler_training_prototype() {
+        let uri_js = "/training-prototype.js".parse::<Uri>().unwrap();
+        let resp_js = static_handler(uri_js).await.into_response();
+        assert_eq!(resp_js.status(), StatusCode::OK);
+
+        let uri_css = "/training-prototype.css".parse::<Uri>().unwrap();
+        let resp_css = static_handler(uri_css).await.into_response();
+        assert_eq!(resp_css.status(), StatusCode::OK);
     }
 
     #[tokio::test]

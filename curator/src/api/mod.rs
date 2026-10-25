@@ -130,11 +130,6 @@ impl CuratorMakeSpan {
     }
 }
 
-impl Default for CuratorMakeSpan {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 impl<B> MakeSpan<B> for CuratorMakeSpan {
     fn make_span(&mut self, request: &Request<B>) -> Span {
@@ -162,19 +157,15 @@ impl CuratorOnResponse {
     }
 }
 
-impl Default for CuratorOnResponse {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 impl<B> OnResponse<B> for CuratorOnResponse {
     fn on_response(self, response: &Response<B>, latency: Duration, span: &Span) {
-        let is_status = span
-            .metadata()
-            .map_or(false, |meta| *meta.level() == Level::DEBUG);
+        let is_debug = span.is_disabled()
+            || span
+                .metadata()
+                .map_or(false, |meta| *meta.level() == Level::DEBUG);
 
-        if is_status {
+        if is_debug {
             self.debug_on_response.on_response(response, latency, span);
         } else {
             self.info_on_response.on_response(response, latency, span);
@@ -265,5 +256,37 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0], Level::DEBUG);
         assert_eq!(events[1], Level::INFO);
+    }
+
+    #[test]
+    fn test_curator_on_response_disabled_span_does_not_emit_info() {
+        use tracing_subscriber::filter::LevelFilter;
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let layer = LevelCaptureLayer {
+            levels: captured.clone(),
+        };
+        let subscriber = Registry::default().with(layer).with(LevelFilter::INFO);
+
+        tracing::subscriber::with_default(subscriber, || {
+            let mut make_span = CuratorMakeSpan::new();
+            let on_response = CuratorOnResponse::new();
+
+            let req = Request::builder()
+                .uri("/api/status")
+                .body(())
+                .unwrap();
+            let span = make_span.make_span(&req);
+            assert!(span.is_disabled());
+
+            let response = Response::builder().status(200).body(()).unwrap();
+            on_response.on_response(&response, Duration::from_millis(5), &span);
+        });
+
+        let events = captured.lock().unwrap().clone();
+        assert!(
+            events.is_empty(),
+            "expected no events emitted for disabled /api/status span under INFO filter, got: {events:?}"
+        );
     }
 }

@@ -183,10 +183,6 @@ impl S3BlobStorage {
         self.public_url_base.as_deref()
     }
 
-    /// Reference to the underlying S3 client.
-    pub fn client(&self) -> &aws_sdk_s3::Client {
-        &self.client
-    }
 
     /// Resolves the public HTTPS URL for a public artifact key using the configured `public_url_base`.
     pub fn resolve_public_url(&self, key: &BlobKey) -> Option<String> {
@@ -229,13 +225,6 @@ impl BlobStorage for S3BlobStorage {
             .get_object()
             .bucket(&self.bucket)
             .key(&path)
-            .customize()
-            .config_override(
-                aws_sdk_s3::config::Builder::new()
-                    .response_checksum_validation(
-                        aws_sdk_s3::config::ResponseChecksumValidation::WhenRequired,
-                    ),
-            )
             .send()
             .await
             .map_err(|err| Self::map_get_error(&path, err))?;
@@ -474,9 +463,8 @@ mod tests {
             region: "us-east-1".to_string(),
             public_url: None,
         };
-
         let storage = S3BlobStorage::new(config);
-        let client_conf = storage.client().config();
+        let client_conf = storage.client.config();
 
         assert_eq!(
             client_conf.response_checksum_validation(),

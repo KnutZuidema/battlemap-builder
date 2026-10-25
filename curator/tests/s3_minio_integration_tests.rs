@@ -318,14 +318,3 @@ async fn test_arc_dyn_s3_blob_storage_port() {
     assert!(!dyn_storage.exists_blob(&key).await.unwrap());
 }
 
-#[tokio::test]
-async fn test_minio_storage_client_checksum_validation_configured() {
-    let minio = EphemeralMinio::start().await;
-    let bucket = "test-checksum-config-bucket";
-    let storage = setup_minio_storage(&minio.endpoint, bucket, None).await;
-
-    assert_eq!(
-        storage.client().config().response_checksum_validation(),
-        Some(&aws_sdk_s3::config::ResponseChecksumValidation::WhenRequired)
-    );
-}

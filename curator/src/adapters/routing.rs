@@ -10,8 +10,9 @@ use tracing::{debug, instrument};
 
 use crate::adapters::{OpenRouterAdapter, WaveSpeedAdapter};
 use crate::domain::{
-    BenchmarkArchetype, BenchmarkModelSpec, BenchmarkResult, GenerationRequest,
-    GenerationResponse, ModelProvider,
+    build_wavespeed_prompt, generate_benchmark_id, BenchmarkArchetype, BenchmarkMetadata,
+    BenchmarkModelSpec, BenchmarkResult, GenerationRequest, GenerationResponse, ModelDescriptor,
+    ModelProvider,
 };
 use crate::ports::model_engine::{ModelEngine, ModelEngineError};
 
@@ -20,6 +21,7 @@ use crate::ports::model_engine::{ModelEngine, ModelEngineError};
 pub struct RoutingModelEngine {
     openrouter: Arc<dyn ModelEngine + Send + Sync>,
     wavespeed: Arc<dyn ModelEngine + Send + Sync>,
+    registry: Option<Arc<crate::services::ModelRegistry>>,
 }
 
 impl RoutingModelEngine {
@@ -31,7 +33,19 @@ impl RoutingModelEngine {
         Self {
             openrouter,
             wavespeed,
+            registry: None,
         }
+    }
+
+    /// Attaches a model registry for dynamic LoRA adapter resolution (ADR-0010).
+    pub fn with_registry(mut self, registry: Arc<crate::services::ModelRegistry>) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    /// Reference to configured model registry if attached.
+    pub fn registry(&self) -> Option<&Arc<crate::services::ModelRegistry>> {
+        self.registry.as_ref()
     }
 
     /// Convenience constructor wrapping concrete adapter instances.
@@ -54,7 +68,32 @@ impl RoutingModelEngine {
         if let Some(spec) = BenchmarkModelSpec::find(model) {
             return spec.provider == ModelProvider::WaveSpeed;
         }
-        model.starts_with("wavespeed") || model.contains("flux-3-klein")
+        if model.starts_with("wavespeed")
+            || model.contains("flux-3-klein")
+            || model.ends_with("-edit")
+        {
+            return true;
+        }
+        !model.starts_with("google/")
+            && !model.starts_with("meta/")
+            && !model.starts_with("bytedance")
+    }
+    /// Asynchronously resolves a model descriptor via registry or static specs.
+    pub async fn resolve_descriptor(&self, model: &str) -> Option<ModelDescriptor> {
+        if let Some(reg) = &self.registry {
+            if let Ok(Some(desc)) = reg.find_including_retired(model).await {
+                return Some(desc);
+            }
+        }
+        BenchmarkModelSpec::find(model).map(ModelDescriptor::from)
+    }
+
+    /// Asynchronously determines whether a model routes to WaveSpeed using the registry.
+    pub async fn resolve_is_wavespeed(&self, model: &str) -> bool {
+        if let Some(desc) = self.resolve_descriptor(model).await {
+            return desc.provider == ModelProvider::WaveSpeed;
+        }
+        Self::is_wavespeed_model(model)
     }
 
     /// Resolves the destination model engine for a target model ID.
@@ -71,13 +110,29 @@ impl RoutingModelEngine {
 impl ModelEngine for RoutingModelEngine {
     #[instrument(skip(self, request), fields(model = %request.model))]
     async fn generate_image(&self, request: &GenerationRequest) -> Result<GenerationResponse, ModelEngineError> {
-        let is_ws = Self::is_wavespeed_model(&request.model);
+        let desc = self.resolve_descriptor(&request.model).await;
+        let is_ws = desc
+            .as_ref()
+            .map(|d| d.provider == ModelProvider::WaveSpeed)
+            .unwrap_or_else(|| Self::is_wavespeed_model(&request.model));
         debug!(
             model = %request.model,
             provider = if is_ws { "wavespeed" } else { "openrouter" },
             "Routing generation request to provider engine"
         );
-        self.engine_for_model(&request.model).generate_image(request).await
+        if is_ws {
+            let mut req = request.clone();
+            if req.loras.is_empty() {
+                if let Some(d) = &desc {
+                    if let (Some(path), Some(scale)) = (&d.lora_path, d.lora_scale) {
+                        req.loras = vec![crate::domain::LoraWeight::new(path, scale)];
+                    }
+                }
+            }
+            self.wavespeed.generate_image(&req).await
+        } else {
+            self.openrouter.generate_image(request).await
+        }
     }
 
     async fn run_benchmark(
@@ -85,7 +140,35 @@ impl ModelEngine for RoutingModelEngine {
         model: &str,
         archetype: &BenchmarkArchetype,
     ) -> Result<BenchmarkResult, ModelEngineError> {
-        self.engine_for_model(model).run_benchmark(model, archetype).await
+        let desc = self.resolve_descriptor(model).await;
+        let is_ws = desc
+            .as_ref()
+            .map(|d| d.provider == ModelProvider::WaveSpeed)
+            .unwrap_or_else(|| Self::is_wavespeed_model(model));
+        if is_ws {
+            let prompt = build_wavespeed_prompt(archetype.prompt());
+            let mut req = GenerationRequest::new(model, prompt);
+            if let Some(d) = &desc {
+                if let (Some(path), Some(scale)) = (&d.lora_path, d.lora_scale) {
+                    req = req.with_lora(path, scale);
+                }
+            }
+            let response = self.wavespeed.generate_image(&req).await?;
+            let id = generate_benchmark_id(model, archetype.slug());
+            let metadata = BenchmarkMetadata::new(
+                id,
+                model,
+                archetype.name(),
+                archetype.prompt(),
+                response.prompt_tokens,
+                response.completion_tokens,
+                response.latency_ms,
+                response.cost_usd,
+            );
+            Ok(BenchmarkResult::new(metadata, response.image_bytes))
+        } else {
+            self.openrouter.run_benchmark(model, archetype).await
+        }
     }
 
     async fn run_benchmark_suite(
@@ -97,25 +180,33 @@ impl ModelEngine for RoutingModelEngine {
             return Ok(Vec::new());
         }
 
-        let (wavespeed_models, openrouter_models): (Vec<String>, Vec<String>) =
-            models.iter().cloned().partition(|m| Self::is_wavespeed_model(m));
+        let mut wavespeed_models = Vec::new();
+        let mut openrouter_models = Vec::new();
+        for model in models {
+            if self.resolve_is_wavespeed(model).await {
+                wavespeed_models.push(model.clone());
+            } else {
+                openrouter_models.push(model.clone());
+            }
+        }
 
         let mut results = Vec::new();
 
         if !openrouter_models.is_empty() {
             let mut or_results = self
                 .openrouter
-                .run_benchmark_suite(&openrouter_models, archetypes)
+                 .run_benchmark_suite(&openrouter_models, archetypes)
                 .await?;
             results.append(&mut or_results);
         }
 
         if !wavespeed_models.is_empty() {
-            let mut ws_results = self
-                .wavespeed
-                .run_benchmark_suite(&wavespeed_models, archetypes)
-                .await?;
-            results.append(&mut ws_results);
+            for model in &wavespeed_models {
+                for archetype in archetypes {
+                    let res = self.run_benchmark(model, archetype).await?;
+                    results.push(res);
+                }
+            }
         }
 
         results.sort_by(|a, b| {

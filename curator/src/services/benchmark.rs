@@ -9,8 +9,7 @@ use tracing::{info, instrument};
 
 use crate::domain::{
     build_battlemap_prompt, build_wavespeed_prompt, generate_benchmark_id, BatchBenchmarkItem,
-    BenchmarkArchetype, BenchmarkMetadata, BenchmarkModelSpec, BenchmarkResult, GenerationRequest,
-    LoraWeight, ALL_BENCHMARK_MODELS,
+    BenchmarkArchetype, BenchmarkMetadata, BenchmarkResult, GenerationRequest, LoraWeight,
 };
 use crate::ports::blob_storage::BlobStorage;
 use crate::ports::catalog_repository::CatalogRepository;
@@ -67,6 +66,7 @@ pub struct BenchmarkService {
     reference_provider: ReferenceProvider,
     reference_conditioning_enabled: bool,
     lora_weight: Option<LoraWeight>,
+    model_registry: Arc<crate::services::ModelRegistry>,
 }
 
 impl BenchmarkService {
@@ -77,6 +77,7 @@ impl BenchmarkService {
         blobs: Arc<dyn BlobStorage + Send + Sync>,
     ) -> Self {
         let reference_provider = ReferenceProvider::new(catalog.clone(), blobs.clone());
+        let model_registry = Arc::new(crate::services::ModelRegistry::new(catalog.clone(), blobs.clone()));
         Self {
             engine,
             library: LibraryService::new(catalog, blobs),
@@ -84,6 +85,7 @@ impl BenchmarkService {
             reference_provider,
             reference_conditioning_enabled: true,
             lora_weight: None,
+            model_registry,
         }
     }
 
@@ -95,6 +97,7 @@ impl BenchmarkService {
         blobs: Arc<dyn BlobStorage + Send + Sync>,
     ) -> Self {
         let reference_provider = ReferenceProvider::new(catalog.clone(), blobs.clone());
+        let model_registry = Arc::new(crate::services::ModelRegistry::new(catalog.clone(), blobs.clone()));
         Self {
             engine,
             library: LibraryService::new(catalog, blobs),
@@ -102,7 +105,19 @@ impl BenchmarkService {
             reference_provider,
             reference_conditioning_enabled: true,
             lora_weight: None,
+            model_registry,
         }
+    }
+
+    /// Reference to the underlying derived model registry.
+    pub fn model_registry(&self) -> &Arc<crate::services::ModelRegistry> {
+        &self.model_registry
+    }
+
+    /// Configures custom model registry.
+    pub fn with_model_registry(mut self, registry: Arc<crate::services::ModelRegistry>) -> Self {
+        self.model_registry = registry;
+        self
     }
 
     /// Attaches a custom reference provider.
@@ -205,9 +220,17 @@ impl BenchmarkService {
         model: &str,
         archetype: &BenchmarkArchetype,
     ) -> Result<BenchmarkResult, BenchmarkServiceError> {
-        let is_wavespeed = model.starts_with("wavespeed")
-            || BenchmarkModelSpec::find(model)
-                .is_some_and(|s| s.provider == crate::domain::ModelProvider::WaveSpeed);
+        // Model identity is registry-owned (ADR-0010): the descriptor decides provider kind and
+        // capability, and a retired adapter still resolves so its recorded results stay runnable.
+        let desc = self
+            .model_registry
+            .find_including_retired(model)
+            .await
+            .ok()
+            .flatten();
+        let is_wavespeed = desc
+            .as_ref()
+            .is_some_and(|d| d.provider == crate::domain::ModelProvider::WaveSpeed);
         let prompt = if is_wavespeed {
             build_wavespeed_prompt(archetype.prompt())
         } else {
@@ -219,13 +242,17 @@ impl BenchmarkService {
         }
         if let Some(lw) = &self.lora_weight {
             request = request.with_lora(&lw.path, lw.scale);
+        } else if let Some(d) = &desc {
+            if let (Some(path), Some(scale)) = (&d.lora_path, d.lora_scale) {
+                request = request.with_lora(path, scale);
+            }
         }
 
-
-        let supports_ref = BenchmarkModelSpec::find(model)
-            .map(|s| s.supports_reference_image)
-            .unwrap_or(true);
-
+        // The registry capability flag gates reference conditioning (ADR-0010).
+        let supports_ref = match &desc {
+            Some(descriptor) => descriptor.supports_reference_image,
+            None => true,
+        };
         if self.reference_conditioning_enabled && supports_ref {
             let theme = archetype.default_theme();
             if let Ok(Some(resolution)) = self
@@ -316,12 +343,19 @@ impl BenchmarkService {
         Ok(results)
     }
 
-    /// Run the full standard benchmark suite (all 4 models x 6 archetypes = 24 combinations)
-    /// and persist every raster image as a regular staging candidate.
+    /// Run the full standard benchmark suite across the registry's selectable OpenRouter entries
+    /// (baseline models × 6 archetypes) and persist every raster image as a staging candidate.
     pub async fn run_full_benchmark_and_persist(
         &self,
     ) -> Result<Vec<BenchmarkResult>, BenchmarkServiceError> {
-        let models: Vec<String> = ALL_BENCHMARK_MODELS.iter().map(|&m| m.to_string()).collect();
+        let models: Vec<String> = self
+            .model_registry
+            .list_selectable()
+            .await?
+            .into_iter()
+            .filter(|d| d.provider == crate::domain::ModelProvider::OpenRouter)
+            .map(|d| d.id)
+            .collect();
         self.run_suite_and_persist(&models, &BenchmarkArchetype::ALL)
             .await
     }
@@ -340,9 +374,16 @@ impl BenchmarkService {
         {
             self.run_archetype(model, &archetype).await?
         } else {
-            let is_wavespeed = model.starts_with("wavespeed")
-                || BenchmarkModelSpec::find(model)
-                    .is_some_and(|s| s.provider == crate::domain::ModelProvider::WaveSpeed);
+            // Identity is resolved through the registry, never the static catalog (ADR-0010).
+            let desc = self
+                .model_registry
+                .find_including_retired(model)
+                .await
+                .ok()
+                .flatten();
+            let is_wavespeed = desc
+                .as_ref()
+                .is_some_and(|d| d.provider == crate::domain::ModelProvider::WaveSpeed);
             let prompt = if is_wavespeed {
                 build_wavespeed_prompt(&item.prompt)
             } else {
@@ -355,12 +396,16 @@ impl BenchmarkService {
 
             if let Some(lw) = &self.lora_weight {
                 request = request.with_lora(&lw.path, lw.scale);
+            } else if let Some(d) = &desc {
+                if let (Some(path), Some(scale)) = (&d.lora_path, d.lora_scale) {
+                    request = request.with_lora(path, scale);
+                }
             }
 
-            let supports_ref = BenchmarkModelSpec::find(model)
-                .map(|s| s.supports_reference_image)
-                .unwrap_or(true);
-
+            let supports_ref = match &desc {
+                Some(descriptor) => descriptor.supports_reference_image,
+                None => true,
+            };
             if self.reference_conditioning_enabled && supports_ref {
                 if let Ok(Some(resolution)) = self
                     .reference_provider

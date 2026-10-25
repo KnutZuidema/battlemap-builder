@@ -280,10 +280,13 @@ async fn test_wavespeed_edit_lora_pricing_and_images_payload() {
 #[tokio::test]
 async fn test_wavespeed_http_error_propagation() {
     let mock_server = MockServer::start().await;
+    // Model identity is registry-derived; every WaveSpeed request targets the engine
+    // endpoint, not the selectable model id.
+    let endpoint = format!("/api/v3/{}", MODEL_WAVESPEED_KLEIN_T2I_LORA);
 
     // 1. 401 Unauthorized
     Mock::given(method("POST"))
-        .and(path("/api/v3/auth-fail"))
+        .and(path(endpoint.as_str()))
         .respond_with(
             ResponseTemplate::new(401)
                 .set_body_json(json!({"code": 401, "message": "Invalid API key."})),
@@ -293,14 +296,15 @@ async fn test_wavespeed_http_error_propagation() {
 
     let adapter = WaveSpeedAdapter::with_config("invalid_key", mock_server.uri(), 2);
     let err = adapter
-        .generate_image(&GenerationRequest::new("auth-fail", "test"))
+        .generate_image(&GenerationRequest::new(MODEL_WAVESPEED_KLEIN_T2I_LORA, "test"))
         .await
         .unwrap_err();
     assert!(matches!(err, ModelEngineError::Auth(msg) if msg.contains("401")));
+    mock_server.reset().await;
 
     // 2. 402 Insufficient Quota
     Mock::given(method("POST"))
-        .and(path("/api/v3/quota-fail"))
+        .and(path(endpoint.as_str()))
         .respond_with(
             ResponseTemplate::new(402)
                 .set_body_json(json!({"code": 402, "message": "insufficient_quota: credits exhausted"})),
@@ -309,14 +313,15 @@ async fn test_wavespeed_http_error_propagation() {
         .await;
 
     let err = adapter
-        .generate_image(&GenerationRequest::new("quota-fail", "test"))
+        .generate_image(&GenerationRequest::new(MODEL_WAVESPEED_KLEIN_T2I_LORA, "test"))
         .await
         .unwrap_err();
     assert!(matches!(err, ModelEngineError::QuotaOrRateLimit(msg) if msg.contains("402")));
+    mock_server.reset().await;
 
     // 3. 429 Rate Limit
     Mock::given(method("POST"))
-        .and(path("/api/v3/rate-limit"))
+        .and(path(endpoint.as_str()))
         .respond_with(
             ResponseTemplate::new(429)
                 .set_body_json(json!({"code": 429, "message": "Too many requests"})),
@@ -325,14 +330,15 @@ async fn test_wavespeed_http_error_propagation() {
         .await;
 
     let err = adapter
-        .generate_image(&GenerationRequest::new("rate-limit", "test"))
+        .generate_image(&GenerationRequest::new(MODEL_WAVESPEED_KLEIN_T2I_LORA, "test"))
         .await
         .unwrap_err();
     assert!(matches!(err, ModelEngineError::QuotaOrRateLimit(msg) if msg.contains("429")));
+    mock_server.reset().await;
 
     // 4. 500 Upstream Server Error
     Mock::given(method("POST"))
-        .and(path("/api/v3/server-error"))
+        .and(path(endpoint.as_str()))
         .respond_with(
             ResponseTemplate::new(500)
                 .set_body_string("Internal Gateway Error"),
@@ -341,14 +347,15 @@ async fn test_wavespeed_http_error_propagation() {
         .await;
 
     let err = adapter
-        .generate_image(&GenerationRequest::new("server-error", "test"))
+        .generate_image(&GenerationRequest::new(MODEL_WAVESPEED_KLEIN_T2I_LORA, "test"))
         .await
         .unwrap_err();
     assert!(matches!(err, ModelEngineError::Api { status: 500, ref message } if message.contains("Internal Gateway Error")));
+    mock_server.reset().await;
 
     // 5. Task Polling Failure (status: "failed")
     Mock::given(method("POST"))
-        .and(path("/api/v3/task-fail-test"))
+        .and(path(endpoint.as_str()))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "code": 200,
             "message": "success",
@@ -380,7 +387,7 @@ async fn test_wavespeed_http_error_propagation() {
 
     let adapter_poll = adapter.clone().with_poll_interval(Duration::from_millis(5));
     let err = adapter_poll
-        .generate_image(&GenerationRequest::new("task-fail-test", "test"))
+        .generate_image(&GenerationRequest::new(MODEL_WAVESPEED_KLEIN_T2I_LORA, "test"))
         .await
         .unwrap_err();
     assert!(matches!(err, ModelEngineError::Api { status: 500, ref message } if message.contains("Out of memory")));

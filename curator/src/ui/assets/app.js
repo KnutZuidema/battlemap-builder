@@ -140,14 +140,6 @@
     const MAX_ZOOM = 5.0;
     const PREFETCH_AHEAD = 3;
 
-    const MODEL_PRICES = {
-        "google/gemini-3.1-flash-image": 0.07,
-        "google/gemini-3.1-flash-lite-image": 0.035,
-        "meta/muse-image": 0.01,
-        "bytedance-seed/seedream-5-0-flash": 0.018,
-        "wavespeed-ai/flux-3-klein-image-distilled/text-to-image-lora": 0.015,
-        "wavespeed-ai/flux-3-klein-image-distilled/edit-lora": 0.021,
-    };
     const BUDGET_GUARDRAIL_THRESHOLD = 2.00;
     const CANONICAL_THEMES = [
         "dungeon",
@@ -192,6 +184,9 @@
     let benchmarkDrawer, btnCloseBenchmarkDrawer, btnCancelBenchmarkDrawer;
     let btnModelsSelectAll, btnModelsSelectNone, btnPromptsSelectAll, btnPromptsSelectNone;
     let benchmarkEnableCustom, customPromptFields, benchmarkCustomName, benchmarkCustomPrompt, benchmarkEnableReference;
+    let benchmarkModelsList, benchmarkReferenceWarning;
+    // Selectable models served by GET /api/models (ADR-0010); never hardcoded.
+    let benchmarkModelCatalog = [];
     let benchmarkEnableCustomLora, benchmarkCustomLoraFields, benchmarkCustomLoraPath, benchmarkCustomLoraScale;
     let calcBadgeCost, calcFormulaDisplay, calcWarningNote;
     let btnStartBenchmark, btnStartBenchmarkText;
@@ -380,6 +375,8 @@
         benchmarkCustomName = document.getElementById("benchmark-custom-name");
         benchmarkCustomPrompt = document.getElementById("benchmark-custom-prompt");
         benchmarkEnableReference = document.getElementById("benchmark-enable-reference");
+        benchmarkModelsList = document.getElementById("benchmark-models-list");
+        benchmarkReferenceWarning = document.getElementById("benchmark-reference-warning");
         benchmarkEnableCustomLora = document.getElementById("benchmark-enable-custom-lora");
         benchmarkCustomLoraFields = document.getElementById("benchmark-custom-lora-fields");
         benchmarkCustomLoraPath = document.getElementById("benchmark-custom-lora-path");
@@ -2888,6 +2885,89 @@
         return Array.from(checkboxes).map((cb) => cb.value);
     }
 
+    function benchmarkModelById(id) {
+        return benchmarkModelCatalog.find((m) => m.id === id) || null;
+    }
+
+    // Badge styling is presentation only; identity and price always come from the registry entry.
+    function benchmarkModelBadgeClass(model) {
+        if (model.provider === "wavespeed") return "badge-wavespeed";
+        if (model.id.includes("flash-lite")) return "badge-flash-lite";
+        if (model.id.includes("muse")) return "badge-muse";
+        if (model.id.includes("seedream")) return "badge-seedream";
+        return "badge-flash";
+    }
+
+    // Fetches the derived registry; publishing or retiring an adapter shows up on the next open
+    // with no restart (ADR-0010).
+    async function loadBenchmarkModelCatalog() {
+        try {
+            const res = await fetch("/api/models");
+            if (!res.ok) throw new Error(`GET /api/models returned ${res.status}`);
+            const models = await res.json();
+            benchmarkModelCatalog = Array.isArray(models) ? models : [];
+        } catch (_) {
+            benchmarkModelCatalog = [];
+        }
+        renderBenchmarkModelChecklist();
+    }
+
+    function renderBenchmarkModelChecklist() {
+        if (!benchmarkModelsList) return;
+        benchmarkModelsList.innerHTML = "";
+
+        if (benchmarkModelCatalog.length === 0) {
+            const empty = document.createElement("div");
+            empty.className = "check-item-desc mono";
+            empty.textContent = "No selectable models reported by the registry.";
+            benchmarkModelsList.appendChild(empty);
+            return;
+        }
+
+        for (const model of benchmarkModelCatalog) {
+            const label = document.createElement("label");
+            label.className = "check-item-card";
+
+            const checkbox = document.createElement("input");
+            checkbox.type = "checkbox";
+            checkbox.name = "benchmark-model";
+            checkbox.value = model.id;
+            // The default selection is the registry's OpenRouter baseline entries (ADR-0010).
+            checkbox.checked = model.provider === "openrouter";
+
+            const info = document.createElement("div");
+            info.className = "check-item-info";
+
+            const titleRow = document.createElement("div");
+            titleRow.className = "check-item-title-row";
+
+            const name = document.createElement("span");
+            name.className = "check-item-name";
+            name.textContent = model.display_name;
+
+            const badge = document.createElement("span");
+            badge.className = `pricing-badge ${benchmarkModelBadgeClass(model)}`;
+            badge.textContent = `$${Number(model.estimated_cost_per_image).toFixed(3)}/image`;
+
+            titleRow.appendChild(name);
+            titleRow.appendChild(badge);
+
+            const desc = document.createElement("span");
+            desc.className = "check-item-desc mono";
+            desc.textContent = model.id;
+
+            info.appendChild(titleRow);
+            info.appendChild(desc);
+            label.appendChild(checkbox);
+            label.appendChild(info);
+            benchmarkModelsList.appendChild(label);
+        }
+    }
+
+    function referenceConditioningRequested() {
+        return benchmarkEnableReference ? benchmarkEnableReference.checked : true;
+    }
+
     function calculatePreflightMetrics() {
         const models = getSelectedBenchmarkModels();
         const archetypes = getSelectedBenchmarkArchetypes();
@@ -2897,10 +2977,20 @@
         const totalImages = modelCount * promptCount;
 
         let costPerSet = 0;
-        for (const m of models) {
-            costPerSet += MODEL_PRICES[m] || 0.05;
+        for (const id of models) {
+            const model = benchmarkModelById(id);
+            costPerSet += model ? Number(model.estimated_cost_per_image) || 0 : 0;
         }
         const estimatedCost = promptCount * costPerSet;
+
+        // Reference conditioning is a capability gate, not a label (ADR-0010): a model whose
+        // `supports_reference_image` is false cannot accept an image, so the combination is blocked.
+        const referenceIncapableModels = referenceConditioningRequested()
+            ? models.filter((id) => {
+                const model = benchmarkModelById(id);
+                return model ? !model.supports_reference_image : false;
+            })
+            : [];
 
         return {
             models,
@@ -2910,12 +3000,13 @@
             promptCount,
             totalImages,
             estimatedCost,
+            referenceIncapableModels,
         };
     }
 
     function updatePreflightCost() {
         const metrics = calculatePreflightMetrics();
-        const { modelCount, promptCount, totalImages, estimatedCost } = metrics;
+        const { modelCount, promptCount, totalImages, estimatedCost, referenceIncapableModels } = metrics;
 
         const costStr = `$${estimatedCost.toFixed(2)}`;
         if (calcBadgeCost) calcBadgeCost.textContent = costStr;
@@ -2929,12 +3020,20 @@
             calcWarningNote.classList.toggle("hidden", !exceedsGuardrail);
         }
 
+        const referenceBlocked = referenceIncapableModels.length > 0;
+        if (benchmarkReferenceWarning) {
+            if (referenceBlocked) {
+                benchmarkReferenceWarning.textContent = `⚠️ Reference conditioning is unavailable for: ${referenceIncapableModels.join(", ")}. Turn it off or deselect those models.`;
+            }
+            benchmarkReferenceWarning.classList.toggle("hidden", !referenceBlocked);
+        }
+
         if (btnStartBenchmarkText) {
             btnStartBenchmarkText.textContent = `Run Benchmark (${costStr})`;
         }
 
         if (btnStartBenchmark) {
-            btnStartBenchmark.disabled = (modelCount === 0 || promptCount === 0 || state.isBenchmarking);
+            btnStartBenchmark.disabled = (modelCount === 0 || promptCount === 0 || referenceBlocked || state.isBenchmarking);
         }
     }
 
@@ -2946,13 +3045,14 @@
         }
     }
 
-    function openBenchmarkDrawer() {
+    async function openBenchmarkDrawer() {
         stopPanLoop();
         stopZoomLoop();
         if (state.helpModalOpen) closeHelpModal();
         if (state.drawerOpen) closeIngestionDrawer();
         state.benchmarkDrawerOpen = true;
         benchmarkDrawer?.classList.remove("hidden");
+        await loadBenchmarkModelCatalog();
         updatePreflightCost();
     }
 
@@ -2994,6 +3094,13 @@
         }
         if (metrics.promptCount === 0) {
             showToast("Please select at least 1 benchmark archetype or enter a custom prompt", "danger");
+            return;
+        }
+        if (metrics.referenceIncapableModels.length > 0) {
+            showToast(
+                `Reference conditioning is unavailable for: ${metrics.referenceIncapableModels.join(", ")}`,
+                "danger",
+            );
             return;
         }
 
@@ -3602,9 +3709,12 @@
             updatePreflightCost();
         });
 
-        document.querySelectorAll('input[name="benchmark-model"]').forEach((cb) => {
-            cb.addEventListener("change", () => updatePreflightCost());
+        // The model checklist is rendered from the registry after each fetch, so its change events
+        // are handled by delegation on the container instead of per-checkbox listeners.
+        benchmarkModelsList?.addEventListener("change", (e) => {
+            if (e.target && e.target.name === "benchmark-model") updatePreflightCost();
         });
+        benchmarkEnableReference?.addEventListener("change", () => updatePreflightCost());
         document.querySelectorAll('input[name="benchmark-archetype"]').forEach((cb) => {
             cb.addEventListener("change", () => updatePreflightCost());
         });

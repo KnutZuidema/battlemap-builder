@@ -1,6 +1,7 @@
 pub mod curation;
 pub mod description;
 pub mod benchmark;
+pub mod model_registry;
 pub mod dataset_export;
 pub mod ingestion;
 pub mod library;
@@ -14,6 +15,7 @@ pub use sections::{describe_map_sections, SectionDescriptionContext};
 pub use curation::*;
 
 pub use benchmark::*;
+pub use model_registry::ModelRegistry;
 pub use dataset_export::{DatasetExportService, DeleteDatasetError, FreezeDatasetError};
 pub use training::{compute_poll_backoff, CreateTrainingRunRequest, TrainingService, TrainingServiceError};
 pub use storage_maintenance::StorageMaintenanceService;

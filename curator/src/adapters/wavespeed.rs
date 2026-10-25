@@ -16,8 +16,8 @@ use tracing::{debug, info, instrument};
 
 use crate::domain::{
     build_wavespeed_prompt, generate_benchmark_id, BenchmarkArchetype, BenchmarkMetadata,
-    BenchmarkModelSpec, BenchmarkResult, GenerationRequest, GenerationResponse,
-    MODEL_WAVESPEED_KLEIN_EDIT_LORA,
+    BenchmarkResult, GenerationRequest, GenerationResponse, MODEL_WAVESPEED_KLEIN_EDIT_LORA,
+    MODEL_WAVESPEED_KLEIN_T2I_LORA,
 };
 use crate::ports::model_engine::{ModelEngine, ModelEngineError};
 
@@ -204,6 +204,11 @@ impl WaveSpeedAdapter {
         trimmed
     }
 
+    /// Whether a model identifier routes to the edit engine rather than text-to-image.
+    pub fn is_edit_model(model: &str) -> bool {
+        model == MODEL_WAVESPEED_KLEIN_EDIT_LORA || model.ends_with("-edit")
+    }
+
     /// Formats the prompt specifically for WaveSpeed FLUX 3 Klein LoRA (`Trigger Phrase, Physical Description`).
     pub fn format_full_scene_prompt(prompt: &str) -> String {
         let desc = Self::extract_physical_description(prompt);
@@ -241,7 +246,7 @@ impl WaveSpeedAdapter {
             "loras": loras,
         });
 
-        if request.model == MODEL_WAVESPEED_KLEIN_EDIT_LORA {
+        if Self::is_edit_model(&request.model) {
             if request.images.is_empty() {
                 return Err(ModelEngineError::InvalidRequest(
                     "FLUX 3 Klein Edit LoRA requires at least one reference image".to_string(),
@@ -256,12 +261,10 @@ impl WaveSpeedAdapter {
 
     /// Calculates flat per-image cost in USD for WaveSpeed endpoints.
     pub fn cost_for_model(model_id: &str) -> f64 {
-        if let Some(spec) = BenchmarkModelSpec::find(model_id) {
-            return spec.pricing.image_output;
-        }
-        match model_id {
-            MODEL_WAVESPEED_KLEIN_EDIT_LORA => 0.021,
-            _ => 0.015,
+        if Self::is_edit_model(model_id) {
+            0.021
+        } else {
+            0.015
         }
     }
 }
@@ -285,7 +288,12 @@ impl ModelEngine for WaveSpeedAdapter {
 
         let start_time = Instant::now();
         let payload = self.build_payload(request)?;
-        let endpoint = format!("{}/api/v3/{}", self.inner.base_url, request.model);
+        let engine_name = if Self::is_edit_model(&request.model) {
+            MODEL_WAVESPEED_KLEIN_EDIT_LORA
+        } else {
+            MODEL_WAVESPEED_KLEIN_T2I_LORA
+        };
+        let endpoint = format!("{}/api/v3/{}", self.inner.base_url, engine_name);
 
         debug!(
             endpoint = %endpoint,

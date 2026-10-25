@@ -34,6 +34,7 @@ pub struct AppState {
     pub curation_service: Arc<dyn CurationWorkflow>,
     pub training_service: Arc<TrainingService>,
     pub training_runner: Option<Arc<dyn TrainingRunner + Send + Sync>>,
+    pub model_registry: Arc<crate::services::ModelRegistry>,
     pub start_time: Instant,
 }
 
@@ -78,6 +79,7 @@ impl AppState {
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
         let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
+        let model_registry = Arc::new(crate::services::ModelRegistry::new(catalog.clone(), blobs.clone()));
         Self {
             catalog,
             blobs,
@@ -92,6 +94,7 @@ impl AppState {
             curation_service,
             training_service,
             training_runner,
+            model_registry,
             start_time: Instant::now(),
         }
     }
@@ -114,6 +117,7 @@ impl AppState {
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
         let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
+        let model_registry = Arc::new(crate::services::ModelRegistry::new(catalog.clone(), blobs.clone()));
         Self {
             catalog,
             blobs,
@@ -128,6 +132,7 @@ impl AppState {
             curation_service,
             training_service,
             training_runner,
+            model_registry,
             start_time: Instant::now(),
         }
     }
@@ -149,6 +154,7 @@ impl AppState {
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
         let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
+        let model_registry = Arc::new(crate::services::ModelRegistry::new(catalog.clone(), blobs.clone()));
         Self {
             catalog,
             blobs,
@@ -163,6 +169,7 @@ impl AppState {
             curation_service,
             training_service,
             training_runner,
+            model_registry,
             start_time: Instant::now(),
         }
     }
@@ -185,6 +192,7 @@ impl AppState {
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
         let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
+        let model_registry = Arc::new(crate::services::ModelRegistry::new(catalog.clone(), blobs.clone()));
         Self {
             catalog,
             blobs,
@@ -199,6 +207,7 @@ impl AppState {
             curation_service,
             training_service,
             training_runner,
+            model_registry,
             start_time: Instant::now(),
         }
     }
@@ -216,6 +225,7 @@ impl AppState {
         let curation_service = Self::default_curation_service(catalog.clone(), blobs.clone(), description_service.clone());
         let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
         let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
+        let model_registry = Arc::new(crate::services::ModelRegistry::new(catalog.clone(), blobs.clone()));
         Self {
             catalog,
             blobs,
@@ -230,8 +240,15 @@ impl AppState {
             curation_service,
             training_service,
             training_runner,
+            model_registry,
             start_time: Instant::now(),
         }
+    }
+
+    /// Configures an explicit model registry.
+    pub fn with_model_registry(mut self, registry: Arc<crate::services::ModelRegistry>) -> Self {
+        self.model_registry = registry;
+        self
     }
 
     /// Creates a new `AppState` with an explicit OpenRouter adapter (ideal for testing).
@@ -309,10 +326,11 @@ impl AppState {
 
         let openrouter = OpenRouterAdapter::from_env().unwrap_or_else(|_| OpenRouterAdapter::new(""));
         let wavespeed = WaveSpeedAdapter::from_env().unwrap_or_else(|_| WaveSpeedAdapter::new(""));
+        let model_registry = Arc::new(crate::services::ModelRegistry::new(catalog.clone(), blobs.clone()));
         let routing_engine = Arc::new(RoutingModelEngine::new(
             Arc::new(openrouter),
             Arc::new(wavespeed),
-        ));
+        ).with_registry(model_registry.clone()));
 
         Some(Arc::new(BenchmarkService::with_cost_tracker(
             routing_engine,

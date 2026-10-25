@@ -149,6 +149,7 @@ impl S3BlobStorage {
             .region(aws_sdk_s3::config::Region::new(config.region))
             .endpoint_url(config.endpoint)
             .force_path_style(true)
+            .response_checksum_validation(aws_sdk_s3::config::ResponseChecksumValidation::WhenRequired)
             .build();
         let client = aws_sdk_s3::Client::from_conf(s3_conf);
 
@@ -181,6 +182,7 @@ impl S3BlobStorage {
     pub fn public_url_base(&self) -> Option<&str> {
         self.public_url_base.as_deref()
     }
+
 
     /// Resolves the public HTTPS URL for a public artifact key using the configured `public_url_base`.
     pub fn resolve_public_url(&self, key: &BlobKey) -> Option<String> {
@@ -443,5 +445,30 @@ impl BlobStorage for S3BlobStorage {
         matched_keys.sort_by_key(|k| k.to_path());
         matched_keys.dedup();
         Ok(matched_keys)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_sdk_s3::config::ResponseChecksumValidation;
+
+    #[test]
+    fn test_s3_blob_storage_client_has_response_checksum_validation_when_required() {
+        let config = S3StorageConfig {
+            bucket_name: "test-bucket".to_string(),
+            endpoint: "http://localhost:9000".to_string(),
+            access_key_id: "minioadmin".to_string(),
+            secret_access_key: "minioadmin".to_string(),
+            region: "us-east-1".to_string(),
+            public_url: None,
+        };
+        let storage = S3BlobStorage::new(config);
+        let client_conf = storage.client.config();
+
+        assert_eq!(
+            client_conf.response_checksum_validation(),
+            Some(&ResponseChecksumValidation::WhenRequired)
+        );
     }
 }

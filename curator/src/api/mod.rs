@@ -12,8 +12,11 @@ use axum::{
     routing::{get, patch, post},
     Router,
 };
+use axum::http::{Request, Response};
+use std::time::Duration;
 use tower_http::cors::CorsLayer;
-use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, MakeSpan, OnResponse, TraceLayer};
+use tracing::{Level, Span};
 
 /// Builds the complete Axum application router mounting API endpoints,
 /// CORS and tracing middleware, and the static UI assets fallback.
@@ -104,9 +107,186 @@ pub fn create_router(state: AppState) -> Router {
         .layer(CorsLayer::permissive())
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().level(tracing::Level::INFO))
-                .on_response(DefaultOnResponse::new().level(tracing::Level::INFO)),
+                .make_span_with(CuratorMakeSpan::new())
+                .on_response(CuratorOnResponse::new()),
         )
         .fallback(crate::ui::static_handler)
         .with_state(state)
+}
+
+/// Custom MakeSpan strategy that emits DEBUG spans for /api/status and INFO for all other endpoints.
+#[derive(Clone, Debug)]
+pub struct CuratorMakeSpan {
+    info_make_span: DefaultMakeSpan,
+    debug_make_span: DefaultMakeSpan,
+}
+
+impl CuratorMakeSpan {
+    pub fn new() -> Self {
+        Self {
+            info_make_span: DefaultMakeSpan::new().level(Level::INFO),
+            debug_make_span: DefaultMakeSpan::new().level(Level::DEBUG),
+        }
+    }
+}
+
+
+impl<B> MakeSpan<B> for CuratorMakeSpan {
+    fn make_span(&mut self, request: &Request<B>) -> Span {
+        if request.uri().path() == "/api/status" {
+            self.debug_make_span.make_span(request)
+        } else {
+            self.info_make_span.make_span(request)
+        }
+    }
+}
+
+/// Custom OnResponse strategy that emits DEBUG response logs for /api/status and INFO for all other endpoints.
+#[derive(Clone, Debug)]
+pub struct CuratorOnResponse {
+    info_on_response: DefaultOnResponse,
+    debug_on_response: DefaultOnResponse,
+}
+
+impl CuratorOnResponse {
+    pub fn new() -> Self {
+        Self {
+            info_on_response: DefaultOnResponse::new().level(Level::INFO),
+            debug_on_response: DefaultOnResponse::new().level(Level::DEBUG),
+        }
+    }
+}
+
+
+impl<B> OnResponse<B> for CuratorOnResponse {
+    fn on_response(self, response: &Response<B>, latency: Duration, span: &Span) {
+        let is_debug = span.is_disabled()
+            || span
+                .metadata()
+                .map_or(false, |meta| *meta.level() == Level::DEBUG);
+
+        if is_debug {
+            self.debug_on_response.on_response(response, latency, span);
+        } else {
+            self.info_on_response.on_response(response, latency, span);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Request;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Registry;
+
+    #[test]
+    fn test_curator_make_span_levels() {
+        let mut make_span = CuratorMakeSpan::new();
+
+        let status_req = Request::builder()
+            .uri("/api/status")
+            .body(())
+            .unwrap();
+        let status_span = make_span.make_span(&status_req);
+        assert_eq!(
+            status_span.metadata().map(|m| *m.level()),
+            Some(Level::DEBUG)
+        );
+
+        let staging_req = Request::builder()
+            .uri("/api/staging")
+            .body(())
+            .unwrap();
+        let staging_span = make_span.make_span(&staging_req);
+        assert_eq!(
+            staging_span.metadata().map(|m| *m.level()),
+            Some(Level::INFO)
+        );
+
+        let root_req = Request::builder()
+            .uri("/")
+            .body(())
+            .unwrap();
+        let root_span = make_span.make_span(&root_req);
+        assert_eq!(
+            root_span.metadata().map(|m| *m.level()),
+            Some(Level::INFO)
+        );
+    }
+
+    #[derive(Default)]
+    struct LevelCaptureLayer {
+        levels: Arc<Mutex<Vec<Level>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LevelCaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            self.levels.lock().unwrap().push(*event.metadata().level());
+        }
+    }
+
+    #[test]
+    fn test_curator_on_response_levels() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let layer = LevelCaptureLayer {
+            levels: captured.clone(),
+        };
+        let subscriber = Registry::default().with(layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            let on_response = CuratorOnResponse::new();
+            let response = Response::builder().status(200).body(()).unwrap();
+
+            let debug_span = tracing::span!(Level::DEBUG, "request");
+            let _guard = debug_span.enter();
+            on_response.clone().on_response(&response, Duration::from_millis(5), &debug_span);
+
+            let info_span = tracing::span!(Level::INFO, "request");
+            let _guard2 = info_span.enter();
+            on_response.on_response(&response, Duration::from_millis(5), &info_span);
+        });
+
+        let events = captured.lock().unwrap().clone();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0], Level::DEBUG);
+        assert_eq!(events[1], Level::INFO);
+    }
+
+    #[test]
+    fn test_curator_on_response_disabled_span_does_not_emit_info() {
+        use tracing_subscriber::filter::LevelFilter;
+
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let layer = LevelCaptureLayer {
+            levels: captured.clone(),
+        };
+        let subscriber = Registry::default().with(layer).with(LevelFilter::INFO);
+
+        tracing::subscriber::with_default(subscriber, || {
+            let mut make_span = CuratorMakeSpan::new();
+            let on_response = CuratorOnResponse::new();
+
+            let req = Request::builder()
+                .uri("/api/status")
+                .body(())
+                .unwrap();
+            let span = make_span.make_span(&req);
+            assert!(span.is_disabled());
+
+            let response = Response::builder().status(200).body(()).unwrap();
+            on_response.on_response(&response, Duration::from_millis(5), &span);
+        });
+
+        let events = captured.lock().unwrap().clone();
+        assert!(
+            events.is_empty(),
+            "expected no events emitted for disabled /api/status span under INFO filter, got: {events:?}"
+        );
+    }
 }

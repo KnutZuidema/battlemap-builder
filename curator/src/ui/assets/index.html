@@ -36,6 +36,12 @@
                         </svg>
                         <span>Dataset Library</span>
                     </button>
+                    <button type="button" id="tab-nav-training" class="nav-switcher-btn" title="Training Runs & LoRA Adapters (Hotkey: R)">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                        </svg>
+                        <span>Training Runs</span>
+                    </button>
                 </nav>
                 <div id="status-indicator" class="status-pill status-connecting" title="Curator API Status">
                     <span class="status-dot"></span>
@@ -56,6 +62,13 @@
                     </svg>
                     <span>Benchmark</span>
                     <kbd>B</kbd>
+                </button>
+                <button type="button" id="btn-open-training-drawer" class="btn btn-tool btn-training" title="LoRA Training Runs & Adapters (Hotkey: R)">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                    </svg>
+                    <span>Training</span>
+                    <kbd>R</kbd>
                 </button>
                 <button type="button" id="btn-open-storage-modal" class="btn btn-tool btn-storage" title="Storage Footprint & Purge Monitor">
                     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
@@ -454,6 +467,12 @@
                             <span id="snapshots-count-badge" class="snapshots-count-badge mono">0</span>
                         </div>
                         <div class="snapshots-panel-actions">
+                            <button type="button" id="btn-open-training-from-library" class="btn btn-secondary btn-xs btn-training-runs" title="Open LoRA Training Runs & Adapters">
+                                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                                </svg>
+                                <span>Training Runs</span>
+                            </button>
                             <button type="button" id="btn-refresh-snapshots" class="btn btn-secondary btn-xs btn-icon-only" title="Refresh Snapshots">
                                 <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
                                     <polyline points="23 4 23 10 17 10"/>
@@ -1150,6 +1169,7 @@
                             <div class="help-row"><kbd>K</kbd> or <kbd>←</kbd><span>Return to previous candidate</span></div>
                             <div class="help-row"><kbd>B</kbd><span>Open AI Benchmark Suite drawer</span></div>
                             <div class="help-row"><kbd>H</kbd><span>Open Reddit Harvest drawer</span></div>
+                            <div class="help-row"><kbd>R</kbd><span>Open LoRA Training Runs & Adapters drawer</span></div>
                         </div>
                     </div>
 
@@ -1496,6 +1516,185 @@
 
                 <div class="drawer-footer">
                     <button type="button" id="btn-cancel-benchmark-drawer" class="btn btn-secondary">
+                        <kbd>Esc</kbd>
+                        <span>Close</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Training Runs & LoRA Adapter Studio Drawer (Issue #209, ADR-0009, ADR-0010) -->
+        <div id="training-drawer" class="drawer-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="training-drawer-title">
+            <div class="drawer-panel training-drawer-panel" id="training-drawer-panel">
+                <div class="drawer-header">
+                    <div class="drawer-title-group">
+                        <svg class="drawer-icon training-drawer-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                        </svg>
+                        <div class="training-title-wrap">
+                            <h3 id="training-drawer-title">Training Runs &amp; LoRA Studio</h3>
+                            <span class="training-subtitle">FLUX 3 Image Klein Fine-Tuning</span>
+                        </div>
+                    </div>
+                    <div class="training-header-actions">
+                        <span id="training-runs-active-badge" class="badge badge-status-running hidden">0 Active</span>
+                        <button type="button" id="btn-close-training-drawer" class="btn-close" aria-label="Close training drawer">×</button>
+                    </div>
+                </div>
+
+                <!-- Sub-nav Tabs: Runs vs Adapters -->
+                <div class="training-drawer-tabs" role="tablist">
+                    <button type="button" id="tab-training-runs" class="training-tab-btn active" role="tab" aria-selected="true">
+                        <span>Training Runs</span>
+                        <span id="training-runs-count-tab" class="tab-badge">0</span>
+                    </button>
+                    <button type="button" id="tab-training-adapters" class="training-tab-btn" role="tab" aria-selected="false">
+                        <span>LoRA Adapters</span>
+                        <span id="training-adapters-count-tab" class="tab-badge">0</span>
+                    </button>
+                </div>
+
+                <div class="drawer-body training-drawer-body">
+                    <!-- Tab 1: Training Runs View -->
+                    <div id="training-view-runs" class="training-view-pane">
+                        <!-- Launch Run Card -->
+                        <div class="training-launch-card" id="training-launch-card">
+                            <div class="launch-card-header">
+                                <div class="launch-card-title-group">
+                                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polygon points="5 3 19 12 5 21 5 3"/>
+                                    </svg>
+                                    <span class="launch-card-title">Start Fine-Tuning Run</span>
+                                </div>
+                                <button type="button" id="btn-toggle-launch-form" class="btn btn-secondary btn-xs">
+                                    <span id="btn-toggle-launch-text">Collapse</span>
+                                </button>
+                            </div>
+
+                            <div id="training-launch-form" class="launch-form-body">
+                                <div class="form-group">
+                                    <label for="training-snapshot-select" class="form-label">
+                                        Dataset Scope &amp; Snapshot
+                                    </label>
+                                    <select id="training-snapshot-select" class="form-select mono">
+                                        <option value="__freeze_current__">⚡ Freeze Current Scope Now</option>
+                                    </select>
+                                    <div class="form-hint" id="training-scope-hint">
+                                        Target: Current active theme scope.
+                                    </div>
+                                </div>
+
+                                <div class="form-group">
+                                    <label class="form-label">Training Recipe Policy</label>
+                                    <div class="training-policy-selector" role="radiogroup" aria-label="Training Recipe Policy">
+                                        <label class="policy-option active" id="policy-opt-calibration">
+                                            <input type="radio" name="training-policy" value="calibration" checked>
+                                            <div class="policy-details">
+                                                <div class="policy-head">
+                                                    <span class="policy-name">Calibration</span>
+                                                    <span class="policy-badge">1,500 Steps</span>
+                                                </div>
+                                                <span class="policy-desc">Quick convergence test (~15 min, $1.25 est.)</span>
+                                            </div>
+                                        </label>
+                                        <label class="policy-option" id="policy-opt-full">
+                                            <input type="radio" name="training-policy" value="full">
+                                            <div class="policy-details">
+                                                <div class="policy-head">
+                                                    <span class="policy-name">Full Fine-Tuning</span>
+                                                    <span class="policy-badge">4,000 Steps</span>
+                                                </div>
+                                                <span class="policy-desc">Production battlemap style LoRA (~40 min, $3.35 est.)</span>
+                                            </div>
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <!-- Readiness Gate Status Readout -->
+                                <div class="readiness-gate-row">
+                                    <div class="readiness-indicator-wrap">
+                                        <span class="gate-label">Readiness Gate:</span>
+                                        <span id="training-readiness-indicator" class="gate-status mono">Auditing...</span>
+                                    </div>
+                                    <button type="button" id="btn-check-training-readiness" class="btn btn-secondary btn-xs" title="Audit active dataset scope">
+                                        Re-audit Scope
+                                    </button>
+                                </div>
+
+                                <!-- Launch Action & Error Banner -->
+                                <div id="training-launch-error" class="training-error-banner hidden" role="alert"></div>
+
+                                <button type="button" id="btn-start-training-run" class="btn btn-primary btn-block btn-start-run">
+                                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polygon points="5 3 19 12 5 21 5 3"/>
+                                    </svg>
+                                    <span id="btn-start-run-text">Launch Training Run</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Runs Section Toolbar -->
+                        <div class="training-section-header">
+                            <div class="section-title-group">
+                                <span class="section-title">Run History</span>
+                                <span id="training-runs-total-badge" class="badge badge-count mono">0</span>
+                            </div>
+                            <div class="section-actions">
+                                <select id="training-runs-filter" class="form-select-sm" aria-label="Filter training runs">
+                                    <option value="all" selected>All Runs</option>
+                                    <option value="active">Active (Queued / Running)</option>
+                                    <option value="succeeded">Succeeded</option>
+                                    <option value="failed">Failed</option>
+                                    <option value="cancelled">Cancelled</option>
+                                </select>
+                                <button type="button" id="btn-refresh-training-runs" class="btn btn-secondary btn-xs btn-icon-only" title="Refresh runs">
+                                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="23 4 23 10 17 10"/>
+                                        <polyline points="1 20 1 14 7 14"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Runs Cards List -->
+                        <div id="training-runs-list" class="training-cards-list"></div>
+                        <div id="training-runs-empty" class="training-empty-state hidden">
+                            <p>No training runs found. Click <strong>Launch Training Run</strong> above to begin fine-tuning.</p>
+                        </div>
+                    </div>
+
+                    <!-- Tab 2: LoRA Adapters Catalog View -->
+                    <div id="training-view-adapters" class="training-view-pane hidden">
+                        <div class="training-section-header">
+                            <div class="section-title-group">
+                                <span class="section-title">Published Adapters</span>
+                                <span id="adapters-count-badge" class="badge badge-lora">0 Adapters</span>
+                            </div>
+                            <div class="section-actions">
+                                <select id="training-adapters-filter" class="form-select-sm" aria-label="Filter LoRA adapters">
+                                    <option value="all" selected>All Adapters</option>
+                                    <option value="usable">Active Only</option>
+                                    <option value="retired">Retired Only</option>
+                                </select>
+                                <button type="button" id="btn-refresh-training-adapters" class="btn btn-secondary btn-xs btn-icon-only" title="Refresh adapters">
+                                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="23 4 23 10 17 10"/>
+                                        <polyline points="1 20 1 14 7 14"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Adapters Cards List -->
+                        <div id="training-adapters-list" class="training-cards-list"></div>
+                        <div id="training-adapters-empty" class="training-empty-state hidden">
+                            <p>No LoRA adapters published yet. Checkpoints from succeeded training runs can be published into the catalog.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="drawer-footer">
+                    <button type="button" id="btn-cancel-training-drawer" class="btn btn-secondary">
                         <kbd>Esc</kbd>
                         <span>Close</span>
                     </button>

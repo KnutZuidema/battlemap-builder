@@ -145,6 +145,7 @@ async fn setup_minio_storage(
         .region(aws_sdk_s3::config::Region::new("us-east-1"))
         .endpoint_url(endpoint)
         .force_path_style(true)
+        .response_checksum_validation(aws_sdk_s3::config::ResponseChecksumValidation::WhenRequired)
         .build();
     let client = aws_sdk_s3::Client::from_conf(s3_conf);
 
@@ -315,4 +316,16 @@ async fn test_arc_dyn_s3_blob_storage_port() {
 
     dyn_storage.delete_blob(&key).await.unwrap();
     assert!(!dyn_storage.exists_blob(&key).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_minio_storage_client_checksum_validation_configured() {
+    let minio = EphemeralMinio::start().await;
+    let bucket = "test-checksum-config-bucket";
+    let storage = setup_minio_storage(&minio.endpoint, bucket, None).await;
+
+    assert_eq!(
+        storage.client().config().response_checksum_validation(),
+        Some(&aws_sdk_s3::config::ResponseChecksumValidation::WhenRequired)
+    );
 }

@@ -16,7 +16,7 @@ use curator::adapters::{
 use curator::api::{create_router, AppState};
 use curator::domain::{
     ArtifactVerification, ArtifactVerificationState, CheckpointRecord, DatasetSnapshot,
-    LoraAdapter, TrainingRecipe, TrainingRun, TrainingRunState, TRIGGER_PHRASE,
+    TrainingRecipe, TrainingRun, TrainingRunState, TRIGGER_PHRASE,
 };
 use curator::ports::blob_storage::{sha256_digest, BlobKey, BlobStorage};
 use curator::ports::catalog_repository::CatalogRepository;

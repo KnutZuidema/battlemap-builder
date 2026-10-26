@@ -43,6 +43,10 @@ pub fn create_router(state: AppState) -> Router {
             get(get_training_datasets).post(post_training_dataset),
         )
         .route(
+            "/api/training/datasets/freeze/status",
+            get(get_training_dataset_freeze_status),
+        )
+        .route(
             "/api/training/datasets/{id}",
             get(get_training_dataset).delete(delete_training_dataset),
         )
@@ -130,6 +134,12 @@ impl CuratorMakeSpan {
     }
 }
 
+impl Default for CuratorMakeSpan {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 
 impl<B> MakeSpan<B> for CuratorMakeSpan {
     fn make_span(&mut self, request: &Request<B>) -> Span {
@@ -157,13 +167,19 @@ impl CuratorOnResponse {
     }
 }
 
+impl Default for CuratorOnResponse {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 
 impl<B> OnResponse<B> for CuratorOnResponse {
     fn on_response(self, response: &Response<B>, latency: Duration, span: &Span) {
         let is_debug = span.is_disabled()
             || span
                 .metadata()
-                .map_or(false, |meta| *meta.level() == Level::DEBUG);
+                .is_some_and(|meta| *meta.level() == Level::DEBUG);
 
         if is_debug {
             self.debug_on_response.on_response(response, latency, span);

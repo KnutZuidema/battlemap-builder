@@ -288,6 +288,32 @@ impl DatasetSnapshot {
         }
     }
 }
+/// Real-time progress update emitted during dataset snapshot freezing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FreezeProgressUpdate {
+    /// Progress phase: "starting", "auditing", "packaging", "finalizing", "complete", "error".
+    pub phase: String,
+    /// Number of curated maps audited or packaged so far.
+    pub completed_maps: usize,
+    /// Total number of curated maps in scope.
+    pub total_maps: usize,
+    /// Number of 16x16 sample tiles cropped, resampled, and written to the archive so far.
+    pub completed_samples: usize,
+    /// Total number of 16x16 sample tiles expected to be written to the archive.
+    pub total_samples: usize,
+    /// ID of the map currently being processed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_map: Option<String>,
+    /// (col, row) coordinates of the section currently being cropped/resampled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_section: Option<(u32, u32)>,
+    /// Human-readable status description for UI progress banners.
+    pub message: String,
+    /// The resulting DatasetSnapshot once phase == "complete".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<DatasetSnapshot>,
+}
+
 
 #[cfg(test)]
 mod tests {

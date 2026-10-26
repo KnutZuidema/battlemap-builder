@@ -26,8 +26,8 @@ use crate::ports::catalog_repository::{CandidateFilter, CuratedFilter};
 use crate::ports::cost_tracker::CostStats;
 use crate::services::sections::{describe_map_sections, SectionDescriptionContext};
 use crate::services::{
-    DatasetExportService, IngestionSummary, LibraryService, RedditIngestionService,
-    StorageMaintenanceService,
+    DatasetExportService, FreezeDatasetError, IngestionSummary, LibraryService,
+    RedditIngestionService, StorageMaintenanceService,
 };
 use crate::adapters::clean_tags;
 pub use crate::services::description::detect_image_mime;
@@ -345,27 +345,167 @@ pub struct FreezeDatasetRequest {
     pub id: Option<String>,
 }
 
+/// Status response payload for active dataset snapshot freezing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FreezeStatusResponse {
+    pub in_progress: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<crate::domain::FreezeProgressUpdate>,
+}
+
+/// GET /api/training/datasets/freeze/status - Get current dataset snapshot freeze progress if running.
+pub async fn get_training_dataset_freeze_status(
+    State(state): State<AppState>,
+) -> Result<Json<FreezeStatusResponse>, ApiError> {
+    let status = state.snapshot_freeze_status.read().await;
+    let in_progress = status.is_some();
+    Ok(Json(FreezeStatusResponse {
+        in_progress,
+        progress: status.clone(),
+    }))
+}
+
 /// POST /api/training/datasets - Freeze a scope into an immutable DatasetSnapshot.
+/// Supports text/event-stream for live progress streaming, or returns HTTP 201 with the created snapshot.
 pub async fn post_training_dataset(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<ThemeQuery>,
     body: Option<Json<FreezeDatasetRequest>>,
-) -> Result<(StatusCode, Json<DatasetSnapshot>), ApiError> {
+) -> Result<Response, ApiError> {
     let req = body.map(|b| b.0).unwrap_or_default();
     let theme_str = req.theme.as_deref().or(query.theme.as_deref());
     let theme = parse_optional_theme(theme_str)?;
-    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
-    let snapshot = export_service
-        .freeze_dataset_snapshot(theme.as_ref(), req.id)
-        .await?;
-    tracing::info!(
-        id = %snapshot.id,
-        sha256 = %snapshot.sha256,
-        samples = snapshot.samples_count,
-        maps = snapshot.maps_count,
-        "Frozen dataset snapshot created"
-    );
-    Ok((StatusCode::CREATED, Json(snapshot)))
+
+    let is_sse = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("text/event-stream"))
+        .unwrap_or(false);
+
+    let lock = state.snapshot_freeze_lock.clone();
+    let lock_permit = match lock.try_lock_owned() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Err(ApiError::Conflict(
+                "A dataset snapshot freeze is already in progress. Please wait for it to complete.".to_string(),
+            ));
+        }
+    };
+
+    if is_sse {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, std::convert::Infallible>>();
+        let status_ref = state.snapshot_freeze_status.clone();
+        let catalog = state.catalog.clone();
+        let blobs = state.blobs.clone();
+
+        tokio::spawn(async move {
+            let _permit = lock_permit;
+            let export_service = DatasetExportService::new(catalog, blobs);
+            let res = export_service
+                .freeze_dataset_snapshot_with_progress(theme.as_ref(), req.id, |progress| {
+                    if tx.is_closed() {
+                        return false;
+                    }
+                    let status_ref = status_ref.clone();
+                    let progress_clone = progress.clone();
+                    tokio::spawn(async move {
+                        let mut lock = status_ref.write().await;
+                        *lock = Some(progress_clone);
+                    });
+
+                    let json_data = serde_json::to_string(&progress).unwrap_or_default();
+                    let event_name = match progress.phase.as_str() {
+                        "complete" => "complete",
+                        "error" => "error",
+                        _ => "progress",
+                    };
+                    let event = Event::default().event(event_name).data(json_data);
+                    tx.send(Ok(event)).is_ok()
+                })
+                .await;
+
+            match res {
+                Ok(snapshot) => {
+                    tracing::info!(
+                        id = %snapshot.id,
+                        sha256 = %snapshot.sha256,
+                        samples = snapshot.samples_count,
+                        maps = snapshot.maps_count,
+                        "Frozen dataset snapshot created"
+                    );
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "Failed to freeze dataset snapshot");
+                    let (err_summary, err_code, blocking, readiness) = match &err {
+                        FreezeDatasetError::NotReady { summary, blocking_issues, readiness } => (
+                            summary.clone(),
+                            "DATASET_NOT_READY",
+                            Some(serde_json::to_value(blocking_issues).unwrap_or_default()),
+                            Some(serde_json::to_value(readiness).unwrap_or_default()),
+                        ),
+                        FreezeDatasetError::Storage(s) => (
+                            s.to_string(),
+                            "STORAGE_ERROR",
+                            None,
+                            None,
+                        ),
+                    };
+                    let mut err_data = serde_json::json!({
+                        "phase": "error",
+                        "error": err_summary,
+                        "code": err_code,
+                    });
+                    if let Some(b) = blocking {
+                        err_data["blocking_issues"] = b;
+                    }
+                    if let Some(r) = readiness {
+                        err_data["readiness"] = r;
+                    }
+                    let event = Event::default()
+                        .event("error")
+                        .data(serde_json::to_string(&err_data).unwrap_or_default());
+                    let _ = tx.send(Ok(event));
+                }
+            }
+
+            let mut lock = status_ref.write().await;
+            *lock = None;
+        });
+
+        Ok(Sse::new(UnboundedReceiverStream::new(rx))
+            .keep_alive(axum::response::sse::KeepAlive::default())
+            .into_response())
+    } else {
+        let _permit = lock_permit;
+        let status_ref = state.snapshot_freeze_status.clone();
+        let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
+        let snapshot_res = export_service
+            .freeze_dataset_snapshot_with_progress(theme.as_ref(), req.id, |progress| {
+                let status_ref = status_ref.clone();
+                tokio::spawn(async move {
+                    let mut lock = status_ref.write().await;
+                    *lock = Some(progress);
+                });
+                true
+            })
+            .await;
+
+        {
+            let mut lock = status_ref.write().await;
+            *lock = None;
+        }
+
+        let snapshot = snapshot_res?;
+        tracing::info!(
+            id = %snapshot.id,
+            sha256 = %snapshot.sha256,
+            samples = snapshot.samples_count,
+            maps = snapshot.maps_count,
+            "Frozen dataset snapshot created"
+        );
+        Ok((StatusCode::CREATED, Json(snapshot)).into_response())
+    }
 }
 
 /// GET /api/training/datasets - List frozen dataset snapshots, optionally filtered by theme.

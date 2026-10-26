@@ -660,7 +660,60 @@ async fn test_freeze_snapshot_with_sse_progress_stream_and_status() {
     assert!(stream_str.contains("starting") || stream_str.contains("auditing") || stream_str.contains("packaging"));
     assert!(stream_str.contains("event: complete"));
     assert!(stream_str.contains("ds_dungeon_"));
+
+    // 3. Status after completion must return in_progress: false
+    let post_status_req = Request::builder()
+        .method("GET")
+        .uri("/api/training/datasets/freeze/status")
+        .body(Body::empty())
+        .unwrap();
+    let post_status_resp = app.clone().oneshot(post_status_req).await.unwrap();
+    assert_eq!(post_status_resp.status(), StatusCode::OK);
+    let post_status_bytes = to_bytes(post_status_resp.into_body(), usize::MAX).await.unwrap();
+    let post_status_json: Value = serde_json::from_slice(&post_status_bytes).unwrap();
+    assert_eq!(post_status_json["in_progress"], false);
 }
+
+#[tokio::test]
+async fn test_freeze_snapshot_sse_refusal_when_unready() {
+    let (app, _catalog, _blobs) = setup_test_app();
+
+    // Freeze empty scope with Accept: text/event-stream
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/training/datasets")
+        .header(header::ACCEPT, "text/event-stream")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"theme":"dungeon"}"#))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/event-stream"
+    );
+
+    let stream_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let stream_str = String::from_utf8(stream_bytes.to_vec()).unwrap();
+
+    // Verify stream contains terminal error event with DATASET_NOT_READY code
+    assert!(stream_str.contains("event: error"));
+    assert!(stream_str.contains(r#""code":"DATASET_NOT_READY""#));
+    assert!(stream_str.contains(r#""blocking_issues""#));
+
+    // Verify status returns in_progress: false after refusal
+    let status_req = Request::builder()
+        .method("GET")
+        .uri("/api/training/datasets/freeze/status")
+        .body(Body::empty())
+        .unwrap();
+    let status_resp = app.clone().oneshot(status_req).await.unwrap();
+    assert_eq!(status_resp.status(), StatusCode::OK);
+    let status_bytes = to_bytes(status_resp.into_body(), usize::MAX).await.unwrap();
+    let status_json: Value = serde_json::from_slice(&status_bytes).unwrap();
+    assert_eq!(status_json["in_progress"], false);
+ }
 
 #[tokio::test]
 async fn test_freeze_snapshot_concurrency_lock_refuses_concurrent_freeze() {

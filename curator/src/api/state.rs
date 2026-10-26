@@ -36,7 +36,7 @@ pub struct AppState {
     pub training_runner: Option<Arc<dyn TrainingRunner + Send + Sync>>,
     pub model_registry: Arc<crate::services::ModelRegistry>,
     pub start_time: Instant,
-    pub snapshot_freeze_status: Arc<RwLock<Option<crate::domain::FreezeProgressUpdate>>>,
+    pub snapshot_freeze_status: Arc<std::sync::RwLock<Option<crate::domain::FreezeProgressUpdate>>>,
     pub snapshot_freeze_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -98,7 +98,7 @@ impl AppState {
             training_runner,
             model_registry,
             start_time: Instant::now(),
-            snapshot_freeze_status: Arc::new(RwLock::new(None)),
+            snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
             snapshot_freeze_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -138,7 +138,7 @@ impl AppState {
             training_runner,
             model_registry,
             start_time: Instant::now(),
-            snapshot_freeze_status: Arc::new(RwLock::new(None)),
+            snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
             snapshot_freeze_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -177,7 +177,7 @@ impl AppState {
             training_runner,
             model_registry,
             start_time: Instant::now(),
-            snapshot_freeze_status: Arc::new(RwLock::new(None)),
+            snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
             snapshot_freeze_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -217,7 +217,7 @@ impl AppState {
             training_runner,
             model_registry,
             start_time: Instant::now(),
-            snapshot_freeze_status: Arc::new(RwLock::new(None)),
+            snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
             snapshot_freeze_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -252,7 +252,7 @@ impl AppState {
             training_runner,
             model_registry,
             start_time: Instant::now(),
-            snapshot_freeze_status: Arc::new(RwLock::new(None)),
+            snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
             snapshot_freeze_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }

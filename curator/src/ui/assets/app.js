@@ -5448,6 +5448,7 @@
             const decoder = new TextDecoder();
             let buffer = "";
             let finalSnapshot = null;
+            let currentEvent = "message";
 
             while (true) {
                 const { done, value } = await reader.read();
@@ -5457,7 +5458,6 @@
                 const lines = buffer.split("\n");
                 buffer = lines.pop();
 
-                let currentEvent = "message";
                 for (const line of lines) {
                     const trimmed = line.trim();
                     if (trimmed.startsWith("event:")) {
@@ -5478,6 +5478,7 @@
                         } catch (e) {
                             if (currentEvent === "error") throw e;
                         }
+                        currentEvent = "message";
                     }
                 }
             }

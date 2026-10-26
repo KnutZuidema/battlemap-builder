@@ -357,7 +357,10 @@ pub struct FreezeStatusResponse {
 pub async fn get_training_dataset_freeze_status(
     State(state): State<AppState>,
 ) -> Result<Json<FreezeStatusResponse>, ApiError> {
-    let status = state.snapshot_freeze_status.read().await;
+    let status = state
+        .snapshot_freeze_status
+        .read()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     let in_progress = status.is_some();
     Ok(Json(FreezeStatusResponse {
         in_progress,
@@ -404,20 +407,18 @@ pub async fn post_training_dataset(
             let export_service = DatasetExportService::new(catalog, blobs);
             let res = export_service
                 .freeze_dataset_snapshot_with_progress(theme.as_ref(), req.id, |progress| {
+                    // Update global status first so secondary tabs/status polling stays accurate
+                    if let Ok(mut lock) = status_ref.write() {
+                        *lock = Some(progress.clone());
+                    }
+
                     if tx.is_closed() {
                         return false;
                     }
-                    let status_ref = status_ref.clone();
-                    let progress_clone = progress.clone();
-                    tokio::spawn(async move {
-                        let mut lock = status_ref.write().await;
-                        *lock = Some(progress_clone);
-                    });
 
                     let json_data = serde_json::to_string(&progress).unwrap_or_default();
                     let event_name = match progress.phase.as_str() {
                         "complete" => "complete",
-                        "error" => "error",
                         _ => "progress",
                     };
                     let event = Event::default().event(event_name).data(json_data);
@@ -444,6 +445,12 @@ pub async fn post_training_dataset(
                             Some(serde_json::to_value(blocking_issues).unwrap_or_default()),
                             Some(serde_json::to_value(readiness).unwrap_or_default()),
                         ),
+                        FreezeDatasetError::Cancelled => (
+                            "Dataset snapshot freeze was cancelled".to_string(),
+                            "FREEZE_CANCELLED",
+                            None,
+                            None,
+                        ),
                         FreezeDatasetError::Storage(s) => (
                             s.to_string(),
                             "STORAGE_ERROR",
@@ -468,9 +475,9 @@ pub async fn post_training_dataset(
                     let _ = tx.send(Ok(event));
                 }
             }
-
-            let mut lock = status_ref.write().await;
-            *lock = None;
+            if let Ok(mut lock) = status_ref.write() {
+                *lock = None;
+            }
         });
 
         Ok(Sse::new(UnboundedReceiverStream::new(rx))
@@ -482,17 +489,14 @@ pub async fn post_training_dataset(
         let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
         let snapshot_res = export_service
             .freeze_dataset_snapshot_with_progress(theme.as_ref(), req.id, |progress| {
-                let status_ref = status_ref.clone();
-                tokio::spawn(async move {
-                    let mut lock = status_ref.write().await;
+                if let Ok(mut lock) = status_ref.write() {
                     *lock = Some(progress);
-                });
+                }
                 true
             })
             .await;
 
-        {
-            let mut lock = status_ref.write().await;
+        if let Ok(mut lock) = status_ref.write() {
             *lock = None;
         }
 

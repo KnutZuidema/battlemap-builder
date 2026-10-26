@@ -104,6 +104,10 @@ _Avoid_: Wiki prompt, map concept, suggestion card
 An uncurated Battlemap bundle in the staging queue awaiting human triage.
 _Avoid_: Staging item, raw map, post, bundle
 
+**Harvest Run**:
+A single execution of an external harvester crawling an online tabletop community (such as `/r/battlemaps`) for candidate encounter maps.
+_Avoid_: Scraping job, crawl run, import batch
+
 **Curated Map**:
 A Battlemap that has passed triage with a persisted Grid Configuration, assigned Layer Roles, Tags, a Physical Description, and 16×16 Map Sections, stored in the curated dataset for reference conditioning and training.
 _Avoid_: Approved map, dataset item, manifest

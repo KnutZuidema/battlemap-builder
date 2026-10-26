@@ -585,6 +585,9 @@ fn test_ui_assets_expose_dataset_snapshot_controls() {
     // Dataset Snapshots panel
     assert!(html.contains("id=\"dataset-snapshots-panel\""));
     assert!(html.contains("id=\"snapshots-list\""));
+    assert!(html.contains("id=\"freeze-progress-panel\""));
+    assert!(html.contains("id=\"freeze-progress-bar\""));
+    assert!(html.contains("id=\"freeze-phase-badge\""));
 
     // JavaScript handlers & API calls
     assert!(js.contains("/api/training/datasets"));
@@ -594,9 +597,151 @@ fn test_ui_assets_expose_dataset_snapshot_controls() {
     assert!(js.contains("freezeDatasetSnapshot"));
     assert!(js.contains("deleteDatasetSnapshot"));
     assert!(js.contains("fetchDatasetSnapshots"));
+    assert!(js.contains("updateFreezeProgressUI"));
+    assert!(js.contains("checkActiveFreezeStatus"));
+    assert!(js.contains("performFreezeSnapshotWithProgress"));
 
     // CSS styling
     assert!(css.contains(".dataset-snapshots-panel"));
     assert!(css.contains(".snapshot-card"));
     assert!(css.contains(".readiness-issue-remediation"));
+    assert!(css.contains(".freeze-progress-panel"));
+    assert!(css.contains(".freeze-progress-bar"));
+    assert!(css.contains(".freeze-phase-badge"));
+}
+
+// ---------------------------------------------------------------------------
+// 7. Live SSE progress stream and status observation for snapshot freeze
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_freeze_snapshot_with_sse_progress_stream_and_status() {
+    let (app, catalog, blobs) = setup_test_app();
+    let cat_trait: Arc<dyn CatalogRepository + Send + Sync> = catalog.clone();
+    let blob_trait: Arc<dyn BlobStorage + Send + Sync> = blobs.clone();
+
+    // 1. Initial status when idle
+    let status_req = Request::builder()
+        .method("GET")
+        .uri("/api/training/datasets/freeze/status")
+        .body(Body::empty())
+        .unwrap();
+    let status_resp = app.clone().oneshot(status_req).await.unwrap();
+    assert_eq!(status_resp.status(), StatusCode::OK);
+    let status_bytes = to_bytes(status_resp.into_body(), usize::MAX).await.unwrap();
+    let status_json: Value = serde_json::from_slice(&status_bytes).unwrap();
+    assert_eq!(status_json["in_progress"], false);
+
+    // Seed map
+    let map = ready_multisection_map("sse-dungeon-map-1", Theme::Dungeon);
+    let png_bytes = create_test_png(2048, 2048);
+    seed_curated_ports(&cat_trait, &blob_trait, &map, &png_bytes).await;
+
+    // 2. Request freeze with Accept: text/event-stream
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/training/datasets")
+        .header(header::ACCEPT, "text/event-stream")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"theme":"dungeon"}"#))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/event-stream"
+    );
+
+    let stream_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let stream_str = String::from_utf8(stream_bytes.to_vec()).unwrap();
+
+    // Verify stream contains events
+    assert!(stream_str.contains("event: progress") || stream_str.contains("event: complete"));
+    assert!(stream_str.contains("starting") || stream_str.contains("auditing") || stream_str.contains("packaging"));
+    assert!(stream_str.contains("event: complete"));
+    assert!(stream_str.contains("ds_dungeon_"));
+
+    // 3. Status after completion must return in_progress: false
+    let post_status_req = Request::builder()
+        .method("GET")
+        .uri("/api/training/datasets/freeze/status")
+        .body(Body::empty())
+        .unwrap();
+    let post_status_resp = app.clone().oneshot(post_status_req).await.unwrap();
+    assert_eq!(post_status_resp.status(), StatusCode::OK);
+    let post_status_bytes = to_bytes(post_status_resp.into_body(), usize::MAX).await.unwrap();
+    let post_status_json: Value = serde_json::from_slice(&post_status_bytes).unwrap();
+    assert_eq!(post_status_json["in_progress"], false);
+}
+
+#[tokio::test]
+async fn test_freeze_snapshot_sse_refusal_when_unready() {
+    let (app, _catalog, _blobs) = setup_test_app();
+
+    // Freeze empty scope with Accept: text/event-stream
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/training/datasets")
+        .header(header::ACCEPT, "text/event-stream")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"theme":"dungeon"}"#))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/event-stream"
+    );
+
+    let stream_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let stream_str = String::from_utf8(stream_bytes.to_vec()).unwrap();
+
+    // Verify stream contains terminal error event with DATASET_NOT_READY code
+    assert!(stream_str.contains("event: error"));
+    assert!(stream_str.contains(r#""code":"DATASET_NOT_READY""#));
+    assert!(stream_str.contains(r#""blocking_issues""#));
+
+    // Verify status returns in_progress: false after refusal
+    let status_req = Request::builder()
+        .method("GET")
+        .uri("/api/training/datasets/freeze/status")
+        .body(Body::empty())
+        .unwrap();
+    let status_resp = app.clone().oneshot(status_req).await.unwrap();
+    assert_eq!(status_resp.status(), StatusCode::OK);
+    let status_bytes = to_bytes(status_resp.into_body(), usize::MAX).await.unwrap();
+    let status_json: Value = serde_json::from_slice(&status_bytes).unwrap();
+    assert_eq!(status_json["in_progress"], false);
+ }
+
+#[tokio::test]
+async fn test_freeze_snapshot_concurrency_lock_refuses_concurrent_freeze() {
+    let catalog = Arc::new(InMemoryCatalogRepository::new());
+    let blobs = Arc::new(InMemoryBlobStorage::new());
+    let cat_trait: Arc<dyn CatalogRepository + Send + Sync> = catalog.clone();
+    let blob_trait: Arc<dyn BlobStorage + Send + Sync> = blobs.clone();
+
+    let map = ready_multisection_map("lock-dungeon-map-1", Theme::Dungeon);
+    let png_bytes = create_test_png(2048, 2048);
+    seed_curated_ports(&cat_trait, &blob_trait, &map, &png_bytes).await;
+
+    let state = AppState::new(catalog.clone(), blobs.clone());
+    let router = create_router(state.clone());
+
+    // Acquire lock manually to simulate concurrent freeze running
+    let _guard = state.snapshot_freeze_lock.try_lock().unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/training/datasets")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"theme":"dungeon"}"#))
+        .unwrap();
+
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert!(json["error"].as_str().unwrap().contains("already in progress"));
 }

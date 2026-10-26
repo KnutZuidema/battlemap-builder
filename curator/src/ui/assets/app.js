@@ -223,6 +223,7 @@
     let librarySortSelect, libraryDensityGroup, libraryFacetFilters;
     let btnExportLora, btnExportLabel, btnRefreshLibrary, btnSwitchToTriage, btnClearLibraryFilters;
     let btnFreezeSnapshot, btnFreezeLabel;
+    let freezeProgressPanel, freezePhaseBadge, freezeProgressMessage, freezeProgressCounts, freezeProgressPercent, freezeProgressBar, freezeDetailMap, freezeDetailSection;
     let datasetSnapshotsPanel, snapshotsList, snapshotsEmpty, snapshotsCountBadge;
     let btnRefreshSnapshots, btnToggleSnapshots, toggleSnapshotsText, snapshotsShelf;
     let btnDatasetReadiness, datasetReadinessLabel;
@@ -469,6 +470,14 @@
         btnClearLibraryFilters = document.getElementById("btn-clear-library-filters");
         btnFreezeSnapshot = document.getElementById("btn-freeze-snapshot");
         btnFreezeLabel = document.getElementById("btn-freeze-label");
+        freezeProgressPanel = document.getElementById("freeze-progress-panel");
+        freezePhaseBadge = document.getElementById("freeze-phase-badge");
+        freezeProgressMessage = document.getElementById("freeze-progress-message");
+        freezeProgressCounts = document.getElementById("freeze-progress-counts");
+        freezeProgressPercent = document.getElementById("freeze-progress-percent");
+        freezeProgressBar = document.getElementById("freeze-progress-bar");
+        freezeDetailMap = document.getElementById("freeze-detail-map");
+        freezeDetailSection = document.getElementById("freeze-detail-section");
         datasetSnapshotsPanel = document.getElementById("dataset-snapshots-panel");
         snapshotsList = document.getElementById("snapshots-list");
         snapshotsEmpty = document.getElementById("snapshots-empty");
@@ -5210,6 +5219,7 @@
             state.snapshots = snapshots;
             renderDatasetSnapshots(snapshots);
             populateTrainingSnapshotSelect(snapshots);
+            checkActiveFreezeStatus();
         } catch (err) {
             console.error("Failed to fetch dataset snapshots:", err);
         } finally {
@@ -5296,6 +5306,194 @@
         }
     }
 
+    function showFreezeProgressPanel(show) {
+        if (!freezeProgressPanel) return;
+        if (show) {
+            freezeProgressPanel.classList.remove("hidden");
+        } else {
+            freezeProgressPanel.classList.add("hidden");
+        }
+    }
+
+    function updateFreezeProgressUI(progress) {
+        if (!progress) return;
+        showFreezeProgressPanel(true);
+
+        const phase = (progress.phase || "starting").toLowerCase();
+        if (freezePhaseBadge) {
+            freezePhaseBadge.textContent = phase.toUpperCase();
+            freezePhaseBadge.className = `freeze-phase-badge phase-${phase}`;
+        }
+
+        if (freezeProgressMessage) {
+            freezeProgressMessage.textContent = progress.message || "Processing dataset snapshot...";
+        }
+
+        let pct = 0;
+        let countsText = "";
+        if (phase === "starting") {
+            pct = 5;
+            countsText = "Initializing...";
+        } else if (phase === "auditing") {
+            const completed = progress.completed_maps || 0;
+            const total = progress.total_maps || 1;
+            pct = Math.min(25, Math.round((completed / Math.max(total, 1)) * 25));
+            countsText = `${completed} / ${total} maps`;
+            if (btnFreezeLabel) btnFreezeLabel.textContent = `Auditing (${completed}/${total})`;
+        } else if (phase === "packaging") {
+            const completed = progress.completed_samples || 0;
+            const total = progress.total_samples || 1;
+            pct = 25 + Math.min(70, Math.round((completed / Math.max(total, 1)) * 70));
+            countsText = `${completed} / ${total} samples`;
+            if (btnFreezeLabel) btnFreezeLabel.textContent = `Freezing (${completed}/${total})`;
+        } else if (phase === "finalizing") {
+            pct = 95;
+            countsText = "Saving artifact...";
+            if (btnFreezeLabel) btnFreezeLabel.textContent = "Finalizing...";
+        } else if (phase === "complete") {
+            pct = 100;
+            countsText = "Complete";
+            if (btnFreezeLabel) btnFreezeLabel.textContent = "Complete!";
+        } else if (phase === "error") {
+            countsText = "Error";
+            if (btnFreezeLabel) btnFreezeLabel.textContent = "Freeze Snapshot";
+        }
+
+        if (freezeProgressBar) {
+            freezeProgressBar.style.width = `${pct}%`;
+        }
+        if (freezeProgressCounts) {
+            freezeProgressCounts.textContent = countsText;
+        }
+        if (freezeProgressPercent) {
+            freezeProgressPercent.textContent = `(${pct}%)`;
+        }
+
+        if (freezeDetailMap) {
+            freezeDetailMap.textContent = progress.current_map ? `Map: ${progress.current_map}` : "";
+        }
+        if (freezeDetailSection) {
+            freezeDetailSection.textContent = progress.current_section
+                ? `Section: (${progress.current_section[0]}, ${progress.current_section[1]})`
+                : "";
+        }
+    }
+
+    let freezePollingTimer = null;
+    function startFreezeStatusPolling() {
+        if (freezePollingTimer) return;
+        freezePollingTimer = setInterval(async () => {
+            try {
+                const res = await fetch("/api/training/datasets/freeze/status");
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.in_progress && data.progress) {
+                    state.isFreezingSnapshot = true;
+                    if (btnFreezeSnapshot) btnFreezeSnapshot.disabled = true;
+                    updateFreezeProgressUI(data.progress);
+                } else {
+                    stopFreezeStatusPolling();
+                    state.isFreezingSnapshot = false;
+                    if (btnFreezeSnapshot) btnFreezeSnapshot.disabled = false;
+                    if (btnFreezeLabel) btnFreezeLabel.textContent = "Freeze Snapshot";
+                    showFreezeProgressPanel(false);
+                    fetchDatasetSnapshots();
+                }
+            } catch (_) {}
+        }, 1500);
+    }
+
+    function stopFreezeStatusPolling() {
+        if (freezePollingTimer) {
+            clearInterval(freezePollingTimer);
+            freezePollingTimer = null;
+        }
+    }
+
+    async function checkActiveFreezeStatus() {
+        try {
+            const res = await fetch("/api/training/datasets/freeze/status");
+            if (!res.ok) return;
+            const data = await res.json();
+            if (data.in_progress && data.progress) {
+                state.isFreezingSnapshot = true;
+                if (btnFreezeSnapshot) btnFreezeSnapshot.disabled = true;
+                updateFreezeProgressUI(data.progress);
+                startFreezeStatusPolling();
+            }
+        } catch (_) {}
+    }
+
+    async function performFreezeSnapshotWithProgress(scopeTheme, onProgress) {
+        const body = scopeTheme ? { theme: scopeTheme } : {};
+        const query = scopeTheme ? `?theme=${encodeURIComponent(scopeTheme)}` : "";
+        const res = await fetch(`/api/training/datasets${query}`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
+            body: JSON.stringify(body),
+        });
+
+        if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            errData.status = res.status;
+            throw errData;
+        }
+
+        const contentType = res.headers.get("content-type") || "";
+        if (contentType.includes("text/event-stream") && res.body) {
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            let finalSnapshot = null;
+            let currentEvent = "message";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+
+                const lines = buffer.split("\n");
+                buffer = lines.pop();
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (trimmed.startsWith("event:")) {
+                        currentEvent = trimmed.slice(6).trim();
+                    } else if (trimmed.startsWith("data:")) {
+                        const dataStr = trimmed.slice(5).trim();
+                        try {
+                            const data = JSON.parse(dataStr);
+                            if (currentEvent === "progress") {
+                                onProgress?.("progress", data);
+                            } else if (currentEvent === "complete") {
+                                finalSnapshot = data.snapshot || data;
+                                onProgress?.("complete", data);
+                            } else if (currentEvent === "error") {
+                                onProgress?.("error", data);
+                                throw data;
+                            }
+                        } catch (e) {
+                            if (currentEvent === "error") throw e;
+                        }
+                        currentEvent = "message";
+                    }
+                }
+            }
+
+            if (!finalSnapshot) {
+                throw new Error("Freezing completed without receiving snapshot metadata");
+            }
+            return finalSnapshot;
+        } else {
+            const snapshot = await res.json();
+            onProgress?.("complete", { snapshot });
+            return snapshot;
+        }
+    }
+
     async function freezeDatasetSnapshot() {
         if (state.isFreezingSnapshot) return;
         state.isFreezingSnapshot = true;
@@ -5305,29 +5503,50 @@
         const scopeTheme = datasetScopeTheme();
         const scopeLabel = scopeTheme ? `theme '${scopeTheme}'` : "all themes";
         showToast(`Auditing readiness & freezing snapshot (${scopeLabel})...`, "info");
+        showFreezeProgressPanel(true);
+        updateFreezeProgressUI({
+            phase: "starting",
+            completed_maps: 0,
+            total_maps: 0,
+            completed_samples: 0,
+            total_samples: 0,
+            message: `Auditing readiness & freezing snapshot (${scopeLabel})...`,
+        });
 
         try {
-            const body = scopeTheme ? { theme: scopeTheme } : {};
-            const res = await fetch("/api/training/datasets", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
+            const snapshot = await performFreezeSnapshotWithProgress(scopeTheme, (event, data) => {
+                if (event === "progress") {
+                    updateFreezeProgressUI(data);
+                } else if (event === "complete") {
+                    updateFreezeProgressUI({
+                        phase: "complete",
+                        completed_maps: data.completed_maps,
+                        total_maps: data.total_maps,
+                        completed_samples: data.completed_samples,
+                        total_samples: data.total_samples,
+                        message: `Snapshot created: ${data.snapshot?.id || ""}`,
+                        snapshot: data.snapshot,
+                    });
+                }
             });
 
-            if (!res.ok) {
-                const errData = await res.json().catch(() => ({}));
-                if (res.status === 400 || res.status === 422 || errData.code === "DATASET_NOT_READY") {
-                    showFreezeRefusalModal(errData);
-                    return;
-                }
-                throw new Error(errData.error || `HTTP ${res.status}`);
-            }
-
-            const snapshot = await res.json();
             showToast(`Frozen Dataset Snapshot '${snapshot.id}' created (${snapshot.samples_count} samples, ${snapshot.maps_count} maps)!`, "success");
+            setTimeout(() => {
+                showFreezeProgressPanel(false);
+            }, 2500);
             fetchDatasetSnapshots();
-        } catch (err) {
-            showToast(`Freeze error: ${err.message}`, "danger");
+        } catch (errData) {
+            showFreezeProgressPanel(false);
+            if (errData?.status === 400 || errData?.status === 422 || errData?.code === "DATASET_NOT_READY") {
+                showFreezeRefusalModal(errData);
+                return;
+            }
+            if (errData?.status === 409) {
+                showToast(errData.error || "A dataset snapshot freeze is already in progress", "warning");
+                startFreezeStatusPolling();
+                return;
+            }
+            showToast(`Freeze error: ${errData?.message || errData?.error || "Unknown error"}`, "danger");
         } finally {
             state.isFreezingSnapshot = false;
             if (btnFreezeSnapshot) btnFreezeSnapshot.disabled = false;
@@ -5541,28 +5760,30 @@
                 const scopeTheme = datasetScopeTheme();
                 const scopeLabel = scopeTheme ? `theme '${scopeTheme}'` : "all themes";
                 showToast(`Auditing readiness & freezing snapshot for ${scopeLabel}...`, "info");
+                if (trainingScopeHint) trainingScopeHint.textContent = `Freezing snapshot for ${scopeLabel}...`;
+                showFreezeProgressPanel(true);
 
-                const freezeBody = scopeTheme ? { theme: scopeTheme } : {};
-                const freezeRes = await fetch(`/api/training/datasets${datasetScopeQuery()}`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(freezeBody),
-                });
-
-                if (!freezeRes.ok) {
-                    const errData = await freezeRes.json().catch(() => ({}));
-                    if (freezeRes.status === 422 || errData.code === "DATASET_NOT_READY") {
+                try {
+                    const createdSnapshot = await performFreezeSnapshotWithProgress(scopeTheme, (event, data) => {
+                        updateFreezeProgressUI(data);
+                        if (trainingScopeHint && data.message) {
+                            trainingScopeHint.textContent = data.message;
+                        }
+                    });
+                    snapshotId = createdSnapshot.id;
+                    showToast(`Created snapshot '${snapshotId}'! Proceeding to training run...`, "info");
+                    fetchDatasetSnapshots();
+                    setTimeout(() => showFreezeProgressPanel(false), 2000);
+                } catch (errData) {
+                    showFreezeProgressPanel(false);
+                    if (trainingScopeHint) trainingScopeHint.textContent = "Target: Current active theme scope.";
+                    if (errData?.status === 422 || errData?.code === "DATASET_NOT_READY") {
                         showTrainingLaunchError(errData);
                         showFreezeRefusalModal(errData);
                         return;
                     }
-                    throw new Error(errData.error || `HTTP ${freezeRes.status}`);
+                    throw new Error(errData?.error || errData?.message || "Failed to freeze snapshot");
                 }
-
-                const createdSnapshot = await freezeRes.json();
-                snapshotId = createdSnapshot.id;
-                showToast(`Created snapshot '${snapshotId}'! Proceeding to training run...`, "info");
-                fetchDatasetSnapshots();
             }
 
             // Create the queued training run

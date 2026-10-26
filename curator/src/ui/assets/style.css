@@ -3818,6 +3818,153 @@ kbd {
 .btn-freeze {
     gap: 0.4rem;
 }
+/* Snapshot Freeze Progress Panel */
+.freeze-progress-panel {
+    padding: 0.85rem 1rem;
+    background: rgba(15, 23, 42, 0.95);
+    border-bottom: 1px solid rgba(56, 189, 248, 0.25);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    animation: fadeIn 0.2s ease-in-out;
+}
+
+.freeze-progress-panel.hidden {
+    display: none;
+}
+
+.freeze-progress-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    font-size: 0.8rem;
+}
+
+.freeze-progress-status-line {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.freeze-spinner-pulse {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: var(--accent-cyan, #06b6d4);
+    box-shadow: 0 0 8px var(--accent-cyan, #06b6d4);
+    animation: pulseGlow 1.5s infinite ease-in-out;
+    flex-shrink: 0;
+}
+
+@keyframes pulseGlow {
+    0%, 100% {
+        transform: scale(0.85);
+        opacity: 0.6;
+    }
+    50% {
+        transform: scale(1.15);
+        opacity: 1;
+    }
+}
+
+.freeze-phase-badge {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    padding: 2px 6px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+}
+
+.freeze-phase-badge.phase-starting,
+.freeze-phase-badge.phase-auditing {
+    background: rgba(245, 158, 11, 0.15);
+    color: #fbbf24;
+    border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.freeze-phase-badge.phase-packaging {
+    background: rgba(6, 182, 212, 0.15);
+    color: #38bdf8;
+    border: 1px solid rgba(6, 182, 212, 0.3);
+}
+
+.freeze-phase-badge.phase-finalizing {
+    background: rgba(168, 85, 247, 0.15);
+    color: #c084fc;
+    border: 1px solid rgba(168, 85, 247, 0.3);
+}
+
+.freeze-phase-badge.phase-complete {
+    background: rgba(16, 185, 129, 0.15);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.freeze-phase-badge.phase-error {
+    background: rgba(239, 68, 68, 0.15);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.freeze-progress-message {
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.freeze-progress-stats {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.freeze-progress-percent {
+    color: var(--accent-cyan, #06b6d4);
+    font-weight: 600;
+}
+
+.freeze-progress-track {
+    width: 100%;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 9999px;
+    overflow: hidden;
+}
+
+.freeze-progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #06b6d4, #3b82f6, #10b981);
+    background-size: 200% 100%;
+    border-radius: 9999px;
+    transition: width 0.25s ease-out;
+    animation: shimmerProgress 2s linear infinite;
+}
+
+@keyframes shimmerProgress {
+    0% { background-position: 100% 0; }
+    100% { background-position: -100% 0; }
+}
+
+.freeze-progress-subline {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.7rem;
+}
+
+.freeze-detail-item {
+    color: var(--text-muted);
+}
+
 
 .dataset-snapshots-panel {
     background: rgba(15, 23, 42, 0.65);

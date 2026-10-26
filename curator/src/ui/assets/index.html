@@ -485,6 +485,27 @@
                             </button>
                         </div>
                     </div>
+                    <!-- Freeze Progress Tracker -->
+                    <div id="freeze-progress-panel" class="freeze-progress-panel hidden" role="region" aria-label="Dataset Freeze Progress">
+                        <div class="freeze-progress-header">
+                            <div class="freeze-progress-status-line">
+                                <div class="freeze-spinner-pulse" aria-hidden="true"></div>
+                                <span id="freeze-phase-badge" class="freeze-phase-badge phase-starting">STARTING</span>
+                                <span id="freeze-progress-message" class="freeze-progress-message">Auditing dataset readiness...</span>
+                            </div>
+                            <div class="freeze-progress-stats mono">
+                                <span id="freeze-progress-counts">0 / 0</span>
+                                <span id="freeze-progress-percent" class="freeze-progress-percent">(0%)</span>
+                            </div>
+                        </div>
+                        <div class="freeze-progress-track">
+                            <div id="freeze-progress-bar" class="freeze-progress-bar" style="width: 0%;"></div>
+                        </div>
+                        <div class="freeze-progress-subline">
+                            <span id="freeze-detail-map" class="freeze-detail-item mono"></span>
+                            <span id="freeze-detail-section" class="freeze-detail-item mono"></span>
+                        </div>
+                    </div>
                     <div id="snapshots-shelf" class="snapshots-shelf">
                         <div id="snapshots-list" class="snapshots-list"></div>
                         <div id="snapshots-empty" class="snapshots-empty hidden">

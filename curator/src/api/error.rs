@@ -127,6 +127,9 @@ impl From<crate::services::FreezeDatasetError> for ApiError {
                 blocking_issues,
                 readiness: Box::new(readiness),
             },
+            crate::services::FreezeDatasetError::Cancelled => {
+                ApiError::BadRequest("Dataset snapshot freeze was cancelled".to_string())
+            }
             crate::services::FreezeDatasetError::Storage(storage_err) => storage_err.into(),
         }
     }

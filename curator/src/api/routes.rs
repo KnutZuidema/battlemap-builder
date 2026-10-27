@@ -1,7 +1,7 @@
 use axum::{
     body::{Body, Bytes},
     extract::{Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{
         sse::{Event, Sse},
         IntoResponse, Response,
@@ -24,7 +24,7 @@ use crate::domain::{
 use crate::services::CreateTrainingRunRequest;
 use crate::ports::catalog_repository::{CandidateFilter, CuratedFilter};
 use crate::ports::cost_tracker::CostStats;
-use crate::services::sections::{describe_map_sections, SectionDescriptionContext};
+use crate::services::sections::{describe_map_sections, ground_dimensions, SectionDescriptionContext};
 use crate::services::{
     DatasetExportService, FreezeDatasetError, IngestionSummary, LibraryService,
     RedditIngestionService, StorageMaintenanceService,
@@ -133,18 +133,7 @@ pub async fn patch_curated(
             .map(|(bytes, _)| bytes);
 
         let ground_img = ground_bytes.as_ref().and_then(|b| image::load_from_memory(b).ok());
-        let (mut ground_w, mut ground_h) = ground_layer
-            .as_ref()
-            .map(|l| l.dimensions)
-            .filter(|&(w, h)| w > 0 && h > 0)
-            .unwrap_or(current_map.dimensions);
-
-        if ground_w == 0 || ground_h == 0 {
-            if let Some(img) = &ground_img {
-                ground_w = img.width();
-                ground_h = img.height();
-            }
-        }
+        let (ground_w, ground_h) = ground_dimensions(&current_map, ground_img.as_ref());
 
         if !new_grid.is_curation_eligible(ground_w, ground_h) {
             return Err(ApiError::bad_request(
@@ -1088,12 +1077,20 @@ pub struct DescribeRequest {
     pub themes: Option<Vec<String>>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// Curated maps only: persist the generated `Physical Description` onto the curated map and
+    /// recompute every Map Section description through the shared section policy. Staging
+    /// candidates reject it, because their description belongs to the curation decision.
+    #[serde(default)]
+    pub apply: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeResponse {
     pub id: String,
     pub description: String,
+    /// True when the description was persisted to the curated map (see [`DescribeRequest::apply`]).
+    #[serde(default)]
+    pub applied: bool,
 }
 
 /// POST /api/staging/{id}/describe or GET /api/staging/{id}/describe
@@ -1114,6 +1111,11 @@ pub async fn post_describe_candidate(
             .map_err(|e| ApiError::bad_request(format!("Invalid JSON payload: {e}")))?
             .unwrap_or_default()
     };
+    if req.apply {
+        return Err(ApiError::bad_request(
+            "apply is only supported for curated maps",
+        ));
+    }
 
     // 1. Locate staging candidate
     let candidate = state
@@ -1148,7 +1150,11 @@ pub async fn post_describe_candidate(
         )
         .await?;
 
-    Ok(Json(DescribeResponse { id, description }))
+    Ok(Json(DescribeResponse {
+        id,
+        description,
+        applied: false,
+    }))
 }
 
 /// POST /api/curated/{id}/describe or GET /api/curated/{id}/describe
@@ -1156,6 +1162,7 @@ pub async fn post_describe_candidate(
 pub async fn post_curated_describe(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    method: Method,
     body: Bytes,
 ) -> Result<Json<DescribeResponse>, ApiError> {
     if id.trim().is_empty() {
@@ -1169,8 +1176,16 @@ pub async fn post_curated_describe(
             .map_err(|e| ApiError::bad_request(format!("Invalid JSON payload: {e}")))?
             .unwrap_or_default()
     };
+    // `apply` writes the curated bundle, so it stays behind POST: the route also answers GET for
+    // headless inspection, and a safe method must never mutate storage.
+    if req.apply && method != Method::POST {
+        return Err(ApiError::bad_request("apply requires a POST request"));
+    }
 
     let curated_map = state.catalog.get_curated(&id).await.ok();
+    if req.apply && curated_map.is_none() {
+        return Err(ApiError::not_found(format!("Curated map '{id}' not found")));
+    }
 
     let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
     let (bytes, filename) = library
@@ -1206,7 +1221,44 @@ pub async fn post_curated_describe(
         .describe(&bytes, filename, &tags, None)
         .await?;
 
-    Ok(Json(DescribeResponse { id, description }))
+    let mut applied = false;
+    if let (true, Some(stored)) = (req.apply, curated_map.as_ref()) {
+        let ground_image = image::load_from_memory(&bytes).ok();
+        let (ground_w, ground_h) = ground_dimensions(stored, ground_image.as_ref());
+        let sections = describe_map_sections(
+            &state.description_service,
+            SectionDescriptionContext {
+                grid: &stored.grid,
+                ground_image: ground_image.as_ref(),
+                ground_dimensions: (ground_w, ground_h),
+                tags: &tags,
+                title: None,
+                map_description: &description,
+            },
+        )
+        .await;
+        library
+            .update_curated(
+                &id,
+                CuratedMapUpdate {
+                    description: Some(description.clone()),
+                    sections: Some(sections),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        applied = true;
+        tracing::info!(
+            id = %id,
+            "Applied regenerated Physical Description and Map Section descriptions"
+        );
+    }
+
+    Ok(Json(DescribeResponse {
+        id,
+        description,
+        applied,
+    }))
 }
 
 /// Request payload for rejecting a candidate.

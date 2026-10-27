@@ -1675,6 +1675,10 @@ kbd {
     border-left: 3px solid var(--accent-cyan);
 }
 
+.toast.toast-warning {
+    border-left: 3px solid var(--accent-amber);
+}
+
 .toast-message {
     flex: 1;
 }
@@ -3739,6 +3743,15 @@ kbd {
     gap: 0.6rem;
 }
 
+.readiness-empty {
+    padding: 0.85rem 1rem;
+    border-radius: 8px;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.28);
+    color: #fcd34d;
+    font-size: 0.8rem;
+}
+
 .readiness-clean {
     padding: 0.85rem 1rem;
     border-radius: 8px;
@@ -3813,6 +3826,72 @@ kbd {
     color: #93c5fd;
     font-size: 0.75rem;
 }
+
+/* In-modal remediation actions (Issue #245) */
+#btn-fix-all-descriptions {
+    margin-right: auto;
+}
+
+.readiness-issue-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.15rem 0;
+}
+
+.readiness-issue-text {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.readiness-issue-side {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.25rem;
+    flex: 0 0 auto;
+}
+
+.readiness-issue-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.35rem;
+}
+
+.readiness-action-btn {
+    gap: 0.35rem;
+    font-size: 0.72rem;
+    padding: 0.2rem 0.5rem;
+    white-space: nowrap;
+}
+
+.readiness-action-btn.is-busy {
+    opacity: 0.7;
+    cursor: progress;
+}
+
+/* A running batch owns the manifest writes; row actions wait for it. */
+.readiness-issues.is-batching .readiness-action-btn {
+    pointer-events: none;
+    opacity: 0.55;
+}
+
+.readiness-action-spinner {
+    display: inline-block;
+    width: 11px;
+    height: 11px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top-color: #ffffff;
+    border-radius: 50%;
+    animation: ai-spin 0.6s linear infinite;
+}
+
+.readiness-action-spinner.hidden {
+    display: none;
+}
+
 
 /* Frozen Dataset Snapshots Panel (Issue #216) */
 .btn-freeze {

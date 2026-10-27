@@ -11,7 +11,7 @@ pub mod storage_maintenance;
 pub mod storage_migration;
 pub mod training;
 pub use description::*;
-pub use sections::{describe_map_sections, SectionDescriptionContext};
+pub use sections::{describe_map_sections, ground_dimensions, SectionDescriptionContext};
 pub use curation::*;
 
 pub use benchmark::*;

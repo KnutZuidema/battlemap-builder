@@ -1,7 +1,8 @@
 use image::DynamicImage;
 
 use crate::domain::{
-    crop_section_box, synthesize_map_sections, synthesize_sections, GridConfig, MapSection,
+    crop_section_box, synthesize_map_sections, synthesize_sections, CuratedMap, GridConfig,
+    LayerRole, MapSection,
 };
 use crate::services::description::DescriptionService;
 
@@ -19,6 +20,26 @@ pub struct SectionDescriptionContext<'a> {
     pub title: Option<&'a str>,
     /// Map-level physical description, reused verbatim for single-section maps.
     pub map_description: &'a str,
+}
+
+/// Ground layer dimensions used to derive Map Section origins.
+///
+/// The decoded image wins: the readiness audit crops sections out of exactly those pixels, so
+/// planning origins from stale layer metadata mints sections whose boxes never fit the image and
+/// a remediation can never clear `section_unresolvable`. Recorded metadata is the fallback when
+/// the image cannot be read or decoded.
+pub fn ground_dimensions(map: &CuratedMap, ground_image: Option<&DynamicImage>) -> (u32, u32) {
+    ground_image
+        .map(|img| (img.width(), img.height()))
+        .or_else(|| {
+            map.layers
+                .iter()
+                .find(|layer| layer.role == LayerRole::Ground)
+                .or_else(|| map.layers.first())
+                .map(|layer| layer.dimensions)
+                .filter(|&(w, h)| w > 0 && h > 0)
+        })
+        .unwrap_or(map.dimensions)
 }
 
 /// Crops one 16×16 grid-cell Map Section from the Ground layer and encodes it as PNG.

@@ -1361,3 +1361,353 @@ async fn test_reject_endpoint_logs_rejection_and_purges_in_memory_staging() {
         .unwrap()
         .is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Dataset readiness remediation: `POST /api/curated/{id}/describe` with `apply`
+// ---------------------------------------------------------------------------
+
+/// Audit the current dataset readiness scope through the HTTP surface.
+async fn readiness_report(app: axum::Router) -> Value {
+    let req = Request::builder()
+        .uri("/api/dataset/readiness")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test]
+async fn test_curated_describe_apply_persists_neutral_description_and_sections() {
+    let neutral = "Moss-slick stone crypt with two carved sarcophagi and a flooded alcove.";
+    let generator = Arc::new(MockCuratedGen(Ok(neutral.to_string())));
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
+    let app = create_router(state);
+
+    curate_multi_section_map(
+        &catalog,
+        &blobs,
+        "remediate_descriptions",
+        Some("Top-down view of a stone crypt"),
+    )
+    .await;
+
+    // Precondition: the stored description fails the audit, so the remediation has a defect to
+    // clear rather than pinning a no-op.
+    let before = readiness_report(app.clone()).await;
+    assert_eq!(before["ready"], false);
+    assert_eq!(
+        before["maps"][0]["issues"][0]["code"],
+        "physical_description_not_neutral"
+    );
+
+    let req = Request::builder()
+        .uri("/api/curated/remediate_descriptions/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "apply": true }).to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let res: DescribeResponse = serde_json::from_slice(&body).unwrap();
+    assert!(res.applied, "apply must report the persisted remediation");
+    assert_eq!(res.description, neutral);
+
+    let stored = catalog.get_curated("remediate_descriptions").await.unwrap();
+    assert_eq!(stored.description.as_deref(), Some(neutral));
+    assert_eq!(stored.sections.len(), 4);
+    assert!(
+        stored.sections.iter().all(|s| s.description == neutral),
+        "every Map Section must carry the regenerated description: {:?}",
+        stored.sections
+    );
+    let ground_caption = stored
+        .layers
+        .iter()
+        .find(|layer| layer.role == LayerRole::Ground)
+        .and_then(|layer| layer.caption.as_deref());
+    assert_eq!(ground_caption, Some(neutral));
+
+    // Re-auditing the same scope now reports a clean dataset.
+    let after = readiness_report(app).await;
+    assert_eq!(after["ready"], true, "{after}");
+    assert_eq!(after["maps_ready"], 1);
+    assert_eq!(after["sections_ready"], 4);
+}
+
+#[tokio::test]
+async fn test_curated_describe_apply_unknown_map_is_not_found() {
+    let (app, _, _) = setup_test_app();
+
+    let req = Request::builder()
+        .uri("/api/curated/no_such_map/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "apply": true }).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_curated_describe_apply_propagates_vision_failure_without_persisting() {
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_description_service(Arc::new(DescriptionService::new(None)));
+    let app = create_router(state);
+
+    let kept = "Moss-slick stone crypt with two carved sarcophagi.";
+    curate_multi_section_map(&catalog, &blobs, "remediate_unconfigured", Some(kept)).await;
+
+    let req = Request::builder()
+        .uri("/api/curated/remediate_unconfigured/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "apply": true }).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let stored = catalog.get_curated("remediate_unconfigured").await.unwrap();
+    assert_eq!(stored.description.as_deref(), Some(kept));
+}
+
+#[tokio::test]
+async fn test_staging_describe_rejects_apply() {
+    let (app, _, _) = setup_test_app();
+
+    let req = Request::builder()
+        .uri("/api/staging/whatever/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "apply": true }).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let err: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        err["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("only supported for curated maps"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn test_curated_describe_apply_plans_sections_from_the_ground_image() {
+    let neutral = "Moss-slick stone crypt with two carved sarcophagi.";
+    let generator = Arc::new(MockCuratedGen(Ok(neutral.to_string())));
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
+    let app = create_router(state);
+
+    // The bundle's layer metadata claims 4096×4096 while the stored PNG is 2048×2048. Section
+    // origins must follow the pixels the readiness audit crops, otherwise the remediation mints
+    // sections whose boxes never fit and the audit can never converge.
+    let png = create_test_png(2048, 2048);
+    let map = CuratedMap::with_now(
+        "stale_dims",
+        Theme::Dungeon,
+        vec!["dungeon".into()],
+        (4096, 4096),
+    )
+    .with_grid(GridConfig::new(64, 0, 0))
+    .with_description("Top-down view of a stone crypt");
+    seed_curated_ports(&catalog, &blobs, &map, &png).await;
+
+    let req = Request::builder()
+        .uri("/api/curated/stale_dims/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "apply": true }).to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored = catalog.get_curated("stale_dims").await.unwrap();
+    assert_eq!(stored.sections.len(), 4, "{:?}", stored.sections);
+
+    let after = readiness_report(app).await;
+    assert_eq!(after["ready"], true, "{after}");
+    assert_eq!(after["sections_ready"], 4);
+}
+
+#[tokio::test]
+async fn test_curated_describe_apply_requires_post() {
+    let responder = Arc::new(MockCuratedGen(Ok("Moss-slick stone crypt.".to_string())));
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(responder))));
+    let app = create_router(state);
+
+    let kept = "Moss-slick stone crypt with two carved sarcophagi.";
+    curate_multi_section_map(&catalog, &blobs, "apply_via_get", Some(kept)).await;
+
+    let req = Request::builder()
+        .uri("/api/curated/apply_via_get/describe")
+        .method("GET")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "apply": true }).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // A safe method must never write the curated bundle.
+    let stored = catalog.get_curated("apply_via_get").await.unwrap();
+    assert_eq!(stored.description.as_deref(), Some(kept));
+}
+
+#[tokio::test]
+async fn test_patch_curated_regrid_plans_sections_from_the_ground_image() {
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_description_service(Arc::new(
+        DescriptionService::new(Some(Arc::new(MockCuratedGen(Ok(
+            "Moss-slick stone crypt with two carved sarcophagi.".to_string(),
+        ))))),
+    ));
+    let app = create_router(state);
+
+    // Same stale metadata as the apply regression: the grid editor must plan sections from the
+    // 2048×2048 pixels, not the 4096×4096 the layer metadata claims.
+    let png = create_test_png(2048, 2048);
+    let map = CuratedMap::with_now(
+        "stale_regrid",
+        Theme::Dungeon,
+        vec!["dungeon".into()],
+        (4096, 4096),
+    )
+    .with_grid(GridConfig::new(64, 0, 0))
+    .with_description("Moss-slick stone crypt with two carved sarcophagi.");
+    seed_curated_ports(&catalog, &blobs, &map, &png).await;
+
+    let req = Request::builder()
+        .uri("/api/curated/stale_regrid")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(regrid_payload(64).to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = catalog.get_curated("stale_regrid").await.unwrap();
+    assert_eq!(stored.sections.len(), 4, "{:?}", stored.sections);
+
+    let after = readiness_report(app).await;
+    assert_eq!(after["ready"], true, "{after}");
+}
+
+#[tokio::test]
+async fn test_curated_describe_apply_mints_descriptions_for_a_legacy_map() {
+    let neutral = "Damp grotto with a still green pool and moss-crusted boulders.";
+    let generator = Arc::new(MockCuratedGen(Ok(neutral.to_string())));
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
+    let app = create_router(state);
+
+    // Legacy bundle: a Map Section exists but carries no description, and the map has none either,
+    // so the only remediation is to mint both.
+    let map = CuratedMap::with_now(
+        "legacy_undescribed",
+        Theme::Cave,
+        vec!["grotto".into()],
+        (1024, 1024),
+    )
+    .with_grid(GridConfig::new(64, 0, 0))
+    .with_sections(vec![curator::domain::MapSection::new(0, 0, "   ")]);
+    seed_curated_ports(&catalog, &blobs, &map, &create_test_png(1024, 1024)).await;
+
+    let before = readiness_report(app.clone()).await;
+    assert_eq!(before["ready"], false);
+    assert_eq!(
+        before["maps"][0]["issues"][0]["code"],
+        "physical_description_missing"
+    );
+
+    let req = Request::builder()
+        .uri("/api/curated/legacy_undescribed/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "apply": true }).to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored = catalog.get_curated("legacy_undescribed").await.unwrap();
+    assert_eq!(stored.description.as_deref(), Some(neutral));
+    assert_eq!(stored.sections.len(), 1);
+    assert_eq!(stored.sections[0].description, neutral);
+    let ground_caption = stored
+        .layers
+        .iter()
+        .find(|layer| layer.role == LayerRole::Ground)
+        .and_then(|layer| layer.caption.as_deref());
+    assert_eq!(ground_caption, Some(neutral));
+
+    let after = readiness_report(app).await;
+    assert_eq!(after["ready"], true, "{after}");
+}
+
+#[tokio::test]
+async fn test_patch_curated_regrid_accepts_a_grid_the_pixels_support() {
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_description_service(Arc::new(
+        DescriptionService::new(Some(Arc::new(MockCuratedGen(Ok(
+            "Moss-slick stone crypt with two carved sarcophagi.".to_string(),
+        ))))),
+    ));
+    let app = create_router(state);
+
+    // The inverse stale case: the layer metadata understates a 2048×2048 raster as 512×512, so the
+    // persisted grid must be validated against the pixels that actually hold the sections.
+    let png = create_test_png(2048, 2048);
+    let mut map = CuratedMap::with_now(
+        "undersized_dims",
+        Theme::Dungeon,
+        vec!["dungeon".into()],
+        (512, 512),
+    )
+    .with_grid(GridConfig::new(64, 0, 0))
+    .with_description("Moss-slick stone crypt with two carved sarcophagi.");
+    map.layers = vec![CuratedLayer::new(
+        0,
+        CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), "png"),
+        LayerRole::Ground,
+        Some(0),
+        (512, 512),
+    )];
+    catalog.save_curated(&map).await.unwrap();
+    blobs
+        .write_blob(&curated_ground_key(&map), &png)
+        .await
+        .unwrap();
+
+    let req = Request::builder()
+        .uri("/api/curated/undersized_dims")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(regrid_payload(64).to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = catalog.get_curated("undersized_dims").await.unwrap();
+    assert_eq!(stored.sections.len(), 4, "{:?}", stored.sections);
+
+    let after = readiness_report(app).await;
+    assert_eq!(after["ready"], true, "{after}");
+}

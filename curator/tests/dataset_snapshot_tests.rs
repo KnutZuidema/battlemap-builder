@@ -593,7 +593,7 @@ fn test_ui_assets_expose_dataset_snapshot_controls() {
     assert!(js.contains("/api/training/datasets"));
     assert!(js.contains("DATASET_NOT_READY"));
     assert!(js.contains("SNAPSHOT_IN_USE"));
-    assert!(js.contains("DATASET_ISSUE_REMEDIATIONS"));
+    assert!(js.contains("DATASET_ISSUE_ACTIONS"));
     assert!(js.contains("freezeDatasetSnapshot"));
     assert!(js.contains("deleteDatasetSnapshot"));
     assert!(js.contains("fetchDatasetSnapshots"));
@@ -608,6 +608,43 @@ fn test_ui_assets_expose_dataset_snapshot_controls() {
     assert!(css.contains(".freeze-progress-panel"));
     assert!(css.contains(".freeze-progress-bar"));
     assert!(css.contains(".freeze-phase-badge"));
+}
+
+/// Issue #245: the readiness modal fixes flagged maps in place, so the assets must expose the
+/// remediation controls and the API wiring behind them.
+#[test]
+fn test_ui_assets_expose_dataset_readiness_remediation_actions() {
+    let html = include_str!("../src/ui/assets/index.html");
+    let js = include_str!("../src/ui/assets/app.js");
+    let css = include_str!("../src/ui/assets/style.css");
+
+    assert!(html.contains("id=\"btn-fix-all-descriptions\""));
+    assert!(html.contains("Fix All Descriptions"));
+
+    // Per-issue action buttons and the handlers behind them.
+    assert!(js.contains("DATASET_ISSUE_ACTIONS"));
+    assert!(js.contains("renderDatasetIssueRow"));
+    assert!(js.contains("data-remediate="));
+    assert!(js.contains("remediateDatasetIssue"));
+    assert!(js.contains("fixAllDatasetDescriptions"));
+    assert!(js.contains("fixableDescriptionMapIds"));
+    assert!(js.contains("openGridCalibrationForMap"));
+    assert!(js.contains("openCuratedInspectorById"));
+    assert!(js.contains("apply: true"));
+    assert!(js.contains("fetchDatasetReadiness"));
+    // The action buttons are delegated from the issue list, so a re-render never stacks handlers.
+    assert!(js.contains("datasetReadinessIssues?.addEventListener(\"click\""));
+    assert!(js.contains("closest(\"[data-remediate]\")"));
+    assert!(js.contains("state.datasetRemediating"));
+
+    // Every successful remediation re-audits the scope it was opened for.
+    assert!(js.contains("renderDatasetReadinessReport(refusal.readiness)"));
+
+    assert!(css.contains(".readiness-issue-row"));
+    assert!(css.contains(".readiness-issue-actions"));
+    assert!(css.contains(".readiness-action-btn"));
+    assert!(css.contains(".readiness-action-btn.is-busy"));
+    assert!(css.contains(".readiness-action-spinner"));
 }
 
 // ---------------------------------------------------------------------------

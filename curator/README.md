@@ -131,7 +131,7 @@ Curator features an automated vision description workflow powered by Google Gemi
 4. **Failure Propagation & Section Fallback (ADR-0005)**:
    - **Map-level physical description is strict**: there is no deterministic caption fallback. `POST /api/staging/:id/describe` and `POST /api/curated/:id/describe` propagate vision failures as HTTP errors: `503 Service Unavailable` when the vision engine is unconfigured (missing/invalid `OPENROUTER_API_KEY` or disabled) and `502 Bad Gateway` when the upstream provider fails or returns an empty description.
    - During curation (`POST /api/curate`), an omitted map-level description is generated through the same strict path; if vision is unavailable, curation fails with the propagated error instead of persisting a synthesized description.
-   - **Per-section captions are best-effort**: for multi-section maps, each 16×16 section is described independently and falls back to the deterministic `CaptionGenerator` when its vision call fails or its crop is unavailable, so a single failed section never blocks curation or regridding. Single-section maps reuse the map-level description verbatim.
+   - **Per-section descriptions are best-effort**: for multi-section maps, each 16×16 section is described independently and falls back to the map-level `Physical Description` when its vision call fails or its crop is unavailable, so a single failed section never blocks curation or regridding. Single-section maps reuse the map-level description verbatim. Captions are never synthesized here; the `Trigger Phrase` is applied once, at export time.
 
 ### 2.4. Keyboard Event Routing & Trapping
 
@@ -299,13 +299,34 @@ An empty store is **not** a ready dataset (`ready: false`): there is nothing to 
 | `ground_image_unreadable` | The Ground layer bytes do not decode as an image | Re-ingest the map; an export would skip it entirely |
 | `grid_below_minimum` | The persisted Grid Configuration yields no full 16×16 Grid Cell window | Recalibrate the grid (`PATCH /api/curated/{id}` with a `grid` that fits the Ground layer) |
 | `section_unresolvable` | A Map Section's exact `16 * cell_size_px` box does not fit the Ground layer | Regrid, or re-curate the map; the export skips that section |
-| `physical_description_missing` | The section (and the map) resolve to no `Physical Description`, so its caption would carry only the Trigger Phrase, themes and tags | `POST /api/curated/{id}/describe`, then `PATCH` the description |
-| `physical_description_not_neutral` | The stored description holds camera, perspective, art-style or grid directives instead of physical prose | Regenerate the description, then `PATCH /api/curated/{id}` with a `grid` so section descriptions are recomputed per crop |
+| `physical_description_missing` | The section (and the map) resolve to no `Physical Description`, so its caption would carry only the Trigger Phrase, themes and tags | `POST /api/curated/{id}/describe` with `{"apply": true}` regenerates and persists the description plus every Map Section description |
+| `physical_description_not_neutral` | The stored description holds camera, perspective, art-style or grid directives instead of physical prose | `POST /api/curated/{id}/describe` with `{"apply": true}` regenerates it under the strict neutral prompt and recomputes the section descriptions per crop |
 
 The embedded UI exposes the same audit as **Dataset Readiness** in the Dataset Library toolbar: the
 button turns emerald (`Dataset Ready · N sections`) or amber (`Dataset Issues · ready/total maps`) and
 the modal lists the aggregate counts plus every flagged map and issue. The audit mirrors the library's
 active theme tag, so the report always describes the scope an export from that view would ship.
+
+### In-modal remediation
+
+Fixable issues carry an action button on their row, and the same controls appear when a snapshot freeze
+is refused (`DATASET_NOT_READY`), so the flagged maps are resolved without leaving the dialog:
+
+- **Description codes** (`physical_description_missing`, `physical_description_not_neutral`) offer
+  *Regenerate Description* / *Regenerate Neutral Description*. The button calls
+  `POST /api/curated/{id}/describe` with `{"apply": true}`: that request regenerates the strict
+  perspective-neutral `Physical Description`, persists it on the curated map, and recomputes every Map
+  Section description through the same section policy the ZIP export reads. **Fix All Descriptions**
+  batches that call across every flagged map, sequentially, with live progress on the button.
+- **Grid codes** (`grid_below_minimum`, `section_unresolvable`) offer *Edit Grid*, which opens the
+  fullscreen grid calibration editor for that curated map.
+- **Ground layer codes** (`ground_layer_missing`, `ground_image_unreadable`) offer *Inspect / Delete*,
+  which opens the curated inspector drawer for that bundle.
+
+A successful action immediately re-audits the active scope, so the resolved issue leaves the list and
+the counts update without closing the modal; a description that is generated but not persisted, or that
+still fails the audit, surfaces as a danger/warning toast with the row left actionable. Failures surface
+the propagated error (`503` when vision is unconfigured, `502` on upstream failure) the same way.
 
 Legacy bundles curated before ADR-0007 carry no `sections` and no `description`: their full-grid lattice
 still exports (one 16×16 window per lattice) but their captions have no `Physical Description`, which the

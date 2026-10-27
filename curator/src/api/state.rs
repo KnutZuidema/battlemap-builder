@@ -5,13 +5,14 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 
 use crate::adapters::{
-    FileCostLedger, ModalTrainingRunner, OpenRouterAdapter, RedditCrawler, RoutingModelEngine,
-    WaveSpeedAdapter,
+    FileCostLedger, ModalTrainingRunner, NoopHarvestRunLedger, OpenRouterAdapter, RedditCrawler,
+    RoutingModelEngine, WaveSpeedAdapter,
 };
 use crate::api::error::ApiError;
 use crate::ports::blob_storage::BlobStorage;
 use crate::ports::catalog_repository::CatalogRepository;
 use crate::ports::cost_tracker::CostTracker;
+use crate::ports::harvest_run_ledger::HarvestRunLedger;
 use crate::ports::harvester::RedditHarvester;
 use crate::ports::training_runner::TrainingRunner;
 use crate::services::BenchmarkService;
@@ -24,6 +25,8 @@ pub struct AppState {
     pub catalog: Arc<dyn CatalogRepository + Send + Sync>,
     pub blobs: Arc<dyn BlobStorage + Send + Sync>,
     pub harvester: Arc<dyn RedditHarvester + Send + Sync>,
+    /// Audit ledger for Reddit harvest runs; a no-op ledger logs outcomes when no database is set.
+    pub harvest_ledger: Arc<dyn HarvestRunLedger>,
     pub cost_tracker: Arc<dyn CostTracker + Send + Sync>,
     pub benchmark_service: Option<Arc<BenchmarkService>>,
     pub benchmark_cancelled: Arc<AtomicBool>,
@@ -97,6 +100,7 @@ impl AppState {
             training_service,
             training_runner,
             model_registry,
+            harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
             snapshot_freeze_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -137,6 +141,7 @@ impl AppState {
             training_service,
             training_runner,
             model_registry,
+            harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
             snapshot_freeze_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -176,6 +181,7 @@ impl AppState {
             training_service,
             training_runner,
             model_registry,
+            harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
             snapshot_freeze_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -216,6 +222,7 @@ impl AppState {
             training_service,
             training_runner,
             model_registry,
+            harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
             snapshot_freeze_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -251,6 +258,7 @@ impl AppState {
             training_service,
             training_runner,
             model_registry,
+            harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
             snapshot_freeze_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -260,6 +268,12 @@ impl AppState {
     /// Configures an explicit model registry.
     pub fn with_model_registry(mut self, registry: Arc<crate::services::ModelRegistry>) -> Self {
         self.model_registry = registry;
+        self
+    }
+
+    /// Configures the ledger that records every Reddit harvest run.
+    pub fn with_harvest_run_ledger(mut self, harvest_ledger: Arc<dyn HarvestRunLedger>) -> Self {
+        self.harvest_ledger = harvest_ledger;
         self
     }
 

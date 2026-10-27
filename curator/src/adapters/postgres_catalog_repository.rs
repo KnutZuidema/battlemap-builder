@@ -9,10 +9,11 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 
 use crate::domain::{
-    Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, RejectionReason, RejectionRecord,
-    Theme, TrainingMetricSnapshot, TrainingRun,
+    Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, RedditHarvestQuery, RejectionReason,
+    RejectionRecord, Theme, TrainingMetricSnapshot, TrainingRun,
 };
 use crate::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
+use crate::ports::harvest_run_ledger::{HarvestRunLedger, HarvestRunOutcome};
 use crate::ports::storage_error::StorageError;
 
 fn map_sqlx_err(err: sqlx::Error) -> StorageError {
@@ -922,3 +923,51 @@ impl CatalogRepository for PostgresCatalogRepository {
         Ok(adapters)
     }
 }
+
+/// Clamps a harvest counter into the `INT` range of the `harvest_runs` ledger columns.
+fn ledger_counter(value: usize) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+#[async_trait]
+impl HarvestRunLedger for PostgresCatalogRepository {
+    async fn start_run(&self, query: &RedditHarvestQuery) -> Result<Option<String>, StorageError> {
+        let row = sqlx::query(
+            "INSERT INTO harvest_runs (subreddit, sort) VALUES ($1, $2) RETURNING id::text",
+        )
+        .bind(&query.subreddit)
+        .bind(query.sort.as_str())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
+
+        row.try_get("id").map(Some).map_err(map_sqlx_err)
+    }
+
+    async fn finish_run(
+        &self,
+        run_id: Option<&str>,
+        outcome: &HarvestRunOutcome,
+    ) -> Result<(), StorageError> {
+        let Some(run_id) = run_id else {
+            return Ok(());
+        };
+
+        sqlx::query(
+            "UPDATE harvest_runs \
+             SET finished_at = NOW(), posts_scanned = $2, downloaded = $3, skipped = $4, error = $5 \
+             WHERE id = $1::uuid",
+        )
+        .bind(run_id)
+        .bind(ledger_counter(outcome.posts_scanned))
+        .bind(ledger_counter(outcome.downloaded))
+        .bind(ledger_counter(outcome.skipped))
+        .bind(outcome.error.as_deref())
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
+
+        Ok(())
+    }
+}
+

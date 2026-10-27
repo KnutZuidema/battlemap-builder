@@ -1346,6 +1346,9 @@ pub struct RedditHarvestResponse {
     pub processed: usize,
     pub downloaded: usize,
     pub skipped: usize,
+    /// Harvest ledger run id; `None` when the catalog backend keeps no ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub summary: IngestionSummary,
 }
 
@@ -1355,6 +1358,7 @@ impl From<IngestionSummary> for RedditHarvestResponse {
             processed: s.processed,
             downloaded: s.downloaded,
             skipped: s.skipped,
+            run_id: None,
             summary: s,
         }
     }
@@ -1378,6 +1382,7 @@ pub async fn post_harvest_reddit(
         state.harvester.clone(),
         state.catalog.clone(),
         state.blobs.clone(),
+        state.harvest_ledger.clone(),
     );
 
     tracing::info!(
@@ -1417,8 +1422,11 @@ pub async fn post_harvest_reddit(
         let stream = UnboundedReceiverStream::new(rx);
         Ok(Sse::new(stream).into_response())
     } else {
-        let summary = service.ingest_query_filtered(&query, gridless_only).await?;
-        let response = RedditHarvestResponse::from(summary);
+        let (summary, run_id) = service.ingest_query_with_run(&query, gridless_only).await?;
+        let response = RedditHarvestResponse {
+            run_id,
+            ..RedditHarvestResponse::from(summary)
+        };
         Ok(Json(response).into_response())
     }
 }

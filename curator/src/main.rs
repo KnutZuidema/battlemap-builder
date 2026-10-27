@@ -8,6 +8,7 @@ use curator::adapters::{
 use curator::api::{create_router, AppState};
 use curator::ports::blob_storage::BlobStorage;
 use curator::ports::catalog_repository::CatalogRepository;
+use curator::ports::harvest_run_ledger::HarvestRunLedger;
 use tracing_subscriber::EnvFilter;
 
 fn resolve_port() -> u16 {
@@ -113,7 +114,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Initializing filesystem catalog and blob ports..."
     );
     let catalog_backend = curator::adapters::CatalogBackend::from_env();
-    let catalog: Arc<dyn CatalogRepository + Send + Sync> = match catalog_backend {
+    let (catalog, harvest_ledger): (
+        Arc<dyn CatalogRepository + Send + Sync>,
+        Arc<dyn HarvestRunLedger>,
+    ) = match catalog_backend {
         curator::adapters::CatalogBackend::Postgres(db_url) => {
             tracing::info!("Initializing PostgreSQL catalog repository...");
             let repo = curator::adapters::PostgresCatalogRepository::connect(&db_url)
@@ -122,7 +126,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             repo.run_migrations()
                 .await
                 .map_err(|e| format!("Failed to run PostgreSQL catalog migrations: {e}"))?;
-            Arc::new(repo)
+            let repo = Arc::new(repo);
+            (repo.clone(), repo)
         }
         curator::adapters::CatalogBackend::Filesystem => {
             tracing::info!(
@@ -137,7 +142,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Migrated legacy generated staging manifests to Candidate manifests"
                 );
             }
-            Arc::new(catalog_repository)
+            (
+                Arc::new(catalog_repository),
+                Arc::new(curator::adapters::NoopHarvestRunLedger),
+            )
         }
     };
     let blob_backend = curator::adapters::BlobBackend::from_env()?;
@@ -183,7 +191,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let state = AppState::with_all(Arc::new(crawler), cost_tracker, catalog, blobs);
+    let state = AppState::with_all(Arc::new(crawler), cost_tracker, catalog, blobs)
+        .with_harvest_run_ledger(harvest_ledger);
 
     // Resume any active/running training runs across server restart
     if let Err(e) = state.training_service.resume_non_terminal_runs().await {

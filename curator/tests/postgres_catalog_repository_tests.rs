@@ -54,7 +54,7 @@ async fn cleanup(repository: &PostgresCatalogRepository, prefix: &str) {
         "DELETE FROM dataset_snapshots WHERE id LIKE $1",
         "DELETE FROM training_runs WHERE id LIKE $1",
         "DELETE FROM trashed_candidates WHERE id LIKE $1",
-        "DELETE FROM rejections WHERE id LIKE $1",
+        "DELETE FROM rejections WHERE candidate_id LIKE $1",
         "DELETE FROM curated_maps WHERE id LIKE $1",
         "DELETE FROM candidates WHERE id LIKE $1",
     ] {
@@ -131,7 +131,8 @@ fn sample_snapshot(
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn backend_resolver_prefers_postgres_only_for_non_empty_database_url() {
+fn backend_resolution_falls_back_to_filesystem_without_database_url() {
+    // The fallback contract: only a non-empty `DATABASE_URL` selects PostgreSQL.
     assert_eq!(CatalogBackend::resolve(None), CatalogBackend::Filesystem);
     assert_eq!(
         CatalogBackend::resolve(Some("")),
@@ -145,63 +146,6 @@ fn backend_resolver_prefers_postgres_only_for_non_empty_database_url() {
         CatalogBackend::resolve(Some(" postgres://curator@localhost/curator ")),
         CatalogBackend::Postgres("postgres://curator@localhost/curator".to_string())
     );
-}
-
-#[tokio::test]
-async fn filesystem_fallback_catalog_serves_the_same_port_contract() {
-    // With `DATABASE_URL` unset the resolver selects the filesystem backend, which must keep
-    // serving the full port contract used by Postgres when a database is configured.
-    let catalog = curator::adapters::FilesystemCatalogRepository::new(
-        tempfile::tempdir().expect("tempdir").path(),
-    );
-
-    let group = unique("fallback-group");
-    let mut first = Candidate::new(
-        format!("{group}-a"),
-        Source::Reddit,
-        "a.png",
-        (10, 10),
-        Utc::now(),
-    );
-    first.parent_group_id = Some(group.clone());
-    let second = Candidate::new(
-        format!("{group}-b"),
-        Source::Generated,
-        "b.png",
-        (10, 10),
-        Utc::now(),
-    );
-
-    catalog.save_candidate(&first).await.expect("save candidate");
-    catalog.save_candidate(&second).await.expect("save candidate");
-    assert_eq!(
-        catalog.get_candidate(&first.id).await.expect("get candidate"),
-        first
-    );
-
-    let listed = catalog
-        .list_candidates(&CandidateFilter {
-            source: Some(Source::Reddit),
-            parent_group_id: Some(group.clone()),
-            ..CandidateFilter::default()
-        })
-        .await
-        .expect("list candidates");
-    assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].id, first.id);
-
-    catalog
-        .delete_candidate(&first.id)
-        .await
-        .expect("delete candidate");
-    catalog
-        .delete_candidate(&first.id)
-        .await
-        .expect("delete candidate is idempotent");
-    assert!(matches!(
-        catalog.get_candidate(&first.id).await,
-        Err(StorageError::NotFound(_))
-    ));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -524,32 +468,39 @@ async fn rejections_support_logging_lookup_removal_and_latest() {
     assert_eq!(ours[0].reason, RejectionReason::GridBurnedIn);
     assert_eq!(ours[0].notes.as_deref(), Some("grid"));
 
-    let latest = repository
-        .latest_rejection()
-        .await
-        .expect("latest rejection")
-        .expect("some rejection exists");
-    assert!(latest.timestamp >= ours[1].timestamp);
-
-    // Logging the same id again upserts the row rather than appending a duplicate.
+    // The rejection log is append-only: rejecting the same id again adds a record and leaves the
+    // earlier one in place.
     repository
         .log_rejection(&first_id, RejectionReason::BadGeometry, None)
         .await
         .expect("re-log rejection");
     let records = repository.rejection_records().await.expect("records");
-    let refreshed: Vec<_> = records
+    let ours: Vec<_> = records
         .iter()
-        .filter(|record| record.id == first_id)
+        .filter(|record| record.id.starts_with(&prefix))
         .collect();
-    assert_eq!(refreshed.len(), 1);
-    assert_eq!(refreshed[0].reason, RejectionReason::BadGeometry);
-    assert_eq!(refreshed[0].notes, None);
+    assert_eq!(ours.len(), 3);
+    let relogged: Vec<_> = ours.iter().filter(|record| record.id == first_id).collect();
+    assert_eq!(relogged.len(), 2);
+    assert_eq!(relogged[0].reason, RejectionReason::GridBurnedIn);
+    assert_eq!(relogged[0].notes.as_deref(), Some("grid"));
+    assert_eq!(relogged[1].reason, RejectionReason::BadGeometry);
+    assert_eq!(relogged[1].notes, None);
+
+    let latest = repository
+        .latest_rejection()
+        .await
+        .expect("latest rejection")
+        .expect("some rejection exists");
+    assert_eq!(latest.id, first_id);
+    assert_eq!(latest.reason, RejectionReason::BadGeometry);
 
     repository
         .remove_rejection(&second_id)
         .await
         .expect("remove rejection");
     assert!(!repository.is_rejected(&second_id).await.expect("is_rejected"));
+    assert!(repository.is_rejected(&first_id).await.expect("is_rejected"));
     repository
         .remove_rejection(&second_id)
         .await

@@ -17,20 +17,23 @@ CREATE TABLE IF NOT EXISTS curated_maps (
     tags TEXT[] NOT NULL DEFAULT '{}',
     themes TEXT[] NOT NULL DEFAULT '{}',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     data JSONB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_curated_tags ON curated_maps USING GIN(tags);
 CREATE INDEX IF NOT EXISTS idx_curated_themes ON curated_maps USING GIN(themes);
 
 -- 3. Rejections Log
+-- Append-only log keyed by a surrogate id that defines append order. The rejected candidate id is
+-- a plain indexed column so repeated rejections of the same candidate stay separate records,
+-- mirroring the filesystem and in-memory adapters.
 CREATE TABLE IF NOT EXISTS rejections (
-    id TEXT PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
+    candidate_id TEXT NOT NULL,
     reason TEXT NOT NULL,
     notes TEXT,
     rejected_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_rejections_rejected_at ON rejections(rejected_at);
+CREATE INDEX IF NOT EXISTS idx_rejections_candidate_id ON rejections(candidate_id);
 
 -- 4. Trashed Candidates
 CREATE TABLE IF NOT EXISTS trashed_candidates (
@@ -52,7 +55,6 @@ CREATE INDEX IF NOT EXISTS idx_dataset_snapshots_created ON dataset_snapshots(cr
 -- 6. Training Runs
 CREATE TABLE IF NOT EXISTS training_runs (
     id TEXT PRIMARY KEY,
-    status TEXT NOT NULL,
     dataset_snapshot_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     data JSONB NOT NULL

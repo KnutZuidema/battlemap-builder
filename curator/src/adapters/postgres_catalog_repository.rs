@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 
 use crate::domain::{
@@ -15,10 +16,27 @@ fn map_sqlx_err(err: sqlx::Error) -> StorageError {
     StorageError::Io(std::io::Error::other(err.to_string()))
 }
 
+/// Classifies a failure to decode a persisted entity as malformed stored data rather than a
+/// serialization fault, matching [`super::FilesystemCatalogRepository`] (API 400, not 500).
+fn decode_error(err: serde_json::Error) -> StorageError {
+    StorageError::InvalidData(format!("Invalid stored entity: {err}"))
+}
+
 /// Parses a stored rejection reason, surfacing unknown values as invalid data.
 fn parse_rejection_reason(raw: &str) -> Result<RejectionReason, StorageError> {
     raw.parse::<RejectionReason>()
         .map_err(|err| StorageError::InvalidData(format!("Invalid rejection reason: {err}")))
+}
+
+/// Decodes one rejection log row, read back in append order by the caller.
+fn rejection_from_row(row: &PgRow) -> Result<RejectionRecord, StorageError> {
+    let id: String = row.try_get("candidate_id").map_err(map_sqlx_err)?;
+    let reason_str: String = row.try_get("reason").map_err(map_sqlx_err)?;
+    let reason = parse_rejection_reason(&reason_str)?;
+    let notes: Option<String> = row.try_get("notes").map_err(map_sqlx_err)?;
+    let timestamp: chrono::DateTime<chrono::Utc> =
+        row.try_get("rejected_at").map_err(map_sqlx_err)?;
+    Ok(RejectionRecord::new(id, reason, notes, timestamp))
 }
 
 /// Resolved choice of catalog repository backend based on configuration.
@@ -63,11 +81,6 @@ impl PostgresCatalogRepository {
         Ok(Self { pool })
     }
 
-    /// Wraps an existing connection pool.
-    pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
-    }
-
     /// Reference to the underlying connection pool.
     pub fn pool(&self) -> &PgPool {
         &self.pool
@@ -96,7 +109,7 @@ impl CatalogRepository for PostgresCatalogRepository {
 
         let row = row.ok_or_else(|| StorageError::NotFound(format!("Candidate {id} not found")))?;
         let data: serde_json::Value = row.try_get("data").map_err(map_sqlx_err)?;
-        serde_json::from_value(data).map_err(StorageError::from)
+        serde_json::from_value(data).map_err(decode_error)
     }
 
     async fn save_candidate(&self, candidate: &Candidate) -> Result<(), StorageError> {
@@ -144,7 +157,7 @@ impl CatalogRepository for PostgresCatalogRepository {
         let mut candidates = Vec::with_capacity(rows.len());
         for row in rows {
             let data: serde_json::Value = row.try_get("data").map_err(map_sqlx_err)?;
-            candidates.push(serde_json::from_value(data).map_err(StorageError::from)?);
+            candidates.push(serde_json::from_value(data).map_err(decode_error)?);
         }
         Ok(candidates)
     }
@@ -167,7 +180,7 @@ impl CatalogRepository for PostgresCatalogRepository {
 
         let row = row.ok_or_else(|| StorageError::NotFound(format!("Curated map {id} not found")))?;
         let data: serde_json::Value = row.try_get("data").map_err(map_sqlx_err)?;
-        serde_json::from_value(data).map_err(StorageError::from)
+        serde_json::from_value(data).map_err(decode_error)
     }
 
     async fn save_curated(&self, map: &CuratedMap) -> Result<(), StorageError> {
@@ -180,12 +193,11 @@ impl CatalogRepository for PostgresCatalogRepository {
         let data = serde_json::to_value(map)?;
         sqlx::query(
             r#"
-            INSERT INTO curated_maps (id, tags, themes, created_at, updated_at, data)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO curated_maps (id, tags, themes, created_at, data)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (id) DO UPDATE SET
                 tags = EXCLUDED.tags,
                 themes = EXCLUDED.themes,
-                updated_at = EXCLUDED.updated_at,
                 data = EXCLUDED.data
             "#,
         )
@@ -193,7 +205,6 @@ impl CatalogRepository for PostgresCatalogRepository {
         .bind(&tags)
         .bind(&themes)
         .bind(map.curated_at)
-        .bind(chrono::Utc::now())
         .bind(data)
         .execute(&self.pool)
         .await
@@ -225,7 +236,7 @@ impl CatalogRepository for PostgresCatalogRepository {
         let mut maps = Vec::with_capacity(rows.len());
         for row in rows {
             let data: serde_json::Value = row.try_get("data").map_err(map_sqlx_err)?;
-            maps.push(serde_json::from_value(data).map_err(StorageError::from)?);
+            maps.push(serde_json::from_value(data).map_err(decode_error)?);
         }
         Ok(maps)
     }
@@ -240,29 +251,27 @@ impl CatalogRepository for PostgresCatalogRepository {
     }
 
     async fn rejection_records(&self) -> Result<Vec<RejectionRecord>, StorageError> {
-        let rows = sqlx::query("SELECT id, reason, notes, rejected_at FROM rejections ORDER BY rejected_at ASC, id ASC")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(map_sqlx_err)?;
+        let rows = sqlx::query(
+            "SELECT candidate_id, reason, notes, rejected_at FROM rejections ORDER BY id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
 
         let mut records = Vec::with_capacity(rows.len());
-        for row in rows {
-            let id: String = row.try_get("id").map_err(map_sqlx_err)?;
-            let reason_str: String = row.try_get("reason").map_err(map_sqlx_err)?;
-            let reason = parse_rejection_reason(&reason_str)?;
-            let notes: Option<String> = row.try_get("notes").map_err(map_sqlx_err)?;
-            let timestamp: chrono::DateTime<chrono::Utc> = row.try_get("rejected_at").map_err(map_sqlx_err)?;
-            records.push(RejectionRecord::new(id, reason, notes, timestamp));
+        for row in &rows {
+            records.push(rejection_from_row(row)?);
         }
         Ok(records)
     }
 
     async fn is_rejected(&self, id: &str) -> Result<bool, StorageError> {
-        let row = sqlx::query("SELECT EXISTS(SELECT 1 FROM rejections WHERE id = $1) as exists")
-            .bind(id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(map_sqlx_err)?;
+        let row =
+            sqlx::query("SELECT EXISTS(SELECT 1 FROM rejections WHERE candidate_id = $1) as exists")
+                .bind(id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(map_sqlx_err)?;
         let exists: bool = row.try_get("exists").map_err(map_sqlx_err)?;
         Ok(exists)
     }
@@ -274,21 +283,16 @@ impl CatalogRepository for PostgresCatalogRepository {
         notes: Option<&str>,
     ) -> Result<(), StorageError> {
         let reason_str = reason.as_str();
-        let now = chrono::Utc::now();
         sqlx::query(
             r#"
-            INSERT INTO rejections (id, reason, notes, rejected_at)
+            INSERT INTO rejections (candidate_id, reason, notes, rejected_at)
             VALUES ($1, $2, $3, $4)
-            ON CONFLICT (id) DO UPDATE SET
-                reason = EXCLUDED.reason,
-                notes = EXCLUDED.notes,
-                rejected_at = EXCLUDED.rejected_at
             "#,
         )
         .bind(id)
         .bind(reason_str)
         .bind(notes)
-        .bind(now)
+        .bind(chrono::Utc::now())
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_err)?;
@@ -296,7 +300,7 @@ impl CatalogRepository for PostgresCatalogRepository {
     }
 
     async fn remove_rejection(&self, id: &str) -> Result<(), StorageError> {
-        sqlx::query("DELETE FROM rejections WHERE id = $1")
+        sqlx::query("DELETE FROM rejections WHERE candidate_id = $1")
             .bind(id)
             .execute(&self.pool)
             .await
@@ -305,22 +309,14 @@ impl CatalogRepository for PostgresCatalogRepository {
     }
 
     async fn latest_rejection(&self) -> Result<Option<RejectionRecord>, StorageError> {
-        let row = sqlx::query("SELECT id, reason, notes, rejected_at FROM rejections ORDER BY rejected_at DESC LIMIT 1")
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(map_sqlx_err)?;
+        let row = sqlx::query(
+            "SELECT candidate_id, reason, notes, rejected_at FROM rejections ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
 
-        match row {
-            Some(row) => {
-                let id: String = row.try_get("id").map_err(map_sqlx_err)?;
-                let reason_str: String = row.try_get("reason").map_err(map_sqlx_err)?;
-                let reason = parse_rejection_reason(&reason_str)?;
-                let notes: Option<String> = row.try_get("notes").map_err(map_sqlx_err)?;
-                let timestamp: chrono::DateTime<chrono::Utc> = row.try_get("rejected_at").map_err(map_sqlx_err)?;
-                Ok(Some(RejectionRecord::new(id, reason, notes, timestamp)))
-            }
-            None => Ok(None),
-        }
+        row.as_ref().map(rejection_from_row).transpose()
     }
 
     async fn save_trashed_candidate(&self, candidate: &Candidate) -> Result<(), StorageError> {
@@ -353,7 +349,7 @@ impl CatalogRepository for PostgresCatalogRepository {
 
         let row = row.ok_or_else(|| StorageError::NotFound(format!("Trashed candidate {id} not found")))?;
         let data: serde_json::Value = row.try_get("data").map_err(map_sqlx_err)?;
-        serde_json::from_value(data).map_err(StorageError::from)
+        serde_json::from_value(data).map_err(decode_error)
     }
 
     async fn delete_trashed_candidate(&self, id: &str) -> Result<(), StorageError> {
@@ -374,7 +370,7 @@ impl CatalogRepository for PostgresCatalogRepository {
 
         let row = row.ok_or_else(|| StorageError::NotFound(format!("Dataset snapshot {id} not found")))?;
         let data: serde_json::Value = row.try_get("data").map_err(map_sqlx_err)?;
-        serde_json::from_value(data).map_err(StorageError::from)
+        serde_json::from_value(data).map_err(decode_error)
     }
 
     async fn save_dataset_snapshot(&self, snapshot: &DatasetSnapshot) -> Result<(), StorageError> {
@@ -414,7 +410,7 @@ impl CatalogRepository for PostgresCatalogRepository {
         let mut snapshots = Vec::with_capacity(rows.len());
         for row in rows {
             let data: serde_json::Value = row.try_get("data").map_err(map_sqlx_err)?;
-            snapshots.push(serde_json::from_value(data).map_err(StorageError::from)?);
+            snapshots.push(serde_json::from_value(data).map_err(decode_error)?);
         }
         Ok(snapshots)
     }
@@ -447,25 +443,22 @@ impl CatalogRepository for PostgresCatalogRepository {
 
         let row = row.ok_or_else(|| StorageError::NotFound(format!("Training run {id} not found")))?;
         let data: serde_json::Value = row.try_get("data").map_err(map_sqlx_err)?;
-        serde_json::from_value(data).map_err(StorageError::from)
+        serde_json::from_value(data).map_err(decode_error)
     }
 
     async fn save_training_run(&self, run: &TrainingRun) -> Result<(), StorageError> {
-        let status_str = run.state.as_str();
         let data = serde_json::to_value(run)?;
         sqlx::query(
             r#"
-            INSERT INTO training_runs (id, status, dataset_snapshot_id, created_at, data)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO training_runs (id, dataset_snapshot_id, created_at, data)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (id) DO UPDATE SET
-                status = EXCLUDED.status,
                 dataset_snapshot_id = EXCLUDED.dataset_snapshot_id,
                 created_at = EXCLUDED.created_at,
                 data = EXCLUDED.data
             "#,
         )
         .bind(&run.id)
-        .bind(status_str)
         .bind(&run.dataset_snapshot_id)
         .bind(run.created_at)
         .bind(data)
@@ -484,7 +477,7 @@ impl CatalogRepository for PostgresCatalogRepository {
         let mut runs = Vec::with_capacity(rows.len());
         for row in rows {
             let data: serde_json::Value = row.try_get("data").map_err(map_sqlx_err)?;
-            runs.push(serde_json::from_value(data).map_err(StorageError::from)?);
+            runs.push(serde_json::from_value(data).map_err(decode_error)?);
         }
         Ok(runs)
     }
@@ -525,7 +518,7 @@ impl CatalogRepository for PostgresCatalogRepository {
         let mut metrics = Vec::with_capacity(rows.len());
         for row in rows {
             let data: serde_json::Value = row.try_get("data").map_err(map_sqlx_err)?;
-            metrics.push(serde_json::from_value(data).map_err(StorageError::from)?);
+            metrics.push(serde_json::from_value(data).map_err(decode_error)?);
         }
         Ok(metrics)
     }
@@ -539,7 +532,7 @@ impl CatalogRepository for PostgresCatalogRepository {
 
         let row = row.ok_or_else(|| StorageError::NotFound(format!("LoRA adapter {id} not found")))?;
         let data: serde_json::Value = row.try_get("data").map_err(map_sqlx_err)?;
-        serde_json::from_value(data).map_err(StorageError::from)
+        serde_json::from_value(data).map_err(decode_error)
     }
 
     async fn save_lora_adapter(&self, adapter: &LoraAdapter) -> Result<(), StorageError> {
@@ -571,7 +564,7 @@ impl CatalogRepository for PostgresCatalogRepository {
         let mut adapters = Vec::with_capacity(rows.len());
         for row in rows {
             let data: serde_json::Value = row.try_get("data").map_err(map_sqlx_err)?;
-            adapters.push(serde_json::from_value(data).map_err(StorageError::from)?);
+            adapters.push(serde_json::from_value(data).map_err(decode_error)?);
         }
         Ok(adapters)
     }

@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: curator-harvest-reddit
+  namespace: curator
+  labels:
+    app: curator
+    app.kubernetes.io/name: curator
+spec:
+  # Hourly hot-page sweep of /r/battlemaps (ADR-0011).
+  schedule: "0 * * * *"
+  # A slow or rate-limited harvest must never overlap the next tick. A tick
+  # skipped by Forbid creates no Job: look for the `JobAlreadyActive` event
+  # (`kubectl -n curator describe cronjob curator-harvest-reddit`) or the gap
+  # in `harvest_runs.started_at`.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    metadata:
+      labels:
+        app: curator-harvest
+        app.kubernetes.io/name: curator-harvest
+    spec:
+      # Ordered timeouts: curl aborts the request itself at --max-time 900, so a
+      # hung Reddit OAuth/HTTP exchange fails as a normal container error and
+      # backoffLimit retries apply. The Job hard-stops at 1200, leaving 300s for
+      # those retries before Kubernetes kills the pod.
+      activeDeadlineSeconds: 1200
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: curator-harvest
+            app.kubernetes.io/name: curator-harvest
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsUser: 65534
+            runAsGroup: 65534
+          containers:
+            - name: harvest-trigger
+              image: curlimages/curl:8.10.1
+              imagePullPolicy: IfNotPresent
+              # Internal ClusterIP target: the curator Service is not exposed
+              # through any Ingress, so the CronJob calls it in-cluster only.
+              # The /data volume is ReadWriteOnce and held by the running pod,
+              # which is why this triggers the HTTP API instead of mounting it.
+              command: ["curl"]
+              args:
+                - "-sSf"
+                - "-X"
+                - "POST"
+                - "-H"
+                - "Content-Type: application/json"
+                - "-d"
+                - '{"sort":"hot","limit":25,"gridless_only":false}'
+                - "http://curator:3002/api/harvest/reddit"
+                - "--max-time"
+                - "900"
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi

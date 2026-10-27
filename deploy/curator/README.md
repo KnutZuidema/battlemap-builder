@@ -370,9 +370,13 @@ To verify that data survives across pod restarts and recreations on Hetzner CSI 
    kubectl exec -it -n curator deployment/curator -- ls -la /data
    ```
 2. **Note Current Counts**:
-   Check `http://localhost:3002/api/status` or run:
+   Check `http://localhost:3002/api/status` via `just port-forward` (§4.1), or query it in-cluster
+   (the runtime image ships no `curl`/`wget`, so use a throwaway curl pod):
    ```bash
-   kubectl exec -n curator deployment/curator -- wget -qO- http://localhost:3002/api/status
+   # `--quiet` keeps `--rm`'s pod-deletion notice off stdout, so the JSON stays parseable.
+   kubectl -n curator run status-check --rm -i --quiet --restart=Never \
+     --image=curlimages/curl:8.10.1 \
+     -- curl -sSf http://curator:3002/api/status
    ```
 3. **Simulate Pod Failure / Rollout**:
    Delete the active pod to trigger recreation:
@@ -390,6 +394,51 @@ To verify that data survives across pod restarts and recreations on Hetzner CSI 
    kubectl exec -it -n curator deployment/curator -- ls -la /data/telemetry /data/staging
    ```
    Confirm that all staged maps and `cost_ledger.json` remain intact and populated.
+
+### 5.5. Scheduled Reddit Harvest (CronJob)
+
+`cronjob-harvest.yaml` runs an hourly sweep of `/r/battlemaps` (ADR-0011): every tick it `POST`s `{"sort":"hot","limit":25,"gridless_only":false}` to `http://curator:3002/api/harvest/reddit` from a throwaway `curlimages/curl` pod. It calls the internal `ClusterIP` service — there is no ingress — because the `ReadWriteOnce` data volume is held by the running Curator pod, so a second pod cannot mount `/data`.
+
+- **Schedule**: `0 * * * *` (top of every hour), `concurrencyPolicy: Forbid` and `startingDeadlineSeconds: 300`, so a slow or rate-limited harvest never overlaps the next tick. A tick skipped because the previous Job is still running produces no Job at all — only a `JobAlreadyActive` event on the CronJob (`kubectl -n curator describe cronjob curator-harvest-reddit`).
+- **Timeouts**: curl aborts the HTTP call itself at `--max-time 900` (a hung Reddit OAuth/HTTP exchange then fails as an ordinary container error), the Job hard-stops at `activeDeadlineSeconds: 1200` leaving 300s for `backoffLimit: 2` retries, and history is capped at 3 succeeded / 5 failed Jobs. That history records runs that *started*; skipped ticks are not in it — see the CronJob events above, or the gaps in `harvest_runs.started_at`.
+- **Ledger**: each invocation writes a `harvest_runs` row (`subreddit`, `sort`, `posts_scanned`, `downloaded`, `skipped`, `error`, `started_at`, `finished_at`) into the PostgreSQL catalog. Post deduplication is done against live `Candidate`/`CuratedMap`/`RejectionRecord` rows rather than a timestamp watermark, since Reddit's `hot` ranking is non-monotonic.
+
+Apply and run it:
+
+```bash
+just harvest-apply          # kubectl apply -f cronjob-harvest.yaml
+just harvest-now            # one-off Job from the CronJob template
+just harvest-logs           # tail the newest harvest pod
+just harvest-logs curator-harvest-reddit-29123456   # a specific Job
+```
+
+Inspect results:
+
+```bash
+# Recent runs (started ticks only; ticks skipped by concurrencyPolicy produce
+# no Job — use `kubectl -n curator describe cronjob curator-harvest-reddit`)
+kubectl get jobs -n curator
+
+# Candidates currently staged for triage. The runtime image is a slim Debian with
+# no curl/wget, so query the API from a throwaway curl pod instead of exec-ing
+# into the curator container:
+kubectl -n curator run harvest-check --rm -i --quiet --restart=Never \
+  --image=curlimages/curl:8.10.1 \
+  -- curl -sSf http://curator:3002/api/staging | jq 'length'
+# Drop the `| jq 'length'` to see the raw response, or redirect it
+# (`kubectl -n curator run harvest-check --rm -i --quiet --restart=Never ... > staging.json`).
+# `--quiet` is required: `--rm` otherwise prints `pod "harvest-check" deleted` on
+# stdout, which makes jq fail with exit code 5 and corrupts the redirect.
+# Alternative from your machine: `just port-forward` (§4.1), then
+# `curl -s http://localhost:3002/api/staging | jq 'length'`.
+
+# Harvest ledger rows
+kubectl -n database exec shared-postgres-1 -- psql -U postgres -d curator -c \
+  'SELECT id, subreddit, sort, posts_scanned, downloaded, skipped, error, started_at, finished_at
+     FROM harvest_runs ORDER BY started_at DESC LIMIT 3;'
+```
+
+If harvesting fails with a 401/403, the Reddit credentials in `curator-secrets` are missing or stale (see §6).
 
 ---
 

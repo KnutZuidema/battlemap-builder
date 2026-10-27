@@ -307,6 +307,27 @@ button turns emerald (`Dataset Ready · N sections`) or amber (`Dataset Issues �
 the modal lists the aggregate counts plus every flagged map and issue. The audit mirrors the library's
 active theme tag, so the report always describes the scope an export from that view would ship.
 
+### In-modal remediation
+
+Fixable issues carry an action button on their row, and the same controls appear when a snapshot freeze
+is refused (`DATASET_NOT_READY`), so the flagged maps are resolved without leaving the dialog:
+
+- **Description codes** (`physical_description_missing`, `physical_description_not_neutral`) offer
+  *Regenerate Description* / *Regenerate Neutral Description*. The button calls
+  `POST /api/curated/{id}/describe` with `{"apply": true}`: that request regenerates the strict
+  perspective-neutral `Physical Description`, persists it on the curated map, and recomputes every Map
+  Section description through the same section policy the ZIP export reads. **Fix All Descriptions**
+  batches that call across every flagged map, sequentially, with live progress on the button.
+- **Grid codes** (`grid_below_minimum`, `section_unresolvable`) offer *Edit Grid*, which opens the
+  fullscreen grid calibration editor for that curated map.
+- **Ground layer codes** (`ground_layer_missing`, `ground_image_unreadable`) offer *Inspect / Delete*,
+  which opens the curated inspector drawer for that bundle.
+
+A successful action shows `✓ Resolved` on its row and immediately re-audits the active scope, so
+resolved issues leave the list and the counts update without closing the modal. Failures surface the
+propagated error (`503` when vision is unconfigured, `502` on upstream failure) as a danger toast and
+leave the row untouched.
+
 Legacy bundles curated before ADR-0007 carry no `sections` and no `description`: their full-grid lattice
 still exports (one 16×16 window per lattice) but their captions have no `Physical Description`, which the
 audit reports as `physical_description_missing`.

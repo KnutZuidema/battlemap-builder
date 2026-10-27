@@ -133,6 +133,9 @@
         // Deletion Safeguard Modal & Bulk Ops (Issue #137)
         deleteModalOpen: false,
         deleteModalTarget: null,
+        // Dataset Readiness Remediation (Issue #245)
+        datasetReadiness: null,
+        datasetRemediated: new Set(),
     };
 
     // Curate Decision Modal Flow State
@@ -228,6 +231,7 @@
     let btnRefreshSnapshots, btnToggleSnapshots, toggleSnapshotsText, snapshotsShelf;
     let btnDatasetReadiness, datasetReadinessLabel;
     let datasetReadinessModal, datasetReadinessSummary, datasetReadinessIssues, datasetReadinessIcon;
+    let btnFixAllDescriptions;
 
     // Training Runs & LoRA Drawer Elements (Issue #209)
     let btnOpenTrainingDrawer, tabNavTraining, btnOpenTrainingFromLibrary;
@@ -492,6 +496,7 @@
         datasetReadinessSummary = document.getElementById("dataset-readiness-summary");
         datasetReadinessIssues = document.getElementById("dataset-readiness-issues");
         datasetReadinessIcon = document.getElementById("dataset-readiness-icon");
+        btnFixAllDescriptions = document.getElementById("btn-fix-all-descriptions");
 
         // Training Runs & LoRA Drawer Elements (Issue #209)
         btnOpenTrainingDrawer = document.getElementById("btn-open-training-drawer");
@@ -5026,6 +5031,22 @@
         physical_description_not_neutral: "Physical Description not neutral",
     };
 
+    // Issue codes the modal can fix in place, mapped to the remediation the row offers. Codes
+    // without an entry keep the static "Fix:" hint because no single click resolves them.
+    const DATASET_ISSUE_ACTIONS = {
+        physical_description_missing: { action: "describe", label: "Regenerate Description" },
+        physical_description_not_neutral: { action: "describe", label: "Regenerate Neutral Description" },
+        grid_below_minimum: { action: "grid", label: "Edit Grid" },
+        section_unresolvable: { action: "grid", label: "Edit Grid" },
+        ground_layer_missing: { action: "inspect", label: "Inspect / Delete" },
+        ground_image_unreadable: { action: "inspect", label: "Inspect / Delete" },
+    };
+
+    const DATASET_DESCRIPTION_ISSUES = new Set([
+        "physical_description_missing",
+        "physical_description_not_neutral",
+    ]);
+
     const DATASET_ISSUE_REMEDIATIONS = {
         ground_layer_missing: "Restore 0_ground.png in data/curated/<id>/",
         ground_image_unreadable: "Re-ingest the map; an export would skip it entirely",
@@ -5061,6 +5082,7 @@
 
     function renderDatasetReadinessReport(report) {
         if (!datasetReadinessSummary || !datasetReadinessIssues) return;
+        state.datasetReadiness = report || null;
         renderDatasetReadinessLabel(report);
 
         if (datasetReadinessIcon) {
@@ -5086,6 +5108,8 @@
             .join("");
 
         const flagged = ((report && report.maps) || []).filter(map => (map.issues || []).length > 0);
+        toggleFixAllDescriptions(flagged);
+
         if (flagged.length === 0) {
             datasetReadinessIssues.innerHTML = '<div class="readiness-clean">No issues: every curated map in scope exports clean 16×16 Map Section samples.</div>';
             return;
@@ -5094,16 +5118,44 @@
         datasetReadinessIssues.innerHTML = flagged
             .map(map => {
                 const rows = map.issues
-                    .map(issue => {
-                        const rem = DATASET_ISSUE_REMEDIATIONS[issue.code];
-                        const remHtml = rem ? `<span class="readiness-issue-remediation">Fix: ${escapeHtml(rem)}</span>` : "";
-                        return `<li><div><span class="readiness-issue-code mono">${escapeHtml(datasetIssueLabel(issue.code))}</span> ${escapeHtml(issue.detail)}</div>${remHtml}</li>`;
-                    })
+                    .map(issue => renderDatasetIssueRow(map, issue))
                     .join("");
                 const counts = `${map.ready_sections} / ${map.sections} sections ready`;
                 return `<div class="readiness-map-issue"><div class="readiness-map-head"><span class="readiness-map-id mono">${escapeHtml(map.id)}</span><span class="readiness-map-theme">${escapeHtml(map.theme)}</span><span class="readiness-map-count mono">${escapeHtml(counts)}</span></div><ul class="readiness-issue-list">${rows}</ul></div>`;
             })
             .join("");
+    }
+
+    /** One issue row: contextual fix button when the code is fixable, static hint otherwise. */
+    function renderDatasetIssueRow(map, issue) {
+        const fix = DATASET_ISSUE_ACTIONS[issue.code];
+        const rem = fix ? null : DATASET_ISSUE_REMEDIATIONS[issue.code];
+        const remHtml = rem ? `<span class="readiness-issue-remediation">Fix: ${escapeHtml(rem)}</span>` : "";
+        const resolved = state.datasetRemediated.has(`${map.id}:${issue.code}`);
+        const actionHtml = fix
+            ? `<button type="button" class="btn btn-secondary btn-xs readiness-action-btn" data-remediate="${escapeHtml(fix.action)}" data-map-id="${escapeHtml(map.id)}" data-issue-code="${escapeHtml(issue.code)}">${escapeHtml(fix.label)}<span class="readiness-action-spinner hidden"></span></button>`
+            : "";
+        const actionsHtml = actionHtml ? `<div class="readiness-issue-actions">${actionHtml}</div>` : "";
+        const resolvedHtml = resolved ? '<span class="readiness-issue-resolved">✓ Resolved</span>' : "";
+        const rowClass = resolved ? "readiness-issue-row is-resolved" : "readiness-issue-row";
+        return `<li class="${rowClass}" data-issue-code="${escapeHtml(issue.code)}" data-map-id="${escapeHtml(map.id)}"><div class="readiness-issue-text"><span class="readiness-issue-code mono">${escapeHtml(datasetIssueLabel(issue.code))}</span> ${escapeHtml(issue.detail)}</div><div class="readiness-issue-side">${actionsHtml}${resolvedHtml}${remHtml}</div></li>`;
+    }
+
+    /** Map ids whose description issues the batch action can resolve. */
+    function fixableDescriptionMapIds(report) {
+        const ids = new Set();
+        ((report && report.maps) || []).forEach(map => {
+            (map.issues || []).forEach(issue => {
+                if (DATASET_DESCRIPTION_ISSUES.has(issue.code)) ids.add(map.id);
+            });
+        });
+        return Array.from(ids);
+    }
+
+    function toggleFixAllDescriptions(flagged) {
+        if (!btnFixAllDescriptions) return;
+        const hasFixable = (flagged || []).some(map => (map.issues || []).some(issue => DATASET_DESCRIPTION_ISSUES.has(issue.code)));
+        btnFixAllDescriptions.classList.toggle("hidden", !hasFixable);
     }
 
     async function fetchDatasetReadiness() {
@@ -5129,6 +5181,7 @@
         stopPanLoop();
         stopZoomLoop();
         state.datasetReadinessModalOpen = true;
+        state.datasetRemediated.clear();
         datasetReadinessModal?.classList.remove("hidden");
         fetchDatasetReadiness();
         const titleEl = document.getElementById("dataset-readiness-title");
@@ -5142,11 +5195,164 @@
         datasetReadinessModal?.classList.add("hidden");
     }
 
+    // --------------------------------------------------------------------------
+    // In-modal remediation (Issue #245)
+    // --------------------------------------------------------------------------
+
+    /** Regenerate the map's Physical Description and persist it with its Map Sections. */
+    async function applyDatasetDescription(mapId) {
+        const res = await fetch(`/api/curated/${encodeURIComponent(mapId)}/describe`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ apply: true }),
+        });
+        if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            throw new Error(errData.error || `HTTP ${res.status}`);
+        }
+        return res.json();
+    }
+
+    function setRemediationBusy(button, busy) {
+        if (!button) return;
+        button.disabled = busy;
+        button.classList.toggle("is-busy", busy);
+        button.querySelector(".readiness-action-spinner")?.classList.toggle("hidden", !busy);
+    }
+
+    /** A remediated refusal is an ordinary readiness view again. */
+    function resetDatasetReadinessTitle() {
+        const titleEl = document.getElementById("dataset-readiness-title");
+        if (titleEl) titleEl.textContent = "LoRA Training Dataset Readiness";
+    }
+
+    async function remediateDatasetIssue(mapId, action, issueCode, button) {
+        if (action === "grid") {
+            closeDatasetReadinessModal();
+            await openGridCalibrationForMap(mapId);
+            return;
+        }
+        if (action === "inspect") {
+            closeDatasetReadinessModal();
+            await openCuratedInspectorById(mapId);
+            return;
+        }
+
+        setRemediationBusy(button, true);
+        try {
+            await applyDatasetDescription(mapId);
+            state.datasetRemediated.add(`${mapId}:${issueCode}`);
+            showToast(`Description regenerated for ${mapId}`, "success");
+            // Re-audit the current scope so the resolved issue leaves the list on its own.
+            resetDatasetReadinessTitle();
+            await fetchDatasetReadiness();
+            if ((state.datasetReadiness?.maps || [])
+                .find(map => map.id === mapId)?.issues
+                ?.some(issue => issue.code === issueCode)) {
+                showToast(`The regenerated description for ${mapId} still fails the audit`, "warning");
+            }
+        } catch (err) {
+            showToast(`Description regeneration failed: ${err.message}`, "danger");
+        } finally {
+            setRemediationBusy(button, false);
+        }
+    }
+
+    /** Batch description regeneration, one map at a time, with live progress on the button. */
+    async function fixAllDatasetDescriptions() {
+        const mapIds = fixableDescriptionMapIds(state.datasetReadiness);
+        if (mapIds.length === 0) return;
+
+        const label = btnFixAllDescriptions?.querySelector("span");
+        if (btnFixAllDescriptions) {
+            btnFixAllDescriptions.disabled = true;
+            btnFixAllDescriptions.classList.add("is-busy");
+        }
+
+        let fixed = 0;
+        let failed = 0;
+        try {
+            for (let index = 0; index < mapIds.length; index += 1) {
+                const mapId = mapIds[index];
+                if (label) label.textContent = `Fixing descriptions ${index + 1}/${mapIds.length}…`;
+                try {
+                    await applyDatasetDescription(mapId);
+                    fixed += 1;
+                } catch (err) {
+                    failed += 1;
+                    console.error(`Description remediation failed for ${mapId}:`, err);
+                }
+            }
+        } finally {
+            if (label) label.textContent = "Fix All Descriptions";
+            if (btnFixAllDescriptions) {
+                btnFixAllDescriptions.disabled = false;
+                btnFixAllDescriptions.classList.remove("is-busy");
+            }
+        }
+
+        if (failed === 0) {
+            showToast(`Fixed ${fixed} description${fixed === 1 ? "" : "s"}`, "success");
+        } else {
+            showToast(`Fixed ${fixed} description(s); ${failed} map(s) failed`, "danger");
+        }
+        resetDatasetReadinessTitle();
+        await fetchDatasetReadiness();
+    }
+
+    /** Load the library scope, switch to it, and return the index of `mapId` in the filtered deck. */
+    async function focusLibraryMap(mapId) {
+        if (!state.curatedMaps || !state.curatedMaps.some(map => map.id === mapId)) {
+            await fetchLibraryMaps();
+        }
+        switchView("library");
+        let index = (state.libraryFilteredMaps || []).findIndex(map => map.id === mapId);
+        if (index < 0) {
+            clearLibraryFilters();
+            applyLibraryFilters();
+            index = (state.libraryFilteredMaps || []).findIndex(map => map.id === mapId);
+        }
+        return index;
+    }
+
+    /** Open the fullscreen grid calibration editor for a flagged curated map. */
+    async function openGridCalibrationForMap(mapId) {
+        const index = await focusLibraryMap(mapId);
+        if (index < 0) {
+            showToast(`Curated map '${mapId}' is not in the library scope`, "danger");
+            return;
+        }
+        openLibraryFullscreen(index);
+        toggleFullscreenGridPanel(true);
+    }
+
+    /** Open the curated inspector drawer, where a defective bundle can be inspected or deleted. */
+    async function openCuratedInspectorById(mapId) {
+        const index = await focusLibraryMap(mapId);
+        if (index < 0) {
+            showToast(`Curated map '${mapId}' is not in the library scope`, "danger");
+            return;
+        }
+        openLibraryInspector(state.libraryFilteredMaps[index]);
+    }
+
     function setupDatasetReadinessControls() {
         btnDatasetReadiness?.addEventListener("click", () => openDatasetReadinessModal());
         document.getElementById("btn-close-readiness-modal")?.addEventListener("click", () => closeDatasetReadinessModal());
         document.getElementById("btn-dismiss-readiness")?.addEventListener("click", () => closeDatasetReadinessModal());
         document.getElementById("btn-refresh-readiness")?.addEventListener("click", () => fetchDatasetReadiness());
+        btnFixAllDescriptions?.addEventListener("click", () => fixAllDatasetDescriptions());
+        datasetReadinessIssues?.addEventListener("click", (e) => {
+            const button = e.target.closest("[data-remediate]");
+            if (!button) return;
+            e.preventDefault();
+            remediateDatasetIssue(
+                button.dataset.mapId,
+                button.dataset.remediate,
+                button.dataset.issueCode,
+                button,
+            );
+        });
         datasetReadinessModal?.addEventListener("click", (e) => {
             if (e.target === datasetReadinessModal) closeDatasetReadinessModal();
         });
@@ -5162,46 +5368,62 @@
             return;
         }
         state.datasetReadinessModalOpen = true;
+        state.datasetRemediated.clear();
         datasetReadinessModal.classList.remove("hidden");
-        if (datasetReadinessIcon) {
-            datasetReadinessIcon.textContent = "✕";
-            datasetReadinessIcon.className = "readiness-icon has-issues";
-        }
         const titleEl = document.getElementById("dataset-readiness-title");
         if (titleEl) {
             titleEl.textContent = "Freeze Refused: Dataset Not Ready";
         }
+
+        // The refusal carries the full audit, so the same per-issue remediation controls apply:
+        // operators fix the flagged maps in place instead of closing the modal and re-auditing.
+        const hasReadiness = Boolean(refusal.readiness && Array.isArray(refusal.readiness.maps));
         const blocking = refusal.blocking_issues || [];
-        datasetReadinessSummary.innerHTML = `
-            <div class="readiness-stat">
-                <span class="readiness-stat-label">Status</span>
-                <span class="readiness-stat-value mono" style="color: #f87171;">DATASET_NOT_READY</span>
-            </div>
-            <div class="readiness-stat">
-                <span class="readiness-stat-label">Blocking Issue Kinds</span>
-                <span class="readiness-stat-value mono">${blocking.length}</span>
-            </div>
-            <div class="readiness-stat">
-                <span class="readiness-stat-label">Scope</span>
-                <span class="readiness-stat-value mono">${escapeHtml(datasetScopeTheme() || "all themes")}</span>
-            </div>
-        `;
-        if (blocking.length === 0) {
-            datasetReadinessIssues.innerHTML = `<div class="readiness-clean">${escapeHtml(refusal.error || "Dataset scope is not ready to be frozen.")}</div>`;
+
+        if (hasReadiness) {
+            renderDatasetReadinessReport(refusal.readiness);
+            if (datasetReadinessIcon) {
+                datasetReadinessIcon.textContent = "✕";
+                datasetReadinessIcon.className = "readiness-icon has-issues";
+            }
         } else {
-            datasetReadinessIssues.innerHTML = blocking.map(b => {
-                const mapsText = b.maps && b.maps.length > 0 ? `Affected map(s): ${b.maps.join(", ")}` : "No curated maps in scope";
-                return `
-                    <div class="readiness-map-issue">
-                        <div class="readiness-map-head">
-                            <span class="readiness-issue-code mono">${escapeHtml(datasetIssueLabel(b.code))}</span>
-                            <span class="readiness-map-count mono">${b.count > 0 ? `${b.count} occurrence(s)` : ""}</span>
+            toggleFixAllDescriptions([]);
+            if (datasetReadinessIcon) {
+                datasetReadinessIcon.textContent = "✕";
+                datasetReadinessIcon.className = "readiness-icon has-issues";
+            }
+            state.datasetReadiness = null;
+            datasetReadinessSummary.innerHTML = `
+                <div class="readiness-stat">
+                    <span class="readiness-stat-label">Status</span>
+                    <span class="readiness-stat-value mono" style="color: #f87171;">DATASET_NOT_READY</span>
+                </div>
+                <div class="readiness-stat">
+                    <span class="readiness-stat-label">Blocking Issue Kinds</span>
+                    <span class="readiness-stat-value mono">${blocking.length}</span>
+                </div>
+                <div class="readiness-stat">
+                    <span class="readiness-stat-label">Scope</span>
+                    <span class="readiness-stat-value mono">${escapeHtml(datasetScopeTheme() || "all themes")}</span>
+                </div>
+            `;
+            if (blocking.length === 0) {
+                datasetReadinessIssues.innerHTML = `<div class="readiness-clean">${escapeHtml(refusal.error || "Dataset scope is not ready to be frozen.")}</div>`;
+            } else {
+                datasetReadinessIssues.innerHTML = blocking.map(b => {
+                    const mapsText = b.maps && b.maps.length > 0 ? `Affected map(s): ${b.maps.join(", ")}` : "No curated maps in scope";
+                    return `
+                        <div class="readiness-map-issue">
+                            <div class="readiness-map-head">
+                                <span class="readiness-issue-code mono">${escapeHtml(datasetIssueLabel(b.code))}</span>
+                                <span class="readiness-map-count mono">${b.count > 0 ? `${b.count} occurrence(s)` : ""}</span>
+                            </div>
+                            <div style="font-size: 0.8rem; color: var(--text-secondary); margin: 0.35rem 0;">${escapeHtml(mapsText)}</div>
+                            <span class="readiness-issue-remediation">Fix: ${escapeHtml(b.remediation)}</span>
                         </div>
-                        <div style="font-size: 0.8rem; color: var(--text-secondary); margin: 0.35rem 0;">${escapeHtml(mapsText)}</div>
-                        <span class="readiness-issue-remediation">Fix: ${escapeHtml(b.remediation)}</span>
-                    </div>
-                `;
-            }).join("");
+                    `;
+                }).join("");
+            }
         }
         showToast(`Freeze Refused: ${refusal.error || "Dataset scope has blocking issues"}`, "danger");
     }

@@ -44,6 +44,8 @@ Run the interactive provisioning wizard to walk step-by-step through generating 
 ./scripts/provision-credentials.sh
 ```
 
+The wizard includes a dedicated PostgreSQL stage that prompts for the curator catalog `DATABASE_URL` DSN (leave it empty to keep the filesystem catalog fallback) and writes it into the generated secret, so re-running the wizard preserves an already-applied DSN. It also seeds itself from any values already present in `deploy/curator/secret.yaml`.
+
 #### Manual Configuration
 
 1. Copy the secret template:

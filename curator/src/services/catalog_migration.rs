@@ -42,21 +42,12 @@ pub const ENTITY_TRAINING_METRICS: &str = "training_metrics";
 pub const ENTITY_LORA_ADAPTERS: &str = "lora_adapters";
 
 /// Configuration options for the disk-to-PostgreSQL catalog migration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiskToPostgresOptions {
     /// Overwrite rows whose primary key already exists (`--force`) instead of skipping them.
     pub force: bool,
     /// Discover and classify every entity without writing to PostgreSQL (`--dry-run`).
     pub dry_run: bool,
-}
-
-impl Default for DiskToPostgresOptions {
-    fn default() -> Self {
-        Self {
-            force: false,
-            dry_run: false,
-        }
-    }
 }
 
 /// Per-entity migration tally.

@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: curator-catalog-migration
+  namespace: curator
+  labels:
+    app: curator-catalog-migration
+    app.kubernetes.io/name: curator-catalog-migration
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: curator-catalog-migration
+        app.kubernetes.io/name: curator-catalog-migration
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+        runAsGroup: 1000
+      imagePullSecrets:
+        - name: ghcr-secret
+      containers:
+        - name: migration
+          image: ghcr.io/knutzuidema/curator:latest
+          imagePullPolicy: IfNotPresent
+          args: ["migrate-disk-to-postgres"]
+          env:
+            - name: DATA_DIR
+              value: "/data"
+            - name: RUST_LOG
+              value: "info"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: curator-secrets
+                  key: DATABASE_URL
+                  optional: true
+          volumeMounts:
+            - name: curator-storage
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+      volumes:
+        - name: curator-storage
+          persistentVolumeClaim:
+            claimName: curator-data-pvc

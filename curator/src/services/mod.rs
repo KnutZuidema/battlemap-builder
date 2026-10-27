@@ -1,6 +1,7 @@
 pub mod curation;
 pub mod description;
 pub mod benchmark;
+pub mod catalog_migration;
 pub mod model_registry;
 pub mod dataset_export;
 pub mod ingestion;
@@ -22,6 +23,10 @@ pub use storage_maintenance::StorageMaintenanceService;
 pub use storage_migration::{
     discover_disk_blobs, is_migration_completed, run_storage_migration, MigrationOptions,
     MigrationReport, MIGRATION_MARKER_FILE,
+};
+pub use catalog_migration::{
+    discover_catalog_entities, run_disk_to_postgres_migration, CatalogDiscovery,
+    DiskToPostgresOptions, DiskToPostgresReport, EntityMigrationCounts, MigrationFailure,
 };
 pub use library::LibraryService;
 pub use ingestion::{

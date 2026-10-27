@@ -211,7 +211,7 @@ _seed_from_k8s_secret() {
 
 run_wizard() {
 
-TOTAL_STAGES=7
+TOTAL_STAGES=8
 ENV_FILE="${ENV_FILE:-curator/.env}"
 K8S_SECRET_FILE="${K8S_SECRET_FILE:-deploy/curator/secret.yaml}"
 
@@ -221,6 +221,7 @@ _seed_from_k8s_secret "REDDIT_CLIENT_ID" "$K8S_SECRET_FILE"
 _seed_from_k8s_secret "REDDIT_CLIENT_SECRET" "$K8S_SECRET_FILE"
 _seed_from_k8s_secret "REDDIT_REFRESH_TOKEN" "$K8S_SECRET_FILE"
 _seed_from_k8s_secret "REDDIT_USER_AGENT" "$K8S_SECRET_FILE"
+_seed_from_k8s_secret "DATABASE_URL" "$K8S_SECRET_FILE"
 
 banner "Curator LoRA Training & Inference Credentials Setup"
 
@@ -311,7 +312,19 @@ step "Create or copy an API Key."
 ask_secret WAVESPEED_API_KEY "Paste your WaveSpeed API key:"
 write_env WAVESPEED_API_KEY "$WAVESPEED_API_KEY"
 
-# ── Stage 6: Authenticated API Connectivity Verification ─────────────────
+# ── Stage 6: PostgreSQL Catalog Database Connection ──────────────────────
+stage "PostgreSQL: Catalog Database Connection"
+say "ADR-0011 moves Curator domain metadata (candidates, curated maps, rejections,"
+say "datasets, training runs and adapters) from the on-disk catalog into PostgreSQL."
+note "Set DATABASE_URL to the in-cluster DSN to use PostgreSQL, e.g.:"
+note "  postgres://curator:<password>@shared-postgres-rw.database.svc.cluster.local:5432/curator"
+note "Leave empty to keep the filesystem catalog fallback."
+ask_secret DATABASE_URL "Paste the curator PostgreSQL DSN — Enter keeps the filesystem catalog fallback (empty DSN):" || true
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  write_env DATABASE_URL "$DATABASE_URL"
+fi
+
+# ── Stage 7: Authenticated API Connectivity Verification ─────────────────
 stage "Verification: Authenticated API Connectivity"
 say "Testing authenticated API reachability across configured providers..."
 
@@ -356,7 +369,7 @@ fi
 
 pause "Review verification checks above. Press Enter to proceed to Kubernetes secret sync."
 
-# ── Stage 7: Kubernetes Cluster Secret Sync ──────────────────────────────
+# ── Stage 8: Kubernetes Cluster Secret Sync ──────────────────────────────
 stage "Kubernetes: Cluster Secret Sync"
 say "Generating updated Kubernetes Secret manifest: $K8S_SECRET_FILE"
 
@@ -365,6 +378,7 @@ REDDIT_CLIENT_ID=$(_existing REDDIT_CLIENT_ID || true)
 REDDIT_CLIENT_SECRET=$(_existing REDDIT_CLIENT_SECRET || true)
 REDDIT_REFRESH_TOKEN=$(_existing REDDIT_REFRESH_TOKEN || true)
 REDDIT_USER_AGENT=$(_existing REDDIT_USER_AGENT || true)
+DATABASE_URL=$(_existing DATABASE_URL || true)
 
 mkdir -p "$(dirname "$K8S_SECRET_FILE")"
 cat <<EOF > "$K8S_SECRET_FILE"
@@ -395,6 +409,7 @@ stringData:
   REDDIT_CLIENT_SECRET: "${REDDIT_CLIENT_SECRET:-}"
   REDDIT_REFRESH_TOKEN: "${REDDIT_REFRESH_TOKEN:-}"
   REDDIT_USER_AGENT: "${REDDIT_USER_AGENT:-DungeonForge-Curator/1.0}"
+  DATABASE_URL: "${DATABASE_URL:-}"
 EOF
 chmod 600 "$K8S_SECRET_FILE"
 printf '  %s✓ Generated secret manifest:%s %s (mode 0600)\n' "$GREEN" "$RESET" "$K8S_SECRET_FILE"

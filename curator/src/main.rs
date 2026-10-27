@@ -95,6 +95,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let dry_run = args.iter().any(|arg| arg == "--dry-run" || arg == "-n");
         return run_migration_cli(force, dry_run).await;
     }
+    if args
+        .iter()
+        .any(|arg| arg == "migrate-disk-to-postgres" || arg == "--migrate-disk-to-postgres")
+    {
+        let force = args.iter().any(|arg| arg == "--force" || arg == "-f");
+        let dry_run = args.iter().any(|arg| arg == "--dry-run" || arg == "-n");
+        return run_catalog_migration_cli(force, dry_run).await;
+    }
 
     let port = resolve_port();
     let data_dir = resolve_data_dir();
@@ -227,6 +235,60 @@ async fn run_migration_cli(force: bool, dry_run: bool) -> Result<(), Box<dyn std
     println!("Dry Run:            {}", report.dry_run);
     println!("Completed At:       {}", report.completed_at);
     println!("==================================================");
+
+    Ok(())
+}
+
+/// Imports the filesystem catalog under the data directory into the PostgreSQL catalog.
+async fn run_catalog_migration_cli(
+    force: bool,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data_dir = resolve_data_dir();
+    let curator::adapters::CatalogBackend::Postgres(database_url) =
+        curator::adapters::CatalogBackend::from_env()
+    else {
+        return Err(
+            "DATABASE_URL is not set: 'migrate-disk-to-postgres' requires a PostgreSQL catalog \
+             (for example postgres://curator:curator@postgres:5432/curator)"
+                .into(),
+        );
+    };
+
+    tracing::info!(
+        data_dir = %data_dir.display(),
+        force,
+        dry_run,
+        "Importing filesystem catalog into PostgreSQL..."
+    );
+
+    let repository = curator::adapters::PostgresCatalogRepository::connect(&database_url)
+        .await
+        .map_err(|e| format!("Failed to connect to PostgreSQL catalog: {e}"))?;
+    if dry_run {
+        tracing::info!("Dry run: skipping schema migrations and catalog writes");
+    } else {
+        repository
+            .run_migrations()
+            .await
+            .map_err(|e| format!("Failed to run PostgreSQL catalog migrations: {e}"))?;
+    }
+
+    let options = curator::services::catalog_migration::DiskToPostgresOptions { force, dry_run };
+    let report =
+        curator::services::catalog_migration::run_disk_to_postgres_migration(&data_dir, &repository, options)
+            .await?;
+
+    print!("{}", report.render_summary());
+
+    let totals = report.totals();
+    if totals.failed > 0 {
+        return Err(format!(
+            "{} catalog entities failed to import; see the failure list above",
+            totals.failed
+        )
+        .into());
+    }
 
     Ok(())
 }

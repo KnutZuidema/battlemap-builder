@@ -44,6 +44,8 @@ Run the interactive provisioning wizard to walk step-by-step through generating 
 ./scripts/provision-credentials.sh
 ```
 
+The wizard includes a dedicated PostgreSQL stage that prompts for the curator catalog `DATABASE_URL` DSN (leave it empty to keep the filesystem catalog fallback) and writes it into the generated secret, so re-running the wizard preserves an already-applied DSN. It also seeds itself from any values already present in `deploy/curator/secret.yaml`.
+
 #### Manual Configuration
 
 1. Copy the secret template:
@@ -52,6 +54,7 @@ Run the interactive provisioning wizard to walk step-by-step through generating 
    ```
 
 2. Edit `deploy/curator/secret.yaml` and configure credentials:
+   - `DATABASE_URL`: PostgreSQL catalog DSN (for example `postgres://curator:<password>@curator-postgres:5432/curator`). Required by `curator migrate-disk-to-postgres`; when absent, the server keeps serving the filesystem catalog under `/data` (ADR-0011).
    - `OPENROUTER_API_KEY`: API key for benchmark maps, theme suggestions, and vision descriptions.
    - `HF_TOKEN`: Hugging Face User Access Token (read) for downloading gated `flux-3-image-klein-base` weights.
    - `MODAL_TOKEN_ID` & `MODAL_TOKEN_SECRET`: Modal credentials for GPU training runners.
@@ -327,6 +330,37 @@ kubectl scale deployment curator -n curator --replicas=1
 ```
 
 The migration is fully idempotent: it checks `exists_blob` for each object, skips already uploaded blobs, and records a `.disk_to_s3_migrated` marker file in `/data`. Use `--force` to re-run.
+
+#### Disk-to-PostgreSQL Catalog Migration Job
+
+Before a deployment starts serving from the PostgreSQL catalog (ADR-0011), the manifests already on the volume must be imported into it. `curator migrate-disk-to-postgres` reads `staging/`, `curated/`, `rejected/`, `datasets/`, `training/`, and `adapters/` under `DATA_DIR` and writes them through the same deserializers the filesystem catalog uses.
+
+```bash
+# Dry-run preview (no writes; nothing is migrated):
+kubectl exec -it -n curator deployment/curator -- curator migrate-disk-to-postgres --dry-run
+
+# Execute migration (DATABASE_URL must be present in the pod environment):
+kubectl exec -it -n curator deployment/curator -- curator migrate-disk-to-postgres
+```
+
+`DATABASE_URL` is required; the command exits with an error rather than silently doing nothing. Embedded schema migrations run before the import (unless `--dry-run`). Re-running is idempotent: primary-key rows are kept (`ON CONFLICT DO NOTHING`) and the append-only rejection and metric logs deduplicate identical records. `--force` overwrites primary-key rows (`ON CONFLICT DO UPDATE`) instead. The command prints per-entity migrated/skipped/failed counts plus a failure list with paths and reasons, and exits non-zero if anything failed.
+
+##### Run as a standalone Kubernetes Job
+
+```bash
+# 1. Scale down deployment to release ReadWriteOnce volume
+kubectl scale deployment curator -n curator --replicas=0
+
+# 2. Run migration Job
+kubectl apply -f deploy/curator/job-migrate-catalog.yaml
+kubectl wait --for=condition=complete job/curator-catalog-migration -n curator --timeout=300s
+kubectl logs -n curator job/curator-catalog-migration
+
+# 3. Clean up Job and scale deployment back up
+kubectl delete job curator-catalog-migration -n curator
+kubectl scale deployment curator -n curator --replicas=1
+```
+
 #### Persistence Verification Procedure
 
 To verify that data survives across pod restarts and recreations on Hetzner CSI storage:

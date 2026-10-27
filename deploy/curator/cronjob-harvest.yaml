@@ -21,8 +21,11 @@ spec:
         app: curator-harvest
         app.kubernetes.io/name: curator-harvest
     spec:
-      # Hard stop for a hung Reddit OAuth/HTTP exchange (--max-time 900 below).
-      activeDeadlineSeconds: 900
+      # Ordered timeouts: curl aborts the request itself at --max-time 900, so a
+      # hung Reddit OAuth/HTTP exchange fails as a normal container error and
+      # backoffLimit retries apply. The Job hard-stops at 1200, leaving 300s for
+      # those retries before Kubernetes kills the pod.
+      activeDeadlineSeconds: 1200
       backoffLimit: 2
       template:
         metadata:

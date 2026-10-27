@@ -92,15 +92,23 @@ harvest-apply:
 harvest-now:
     kubectl create job --from=cronjob/curator-harvest-reddit "manual-harvest-$(date +%s)" -n curator
 
-# Tail harvest Job logs (optionally pass a job name, e.g. curator-harvest-reddit-29123456)
+# Tail the newest harvest pod's log (optionally pass a job name, e.g. curator-harvest-reddit-29123456)
 harvest-logs job="":
     #!/usr/bin/env bash
     set -euo pipefail
     if [ -n "{{job}}" ]; then
-        kubectl logs -l "job-name={{job}}" --tail=50 -n curator
+        selector="job-name={{job}}"
     else
-        kubectl logs -l app=curator-harvest --tail=50 -n curator
+        selector="app=curator-harvest"
     fi
+    pod=$(kubectl get pods -n curator -l "$selector" \
+        --sort-by=.metadata.creationTimestamp \
+        -o jsonpath='{.items[-1:].metadata.name}')
+    if [ -z "$pod" ]; then
+        echo "no harvest pod matches $selector" >&2
+        exit 1
+    fi
+    kubectl logs -n curator "$pod" --tail=50
 
 # Delete deployed manifests
 delete:

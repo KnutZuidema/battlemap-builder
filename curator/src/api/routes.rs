@@ -1263,19 +1263,23 @@ pub async fn post_curated_describe(
     }))
 }
 
-/// Ground layer dimensions of a curated map, preferring the recorded layer metadata over the
-/// decoded image and the map's own dimensions. Mirrors the resolution the grid and section
-/// policies use.
+/// Ground layer dimensions used to derive Map Section origins.
+///
+/// The decoded image wins: the readiness audit crops sections out of exactly those pixels, so
+/// planning origins from stale layer metadata would mint sections whose boxes never fit the
+/// image, and a remediation could never clear `section_unresolvable`. Recorded metadata is the
+/// fallback when the image cannot be decoded.
 fn ground_dimensions(map: &CuratedMap, ground_image: Option<&image::DynamicImage>) -> (u32, u32) {
-    let recorded = map
-        .layers
-        .iter()
-        .find(|layer| layer.role == LayerRole::Ground)
-        .or_else(|| map.layers.first())
-        .map(|layer| layer.dimensions)
-        .filter(|&(w, h)| w > 0 && h > 0);
-    recorded
-        .or_else(|| ground_image.map(|img| (img.width(), img.height())))
+    ground_image
+        .map(|img| (img.width(), img.height()))
+        .or_else(|| {
+            map.layers
+                .iter()
+                .find(|layer| layer.role == LayerRole::Ground)
+                .or_else(|| map.layers.first())
+                .map(|layer| layer.dimensions)
+                .filter(|&(w, h)| w > 0 && h > 0)
+        })
         .unwrap_or(map.dimensions)
 }
 

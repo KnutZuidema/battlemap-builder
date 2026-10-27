@@ -641,7 +641,6 @@ fn test_ui_assets_expose_dataset_readiness_remediation_actions() {
     assert!(css.contains(".readiness-action-btn"));
     assert!(css.contains(".readiness-action-btn.is-busy"));
     assert!(css.contains(".readiness-action-spinner"));
-    assert!(css.contains(".readiness-issue-row.is-resolved"));
 }
 
 // ---------------------------------------------------------------------------

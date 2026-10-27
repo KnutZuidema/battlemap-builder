@@ -299,8 +299,8 @@ An empty store is **not** a ready dataset (`ready: false`): there is nothing to 
 | `ground_image_unreadable` | The Ground layer bytes do not decode as an image | Re-ingest the map; an export would skip it entirely |
 | `grid_below_minimum` | The persisted Grid Configuration yields no full 16×16 Grid Cell window | Recalibrate the grid (`PATCH /api/curated/{id}` with a `grid` that fits the Ground layer) |
 | `section_unresolvable` | A Map Section's exact `16 * cell_size_px` box does not fit the Ground layer | Regrid, or re-curate the map; the export skips that section |
-| `physical_description_missing` | The section (and the map) resolve to no `Physical Description`, so its caption would carry only the Trigger Phrase, themes and tags | `POST /api/curated/{id}/describe`, then `PATCH` the description |
-| `physical_description_not_neutral` | The stored description holds camera, perspective, art-style or grid directives instead of physical prose | Regenerate the description, then `PATCH /api/curated/{id}` with a `grid` so section descriptions are recomputed per crop |
+| `physical_description_missing` | The section (and the map) resolve to no `Physical Description`, so its caption would carry only the Trigger Phrase, themes and tags | `POST /api/curated/{id}/describe` with `{"apply": true}` regenerates and persists the description plus every Map Section description |
+| `physical_description_not_neutral` | The stored description holds camera, perspective, art-style or grid directives instead of physical prose | `POST /api/curated/{id}/describe` with `{"apply": true}` regenerates it under the strict neutral prompt and recomputes the section descriptions per crop |
 
 The embedded UI exposes the same audit as **Dataset Readiness** in the Dataset Library toolbar: the
 button turns emerald (`Dataset Ready · N sections`) or amber (`Dataset Issues · ready/total maps`) and
@@ -323,10 +323,10 @@ is refused (`DATASET_NOT_READY`), so the flagged maps are resolved without leavi
 - **Ground layer codes** (`ground_layer_missing`, `ground_image_unreadable`) offer *Inspect / Delete*,
   which opens the curated inspector drawer for that bundle.
 
-A successful action shows `✓ Resolved` on its row and immediately re-audits the active scope, so
-resolved issues leave the list and the counts update without closing the modal. Failures surface the
-propagated error (`503` when vision is unconfigured, `502` on upstream failure) as a danger toast and
-leave the row untouched.
+A successful action immediately re-audits the active scope, so the resolved issue leaves the list and
+the counts update without closing the modal; a description that is generated but not persisted, or that
+still fails the audit, surfaces as a danger/warning toast with the row left actionable. Failures surface
+the propagated error (`503` when vision is unconfigured, `502` on upstream failure) the same way.
 
 Legacy bundles curated before ADR-0007 carry no `sections` and no `description`: their full-grid lattice
 still exports (one 16×16 window per lattice) but their captions have no `Physical Description`, which the

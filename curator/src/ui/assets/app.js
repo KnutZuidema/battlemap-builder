@@ -135,7 +135,6 @@
         deleteModalTarget: null,
         // Dataset Readiness Remediation (Issue #245)
         datasetReadiness: null,
-        datasetRemediated: new Set(),
     };
 
     // Curate Decision Modal Flow State
@@ -5042,10 +5041,11 @@
         ground_image_unreadable: { action: "inspect", label: "Inspect / Delete" },
     };
 
-    const DATASET_DESCRIPTION_ISSUES = new Set([
-        "physical_description_missing",
-        "physical_description_not_neutral",
-    ]);
+    const DATASET_DESCRIPTION_ISSUES = new Set(
+        Object.entries(DATASET_ISSUE_ACTIONS)
+            .filter(([, fix]) => fix.action === "describe")
+            .map(([code]) => code),
+    );
 
     const DATASET_ISSUE_REMEDIATIONS = {
         ground_layer_missing: "Restore 0_ground.png in data/curated/<id>/",
@@ -5131,31 +5131,26 @@
         const fix = DATASET_ISSUE_ACTIONS[issue.code];
         const rem = fix ? null : DATASET_ISSUE_REMEDIATIONS[issue.code];
         const remHtml = rem ? `<span class="readiness-issue-remediation">Fix: ${escapeHtml(rem)}</span>` : "";
-        const resolved = state.datasetRemediated.has(`${map.id}:${issue.code}`);
         const actionHtml = fix
             ? `<button type="button" class="btn btn-secondary btn-xs readiness-action-btn" data-remediate="${escapeHtml(fix.action)}" data-map-id="${escapeHtml(map.id)}" data-issue-code="${escapeHtml(issue.code)}">${escapeHtml(fix.label)}<span class="readiness-action-spinner hidden"></span></button>`
             : "";
         const actionsHtml = actionHtml ? `<div class="readiness-issue-actions">${actionHtml}</div>` : "";
-        const resolvedHtml = resolved ? '<span class="readiness-issue-resolved">✓ Resolved</span>' : "";
-        const rowClass = resolved ? "readiness-issue-row is-resolved" : "readiness-issue-row";
-        return `<li class="${rowClass}" data-issue-code="${escapeHtml(issue.code)}" data-map-id="${escapeHtml(map.id)}"><div class="readiness-issue-text"><span class="readiness-issue-code mono">${escapeHtml(datasetIssueLabel(issue.code))}</span> ${escapeHtml(issue.detail)}</div><div class="readiness-issue-side">${actionsHtml}${resolvedHtml}${remHtml}</div></li>`;
+        return `<li class="readiness-issue-row" data-issue-code="${escapeHtml(issue.code)}" data-map-id="${escapeHtml(map.id)}"><div class="readiness-issue-text"><span class="readiness-issue-code mono">${escapeHtml(datasetIssueLabel(issue.code))}</span> ${escapeHtml(issue.detail)}</div><div class="readiness-issue-side">${actionsHtml}${remHtml}</div></li>`;
+    }
+
+    /** Whether a flagged map carries an issue the batch action can resolve. */
+    function hasDescriptionIssue(map) {
+        return (map.issues || []).some(issue => DATASET_DESCRIPTION_ISSUES.has(issue.code));
     }
 
     /** Map ids whose description issues the batch action can resolve. */
     function fixableDescriptionMapIds(report) {
-        const ids = new Set();
-        ((report && report.maps) || []).forEach(map => {
-            (map.issues || []).forEach(issue => {
-                if (DATASET_DESCRIPTION_ISSUES.has(issue.code)) ids.add(map.id);
-            });
-        });
-        return Array.from(ids);
+        return ((report && report.maps) || []).filter(hasDescriptionIssue).map(map => map.id);
     }
 
     function toggleFixAllDescriptions(flagged) {
         if (!btnFixAllDescriptions) return;
-        const hasFixable = (flagged || []).some(map => (map.issues || []).some(issue => DATASET_DESCRIPTION_ISSUES.has(issue.code)));
-        btnFixAllDescriptions.classList.toggle("hidden", !hasFixable);
+        btnFixAllDescriptions.classList.toggle("hidden", !(flagged || []).some(hasDescriptionIssue));
     }
 
     async function fetchDatasetReadiness() {
@@ -5181,7 +5176,6 @@
         stopPanLoop();
         stopZoomLoop();
         state.datasetReadinessModalOpen = true;
-        state.datasetRemediated.clear();
         datasetReadinessModal?.classList.remove("hidden");
         fetchDatasetReadiness();
         const titleEl = document.getElementById("dataset-readiness-title");
@@ -5210,7 +5204,11 @@
             const errData = await res.json().catch(() => ({}));
             throw new Error(errData.error || `HTTP ${res.status}`);
         }
-        return res.json();
+        const payload = await res.json();
+        if (payload.applied !== true) {
+            throw new Error("Description was generated but not persisted");
+        }
+        return payload;
     }
 
     function setRemediationBusy(button, busy) {
@@ -5241,7 +5239,6 @@
         setRemediationBusy(button, true);
         try {
             await applyDatasetDescription(mapId);
-            state.datasetRemediated.add(`${mapId}:${issueCode}`);
             showToast(`Description regenerated for ${mapId}`, "success");
             // Re-audit the current scope so the resolved issue leaves the list on its own.
             resetDatasetReadinessTitle();
@@ -5368,7 +5365,6 @@
             return;
         }
         state.datasetReadinessModalOpen = true;
-        state.datasetRemediated.clear();
         datasetReadinessModal.classList.remove("hidden");
         const titleEl = document.getElementById("dataset-readiness-title");
         if (titleEl) {

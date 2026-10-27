@@ -3873,18 +3873,6 @@ kbd {
     display: none;
 }
 
-.readiness-issue-resolved {
-    color: #6ee7b7;
-    font-size: 0.72rem;
-    white-space: nowrap;
-}
-
-.readiness-issue-row.is-resolved {
-    border-radius: 6px;
-    background: rgba(16, 185, 129, 0.08);
-    box-shadow: inset 0 0 0 1px rgba(16, 185, 129, 0.25);
-    padding: 0.25rem 0.45rem;
-}
 
 /* Frozen Dataset Snapshots Panel (Issue #216) */
 .btn-freeze {

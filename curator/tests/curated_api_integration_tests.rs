@@ -1502,3 +1502,44 @@ async fn test_staging_describe_rejects_apply() {
         "{err}"
     );
 }
+
+#[tokio::test]
+async fn test_curated_describe_apply_plans_sections_from_the_ground_image() {
+    let neutral = "Moss-slick stone crypt with two carved sarcophagi.";
+    let generator = Arc::new(MockCuratedGen(Ok(neutral.to_string())));
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
+    let app = create_router(state);
+
+    // The bundle's layer metadata claims 4096×4096 while the stored PNG is 2048×2048. Section
+    // origins must follow the pixels the readiness audit crops, otherwise the remediation mints
+    // sections whose boxes never fit and the audit can never converge.
+    let png = create_test_png(2048, 2048);
+    let map = CuratedMap::with_now(
+        "stale_dims",
+        Theme::Dungeon,
+        vec!["dungeon".into()],
+        (4096, 4096),
+    )
+    .with_grid(GridConfig::new(64, 0, 0))
+    .with_description("Top-down view of a stone crypt");
+    seed_curated_ports(&catalog, &blobs, &map, &png).await;
+
+    let req = Request::builder()
+        .uri("/api/curated/stale_dims/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "apply": true }).to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored = catalog.get_curated("stale_dims").await.unwrap();
+    assert_eq!(stored.sections.len(), 4, "{:?}", stored.sections);
+
+    let after = readiness_report(app).await;
+    assert_eq!(after["ready"], true, "{after}");
+    assert_eq!(after["sections_ready"], 4);
+}

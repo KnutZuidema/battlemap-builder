@@ -52,6 +52,7 @@ Run the interactive provisioning wizard to walk step-by-step through generating 
    ```
 
 2. Edit `deploy/curator/secret.yaml` and configure credentials:
+   - `DATABASE_URL`: PostgreSQL catalog DSN (for example `postgres://curator:<password>@curator-postgres:5432/curator`). Required by `curator migrate-disk-to-postgres`; when absent, the server keeps serving the filesystem catalog under `/data` (ADR-0011).
    - `OPENROUTER_API_KEY`: API key for benchmark maps, theme suggestions, and vision descriptions.
    - `HF_TOKEN`: Hugging Face User Access Token (read) for downloading gated `flux-3-image-klein-base` weights.
    - `MODAL_TOKEN_ID` & `MODAL_TOKEN_SECRET`: Modal credentials for GPU training runners.

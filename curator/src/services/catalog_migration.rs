@@ -14,25 +14,23 @@
 //!
 //! Re-running is idempotent: primary-key tables keep existing rows (`ON CONFLICT DO NOTHING`) and
 //! the append-only logs deduplicate identical records. `--force` overwrites primary-key rows
-//! instead; `--dry-run` reports the same counts without writing anything.
+//! instead; `--dry-run` reports the same counts without writing anything, including the
+//! overwrites a forced preview would perform.
 
 use std::fmt::Write as _;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use async_trait::async_trait;
 
 use crate::adapters::postgres_catalog_repository::{
-    ImportConflict, PostgresCatalogRepository, RejectionKey, TrainingMetricKey,
+    CatalogImportIndex, ImportConflict, PostgresCatalogRepository, RejectionKey, TrainingMetricKey,
 };
 use crate::domain::{
     BenchmarkMetadata, Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, RejectionRecord,
     TrainingMetricSnapshot, TrainingRun,
 };
 use crate::ports::storage_error::StorageError;
-
-/// Directory scanned when neither `CURATOR_DATA_DIR` nor `DATA_DIR` is set.
-pub const DEFAULT_DATA_DIR: &str = "data";
 
 /// Entity labels used in reports and failure entries.
 pub const ENTITY_CANDIDATES: &str = "candidates";
@@ -62,7 +60,7 @@ impl Default for DiskToPostgresOptions {
 }
 
 /// Per-entity migration tally.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EntityMigrationCounts {
     /// Entities written (or, for a dry run, that would be written).
     pub migrated: usize,
@@ -73,11 +71,6 @@ pub struct EntityMigrationCounts {
 }
 
 impl EntityMigrationCounts {
-    /// Total entities considered for this entity type.
-    pub fn total(&self) -> usize {
-        self.migrated + self.skipped + self.failed
-    }
-
     /// Records the outcome of a database import (`true` = row written).
     pub fn record_import(&mut self, written: bool) {
         if written {
@@ -106,7 +99,7 @@ impl EntityMigrationCounts {
 }
 
 /// A single entity that could not be imported, with the path that produced it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationFailure {
     /// Entity label, e.g. [`ENTITY_CANDIDATES`].
     pub entity: String,
@@ -128,7 +121,7 @@ impl MigrationFailure {
 }
 
 /// Structured summary of a disk-to-PostgreSQL catalog migration run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiskToPostgresReport {
     pub completed_at: String,
     pub dry_run: bool,
@@ -316,170 +309,69 @@ pub async fn run_disk_to_postgres_migration(
         }
     }
 
-    for item in &discovery.candidates {
-        match &index {
-            Some(index) => {
-                if index.candidate_ids.contains(&item.value.id) {
-                    report.candidates.record_skip();
-                } else {
-                    report.candidates.record_import(true);
-                }
-            }
-            None => match repository.import_candidate(&item.value, conflict).await {
-                Ok(written) => report.candidates.record_import(written),
-                Err(err) => {
-                    report.candidates.record_failure();
-                    report
-                        .failures
-                        .push(MigrationFailure::new(ENTITY_CANDIDATES, &item.path, err.to_string()));
-                }
-            },
-        }
-    }
-
-    for item in &discovery.curated_maps {
-        match &index {
-            Some(index) => {
-                if index.curated_ids.contains(&item.value.id) {
-                    report.curated_maps.record_skip();
-                } else {
-                    report.curated_maps.record_import(true);
-                }
-            }
-            None => match repository.import_curated(&item.value, conflict).await {
-                Ok(written) => report.curated_maps.record_import(written),
-                Err(err) => {
-                    report.curated_maps.record_failure();
-                    report
-                        .failures
-                        .push(MigrationFailure::new(ENTITY_CURATED_MAPS, &item.path, err.to_string()));
-                }
-            },
-        }
-    }
-
-    for item in &discovery.dataset_snapshots {
-        match &index {
-            Some(index) => {
-                if index.dataset_snapshot_ids.contains(&item.value.id) {
-                    report.dataset_snapshots.record_skip();
-                } else {
-                    report.dataset_snapshots.record_import(true);
-                }
-            }
-            None => match repository
-                .import_dataset_snapshot(&item.value, conflict)
-                .await
-            {
-                Ok(written) => report.dataset_snapshots.record_import(written),
-                Err(err) => {
-                    report.dataset_snapshots.record_failure();
-                    report.failures.push(MigrationFailure::new(
-                        ENTITY_DATASET_SNAPSHOTS,
-                        &item.path,
-                        err.to_string(),
-                    ));
-                }
-            },
-        }
-    }
-
-    for item in &discovery.training_runs {
-        match &index {
-            Some(index) => {
-                if index.training_run_ids.contains(&item.value.id) {
-                    report.training_runs.record_skip();
-                } else {
-                    report.training_runs.record_import(true);
-                }
-            }
-            None => match repository.import_training_run(&item.value, conflict).await {
-                Ok(written) => report.training_runs.record_import(written),
-                Err(err) => {
-                    report.training_runs.record_failure();
-                    report.failures.push(MigrationFailure::new(
-                        ENTITY_TRAINING_RUNS,
-                        &item.path,
-                        err.to_string(),
-                    ));
-                }
-            },
-        }
-    }
-
-    for item in &discovery.training_metrics {
-        let key = TrainingMetricKey::from_sample(&item.run_id, &item.value);
-        match &index {
-            Some(index) => {
-                if index.training_metrics.contains(&key) {
-                    report.training_metrics.record_skip();
-                } else {
-                    report.training_metrics.record_import(true);
-                }
-            }
-            None => match repository
-                .import_training_metric(&item.run_id, &item.value)
-                .await
-            {
-                Ok(written) => report.training_metrics.record_import(written),
-                Err(err) => {
-                    report.training_metrics.record_failure();
-                    report.failures.push(MigrationFailure::new(
-                        ENTITY_TRAINING_METRICS,
-                        &item.path,
-                        err.to_string(),
-                    ));
-                }
-            },
-        }
-    }
-
-    for item in &discovery.lora_adapters {
-        match &index {
-            Some(index) => {
-                if index.lora_adapter_ids.contains(&item.value.id) {
-                    report.lora_adapters.record_skip();
-                } else {
-                    report.lora_adapters.record_import(true);
-                }
-            }
-            None => match repository.import_lora_adapter(&item.value, conflict).await {
-                Ok(written) => report.lora_adapters.record_import(written),
-                Err(err) => {
-                    report.lora_adapters.record_failure();
-                    report.failures.push(MigrationFailure::new(
-                        ENTITY_LORA_ADAPTERS,
-                        &item.path,
-                        err.to_string(),
-                    ));
-                }
-            },
-        }
-    }
-
-    for item in &discovery.rejections {
-        match &index {
-            Some(index) => {
-                let key = RejectionKey::from_record(&item.value);
-                if index.rejections.contains(&key) {
-                    report.rejections.record_skip();
-                } else {
-                    report.rejections.record_import(true);
-                }
-            }
-            None => match repository.import_rejection(&item.value).await {
-                Ok(written) => report.rejections.record_import(written),
-                Err(err) => {
-                    report.rejections.record_failure();
-                    report.failures.push(MigrationFailure::new(
-                        ENTITY_REJECTIONS,
-                        &item.path,
-                        err.to_string(),
-                    ));
-                }
-            },
-        }
-    }
+    import_entities(
+        &discovery.candidates,
+        repository,
+        index.as_ref(),
+        conflict,
+        &mut report.candidates,
+        &mut report.failures,
+    )
+    .await;
+    import_entities(
+        &discovery.curated_maps,
+        repository,
+        index.as_ref(),
+        conflict,
+        &mut report.curated_maps,
+        &mut report.failures,
+    )
+    .await;
+    import_entities(
+        &discovery.dataset_snapshots,
+        repository,
+        index.as_ref(),
+        conflict,
+        &mut report.dataset_snapshots,
+        &mut report.failures,
+    )
+    .await;
+    import_entities(
+        &discovery.training_runs,
+        repository,
+        index.as_ref(),
+        conflict,
+        &mut report.training_runs,
+        &mut report.failures,
+    )
+    .await;
+    import_entities(
+        &discovery.training_metrics,
+        repository,
+        index.as_ref(),
+        conflict,
+        &mut report.training_metrics,
+        &mut report.failures,
+    )
+    .await;
+    import_entities(
+        &discovery.lora_adapters,
+        repository,
+        index.as_ref(),
+        conflict,
+        &mut report.lora_adapters,
+        &mut report.failures,
+    )
+    .await;
+    import_entities(
+        &discovery.rejections,
+        repository,
+        index.as_ref(),
+        conflict,
+        &mut report.rejections,
+        &mut report.failures,
+    )
+    .await;
 
     let totals = report.totals();
     tracing::info!(
@@ -491,6 +383,165 @@ pub async fn run_disk_to_postgres_migration(
     );
 
     Ok(report)
+}
+
+/// A discovered entity together with the catalog row it imports as.
+#[async_trait]
+trait Importable {
+    /// Whether `--force` replaces an existing row for this entity kind.
+    ///
+    /// The append-only rejection and metric logs never overwrite: `--force` only applies to
+    /// primary-key tables, matching [`ImportConflict`]'s use in the repository.
+    const OVERWRITES: bool;
+
+    /// Entity label used in reports and failure entries.
+    fn entity(&self) -> &'static str;
+    /// Filesystem path the entity was read from.
+    fn path(&self) -> &Path;
+    /// Whether `index` already holds the row this entity maps to.
+    fn is_present(&self, index: &CatalogImportIndex) -> bool;
+    /// Writes the entity, returning `true` when a row was written.
+    async fn import(
+        &self,
+        repository: &PostgresCatalogRepository,
+        conflict: ImportConflict,
+    ) -> Result<bool, StorageError>;
+}
+
+/// Imports every discovered entity of one kind, tallying the outcome.
+///
+/// A dry run only classifies against `index` and never writes. An entity whose primary key
+/// already exists is reported as `skipped`, or as `migrated` when `conflict` is
+/// [`ImportConflict::Overwrite`], because the real run would overwrite that row.
+async fn import_entities<T>(
+    items: &[T],
+    repository: &PostgresCatalogRepository,
+    index: Option<&CatalogImportIndex>,
+    conflict: ImportConflict,
+    counts: &mut EntityMigrationCounts,
+    failures: &mut Vec<MigrationFailure>,
+) where
+    T: Importable + Sync,
+{
+    let overwrite = conflict == ImportConflict::Overwrite && T::OVERWRITES;
+    for item in items {
+        if let Some(index) = index {
+            if item.is_present(index) && !overwrite {
+                counts.record_skip();
+            } else {
+                counts.record_import(true);
+            }
+            continue;
+        }
+
+        match item.import(repository, conflict).await {
+            Ok(written) => counts.record_import(written),
+            Err(err) => {
+                counts.record_failure();
+                failures.push(MigrationFailure::new(
+                    item.entity(),
+                    item.path(),
+                    err.to_string(),
+                ));
+            }
+        }
+    }
+}
+
+/// Implements [`Importable`] for an entity stored in its own primary-key table.
+macro_rules! primary_key_entity {
+    ($($ty:ident => $entity:expr, $ids:ident, $import:ident;)+) => {
+        $(
+            #[async_trait]
+            impl Importable for Located<$ty> {
+                const OVERWRITES: bool = true;
+
+                fn entity(&self) -> &'static str {
+                    $entity
+                }
+
+                fn path(&self) -> &Path {
+                    &self.path
+                }
+
+                fn is_present(&self, index: &CatalogImportIndex) -> bool {
+                    index.$ids.contains(&self.value.id)
+                }
+
+                async fn import(
+                    &self,
+                    repository: &PostgresCatalogRepository,
+                    conflict: ImportConflict,
+                ) -> Result<bool, StorageError> {
+                    repository.$import(&self.value, conflict).await
+                }
+            }
+        )+
+    };
+}
+
+primary_key_entity! {
+    Candidate => ENTITY_CANDIDATES, candidate_ids, import_candidate;
+    CuratedMap => ENTITY_CURATED_MAPS, curated_ids, import_curated;
+    DatasetSnapshot => ENTITY_DATASET_SNAPSHOTS, dataset_snapshot_ids, import_dataset_snapshot;
+    TrainingRun => ENTITY_TRAINING_RUNS, training_run_ids, import_training_run;
+    LoraAdapter => ENTITY_LORA_ADAPTERS, lora_adapter_ids, import_lora_adapter;
+}
+
+#[async_trait]
+impl Importable for LocatedMetric {
+    const OVERWRITES: bool = false;
+
+    fn entity(&self) -> &'static str {
+        ENTITY_TRAINING_METRICS
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn is_present(&self, index: &CatalogImportIndex) -> bool {
+        index
+            .training_metrics
+            .contains(&TrainingMetricKey::from_sample(&self.run_id, &self.value))
+    }
+
+    async fn import(
+        &self,
+        repository: &PostgresCatalogRepository,
+        _conflict: ImportConflict,
+    ) -> Result<bool, StorageError> {
+        repository
+            .import_training_metric(&self.run_id, &self.value)
+            .await
+    }
+}
+
+#[async_trait]
+impl Importable for Located<RejectionRecord> {
+    const OVERWRITES: bool = false;
+
+    fn entity(&self) -> &'static str {
+        ENTITY_REJECTIONS
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn is_present(&self, index: &CatalogImportIndex) -> bool {
+        index
+            .rejections
+            .contains(&RejectionKey::from_record(&self.value))
+    }
+
+    async fn import(
+        &self,
+        repository: &PostgresCatalogRepository,
+        _conflict: ImportConflict,
+    ) -> Result<bool, StorageError> {
+        repository.import_rejection(&self.value).await
+    }
 }
 
 /// Reads every catalog entity under `data_dir` without touching the database.
@@ -600,26 +651,12 @@ fn parse_candidate_manifest(path: &Path) -> Result<Candidate, StorageError> {
 
 /// Reads the rejection log in append order.
 ///
-/// The canonical location is `rejected/rejections.json` (a JSON array, as written by
-/// [`crate::adapters::FilesystemCatalogRepository`]); the legacy `rejections.jsonl` root file is
-/// imported too when present.
+/// The legacy `rejections.jsonl` root file is read first: it predates the canonical
+/// `rejected/rejections.json` array written by [`crate::adapters::FilesystemCatalogRepository`],
+/// and both can exist before the cutover. Reading the canonical array second keeps the surrogate
+/// id sequence aligned with real rejection history.
 fn discover_rejections(data_dir: &Path, failures: &mut Vec<MigrationFailure>) -> Vec<Located<RejectionRecord>> {
     let mut records = Vec::new();
-
-    let canonical = data_dir.join("rejected").join("rejections.json");
-    if canonical.is_file() {
-        match read_json::<Vec<RejectionRecord>>(&canonical) {
-            Ok(items) => records.extend(items.into_iter().map(|value| Located {
-                path: canonical.clone(),
-                value,
-            })),
-            Err(err) => failures.push(MigrationFailure::new(
-                ENTITY_REJECTIONS,
-                &canonical,
-                err.to_string(),
-            )),
-        }
-    }
 
     let legacy = data_dir.join("rejections.jsonl");
     if legacy.is_file() {
@@ -646,6 +683,21 @@ fn discover_rejections(data_dir: &Path, failures: &mut Vec<MigrationFailure>) ->
             Err(err) => failures.push(MigrationFailure::new(
                 ENTITY_REJECTIONS,
                 &legacy,
+                err.to_string(),
+            )),
+        }
+    }
+
+    let canonical = data_dir.join("rejected").join("rejections.json");
+    if canonical.is_file() {
+        match read_json::<Vec<RejectionRecord>>(&canonical) {
+            Ok(items) => records.extend(items.into_iter().map(|value| Located {
+                path: canonical.clone(),
+                value,
+            })),
+            Err(err) => failures.push(MigrationFailure::new(
+                ENTITY_REJECTIONS,
+                &canonical,
                 err.to_string(),
             )),
         }

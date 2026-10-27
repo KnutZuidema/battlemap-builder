@@ -790,3 +790,155 @@ async fn training_runs_metrics_and_adapters_round_trip_with_ordering() {
 
     cleanup(&repository, &prefix).await;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Upsert semantics
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Reads the indexed creation timestamp of one stored row.
+async fn stored_created_at(
+    repository: &PostgresCatalogRepository,
+    table: &str,
+    id: &str,
+) -> chrono::DateTime<Utc> {
+    sqlx::query_scalar(&format!("SELECT created_at FROM {table} WHERE id = $1"))
+        .bind(id)
+        .fetch_one(repository.pool())
+        .await
+        .expect("read stored created_at")
+}
+
+#[tokio::test]
+async fn upserts_write_the_creation_time_carried_by_the_entity() {
+    let Some(repository) = repository().await else {
+        eprintln!("skipping created_at test: {ENV_VAR} not set");
+        return;
+    };
+    let prefix = unique("created-at");
+    // PostgreSQL keeps microsecond precision, so start from a microsecond-exact instant and the
+    // round trip is exact.
+    let created_at = chrono::DateTime::from_timestamp_micros(Utc::now().timestamp_micros())
+        .expect("current timestamp");
+    let rewritten_at = created_at + Duration::seconds(60);
+
+    let mut candidate = Candidate::new(
+        format!("{prefix}-candidate"),
+        Source::Manual,
+        "map.png",
+        (8, 8),
+        created_at,
+    );
+    let mut curated = CuratedMap::with_now(
+        format!("{prefix}-curated"),
+        Theme::Dungeon,
+        vec!["crypt".to_string()],
+        (8, 8),
+    );
+    curated.curated_at = created_at;
+    let mut snapshot = sample_snapshot(&format!("{prefix}-snapshot"), Some(Theme::Dungeon), created_at);
+    let mut run = sample_run(&format!("{prefix}-run"), &snapshot.id, created_at);
+    let recipe = TrainingRecipe::calibration();
+    let mut adapter = LoraAdapter {
+        id: format!("{prefix}-adapter"),
+        run_id: run.id.clone(),
+        step: 10,
+        scale: 0.75,
+        base_model: recipe.base_model.clone(),
+        trigger_phrase: recipe.trigger_phrase.clone(),
+        artifact_key: format!("artifacts/{prefix}/adapter.safetensors"),
+        artifact_url: format!("https://r2.example.com/{prefix}/adapter.safetensors"),
+        sha256: Some("sha".to_string()),
+        size_bytes: Some(512),
+        recipe_digest: recipe.digest(),
+        dataset_snapshot_id: snapshot.id.clone(),
+        dataset_digest: "digest".to_string(),
+        created_at,
+        retired: false,
+        retired_at: None,
+    };
+
+    repository.save_candidate(&candidate).await.expect("save candidate");
+    repository.save_curated(&curated).await.expect("save curated");
+    repository
+        .save_dataset_snapshot(&snapshot)
+        .await
+        .expect("save snapshot");
+    repository.save_training_run(&run).await.expect("save run");
+    repository
+        .save_lora_adapter(&adapter)
+        .await
+        .expect("save adapter");
+
+    // A later save rewrites the whole entity, creation time included, like the filesystem
+    // adapter, whose `save` replaces the manifest. `save_curated` used to skip the `created_at`
+    // column while `import_curated` wrote it; both now share one statement.
+    candidate.created_at = rewritten_at;
+    candidate.title = Some("rewritten".to_string());
+    curated.curated_at = rewritten_at;
+    snapshot.created_at = rewritten_at;
+    run.created_at = rewritten_at;
+    run.state = TrainingRunState::Succeeded;
+    adapter.created_at = rewritten_at;
+    adapter.retired = true;
+
+    repository.save_candidate(&candidate).await.expect("upsert candidate");
+    repository.save_curated(&curated).await.expect("upsert curated");
+    repository
+        .save_dataset_snapshot(&snapshot)
+        .await
+        .expect("upsert snapshot");
+    repository.save_training_run(&run).await.expect("upsert run");
+    repository
+        .save_lora_adapter(&adapter)
+        .await
+        .expect("upsert adapter");
+
+    for (table, id) in [
+        ("candidates", candidate.id.as_str()),
+        ("curated_maps", curated.id.as_str()),
+        ("dataset_snapshots", snapshot.id.as_str()),
+        ("training_runs", run.id.as_str()),
+        ("lora_adapters", adapter.id.as_str()),
+    ] {
+        assert_eq!(
+            stored_created_at(&repository, table, id).await,
+            rewritten_at,
+            "{table}.created_at must follow the stored entity"
+        );
+    }
+
+    assert_eq!(
+        repository
+            .get_candidate(&candidate.id)
+            .await
+            .expect("get candidate"),
+        candidate
+    );
+    assert_eq!(
+        repository
+            .get_curated(&curated.id)
+            .await
+            .expect("get curated"),
+        curated
+    );
+    assert_eq!(
+        repository
+            .get_dataset_snapshot(&snapshot.id)
+            .await
+            .expect("get snapshot"),
+        snapshot
+    );
+    assert_eq!(
+        repository.get_training_run(&run.id).await.expect("get run"),
+        run
+    );
+    assert_eq!(
+        repository
+            .get_lora_adapter(&adapter.id)
+            .await
+            .expect("get adapter"),
+        adapter
+    );
+
+    cleanup(&repository, &prefix).await;
+}

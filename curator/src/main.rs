@@ -245,14 +245,15 @@ async fn run_catalog_migration_cli(
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = resolve_data_dir();
-    let database_url = std::env::var("DATABASE_URL")
-        .ok()
-        .map(|url| url.trim().to_string())
-        .filter(|url| !url.is_empty())
-        .ok_or(
+    let curator::adapters::CatalogBackend::Postgres(database_url) =
+        curator::adapters::CatalogBackend::from_env()
+    else {
+        return Err(
             "DATABASE_URL is not set: 'migrate-disk-to-postgres' requires a PostgreSQL catalog \
-             (for example postgres://curator:curator@postgres:5432/curator)",
-        )?;
+             (for example postgres://curator:curator@postgres:5432/curator)"
+                .into(),
+        );
+    };
 
     tracing::info!(
         data_dir = %data_dir.display(),

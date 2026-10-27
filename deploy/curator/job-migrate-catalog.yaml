@@ -26,9 +26,6 @@ spec:
           image: ghcr.io/knutzuidema/curator:latest
           imagePullPolicy: IfNotPresent
           args: ["migrate-disk-to-postgres"]
-          envFrom:
-            - secretRef:
-                name: curator-secrets
           env:
             - name: DATA_DIR
               value: "/data"

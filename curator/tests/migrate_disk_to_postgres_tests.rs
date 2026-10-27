@@ -352,16 +352,16 @@ fn discovery_records_malformed_manifests_as_failures() {
 }
 
 #[test]
-fn discovery_reads_legacy_jsonl_rejections_after_the_canonical_log() {
+fn discovery_reads_legacy_jsonl_rejections_before_the_canonical_log() {
     let dir = tempfile::tempdir().expect("temp dir");
     write_json(
         &dir.path().join("rejected/rejections.json"),
-        &vec![sample_rejection("it-legacy-a", RejectionReason::GridBurnedIn, 3)],
+        &vec![sample_rejection("it-legacy-d", RejectionReason::GridBurnedIn, 60)],
     );
     let first = serde_json::to_string(&sample_rejection(
-        "it-legacy-b",
+        "it-legacy-a",
         RejectionReason::Irrelevant,
-        2,
+        3,
     ))
     .expect("serialize");
     let third = serde_json::to_string(&sample_rejection(
@@ -383,7 +383,11 @@ fn discovery_reads_legacy_jsonl_rejections_after_the_canonical_log() {
         .map(|item| item.value.id.as_str())
         .collect();
 
-    assert_eq!(ids, vec!["it-legacy-a", "it-legacy-b", "it-legacy-c"]);
+    assert_eq!(
+        ids,
+        vec!["it-legacy-a", "it-legacy-c", "it-legacy-d"],
+        "the pre-cutover jsonl log must precede the canonical array"
+    );
     assert_eq!(discovery.failures.len(), 1);
     assert!(discovery.failures[0].reason.contains("line 2"));
 }
@@ -396,33 +400,6 @@ fn discovery_of_a_missing_data_dir_is_empty() {
     assert!(discovery.curated_maps.is_empty());
     assert!(discovery.rejections.is_empty());
     assert!(discovery.training_metrics.is_empty());
-}
-
-#[test]
-fn counts_track_migrated_skipped_and_failed_totals() {
-    let mut counts = EntityMigrationCounts::default();
-    counts.record_import(true);
-    counts.record_import(true);
-    counts.record_import(false);
-    counts.record_skip();
-    counts.record_failure();
-
-    assert_eq!(
-        counts,
-        EntityMigrationCounts {
-            migrated: 2,
-            skipped: 2,
-            failed: 1,
-        }
-    );
-    assert_eq!(counts.total(), 5);
-
-    let mut totals = EntityMigrationCounts::default();
-    totals.merge(&counts);
-    totals.merge(&counts);
-    assert_eq!(totals.migrated, 4);
-    assert_eq!(totals.skipped, 4);
-    assert_eq!(totals.failed, 2);
 }
 
 #[test]
@@ -685,6 +662,91 @@ async fn dry_run_reports_work_without_writing() {
     assert!(!index.training_run_ids.contains(&fixture.run.id));
     assert!(!index.dataset_snapshot_ids.contains(&fixture.snapshot.id));
     assert!(!index.lora_adapter_ids.contains(&fixture.adapter.id));
+
+    cleanup(&repository, &prefix).await;
+}
+
+#[tokio::test]
+async fn dry_run_with_force_previews_the_overwrites() {
+    let Some(repository) = repository().await else {
+        eprintln!("skipping dry_run_with_force_previews_the_overwrites: {ENV_VAR} not set");
+        return;
+    };
+    let prefix = unique("diskpg-dry-force");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let fixture = populate_filesystem_catalog(dir.path(), &prefix);
+
+    let seeded = run_disk_to_postgres_migration(dir.path(), &repository, DiskToPostgresOptions::default())
+        .await
+        .expect("initial migration");
+    assert_no_failures(&seeded);
+
+    let mut renamed = fixture.candidate.clone();
+    renamed.title = Some("Previewed Rename".to_string());
+    write_json(
+        &dir.path()
+            .join("staging")
+            .join(&renamed.id)
+            .join("manifest.json"),
+        &renamed,
+    );
+
+    let preview = run_disk_to_postgres_migration(
+        dir.path(),
+        &repository,
+        DiskToPostgresOptions {
+            force: true,
+            dry_run: true,
+        },
+    )
+    .await
+    .expect("forced dry run");
+
+    assert!(preview.dry_run);
+    assert!(preview.force);
+    assert_no_failures(&preview);
+    // Existing primary-key rows would be overwritten, so the preview counts them as migrated.
+    assert_eq!(preview.candidates.migrated, 1);
+    assert_eq!(preview.curated_maps.migrated, 1);
+    assert_eq!(preview.dataset_snapshots.migrated, 1);
+    assert_eq!(preview.training_runs.migrated, 1);
+    assert_eq!(preview.lora_adapters.migrated, 1);
+    // The append-only logs ignore --force and stay deduplicated.
+    assert_eq!(preview.rejections.migrated, 0);
+    assert_eq!(preview.rejections.skipped, 2);
+    assert_eq!(preview.training_metrics.migrated, 0);
+    assert_eq!(preview.training_metrics.skipped, 2);
+    assert_eq!(preview.totals().skipped, 4);
+
+    assert_eq!(
+        repository
+            .get_candidate(&fixture.candidate.id)
+            .await
+            .expect("read previewed candidate")
+            .title,
+        fixture.candidate.title,
+        "a dry run must not write"
+    );
+
+    let forced = run_disk_to_postgres_migration(
+        dir.path(),
+        &repository,
+        DiskToPostgresOptions {
+            force: true,
+            dry_run: false,
+        },
+    )
+    .await
+    .expect("forced migration");
+    assert_eq!(forced.totals(), preview.totals());
+    assert_eq!(
+        repository
+            .get_candidate(&fixture.candidate.id)
+            .await
+            .expect("read forced candidate")
+            .title,
+        renamed.title
+    );
 
     cleanup(&repository, &prefix).await;
 }

@@ -260,8 +260,12 @@ impl PostgresCatalogRepository {
         })
     }
 
-    /// Imports one candidate manifest, returning `false` when an existing row was kept.
-    pub async fn import_candidate(
+    /// Writes one candidate, returning `false` when `conflict` kept the existing row.
+    ///
+    /// Both `save_candidate` and `import_candidate` go through this statement, so a stored entity
+    /// always matches the `Candidate` written to it, exactly like the filesystem adapter, whose
+    /// `save` rewrites the whole manifest.
+    async fn insert_candidate(
         &self,
         candidate: &Candidate,
         conflict: ImportConflict,
@@ -294,8 +298,10 @@ impl PostgresCatalogRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Imports one curated map manifest, returning `false` when an existing row was kept.
-    pub async fn import_curated(
+    /// Writes one curated map, returning `false` when `conflict` kept the existing row.
+    ///
+    /// Shares [`Self::insert_candidate`]'s statement semantics, `curated_at` included.
+    async fn insert_curated(
         &self,
         map: &CuratedMap,
         conflict: ImportConflict,
@@ -333,8 +339,10 @@ impl PostgresCatalogRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Imports one dataset snapshot manifest, returning `false` when an existing row was kept.
-    pub async fn import_dataset_snapshot(
+    /// Writes one dataset snapshot, returning `false` when `conflict` kept the existing row.
+    ///
+    /// Shares [`Self::insert_candidate`]'s statement semantics.
+    async fn insert_dataset_snapshot(
         &self,
         snapshot: &DatasetSnapshot,
         conflict: ImportConflict,
@@ -365,8 +373,10 @@ impl PostgresCatalogRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Imports one training run manifest, returning `false` when an existing row was kept.
-    pub async fn import_training_run(
+    /// Writes one training run, returning `false` when `conflict` kept the existing row.
+    ///
+    /// Shares [`Self::insert_candidate`]'s statement semantics.
+    async fn insert_training_run(
         &self,
         run: &TrainingRun,
         conflict: ImportConflict,
@@ -396,8 +406,10 @@ impl PostgresCatalogRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Imports one LoRA adapter manifest, returning `false` when an existing row was kept.
-    pub async fn import_lora_adapter(
+    /// Writes one LoRA adapter, returning `false` when `conflict` kept the existing row.
+    ///
+    /// Shares [`Self::insert_candidate`]'s statement semantics.
+    async fn insert_lora_adapter(
         &self,
         adapter: &LoraAdapter,
         conflict: ImportConflict,
@@ -422,6 +434,51 @@ impl PostgresCatalogRepository {
             .await
             .map_err(map_sqlx_err)?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Imports one candidate manifest, returning `false` when an existing row was kept.
+    pub async fn import_candidate(
+        &self,
+        candidate: &Candidate,
+        conflict: ImportConflict,
+    ) -> Result<bool, StorageError> {
+        self.insert_candidate(candidate, conflict).await
+    }
+
+    /// Imports one curated map manifest, returning `false` when an existing row was kept.
+    pub async fn import_curated(
+        &self,
+        map: &CuratedMap,
+        conflict: ImportConflict,
+    ) -> Result<bool, StorageError> {
+        self.insert_curated(map, conflict).await
+    }
+
+    /// Imports one dataset snapshot manifest, returning `false` when an existing row was kept.
+    pub async fn import_dataset_snapshot(
+        &self,
+        snapshot: &DatasetSnapshot,
+        conflict: ImportConflict,
+    ) -> Result<bool, StorageError> {
+        self.insert_dataset_snapshot(snapshot, conflict).await
+    }
+
+    /// Imports one training run manifest, returning `false` when an existing row was kept.
+    pub async fn import_training_run(
+        &self,
+        run: &TrainingRun,
+        conflict: ImportConflict,
+    ) -> Result<bool, StorageError> {
+        self.insert_training_run(run, conflict).await
+    }
+
+    /// Imports one LoRA adapter manifest, returning `false` when an existing row was kept.
+    pub async fn import_lora_adapter(
+        &self,
+        adapter: &LoraAdapter,
+        conflict: ImportConflict,
+    ) -> Result<bool, StorageError> {
+        self.insert_lora_adapter(adapter, conflict).await
     }
 
     /// Appends one rejection record, preserving its original timestamp and order.
@@ -499,27 +556,8 @@ impl CatalogRepository for PostgresCatalogRepository {
     }
 
     async fn save_candidate(&self, candidate: &Candidate) -> Result<(), StorageError> {
-        let source_str = candidate.source.to_string();
-        let data = serde_json::to_value(candidate)?;
-        sqlx::query(
-            r#"
-            INSERT INTO candidates (id, source, parent_group_id, created_at, data)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (id) DO UPDATE SET
-                source = EXCLUDED.source,
-                parent_group_id = EXCLUDED.parent_group_id,
-                created_at = EXCLUDED.created_at,
-                data = EXCLUDED.data
-            "#,
-        )
-        .bind(&candidate.id)
-        .bind(&source_str)
-        .bind(candidate.parent_group_id.as_deref())
-        .bind(candidate.created_at)
-        .bind(data)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_err)?;
+        self.insert_candidate(candidate, ImportConflict::Overwrite)
+            .await?;
         Ok(())
     }
 
@@ -570,31 +608,7 @@ impl CatalogRepository for PostgresCatalogRepository {
     }
 
     async fn save_curated(&self, map: &CuratedMap) -> Result<(), StorageError> {
-        let tags: Vec<String> = map.tags.clone();
-        let themes: Vec<String> = tags
-            .iter()
-            .filter_map(|tag| tag.parse::<Theme>().ok())
-            .map(|theme| theme.as_str().to_string())
-            .collect();
-        let data = serde_json::to_value(map)?;
-        sqlx::query(
-            r#"
-            INSERT INTO curated_maps (id, tags, themes, created_at, data)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (id) DO UPDATE SET
-                tags = EXCLUDED.tags,
-                themes = EXCLUDED.themes,
-                data = EXCLUDED.data
-            "#,
-        )
-        .bind(&map.id)
-        .bind(&tags)
-        .bind(&themes)
-        .bind(map.curated_at)
-        .bind(data)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_err)?;
+        self.insert_curated(map, ImportConflict::Overwrite).await?;
         Ok(())
     }
 
@@ -760,25 +774,8 @@ impl CatalogRepository for PostgresCatalogRepository {
     }
 
     async fn save_dataset_snapshot(&self, snapshot: &DatasetSnapshot) -> Result<(), StorageError> {
-        let theme_str = snapshot.theme.as_ref().map(|t| t.as_str().to_string());
-        let data = serde_json::to_value(snapshot)?;
-        sqlx::query(
-            r#"
-            INSERT INTO dataset_snapshots (id, theme, created_at, data)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (id) DO UPDATE SET
-                theme = EXCLUDED.theme,
-                created_at = EXCLUDED.created_at,
-                data = EXCLUDED.data
-            "#,
-        )
-        .bind(&snapshot.id)
-        .bind(theme_str)
-        .bind(snapshot.created_at)
-        .bind(data)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_err)?;
+        self.insert_dataset_snapshot(snapshot, ImportConflict::Overwrite)
+            .await?;
         Ok(())
     }
 
@@ -833,24 +830,8 @@ impl CatalogRepository for PostgresCatalogRepository {
     }
 
     async fn save_training_run(&self, run: &TrainingRun) -> Result<(), StorageError> {
-        let data = serde_json::to_value(run)?;
-        sqlx::query(
-            r#"
-            INSERT INTO training_runs (id, dataset_snapshot_id, created_at, data)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (id) DO UPDATE SET
-                dataset_snapshot_id = EXCLUDED.dataset_snapshot_id,
-                created_at = EXCLUDED.created_at,
-                data = EXCLUDED.data
-            "#,
-        )
-        .bind(&run.id)
-        .bind(&run.dataset_snapshot_id)
-        .bind(run.created_at)
-        .bind(data)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_err)?;
+        self.insert_training_run(run, ImportConflict::Overwrite)
+            .await?;
         Ok(())
     }
 
@@ -922,22 +903,8 @@ impl CatalogRepository for PostgresCatalogRepository {
     }
 
     async fn save_lora_adapter(&self, adapter: &LoraAdapter) -> Result<(), StorageError> {
-        let data = serde_json::to_value(adapter)?;
-        sqlx::query(
-            r#"
-            INSERT INTO lora_adapters (id, created_at, data)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (id) DO UPDATE SET
-                created_at = EXCLUDED.created_at,
-                data = EXCLUDED.data
-            "#,
-        )
-        .bind(&adapter.id)
-        .bind(adapter.created_at)
-        .bind(data)
-        .execute(&self.pool)
-        .await
-        .map_err(map_sqlx_err)?;
+        self.insert_lora_adapter(adapter, ImportConflict::Overwrite)
+            .await?;
         Ok(())
     }
 

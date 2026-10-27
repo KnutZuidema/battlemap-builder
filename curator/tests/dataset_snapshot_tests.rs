@@ -593,7 +593,7 @@ fn test_ui_assets_expose_dataset_snapshot_controls() {
     assert!(js.contains("/api/training/datasets"));
     assert!(js.contains("DATASET_NOT_READY"));
     assert!(js.contains("SNAPSHOT_IN_USE"));
-    assert!(js.contains("DATASET_ISSUE_ACTIONS"));
+    assert!(js.contains("datasetIssueFix"));
     assert!(js.contains("freezeDatasetSnapshot"));
     assert!(js.contains("deleteDatasetSnapshot"));
     assert!(js.contains("fetchDatasetSnapshots"));
@@ -604,48 +604,70 @@ fn test_ui_assets_expose_dataset_snapshot_controls() {
     // CSS styling
     assert!(css.contains(".dataset-snapshots-panel"));
     assert!(css.contains(".snapshot-card"));
-    assert!(css.contains(".readiness-issue-remediation"));
+    assert!(css.contains(".readiness-issue-row"));
     assert!(css.contains(".freeze-progress-panel"));
     assert!(css.contains(".freeze-progress-bar"));
     assert!(css.contains(".freeze-phase-badge"));
 }
 
-/// Issue #245: the readiness modal fixes flagged maps in place, so the assets must expose the
-/// remediation controls and the API wiring behind them.
+/// The readiness audit is owned by the Frozen Dataset Snapshots drawer: one panel in the library,
+/// no toolbar entry point and no modal, so a stored audit (including a freeze refusal) stays on
+/// screen. Its report is cached per theme scope and every curated write invalidates that cache.
 #[test]
 fn test_ui_assets_expose_dataset_readiness_remediation_actions() {
     let html = include_str!("../src/ui/assets/index.html");
     let js = include_str!("../src/ui/assets/app.js");
     let css = include_str!("../src/ui/assets/style.css");
 
-    assert!(html.contains("id=\"btn-fix-all-descriptions\""));
-    assert!(html.contains("Fix All Descriptions"));
+    for id in [
+        "dataset-readiness-panel",
+        "dataset-readiness-status",
+        "dataset-readiness-summary",
+        "dataset-readiness-issues",
+        "dataset-readiness-icon",
+        "btn-audit-readiness",
+        "btn-audit-readiness-label",
+    ] {
+        assert!(
+            html.contains(&format!("id=\"{id}\"")),
+            "drawer markup is missing id {id}"
+        );
+    }
 
-    // Per-issue action buttons and the handlers behind them.
-    assert!(js.contains("DATASET_ISSUE_ACTIONS"));
-    assert!(js.contains("renderDatasetIssueRow"));
-    assert!(js.contains("data-remediate="));
-    assert!(js.contains("remediateDatasetIssue"));
-    assert!(js.contains("fixAllDatasetDescriptions"));
-    assert!(js.contains("fixableDescriptionMapIds"));
-    assert!(js.contains("openGridCalibrationForMap"));
-    assert!(js.contains("openCuratedInspectorById"));
+    // Modal-only ids must not survive the move into the drawer.
+    for id in [
+        "btn-dataset-readiness",
+        "dataset-readiness-modal",
+        "dataset-readiness-title",
+        "btn-close-readiness-modal",
+        "btn-fix-all-descriptions",
+        "btn-refresh-readiness",
+        "btn-dismiss-readiness",
+    ] {
+        assert!(
+            !html.contains(&format!("id=\"{id}\"")),
+            "modal-only id {id} survived the drawer move"
+        );
+    }
+
+    // One stored report per theme scope, one audit path, one invalidation path for curated writes.
+    assert!(js.contains("const READINESS_CACHE_KEY = \"curator_dataset_readiness\""));
+    assert!(js.contains("function auditDatasetReadiness("));
+    assert!(js.contains("function invalidateDatasetReadiness()"));
+    // A curated write bumps the generation, so an audit that began before it is not joined or cached.
+    assert!(js.contains("state.readinessEpoch += 1;"));
+    // A refusal is stored under the scope that was frozen, not the one selected when it arrives.
+    assert!(js.contains("function showFreezeRefusal(refusal, scopeTheme)"));
     assert!(js.contains("apply: true"));
-    assert!(js.contains("fetchDatasetReadiness"));
-    // The action buttons are delegated from the issue list, so a re-render never stacks handlers.
-    assert!(js.contains("datasetReadinessIssues?.addEventListener(\"click\""));
-    assert!(js.contains("closest(\"[data-remediate]\")"));
-    // Both the per-map action and the batch action share one in-flight request per map.
-    assert!(js.contains("state.describeRequests"));
 
-    // Every successful remediation re-audits the scope it was opened for.
-    assert!(js.contains("renderDatasetReadinessReport(refusal.readiness)"));
+    // Action buttons are delegated from the issue list, so a re-render never stacks handlers.
+    assert!(js.contains("function readinessActionButtons()"));
+    assert!(js.contains("closest(\"[data-fix]\")"));
 
+    // Panel styling.
+    assert!(css.contains(".readiness-panel"));
     assert!(css.contains(".readiness-issue-row"));
-    assert!(css.contains(".readiness-issue-actions"));
-    assert!(css.contains(".readiness-action-btn"));
-    assert!(css.contains(".readiness-action-btn.is-busy"));
-    assert!(css.contains(".readiness-action-spinner"));
+    assert!(css.contains(".readiness-audit-btn"));
 }
 
 /// Bug: `fixAllDatasetDescriptions` skipped every map that already had a regeneration in flight,
@@ -665,8 +687,9 @@ fn test_batch_description_fix_reuses_in_flight_requests() {
     ));
     assert!(js.contains("state.describeRequests.set(mapId, request);"));
 
-    // Both entry points go through it, so the batch observes requests a per-map click started...
-    assert_eq!(js.matches("await applyDescriptionOnce(mapId);").count(), 2);
+    // The drawer's description action goes through it, so the batch observes a request that is
+    // already in flight...
+    assert_eq!(js.matches("await applyDescriptionOnce(mapId);").count(), 1);
     assert!(js.contains("const joinedInFlight = state.describeRequests.has(mapId);"));
     // ...instead of skipping the map, which is what produced the zero-request batch, and nothing
     // else tracks in-flight regenerations.

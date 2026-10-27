@@ -3663,23 +3663,66 @@ kbd {
     box-shadow: 0 4px 14px rgba(14, 165, 233, 0.5);
 }
 
-/* LoRA Training Dataset Readiness Audit (Issue #184) */
-.btn-readiness {
-    gap: 0.4rem;
+/* LoRA Training Dataset Readiness (Issues #184, #245): lives in the Frozen Dataset Snapshots
+   drawer, summarized by issue kind. */
+.readiness-panel {
+    margin: 0.75rem 0 0.25rem;
+    padding: 0.85rem 1rem 1rem;
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    background: rgba(148, 163, 184, 0.04);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-.btn-readiness.is-ready {
-    border-color: rgba(16, 185, 129, 0.45);
+.readiness-panel.is-refused {
+    border-color: rgba(248, 113, 113, 0.5);
+    box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.25);
+}
+
+.readiness-panel-head {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.readiness-panel-title-group {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.readiness-panel-title {
+    margin: 0;
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--text-primary);
+}
+
+.readiness-status {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.readiness-status.is-ready {
     color: #6ee7b7;
 }
 
-.btn-readiness.has-issues {
-    border-color: rgba(245, 158, 11, 0.45);
+.readiness-status.has-issues {
     color: #fcd34d;
 }
 
-.readiness-card {
-    max-width: 720px;
+.readiness-refusal-note {
+    margin: 0 0 0.5rem;
+    font-size: 0.75rem;
+    color: #fca5a5;
+}
+
+.readiness-audit-btn {
+    margin-left: auto;
+    gap: 0.35rem;
 }
 
 .readiness-icon {
@@ -3707,40 +3750,43 @@ kbd {
 
 .readiness-summary {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.75rem;
-    margin: 0.75rem 0 1rem;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.5rem;
+    margin: 0.7rem 0 0.75rem;
 }
 
 .readiness-stat {
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
-    padding: 0.6rem 0.75rem;
+    gap: 0.15rem;
+    padding: 0.45rem 0.6rem;
     background: rgba(148, 163, 184, 0.06);
     border: 1px solid var(--border-subtle);
     border-radius: 8px;
 }
 
 .readiness-stat-label {
-    font-size: 0.7rem;
+    font-size: 0.62rem;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
 }
 
 .readiness-stat-value {
-    font-size: 1rem;
+    font-size: 0.85rem;
     font-weight: 700;
     color: var(--text-primary);
 }
 
 .readiness-issues {
-    max-height: 320px;
+    max-height: 260px;
     overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
+}
+
+@media (max-width: 900px) {
+    .readiness-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
 }
 
 .readiness-empty {
@@ -3761,39 +3807,6 @@ kbd {
     font-size: 0.85rem;
 }
 
-.readiness-map-issue {
-    border: 1px solid rgba(245, 158, 11, 0.22);
-    border-radius: 8px;
-    background: rgba(245, 158, 11, 0.05);
-    padding: 0.65rem 0.8rem;
-}
-
-.readiness-map-head {
-    display: flex;
-    align-items: baseline;
-    gap: 0.6rem;
-    flex-wrap: wrap;
-    margin-bottom: 0.35rem;
-}
-
-.readiness-map-id {
-    font-weight: 700;
-    color: var(--text-primary);
-}
-
-.readiness-map-theme {
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-muted);
-}
-
-.readiness-map-count {
-    margin-left: auto;
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-}
-
 .readiness-issue-list {
     list-style: none;
     margin: 0;
@@ -3806,51 +3819,34 @@ kbd {
 }
 
 .readiness-issue-code {
-    display: inline-block;
-    padding: 1px 6px;
-    margin-right: 0.35rem;
-    border-radius: 6px;
-    background: rgba(245, 158, 11, 0.14);
-    border: 1px solid rgba(245, 158, 11, 0.3);
-    color: #fcd34d;
-    font-size: 0.7rem;
-}
-
-.readiness-issue-remediation {
     display: block;
-    margin-top: 0.35rem;
-    padding: 0.35rem 0.6rem;
-    border-radius: 6px;
-    background: rgba(59, 130, 246, 0.1);
-    border: 1px solid rgba(59, 130, 246, 0.25);
-    color: #93c5fd;
-    font-size: 0.75rem;
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    font-weight: 600;
 }
 
-/* In-modal remediation actions (Issue #245) */
-#btn-fix-all-descriptions {
-    margin-right: auto;
+.readiness-issue-count {
+    display: block;
+    font-size: 0.7rem;
+    color: var(--text-muted);
 }
 
+.readiness-issue-list .readiness-issue-row + .readiness-issue-row {
+    border-top: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+/* Per-kind remediation actions (Issue #245) */
 .readiness-issue-row {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
     gap: 0.75rem;
-    padding: 0.15rem 0;
+    padding: 0.45rem 0;
 }
 
 .readiness-issue-text {
     flex: 1 1 auto;
     min-width: 0;
-}
-
-.readiness-issue-side {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 0.25rem;
-    flex: 0 0 auto;
 }
 
 .readiness-issue-actions {
@@ -3870,12 +3866,6 @@ kbd {
 .readiness-action-btn.is-busy {
     opacity: 0.7;
     cursor: progress;
-}
-
-/* A running batch owns the manifest writes; row actions wait for it. */
-.readiness-issues.is-batching .readiness-action-btn {
-    pointer-events: none;
-    opacity: 0.55;
 }
 
 .readiness-action-spinner {

@@ -373,7 +373,8 @@ To verify that data survives across pod restarts and recreations on Hetzner CSI 
    Check `http://localhost:3002/api/status` via `just port-forward` (§4.1), or query it in-cluster
    (the runtime image ships no `curl`/`wget`, so use a throwaway curl pod):
    ```bash
-   kubectl -n curator run status-check --rm -i --restart=Never \
+   # `--quiet` keeps `--rm`'s pod-deletion notice off stdout, so the JSON stays parseable.
+   kubectl -n curator run status-check --rm -i --quiet --restart=Never \
      --image=curlimages/curl:8.10.1 \
      -- curl -sSf http://curator:3002/api/status
    ```
@@ -421,10 +422,13 @@ kubectl get jobs -n curator
 # Candidates currently staged for triage. The runtime image is a slim Debian with
 # no curl/wget, so query the API from a throwaway curl pod instead of exec-ing
 # into the curator container:
-kubectl -n curator run harvest-check --rm -i --restart=Never \
+kubectl -n curator run harvest-check --rm -i --quiet --restart=Never \
   --image=curlimages/curl:8.10.1 \
   -- curl -sSf http://curator:3002/api/staging | jq 'length'
-# Drop the `| jq 'length'` (or use `kubectl -n curator run ... > staging.json`) to see the raw response.
+# Drop the `| jq 'length'` to see the raw response, or redirect it
+# (`kubectl -n curator run harvest-check --rm -i --quiet --restart=Never ... > staging.json`).
+# `--quiet` is required: `--rm` otherwise prints `pod "harvest-check" deleted` on
+# stdout, which makes jq fail with exit code 5 and corrupts the redirect.
 # Alternative from your machine: `just port-forward` (§4.1), then
 # `curl -s http://localhost:3002/api/staging | jq 'length'`.
 

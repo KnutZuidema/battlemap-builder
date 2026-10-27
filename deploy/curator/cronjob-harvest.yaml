@@ -9,8 +9,10 @@ metadata:
 spec:
   # Hourly hot-page sweep of /r/battlemaps (ADR-0011).
   schedule: "0 * * * *"
-  # A slow or rate-limited harvest must never overlap the next tick; the
-  # persisted `harvest_runs` ledger keeps the skipped tick visible via job history.
+  # A slow or rate-limited harvest must never overlap the next tick. A tick
+  # skipped by Forbid creates no Job: look for the `JobAlreadyActive` event
+  # (`kubectl -n curator describe cronjob curator-harvest-reddit`) or the gap
+  # in `harvest_runs.started_at`.
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 300
   successfulJobsHistoryLimit: 3

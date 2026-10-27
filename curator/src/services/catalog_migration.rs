@@ -554,28 +554,28 @@ pub fn discover_catalog_entities(data_dir: &Path) -> CatalogDiscovery {
         "manifest.json",
         ENTITY_CURATED_MAPS,
         &mut discovery.failures,
-        |path| read_json::<CuratedMap>(path),
+        read_json::<CuratedMap>,
     );
     discovery.dataset_snapshots = scan_directory(
         &data_dir.join("datasets"),
         "snapshot.json",
         ENTITY_DATASET_SNAPSHOTS,
         &mut discovery.failures,
-        |path| read_json::<DatasetSnapshot>(path),
+        read_json::<DatasetSnapshot>,
     );
     discovery.training_runs = scan_directory(
         &data_dir.join("training"),
         "run.json",
         ENTITY_TRAINING_RUNS,
         &mut discovery.failures,
-        |path| read_json::<TrainingRun>(path),
+        read_json::<TrainingRun>,
     );
     discovery.lora_adapters = scan_directory(
         &data_dir.join("adapters"),
         "adapter.json",
         ENTITY_LORA_ADAPTERS,
         &mut discovery.failures,
-        |path| read_json::<LoraAdapter>(path),
+        read_json::<LoraAdapter>,
     );
     discovery.training_metrics =
         discover_training_metrics(&data_dir.join("training"), &mut discovery.failures);

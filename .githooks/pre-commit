@@ -16,13 +16,11 @@ if [ -n "$GIT_COMMON_DIR" ] && [ "$GIT_COMMON_DIR" != ".git" ]; then
   fi
 fi
 
-echo "Running pre-commit checks (lint & tests)..."
-npm run lint
-npm test
-
-# Curator checks only when its sources, tests, manifest or reference data changed.
-if git diff --cached --name-only | grep -qE '^(curator/(src|tests)/|curator/(Cargo\.toml|Cargo\.lock)|data/battlemap-reference-)'; then
-  echo "Running curator checks (clippy & tests)..."
-  cargo clippy --manifest-path curator/Cargo.toml -- -D warnings
-  cargo test --manifest-path curator/Cargo.toml
+# Cheap static checks only: linting does not compile anything.
+# Full runs happen in PR CI — `.github/workflows/ci.yml` (client lint/build, server tests) and
+# `.github/workflows/curator-ci.yml` (curator tests/clippy/container build). Adding builds or test
+# suites here recompiles the whole app on every commit and exhausts local machines.
+if git diff --cached --name-only --diff-filter=ACMR | grep -qE '^client/'; then
+  echo "Linting client..."
+  npm run lint
 fi

@@ -1,6 +1,17 @@
 name: Curator CI
 
 on:
+  pull_request:
+    paths:
+      - 'curator/src/**'
+      - 'curator/tests/**'
+      - 'curator/migrations/**'
+      - 'curator/Cargo.toml'
+      - 'curator/Cargo.lock'
+      - 'curator/Dockerfile'
+      - 'data/battlemap-reference-*'
+      - '.dockerignore'
+      - '.github/workflows/curator-ci.yml'
   workflow_dispatch:
 
 permissions:
@@ -29,16 +40,21 @@ jobs:
           filters: |
             build_image:
               - 'curator/src/**'
+              - 'curator/migrations/**'
               - 'curator/Cargo.toml'
               - 'curator/Cargo.lock'
               - 'curator/Dockerfile'
               - 'data/battlemap-reference-*'
+              - '.dockerignore'
+              - '.github/workflows/curator-ci.yml'
             run_tests:
               - 'curator/src/**'
               - 'curator/tests/**'
+              - 'curator/migrations/**'
               - 'curator/Cargo.toml'
               - 'curator/Cargo.lock'
               - 'data/battlemap-reference-*'
+              - '.github/workflows/curator-ci.yml'
 
   test:
     name: Test & Lint

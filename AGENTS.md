@@ -23,13 +23,13 @@ Run from the repository root.
 | Task | Command |
 | :--- | :--- |
 | Dev server + client | `npm run dev` |
-| Client production build | `cd client && npm run build` |
-| Curator tests | `cargo test --manifest-path curator/Cargo.toml` |
+| Focused curator test | `cargo test --manifest-path curator/Cargo.toml <filter>` (or `--test <suite>` for one integration suite) |
+| Focused server test | `node --test server/test/<file>.test.js` |
 | Curator service | `cargo run --manifest-path curator/Cargo.toml` |
 | Curator deploy | `just curator-deploy` (`just curator-publish`, `just curator-rollout <tag>`) |
 
-Commits run `.githooks/pre-commit`: client lint, server tests, and — when `curator/` changed — curator clippy and
-tests. `npm install` installs the hooks.
+`.githooks/pre-commit` only lints the client when staged changes touch it; it never compiles or runs a test suite.
+`npm install` installs the hooks. Full verification is PR CI (see [Verification](#verification)).
 
 ### Curator build cache
 
@@ -55,7 +55,24 @@ delete that file to opt a checkout out. The shared dir accrues per-crate artifac
 
 ## Verification
 
-- Client changes: `cd client && npm run build`.
+PR CI is the authoritative full check; run it rather than rebuilding everything locally.
+
+| Workflow | Covers |
+| :--- | :--- |
+| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Client lint + production build, full server test suite |
+| [`.github/workflows/curator-ci.yml`](.github/workflows/curator-ci.yml) | Curator test suite + clippy (when sources change), container build |
+
+Locally, run only the narrow check for what you touched. Do **not** run `npm run build`, `npm test`,
+`cargo test`, `cargo clippy`, `cargo run`, a Docker build, or any other whole-app compile/test unless the user
+asks or you are reproducing a CI failure:
+
+- Rust: `cargo test --manifest-path curator/Cargo.toml <filter>`, or `--test <suite>` for a single integration
+  suite.
+- Server: `node --test server/test/<file>.test.js`.
+- Client: lint only (`npm run lint`, no compile); exercise the change in the dev server/browser.
+
+Behavior still needs proof; tests alone are not enough:
+
 - Live-API work: exercise both generation and region forging, and prove `compositeRegion` changes 0 pixels outside
   the selection box.
 - Canvas work: drive it in a real browser — right-drag selection, handle resize, and no uncaught Konva draw errors.

@@ -29,7 +29,7 @@ cd ../client && npm install
 cd ..
 ```
 
-`npm install` also installs the local git hooks (`core.hooksPath=.githooks`). Every commit runs client linting and server tests; commits touching `curator/` also run `cargo clippy -D warnings` and `cargo test`. If the hooks were not installed automatically, enable them with `git config core.hooksPath .githooks`.
+`npm install` also installs the local git hooks (`core.hooksPath=.githooks`). Commits only lint client code; full lint, production build, server tests, and curator checks run in PR CI (`.github/workflows/ci.yml`, `.github/workflows/curator-ci.yml`). If the hooks were not installed automatically, enable them with `git config core.hooksPath .githooks`.
 
 ### 2. Configure Environment
 

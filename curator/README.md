@@ -219,17 +219,19 @@ data/
 
 ## 6. Development & Testing Commands
 
-All commands are run from within the repository root or the `curator/` directory:
+Run local checks narrowly; the full curator suite, clippy and the container build run in PR CI
+([`.github/workflows/curator-ci.yml`](../.github/workflows/curator-ci.yml)). Keep the local machine usable: run only
+the test filter or suite covering the change.
 
 ```bash
-# Run unit and integration tests
-cargo test --manifest-path curator/Cargo.toml
+# Preferred locally: focused unit tests matching a name
+cargo test --manifest-path curator/Cargo.toml <filter>
+
+# Run one integration suite
+cargo test --manifest-path curator/Cargo.toml --test api_integration_tests
 
 # Run the Curator service locally
 cargo run --manifest-path curator/Cargo.toml
-
-# Run specific API integration tests
-cargo test --manifest-path curator/Cargo.toml --test api_integration_tests
 ```
 
 ---

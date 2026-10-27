@@ -4,7 +4,26 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+
+// The wiki tree is read from WIKI_PATH (or a developer's home directory), so pin it to
+// a fixture instead of depending on untracked local campaign data — CI has neither.
+const tmpWikiDir = fs.mkdtempSync(path.join(os.tmpdir(), 'routes-wiki-test-'));
+fs.mkdirSync(path.join(tmpWikiDir, 'Regions', 'Aeloria', 'Places'), { recursive: true });
+fs.writeFileSync(
+  path.join(tmpWikiDir, 'Regions', 'Aeloria', 'Places', "Storm's Eye Temple.md"),
+  "# Storm's Eye Temple\n"
+);
+process.env.WIKI_PATH = tmpWikiDir;
+
 const app = require('../index');
+
+test.after(() => {
+  try {
+    fs.rmSync(tmpWikiDir, { recursive: true, force: true });
+  } catch (err) {
+    // Ignore cleanup error
+  }
+});
 
 function startTestServer(serverApp) {
   return new Promise((resolve) => {
@@ -46,6 +65,11 @@ test('GET /api/wiki/tree returns regions, adventures, and custom sections', asyn
     assert.ok(Array.isArray(data.regions));
     assert.ok(Array.isArray(data.adventures));
     assert.ok(Array.isArray(data.custom));
+    assert.deepStrictEqual(data.regions.map((region) => region.name), ['Aeloria']);
+    assert.deepStrictEqual(
+      data.regions[0].places.map((place) => place.name),
+      ["Storm's Eye Temple"]
+    );
   } finally {
     server.close();
   }

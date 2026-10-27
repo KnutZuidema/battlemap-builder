@@ -221,14 +221,17 @@ data/
 
 Run local checks narrowly; the full curator suite, clippy and the container build run in PR CI
 ([`.github/workflows/curator-ci.yml`](../.github/workflows/curator-ci.yml)). Keep the local machine usable: run only
-the test filter or suite covering the change.
+the test filter or suite covering the change. Commands run from the repository root.
 
 ```bash
-# Preferred locally: focused unit tests matching a name
-cargo test --manifest-path curator/Cargo.toml <filter>
+# Preferred locally: focused tests matching a name
+just test-curator cost_ledger
 
 # Run one integration suite
-cargo test --manifest-path curator/Cargo.toml --test api_integration_tests
+just test-curator-suite api_integration_tests
+
+# Full suite + clippy (CI parity; heavy, reproduce CI failures only)
+just check-curator
 
 # Run the Curator service locally
 cargo run --manifest-path curator/Cargo.toml

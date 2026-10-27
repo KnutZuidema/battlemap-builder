@@ -10,6 +10,13 @@
 #   just curator-rollout   # roll the cluster onto an already published tag
 #   just port-forward      # forwarded access to the running service on localhost:3002
 #
+# Checks — run them narrowly locally; PR CI is the authoritative full run:
+#   just lint-client          # client lint (no compile)
+#   just test-server FILE     # one file under server/test/, e.g. routes.wiki.test.js
+#   just test-curator FILTER  # curator tests whose names match FILTER
+#   just test-curator-suite SUITE
+#   just check                # full local CI parity (heavy; reproduce CI failures only)
+#
 # The cluster nodes are arm64 (Hetzner cax11), so linux/arm64 is what gets published;
 # the Dockerfile cross-compiles that leg natively on an amd64 machine (no qemu).
 # `CURATOR_IMAGE_TAG` selects the tag (default: this commit, the scheme CD deploys).
@@ -33,6 +40,38 @@ deploy_dir := "deploy/curator"
 # List available tasks
 default:
     @just --list
+
+# Lint the client (same check pre-commit runs; does not compile)
+lint-client:
+    npm run lint
+
+# Run one server test file, relative to server/test/ (e.g. just test-server routes.wiki.test.js)
+test-server file:
+    node --test server/test/{{file}}
+
+# Run curator tests whose names match FILTER (e.g. just test-curator cost_ledger)
+test-curator filter:
+    cargo test --manifest-path curator/Cargo.toml {{filter}}
+
+# Run one curator integration suite (e.g. just test-curator-suite api_integration_tests)
+test-curator-suite suite:
+    cargo test --manifest-path curator/Cargo.toml --test {{suite}}
+
+# Full client check: lint + production build (CI parity, not for routine local runs)
+check-client: lint-client
+    cd client && npm run build
+
+# Full server test suite (CI parity, not for routine local runs)
+check-server:
+    npm test
+
+# Full curator test suite + clippy (CI parity, not for routine local runs)
+check-curator:
+    cargo test --manifest-path curator/Cargo.toml
+    cargo clippy --manifest-path curator/Cargo.toml -- -D warnings
+
+# Everything PR CI runs for code; heavy — use to reproduce CI failures, not per change
+check: check-client check-server check-curator
 
 # Run the interactive credentials provisioning wizard for local dev & k8s
 provision-secrets:

@@ -23,8 +23,11 @@ Run from the repository root.
 | Task | Command |
 | :--- | :--- |
 | Dev server + client | `npm run dev` |
-| Focused curator test | `cargo test --manifest-path curator/Cargo.toml <filter>` (or `--test <suite>` for one integration suite) |
-| Focused server test | `node --test server/test/<file>.test.js` |
+| Client lint | `just lint-client` |
+| Focused server test | `just test-server <file>` (relative to `server/test/`) |
+| Focused curator test | `just test-curator <filter>` |
+| Curator integration suite | `just test-curator-suite <suite>` |
+| Full CI parity (heavy) | `just check` |
 | Curator service | `cargo run --manifest-path curator/Cargo.toml` |
 | Curator deploy | `just curator-deploy` (`just curator-publish`, `just curator-rollout <tag>`) |
 
@@ -62,14 +65,16 @@ PR CI is the authoritative full check; run it rather than rebuilding everything 
 | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Client lint + production build, full server test suite |
 | [`.github/workflows/curator-ci.yml`](.github/workflows/curator-ci.yml) | Curator test suite + clippy (when sources change), container build |
 
-Locally, run only the narrow check for what you touched. Do **not** run `npm run build`, `npm test`,
-`cargo test`, `cargo clippy`, `cargo run`, a Docker build, or any other whole-app compile/test unless the user
-asks or you are reproducing a CI failure:
+Locally, run only the narrow recipe for what you touched — the `justfile` wraps every check. Do **not** run
+`just check`, `just check-client`, `just check-server`, `just check-curator`, `npm run build`, `npm test`,
+`cargo test`, `cargo clippy`, `cargo run`, a Docker build, or any other whole-app compile/test unless the user asks
+or you are reproducing a CI failure:
 
-- Rust: `cargo test --manifest-path curator/Cargo.toml <filter>`, or `--test <suite>` for a single integration
-  suite.
-- Server: `node --test server/test/<file>.test.js`.
-- Client: lint only (`npm run lint`, no compile); exercise the change in the dev server/browser.
+- Rust: `just test-curator <filter>`, or `just test-curator-suite <suite>` for one integration suite.
+- Server: `just test-server <file>`.
+- Client: `just lint-client` only (no compile); exercise the change in the dev server/browser.
+
+`just check` reproduces the code checks from both workflows; the curator container build stays CI-only.
 
 Behavior still needs proof; tests alone are not enough:
 

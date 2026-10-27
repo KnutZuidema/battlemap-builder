@@ -302,31 +302,42 @@ An empty store is **not** a ready dataset (`ready: false`): there is nothing to 
 | `physical_description_missing` | The section (and the map) resolve to no `Physical Description`, so its caption would carry only the Trigger Phrase, themes and tags | `POST /api/curated/{id}/describe` with `{"apply": true}` regenerates and persists the description plus every Map Section description |
 | `physical_description_not_neutral` | The stored description holds camera, perspective, art-style or grid directives instead of physical prose | `POST /api/curated/{id}/describe` with `{"apply": true}` regenerates it under the strict neutral prompt and recomputes the section descriptions per crop |
 
-The embedded UI exposes the same audit as **Dataset Readiness** in the Dataset Library toolbar: the
-button turns emerald (`Dataset Ready · N sections`) or amber (`Dataset Issues · ready/total maps`) and
-the modal lists the aggregate counts plus every flagged map and issue. The audit mirrors the library's
-active theme tag, so the report always describes the scope an export from that view would ship.
+The embedded UI owns the audit in the **Frozen Dataset Snapshots** drawer, directly above the shelf: a
+single readiness block for the active theme scope, summarized **by issue kind** rather than per map. It
+shows the ready/total counts, the scope, the age of the stored audit, and one row per issue code with the
+number of affected maps and the one-click fix. There is no separate readiness button or modal.
 
-### In-modal remediation
+- **Stored audits**: a report is cached per theme scope in `localStorage`
+  (`curator_dataset_readiness`), so opening the library, switching views, or reloading the page renders
+  the last audit without re-decoding every layer. Only an explicit **Re-audit**, a scope with no cached
+  report, or a curated write (curate, delete, description apply, grid save, inspector save) triggers a
+  new request. A curated write also bumps an audit generation, so a request that began before the write
+  is neither joined nor cached: the panel drops to *Not audited* and a fresh audit runs behind the stale
+  one. A scope switch is handled the same way, so the newly selected scope is audited even while the
+  previous scope's request is still running.
+- **Freeze refusals** (`DATASET_NOT_READY`) carry the full audit of the theme that was frozen, so the
+  refusal seeds that scope's cache and renders the block (highlighted, scrolled into view) plus a danger
+  toast; the results stay visible after the toast disappears. If the operator switched themes while the
+  freeze ran, the report is still stored under the frozen scope and only the toast fires for the active
+  one. A successful freeze returns only snapshot metadata, so it leaves the stored audit untouched
+  rather than inventing a clean report.
+- **Remediation** per issue kind:
+  - **Description codes** (`physical_description_missing`, `physical_description_not_neutral`) offer
+    *Fix descriptions*: one `POST /api/curated/{id}/describe` with `{"apply": true}` per affected map,
+    sequentially, with the button labelled `Regenerating n/total…`. The request regenerates the strict
+    perspective-neutral `Physical Description`, persists it, and recomputes every Map Section
+    description through the same policy the ZIP export reads. A map already regenerating reuses that
+    in-flight request instead of being skipped, and the action always reports its outcome.
+  - **Grid codes** (`grid_below_minimum`, `section_unresolvable`) offer *Edit grid*, which opens the
+    fullscreen grid calibration editor for the first affected map (the toast names how many maps still
+    need a grid fix).
+  - **Ground layer codes** (`ground_layer_missing`, `ground_image_unreadable`) offer *Inspect bundle*,
+    which opens the curated inspector drawer for the first affected map.
 
-Fixable issues carry an action button on their row, and the same controls appear when a snapshot freeze
-is refused (`DATASET_NOT_READY`), so the flagged maps are resolved without leaving the dialog:
-
-- **Description codes** (`physical_description_missing`, `physical_description_not_neutral`) offer
-  *Regenerate Description* / *Regenerate Neutral Description*. The button calls
-  `POST /api/curated/{id}/describe` with `{"apply": true}`: that request regenerates the strict
-  perspective-neutral `Physical Description`, persists it on the curated map, and recomputes every Map
-  Section description through the same section policy the ZIP export reads. **Fix All Descriptions**
-  batches that call across every flagged map, sequentially, with live progress on the button.
-- **Grid codes** (`grid_below_minimum`, `section_unresolvable`) offer *Edit Grid*, which opens the
-  fullscreen grid calibration editor for that curated map.
-- **Ground layer codes** (`ground_layer_missing`, `ground_image_unreadable`) offer *Inspect / Delete*,
-  which opens the curated inspector drawer for that bundle.
-
-A successful action immediately re-audits the active scope, so the resolved issue leaves the list and
-the counts update without closing the modal; a description that is generated but not persisted, or that
-still fails the audit, surfaces as a danger/warning toast with the row left actionable. Failures surface
-the propagated error (`503` when vision is unconfigured, `502` on upstream failure) the same way.
+A successful action re-audits the active scope once, so resolved kinds leave the list and the counts
+update without leaving the drawer; a description that is generated but not persisted, or that still fails
+the audit, surfaces as a danger/warning toast. Failures propagate the same way (`503` when vision is
+unconfigured, `502` on upstream failure).
 
 Legacy bundles curated before ADR-0007 carry no `sections` and no `description`: their full-grid lattice
 still exports (one 16×16 window per lattice) but their captions have no `Physical Description`, which the

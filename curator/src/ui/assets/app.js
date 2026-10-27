@@ -63,6 +63,7 @@
         // Serialized Dataset Readiness audits: a remediation re-audit must observe its own write.
         datasetAuditQueue: Promise.resolve(),
         datasetRemediating: new Set(),
+        datasetBatchActive: false,
         // Frozen Dataset Snapshots (Issue #216)
         isFreezingSnapshot: false,
         isFetchingSnapshots: false,
@@ -5024,6 +5025,7 @@
     // ==========================================================================
 
     const DATASET_ISSUE_LABELS = {
+        empty_dataset: "Empty dataset scope",
         ground_layer_missing: "Ground layer missing",
         ground_image_unreadable: "Ground layer unreadable",
         grid_below_minimum: "Grid below 16×16 cells",
@@ -5032,8 +5034,8 @@
         physical_description_not_neutral: "Physical Description not neutral",
     };
 
-    // Issue codes the modal can fix in place, mapped to the remediation the row offers. Codes
-    // without an entry keep the static "Fix:" hint because no single click resolves them.
+    // Issue codes the modal can fix in place, mapped to the action button their row offers.
+    // Codes without an entry render without a button.
     const DATASET_ISSUE_ACTIONS = {
         physical_description_missing: { action: "describe", label: "Regenerate Description" },
         physical_description_not_neutral: { action: "describe", label: "Regenerate Neutral Description" },
@@ -5229,7 +5231,7 @@
     }
 
     async function remediateDatasetIssue(mapId, action, issueCode, button) {
-        if (state.datasetRemediating.has(mapId)) return;
+        if (state.datasetBatchActive || state.datasetRemediating.has(mapId)) return;
         if (action === "grid") {
             closeDatasetReadinessModal();
             await openGridCalibrationForMap(mapId);
@@ -5278,6 +5280,7 @@
         let fixed = 0;
         let failed = 0;
         datasetReadinessIssues?.classList.add("is-batching");
+        state.datasetBatchActive = true;
         try {
             for (let index = 0; index < mapIds.length; index += 1) {
                 const mapId = mapIds[index];
@@ -5295,6 +5298,7 @@
                 }
             }
         } finally {
+            state.datasetBatchActive = false;
             datasetReadinessIssues?.classList.remove("is-batching");
             if (label) label.textContent = "Fix All Descriptions";
             if (btnFixAllDescriptions) {
@@ -7517,13 +7521,20 @@
             clearTimeout(saveFullscreenGridTimeout);
             saveFullscreenGridTimeout = setTimeout(async () => {
                 try {
-                    await fetch(`/api/curated/${encodeURIComponent(map.id)}`, {
+                    const res = await fetch(`/api/curated/${encodeURIComponent(map.id)}`, {
                         method: "PATCH",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify(payload),
                     });
+                    if (!res.ok) {
+                        const errData = await res.json().catch(() => ({}));
+                        throw new Error(errData.error || `HTTP ${res.status}`);
+                    }
+                    // The regrid recomputes Map Section descriptions server-side, so the readiness
+                    // audit this map was flagged in must be refreshed.
+                    await fetchDatasetReadiness();
                 } catch (err) {
-                    console.error("Failed to save curated grid config:", err);
+                    showToast(`Grid not saved: ${err.message}`, "danger");
                 }
             }, 300);
         }

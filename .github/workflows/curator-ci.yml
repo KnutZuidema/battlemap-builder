@@ -1,6 +1,11 @@
 name: Curator CI
 
 on:
+  pull_request:
+    paths:
+      - 'curator/**'
+      - 'data/battlemap-reference-*'
+      - '.github/workflows/curator-ci.yml'
   workflow_dispatch:
 
 permissions:

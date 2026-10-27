@@ -423,13 +423,6 @@
                         <button type="button" class="btn-density active" data-density="comfortable" title="Comfortable density (Hotkey: 2)">Comfortable <kbd>2</kbd></button>
                         <button type="button" class="btn-density" data-density="large" title="Large density (Hotkey: 3)">Large <kbd>3</kbd></button>
                     </div>
-                    <button type="button" id="btn-dataset-readiness" class="btn btn-secondary btn-readiness" title="Audit curated maps against the LoRA Training Dataset contract (16×16 Map Sections, Trigger Phrase captions)">
-                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M9 11l3 3L22 4"/>
-                            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
-                        </svg>
-                        <span id="dataset-readiness-label">Dataset Readiness</span>
-                    </button>
                     <button type="button" id="btn-export-lora" class="btn btn-primary btn-export" title="Export 1024x1024 LoRA dataset (.zip) for training">
                         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -485,6 +478,27 @@
                             </button>
                         </div>
                     </div>
+                    <!-- Dataset Readiness: the stored audit for the active theme scope, summarized
+                         by issue kind so a refusal and a revisit read the same block. -->
+                    <div id="dataset-readiness-panel" class="readiness-panel" role="region" aria-label="Dataset Readiness">
+                        <div class="readiness-panel-head">
+                            <span id="dataset-readiness-icon" class="readiness-icon">◍</span>
+                            <div class="readiness-panel-title-group">
+                                <h4 class="readiness-panel-title">Dataset Readiness</h4>
+                                <span id="dataset-readiness-status" class="readiness-status mono">Not audited</span>
+                            </div>
+                            <button type="button" id="btn-audit-readiness" class="btn btn-secondary btn-xs readiness-audit-btn" title="Audit curated maps in the active theme scope against the LoRA Training Dataset contract (16×16 Map Sections, Trigger Phrase captions)">
+                                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M9 11l3 3L22 4"/>
+                                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                                </svg>
+                                <span id="btn-audit-readiness-label">Audit</span>
+                            </button>
+                        </div>
+                        <div id="dataset-readiness-summary" class="readiness-summary"></div>
+                        <div id="dataset-readiness-issues" class="readiness-issues"></div>
+                    </div>
+
                     <!-- Freeze Progress Tracker -->
                     <div id="freeze-progress-panel" class="freeze-progress-panel hidden" role="region" aria-label="Dataset Freeze Progress">
                         <div class="freeze-progress-header">
@@ -1987,39 +2001,6 @@
                     </button>
                     <button type="button" id="btn-confirm-purge" class="btn btn-danger btn-affirmative">
                         <span id="btn-confirm-purge-text">Confirm & Purge Staging</span>
-                    </button>
-                </div>
-            </div>
-        </div>
-
-        <!-- LoRA Training Dataset Readiness Modal -->
-        <div id="dataset-readiness-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="dataset-readiness-title">
-            <div class="modal-card readiness-card">
-                <div class="modal-header">
-                    <div class="guard-header-title">
-                        <span id="dataset-readiness-icon" class="readiness-icon">◍</span>
-                        <h3 id="dataset-readiness-title">LoRA Training Dataset Readiness</h3>
-                    </div>
-                    <button type="button" id="btn-close-readiness-modal" class="btn-close" aria-label="Close modal">×</button>
-                </div>
-                <div class="modal-body">
-                    <p class="modal-description">
-                        Every curated map must contribute exact 16×16 Grid Cell Map Sections — 1024×1024 PNGs at a
-                        uniform 64px = 1 Grid Cell with zero letterbox bars — captioned with the Trigger Phrase
-                        followed by a perspective-neutral Physical Description.
-                    </p>
-                    <div id="dataset-readiness-summary" class="readiness-summary"></div>
-                    <div id="dataset-readiness-issues" class="readiness-issues"></div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" id="btn-fix-all-descriptions" class="btn btn-secondary hidden">
-                        <span>Fix All Descriptions</span>
-                    </button>
-                    <button type="button" id="btn-refresh-readiness" class="btn btn-secondary">
-                        <span>Re-audit</span>
-                    </button>
-                    <button type="button" id="btn-dismiss-readiness" class="btn btn-primary">
-                        <span>Close</span>
                     </button>
                 </div>
             </div>

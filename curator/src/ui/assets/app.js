@@ -5167,6 +5167,7 @@
             }
             const report = await res.json();
             renderDatasetReadinessReport(report);
+            resetDatasetReadinessTitle();
             return report;
         } catch (err) {
             showToast(`Dataset audit failed: ${err.message}`, "danger");
@@ -5182,6 +5183,9 @@
         state.datasetReadinessModalOpen = true;
         state.datasetReadiness = null;
         toggleFixAllDescriptions([]);
+        if (datasetReadinessIssues) {
+            datasetReadinessIssues.innerHTML = '<div class="readiness-clean">Auditing the active dataset scope…</div>';
+        }
         datasetReadinessModal?.classList.remove("hidden");
         fetchDatasetReadiness();
         const titleEl = document.getElementById("dataset-readiness-title");

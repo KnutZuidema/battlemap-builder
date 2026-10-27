@@ -131,7 +131,7 @@ Curator features an automated vision description workflow powered by Google Gemi
 4. **Failure Propagation & Section Fallback (ADR-0005)**:
    - **Map-level physical description is strict**: there is no deterministic caption fallback. `POST /api/staging/:id/describe` and `POST /api/curated/:id/describe` propagate vision failures as HTTP errors: `503 Service Unavailable` when the vision engine is unconfigured (missing/invalid `OPENROUTER_API_KEY` or disabled) and `502 Bad Gateway` when the upstream provider fails or returns an empty description.
    - During curation (`POST /api/curate`), an omitted map-level description is generated through the same strict path; if vision is unavailable, curation fails with the propagated error instead of persisting a synthesized description.
-   - **Per-section captions are best-effort**: for multi-section maps, each 16×16 section is described independently and falls back to the deterministic `CaptionGenerator` when its vision call fails or its crop is unavailable, so a single failed section never blocks curation or regridding. Single-section maps reuse the map-level description verbatim.
+   - **Per-section descriptions are best-effort**: for multi-section maps, each 16×16 section is described independently and falls back to the map-level `Physical Description` when its vision call fails or its crop is unavailable, so a single failed section never blocks curation or regridding. Single-section maps reuse the map-level description verbatim. Captions are never synthesized here; the `Trigger Phrase` is applied once, at export time.
 
 ### 2.4. Keyboard Event Routing & Trapping
 

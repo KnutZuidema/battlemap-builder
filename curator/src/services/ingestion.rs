@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,7 @@ use crate::adapters::reddit::{
 use crate::domain::{Candidate, GridConfig, RedditHarvestQuery, RedditPost};
 use crate::ports::blob_storage::{BlobKey, BlobStorage};
 use crate::ports::catalog_repository::CatalogRepository;
+use crate::ports::harvest_run_ledger::{HarvestRunLedger, HarvestRunOutcome};
 use crate::ports::harvester::{HarvesterError, RedditHarvester};
 use crate::ports::storage_error::StorageError;
 /// Summary of an ingestion execution.
@@ -72,6 +74,9 @@ pub struct IngestionProgress {
     pub attempt: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
+    /// Harvest ledger run id, present on the terminal `complete` event when a ledger is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
 }
 
 impl IngestionProgress {
@@ -94,11 +99,17 @@ impl IngestionProgress {
             wait_seconds: None,
             attempt: None,
             max_retries: None,
+            run_id: None,
         }
     }
 
     pub fn with_candidate_id(mut self, candidate_id: impl Into<String>) -> Self {
         self.candidate_id = Some(candidate_id.into());
+        self
+    }
+
+    pub fn with_run_id(mut self, run_id: Option<String>) -> Self {
+        self.run_id = run_id;
         self
     }
 
@@ -142,17 +153,23 @@ pub fn candidate_id_for_post(post_id: &str, media_index: usize, total_media: usi
 
 /// Service orchestrating Reddit crawling, deduplication checks, image downloading,
 /// and persisting staged candidates with companion layer blobs.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RedditIngestionService<H, C, B> {
     harvester: H,
     catalog: C,
     blobs: B,
+    harvest_ledger: Arc<dyn HarvestRunLedger>,
     http_client: reqwest::Client,
     backoff: BackoffConfig,
 }
 
 impl<H, C, B> RedditIngestionService<H, C, B> {
-    pub fn new(harvester: H, catalog: C, blobs: B) -> Self {
+    pub fn new(
+        harvester: H,
+        catalog: C,
+        blobs: B,
+        harvest_ledger: Arc<dyn HarvestRunLedger>,
+    ) -> Self {
         let http_client = reqwest::Client::builder()
             .user_agent(DEFAULT_USER_AGENT)
             .build()
@@ -161,6 +178,7 @@ impl<H, C, B> RedditIngestionService<H, C, B> {
             harvester,
             catalog,
             blobs,
+            harvest_ledger,
             http_client,
             backoff: Self::backoff_from_env(),
         }
@@ -190,8 +208,14 @@ impl<H, C, B> RedditIngestionService<H, C, B> {
         backoff
     }
 
-    pub fn with_http_client(harvester: H, catalog: C, blobs: B, http_client: reqwest::Client) -> Self {
-        let mut service = Self::new(harvester, catalog, blobs);
+    pub fn with_http_client(
+        harvester: H,
+        catalog: C,
+        blobs: B,
+        harvest_ledger: Arc<dyn HarvestRunLedger>,
+        http_client: reqwest::Client,
+    ) -> Self {
+        let mut service = Self::new(harvester, catalog, blobs, harvest_ledger);
         service.http_client = http_client;
         service
     }
@@ -203,6 +227,10 @@ impl<H, C, B> RedditIngestionService<H, C, B> {
 
     pub fn harvester(&self) -> &H {
         &self.harvester
+    }
+
+    pub fn harvest_ledger(&self) -> &Arc<dyn HarvestRunLedger> {
+        &self.harvest_ledger
     }
 
     pub fn http_client(&self) -> &reqwest::Client {
@@ -230,28 +258,73 @@ impl<H: RedditHarvester, C: CatalogRepository, B: BlobStorage> RedditIngestionSe
         query: &RedditHarvestQuery,
         gridless_only: bool,
     ) -> Result<IngestionSummary, IngestionError> {
+        self.ingest_query_with_run(query, gridless_only)
+            .await
+            .map(|(summary, _)| summary)
+    }
+
+    /// Ingest battlemaps matching a Reddit query, returning the summary and the harvest run id.
+    ///
+    /// The run id is `None` when the configured [`HarvestRunLedger`] keeps no ledger.
+    pub async fn ingest_query_with_run(
+        &self,
+        query: &RedditHarvestQuery,
+        gridless_only: bool,
+    ) -> Result<(IngestionSummary, Option<String>), IngestionError> {
+        let run_id = self.begin_harvest_run(query).await;
         info!(
             subreddit = %query.subreddit,
             sort = %query.sort,
             limit = query.limit,
             gridless_only = gridless_only,
+            run_id = ?run_id,
             "Starting Reddit harvest"
         );
-        let posts = self.harvester.fetch_posts(query).await?;
+        let posts = match self.harvester.fetch_posts(query).await {
+            Ok(posts) => posts,
+            Err(e) => {
+                error!(error = %e, "Failed to fetch posts from Reddit");
+                self.finish_harvest_run(run_id.as_deref(), HarvestRunOutcome::failed(e.to_string()))
+                    .await;
+                return Err(e.into());
+            }
+        };
         info!(
             subreddit = %query.subreddit,
             count = posts.len(),
             "Fetched raw posts from Reddit"
         );
-        let summary = self.ingest_posts_filtered(&posts, gridless_only).await?;
-        info!(
-            downloaded = summary.downloaded,
-            skipped = summary.skipped,
-            processed = summary.processed,
-            errors = 0,
-            "Reddit harvest completed"
-        );
-        Ok(summary)
+
+        let (summary, result) = self.ingest_posts_accumulating(&posts, gridless_only).await;
+        let outcome = match &result {
+            Ok(()) => HarvestRunOutcome::success(
+                summary.processed,
+                summary.downloaded,
+                summary.skipped,
+            ),
+            Err(e) => HarvestRunOutcome {
+                posts_scanned: summary.processed,
+                downloaded: summary.downloaded,
+                skipped: summary.skipped,
+                error: Some(e.to_string()),
+            },
+        };
+        self.finish_harvest_run(run_id.as_deref(), outcome).await;
+
+        match result {
+            Ok(()) => {
+                info!(
+                    downloaded = summary.downloaded,
+                    skipped = summary.skipped,
+                    processed = summary.processed,
+                    errors = 0,
+                    run_id = ?run_id,
+                    "Reddit harvest completed"
+                );
+                Ok((summary, run_id))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Ingest battlemaps matching a Reddit query with real-time progress updates.
@@ -264,11 +337,13 @@ impl<H: RedditHarvester, C: CatalogRepository, B: BlobStorage> RedditIngestionSe
     where
         F: FnMut(IngestionProgress) + Send,
     {
+        let run_id = self.begin_harvest_run(query).await;
         info!(
             subreddit = %query.subreddit,
             sort = %query.sort,
             limit = query.limit,
             gridless_only = gridless_only,
+            run_id = ?run_id,
             "Starting Reddit harvest"
         );
         on_progress(IngestionProgress::new(
@@ -294,6 +369,11 @@ impl<H: RedditHarvester, C: CatalogRepository, B: BlobStorage> RedditIngestionSe
             }
             Err(e) => {
                 error!(error = %e, "Failed to fetch posts from Reddit");
+                self.finish_harvest_run(
+                    run_id.as_deref(),
+                    HarvestRunOutcome::failed(e.to_string()),
+                )
+                .await;
                 return Err(e.into());
             }
         };
@@ -301,14 +381,22 @@ impl<H: RedditHarvester, C: CatalogRepository, B: BlobStorage> RedditIngestionSe
 
         if posts.is_empty() {
             let summary = IngestionSummary::default();
-            on_progress(IngestionProgress::new(
-                "complete",
-                format!("No posts found in r/{}", query.subreddit),
-                0,
-                0,
-                0,
-                0,
-            ));
+            self.finish_harvest_run(
+                run_id.as_deref(),
+                HarvestRunOutcome::success(0, 0, 0),
+            )
+            .await;
+            on_progress(
+                IngestionProgress::new(
+                    "complete",
+                    format!("No posts found in r/{}", query.subreddit),
+                    0,
+                    0,
+                    0,
+                    0,
+                )
+                .with_run_id(run_id),
+            );
             return Ok(summary);
         }
 
@@ -403,20 +491,33 @@ impl<H: RedditHarvester, C: CatalogRepository, B: BlobStorage> RedditIngestionSe
             skipped = summary.skipped,
             processed = summary.processed,
             errors = 0,
+            run_id = ?run_id,
             "Reddit harvest completed"
         );
-
-        on_progress(IngestionProgress::new(
-            "complete",
-            format!(
-                "Harvest complete: {} maps downloaded ({} duplicates skipped)...",
-                summary.downloaded, summary.skipped
+        self.finish_harvest_run(
+            run_id.as_deref(),
+            HarvestRunOutcome::success(
+                summary.processed,
+                summary.downloaded,
+                summary.skipped,
             ),
-            summary.processed,
-            summary.downloaded,
-            summary.skipped,
-            total_items,
-        ));
+        )
+        .await;
+
+        on_progress(
+            IngestionProgress::new(
+                "complete",
+                format!(
+                    "Harvest complete: {} maps downloaded ({} duplicates skipped)...",
+                    summary.downloaded, summary.skipped
+                ),
+                summary.processed,
+                summary.downloaded,
+                summary.skipped,
+                total_items,
+            )
+            .with_run_id(run_id),
+        );
 
         Ok(summary)
     }
@@ -435,14 +536,57 @@ impl<H: RedditHarvester, C: CatalogRepository, B: BlobStorage> RedditIngestionSe
         posts: &[RedditPost],
         gridless_only: bool,
     ) -> Result<IngestionSummary, IngestionError> {
+        let (summary, result) = self.ingest_posts_accumulating(posts, gridless_only).await;
+        result.map(|()| summary)
+    }
+
+    /// Ingests every post, keeping the counters of the posts processed before a failure.
+    async fn ingest_posts_accumulating(
+        &self,
+        posts: &[RedditPost],
+        gridless_only: bool,
+    ) -> (IngestionSummary, Result<(), IngestionError>) {
         let mut summary = IngestionSummary::default();
         for post in posts {
-            let post_summary = self.ingest_post_filtered(post, gridless_only).await?;
+            let post_summary = match self.ingest_post_filtered(post, gridless_only).await {
+                Ok(post_summary) => post_summary,
+                Err(e) => return (summary, Err(e)),
+            };
             summary.processed += post_summary.processed;
             summary.downloaded += post_summary.downloaded;
             summary.skipped += post_summary.skipped;
         }
-        Ok(summary)
+        (summary, Ok(()))
+    }
+
+    /// Records the start of a harvest run, degrading to a ledger-less run on ledger failure.
+    async fn begin_harvest_run(&self, query: &RedditHarvestQuery) -> Option<String> {
+        match self.harvest_ledger.start_run(query).await {
+            Ok(run_id) => run_id,
+            Err(e) => {
+                warn!(
+                    subreddit = %query.subreddit,
+                    error = %e,
+                    "Failed to record harvest run start; continuing without a ledger entry"
+                );
+                None
+            }
+        }
+    }
+
+    /// Records the completion of a harvest run, logging instead of failing on ledger errors.
+    async fn finish_harvest_run(
+        &self,
+        run_id: Option<&str>,
+        outcome: HarvestRunOutcome,
+    ) {
+        if let Err(e) = self.harvest_ledger.finish_run(run_id, &outcome).await {
+            warn!(
+                run_id = ?run_id,
+                error = %e,
+                "Failed to record harvest run completion"
+            );
+        }
     }
 
     /// Ingest all media items from a single Reddit post without filter.

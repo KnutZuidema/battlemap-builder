@@ -3,6 +3,7 @@
 pub mod cost_ledger;
 pub mod filesystem_blob_storage;
 pub mod filesystem_catalog_repository;
+pub mod harvest_run_ledger;
 pub mod postgres_catalog_repository;
 pub mod in_memory;
 pub mod openrouter;
@@ -18,6 +19,8 @@ pub use cost_ledger::*;
 pub use filesystem_blob_storage::*;
 #[allow(unused_imports)]
 pub use filesystem_catalog_repository::*;
+#[allow(unused_imports)]
+pub use harvest_run_ledger::*;
 #[allow(unused_imports)]
 pub use postgres_catalog_repository::*;
 pub use in_memory::*;

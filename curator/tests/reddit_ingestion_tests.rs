@@ -8,7 +8,7 @@ use axum::Router;
 use chrono::Utc;
 
 use curator::adapters::reddit::BackoffConfig;
-use curator::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
+use curator::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository, NoopHarvestRunLedger};
 use curator::domain::{
     CuratedMap, GridConfig, HarvestedMedia, LayerRole, ParsedTags, RedditHarvestQuery, RedditPost,
     RejectionReason, Source, Theme,
@@ -203,7 +203,12 @@ async fn test_ingestion_deduplication_against_rejections() {
     };
 
     let harvester = MockHarvester::new(vec![post.clone()]);
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    );
 
     let outcome = service.ingest_media(&post, 0).await.unwrap();
     assert_eq!(
@@ -245,7 +250,12 @@ async fn test_ingestion_deduplication_against_staging() {
         .unwrap();
 
     let harvester = MockHarvester::new(vec![post.clone()]);
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    );
 
     let outcome = service.ingest_media(&post, 0).await.unwrap();
     assert_eq!(
@@ -284,7 +294,12 @@ async fn test_ingestion_deduplication_against_curated() {
     };
 
     let harvester = MockHarvester::new(vec![post.clone()]);
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    );
 
     let outcome = service.ingest_media(&post, 0).await.unwrap();
     assert_eq!(
@@ -320,7 +335,12 @@ async fn test_end_to_end_ingestion_download_and_staging_persistence() {
     };
 
     let harvester = MockHarvester::new(vec![post.clone()]);
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    );
 
     // 3. Run ingest_posts
     let summary = service.ingest_posts(std::slice::from_ref(&post)).await.unwrap();
@@ -442,7 +462,12 @@ async fn test_ingestion_auto_seeds_grid_from_parsed_lattice() {
     };
 
     let harvester = MockHarvester::new(vec![post.clone()]);
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    );
 
     let summary = service.ingest_post(&post).await.unwrap();
     assert_eq!(summary.downloaded, 1);
@@ -484,7 +509,12 @@ async fn test_ingestion_backfills_dimensions_from_downloaded_bytes() {
     };
 
     let harvester = MockHarvester::new(vec![post.clone()]);
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    );
 
     let summary = service.ingest_post(&post).await.unwrap();
     assert_eq!(summary.downloaded, 1);
@@ -523,7 +553,12 @@ async fn test_ingestion_blob_write_failure_leaves_no_candidate() {
     };
 
     let harvester = MockHarvester::new(vec![post.clone()]);
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    );
 
     let summary = service
         .ingest_posts(std::slice::from_ref(&post))
@@ -589,7 +624,12 @@ async fn test_multi_image_gallery_ingestion() {
     };
 
     let harvester = MockHarvester::new(vec![gallery_post.clone()]);
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    );
 
     let summary = service.ingest_post(&gallery_post).await.unwrap();
     assert_eq!(summary.processed, 1);
@@ -712,7 +752,12 @@ async fn test_split_post_deduplication() {
     assert!(catalog.get_candidate("gallery_split_0").await.is_ok());
 
     let harvester = MockHarvester::new(vec![split_child_post.clone()]);
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    );
 
     // Harvest should skip gallery_split because child gallery_split_0 is already in staging
     let summary = service.ingest_post(&split_child_post).await.unwrap();
@@ -867,7 +912,12 @@ async fn test_ingest_query_filtered_gridless_only() {
     };
 
     let harvester = MockHarvester::new(vec![post_gridless, post_gridded, post_unknown]);
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    );
 
     let query = RedditHarvestQuery::default();
     let summary = service.ingest_query_filtered(&query, true).await.unwrap();
@@ -929,7 +979,12 @@ async fn test_ingest_query_progress_events() {
     };
 
     let harvester = MockHarvester::new(vec![post1, post2]);
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    );
 
     let query = RedditHarvestQuery::default();
     let mut events: Vec<IngestionProgress> = Vec::new();
@@ -1008,7 +1063,12 @@ async fn test_media_download_429_backoff_and_recovery() {
 
     let harvester = MockHarvester::new(vec![post.clone()]);
     let backoff = BackoffConfig::new(Duration::from_millis(5), 3, 1.5);
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone()).with_backoff(backoff);
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    ).with_backoff(backoff);
 
     assert_eq!(service.backoff().max_retries, 3);
 
@@ -1099,7 +1159,12 @@ async fn test_media_download_429_exhausted_retries_continues_batch() {
 
     let harvester = MockHarvester::new(vec![post1_fail.clone(), post2_ok.clone()]);
     let backoff = BackoffConfig::new(Duration::from_millis(5), 2, 1.5);
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone()).with_backoff(backoff);
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    ).with_backoff(backoff);
 
     // First verify ingest_media for post1_fail directly returns SkipReason::DownloadFailed
     let outcome = service.ingest_media(&post1_fail, 0).await.unwrap();
@@ -1188,7 +1253,12 @@ async fn test_rate_limit_progress_events_emitted_during_backoff() {
 
     let harvester = MockHarvester::new(vec![post]);
     let backoff = BackoffConfig::new(Duration::from_millis(5), 3, 2.0);
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone()).with_backoff(backoff);
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    ).with_backoff(backoff);
 
     let query = RedditHarvestQuery::default();
     let mut events: Vec<IngestionProgress> = Vec::new();
@@ -1220,7 +1290,12 @@ async fn test_rate_limit_progress_events_emitted_during_backoff() {
 fn test_reddit_ingestion_service_backoff_config() {
     let (catalog, blobs) = in_memory_ports();
     let harvester = MockHarvester::default();
-    let service = RedditIngestionService::new(harvester, catalog.clone(), blobs.clone());
+    let service = RedditIngestionService::new(
+        harvester,
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(NoopHarvestRunLedger),
+    );
 
     assert_eq!(service.backoff().initial_delay, Duration::from_secs(3));
     assert_eq!(service.backoff().max_retries, 5);

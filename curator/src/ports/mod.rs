@@ -4,6 +4,7 @@ pub mod blob_storage;
 pub mod catalog_repository;
 pub mod cost_tracker;
 pub mod harvester;
+pub mod harvest_run_ledger;
 pub mod image_processor;
 pub mod model_engine;
 pub mod storage_error;
@@ -17,6 +18,8 @@ pub use catalog_repository::*;
 pub use cost_tracker::*;
 #[allow(unused_imports)]
 pub use harvester::*;
+#[allow(unused_imports)]
+pub use harvest_run_ledger::*;
 #[allow(unused_imports)]
 pub use image_processor::*;
 #[allow(unused_imports)]

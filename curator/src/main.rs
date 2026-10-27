@@ -104,18 +104,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data_dir = %data_dir.display(),
         "Initializing filesystem catalog and blob ports..."
     );
-    let catalog_repository = FilesystemCatalogRepository::new(&data_dir);
-    // One-shot repair of pre-#176 generated bundles whose manifest is still a raw
-    // `BenchmarkMetadata` document, so they stay visible to `GET /api/staging` and servable by
-    // `GET /api/image/staging/{id}`. Idempotent and never fatal.
-    let migrated = catalog_repository.migrate_legacy_generated_manifests();
-    if migrated > 0 {
-        tracing::info!(
-            count = migrated,
-            "Migrated legacy generated staging manifests to Candidate manifests"
-        );
-    }
-    let catalog: Arc<dyn CatalogRepository + Send + Sync> = Arc::new(catalog_repository);
+    let catalog_backend = curator::adapters::CatalogBackend::from_env();
+    let catalog: Arc<dyn CatalogRepository + Send + Sync> = match catalog_backend {
+        curator::adapters::CatalogBackend::Postgres(db_url) => {
+            tracing::info!("Initializing PostgreSQL catalog repository...");
+            let repo = curator::adapters::PostgresCatalogRepository::connect(&db_url)
+                .await
+                .map_err(|e| format!("Failed to connect to PostgreSQL catalog: {e}"))?;
+            repo.run_migrations()
+                .await
+                .map_err(|e| format!("Failed to run PostgreSQL catalog migrations: {e}"))?;
+            Arc::new(repo)
+        }
+        curator::adapters::CatalogBackend::Filesystem => {
+            tracing::info!(
+                data_dir = %data_dir.display(),
+                "Initializing filesystem catalog repository..."
+            );
+            let catalog_repository = FilesystemCatalogRepository::new(&data_dir);
+            let migrated = catalog_repository.migrate_legacy_generated_manifests();
+            if migrated > 0 {
+                tracing::info!(
+                    count = migrated,
+                    "Migrated legacy generated staging manifests to Candidate manifests"
+                );
+            }
+            Arc::new(catalog_repository)
+        }
+    };
     let blob_backend = curator::adapters::BlobBackend::from_env()?;
     let blobs: Arc<dyn BlobStorage + Send + Sync> = match blob_backend {
         curator::adapters::BlobBackend::Filesystem => {

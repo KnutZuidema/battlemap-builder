@@ -1,6 +1,9 @@
 //! PostgreSQL-backed [`CatalogRepository`] storing domain entities as indexed JSONB documents (ADR-0011).
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
@@ -37,6 +40,101 @@ fn rejection_from_row(row: &PgRow) -> Result<RejectionRecord, StorageError> {
     let timestamp: chrono::DateTime<chrono::Utc> =
         row.try_get("rejected_at").map_err(map_sqlx_err)?;
     Ok(RejectionRecord::new(id, reason, notes, timestamp))
+}
+
+/// Truncates a timestamp to PostgreSQL `timestamptz` (microsecond) precision.
+///
+/// Filesystem manifests keep nanosecond timestamps; the append-only logs are deduplicated on the
+/// stored column, so both sides must be compared at the precision PostgreSQL actually keeps.
+fn to_micros(timestamp: DateTime<Utc>) -> DateTime<Utc> {
+    timestamp - chrono::Duration::nanoseconds(i64::from(timestamp.timestamp_subsec_nanos() % 1_000))
+}
+
+/// Conflict policy applied by the bulk import path when a row already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportConflict {
+    /// Keep the stored row (`ON CONFLICT DO NOTHING`); the default for repeat migrations.
+    SkipExisting,
+    /// Replace the stored row (`ON CONFLICT DO UPDATE`); used by `--force`.
+    Overwrite,
+}
+
+/// Identity of one line in the append-only rejection log.
+///
+/// The log has a surrogate primary key, so idempotency is keyed on the full record instead: a
+/// repeat import of the same rejection is detected and skipped.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RejectionKey {
+    pub candidate_id: String,
+    pub reason: String,
+    pub notes: Option<String>,
+    pub rejected_at: DateTime<Utc>,
+}
+
+impl RejectionKey {
+    /// Computes the idempotency key of a filesystem rejection record.
+    pub fn from_record(record: &RejectionRecord) -> Self {
+        Self {
+            candidate_id: record.id.clone(),
+            reason: record.reason.as_str().to_string(),
+            notes: record.notes.clone(),
+            rejected_at: to_micros(record.timestamp),
+        }
+    }
+}
+
+/// Identity of one appended training metric sample.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TrainingMetricKey {
+    pub run_id: String,
+    pub recorded_at: DateTime<Utc>,
+    pub step: usize,
+}
+
+impl TrainingMetricKey {
+    /// Computes the idempotency key of a metric sample read from `metrics.jsonl`.
+    pub fn from_sample(run_id: &str, metric: &TrainingMetricSnapshot) -> Self {
+        Self {
+            run_id: run_id.to_string(),
+            recorded_at: to_micros(metric.timestamp),
+            step: metric.step,
+        }
+    }
+}
+
+/// Primary-key snapshot used to predict import outcomes without writing (dry runs).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CatalogImportIndex {
+    pub candidate_ids: HashSet<String>,
+    pub curated_ids: HashSet<String>,
+    pub dataset_snapshot_ids: HashSet<String>,
+    pub training_run_ids: HashSet<String>,
+    pub lora_adapter_ids: HashSet<String>,
+    pub rejections: HashSet<RejectionKey>,
+    pub training_metrics: HashSet<TrainingMetricKey>,
+}
+
+/// Renders the `ON CONFLICT` tail shared by every primary-key import statement.
+fn conflict_clause(conflict: ImportConflict, updates: &str) -> String {
+    match conflict {
+        ImportConflict::SkipExisting => "ON CONFLICT (id) DO NOTHING".to_string(),
+        ImportConflict::Overwrite => format!("ON CONFLICT (id) DO UPDATE SET {updates}"),
+    }
+}
+
+/// Collects the `id` column of every row into a set.
+fn collect_ids(rows: Vec<PgRow>) -> Result<HashSet<String>, StorageError> {
+    rows.into_iter()
+        .map(|row| row.try_get::<String, _>("id").map_err(map_sqlx_err))
+        .collect()
+}
+
+/// Whether a query failed because the table has not been created yet (SQLSTATE `42P01`).
+fn is_undefined_table(err: &sqlx::Error) -> bool {
+    err.as_database_error()
+        .and_then(|db_err| db_err.code())
+        .map(|code| code == "42P01")
+        .unwrap_or(false)
 }
 
 /// Resolved choice of catalog repository backend based on configuration.
@@ -95,6 +193,294 @@ impl PostgresCatalogRepository {
                 StorageError::InvalidData(format!("catalog migrations failed: {err}"))
             })?;
         Ok(())
+    }
+
+    /// Fetches import-index rows, treating a not-yet-migrated schema as empty.
+    ///
+    /// `--dry-run` deliberately does not run migrations, so a fresh database must still produce a
+    /// report ("everything would be imported") instead of a missing-relation error.
+    async fn fetch_import_rows(&self, sql: &str) -> Result<Vec<PgRow>, StorageError> {
+        match sqlx::query(sql).fetch_all(&self.pool).await {
+            Ok(rows) => Ok(rows),
+            Err(err) if is_undefined_table(&err) => Ok(Vec::new()),
+            Err(err) => Err(map_sqlx_err(err)),
+        }
+    }
+
+    /// Loads every catalog key the disk import path compares against.
+    ///
+    /// Used to report `--dry-run` outcomes without writing anything.
+    pub async fn import_index(&self) -> Result<CatalogImportIndex, StorageError> {
+        let candidate_rows = self.fetch_import_rows("SELECT id FROM candidates").await?;
+        let curated_rows = self.fetch_import_rows("SELECT id FROM curated_maps").await?;
+        let snapshot_rows = self
+            .fetch_import_rows("SELECT id FROM dataset_snapshots")
+            .await?;
+        let run_rows = self.fetch_import_rows("SELECT id FROM training_runs").await?;
+        let adapter_rows = self.fetch_import_rows("SELECT id FROM lora_adapters").await?;
+
+        let rejection_rows = self
+            .fetch_import_rows("SELECT candidate_id, reason, notes, rejected_at FROM rejections")
+            .await?;
+        let mut rejections = HashSet::with_capacity(rejection_rows.len());
+        for row in &rejection_rows {
+            rejections.insert(RejectionKey {
+                candidate_id: row.try_get("candidate_id").map_err(map_sqlx_err)?,
+                reason: row.try_get("reason").map_err(map_sqlx_err)?,
+                notes: row.try_get("notes").map_err(map_sqlx_err)?,
+                rejected_at: row.try_get("rejected_at").map_err(map_sqlx_err)?,
+            });
+        }
+
+        let metric_rows = self
+            .fetch_import_rows(
+                "SELECT run_id, recorded_at, (data->>'step') AS step FROM training_metrics",
+            )
+            .await?;
+        let mut training_metrics = HashSet::with_capacity(metric_rows.len());
+        for row in &metric_rows {
+            let step_raw: Option<String> = row.try_get("step").map_err(map_sqlx_err)?;
+            training_metrics.insert(TrainingMetricKey {
+                run_id: row.try_get("run_id").map_err(map_sqlx_err)?,
+                recorded_at: row.try_get("recorded_at").map_err(map_sqlx_err)?,
+                step: step_raw
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0),
+            });
+        }
+
+        Ok(CatalogImportIndex {
+            candidate_ids: collect_ids(candidate_rows)?,
+            curated_ids: collect_ids(curated_rows)?,
+            dataset_snapshot_ids: collect_ids(snapshot_rows)?,
+            training_run_ids: collect_ids(run_rows)?,
+            lora_adapter_ids: collect_ids(adapter_rows)?,
+            rejections,
+            training_metrics,
+        })
+    }
+
+    /// Imports one candidate manifest, returning `false` when an existing row was kept.
+    pub async fn import_candidate(
+        &self,
+        candidate: &Candidate,
+        conflict: ImportConflict,
+    ) -> Result<bool, StorageError> {
+        let source_str = candidate.source.to_string();
+        let data = serde_json::to_value(candidate)?;
+        let sql = format!(
+            r#"
+            INSERT INTO candidates (id, source, parent_group_id, created_at, data)
+            VALUES ($1, $2, $3, $4, $5)
+            {}
+            "#,
+            conflict_clause(
+                conflict,
+                "source = EXCLUDED.source, \
+                 parent_group_id = EXCLUDED.parent_group_id, \
+                 created_at = EXCLUDED.created_at, \
+                 data = EXCLUDED.data"
+            )
+        );
+        let result = sqlx::query(&sql)
+            .bind(&candidate.id)
+            .bind(&source_str)
+            .bind(candidate.parent_group_id.as_deref())
+            .bind(candidate.created_at)
+            .bind(data)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Imports one curated map manifest, returning `false` when an existing row was kept.
+    pub async fn import_curated(
+        &self,
+        map: &CuratedMap,
+        conflict: ImportConflict,
+    ) -> Result<bool, StorageError> {
+        let tags: Vec<String> = map.tags.clone();
+        let themes: Vec<String> = tags
+            .iter()
+            .filter_map(|tag| tag.parse::<Theme>().ok())
+            .map(|theme| theme.as_str().to_string())
+            .collect();
+        let data = serde_json::to_value(map)?;
+        let sql = format!(
+            r#"
+            INSERT INTO curated_maps (id, tags, themes, created_at, data)
+            VALUES ($1, $2, $3, $4, $5)
+            {}
+            "#,
+            conflict_clause(
+                conflict,
+                "tags = EXCLUDED.tags, \
+                 themes = EXCLUDED.themes, \
+                 created_at = EXCLUDED.created_at, \
+                 data = EXCLUDED.data"
+            )
+        );
+        let result = sqlx::query(&sql)
+            .bind(&map.id)
+            .bind(&tags)
+            .bind(&themes)
+            .bind(map.curated_at)
+            .bind(data)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Imports one dataset snapshot manifest, returning `false` when an existing row was kept.
+    pub async fn import_dataset_snapshot(
+        &self,
+        snapshot: &DatasetSnapshot,
+        conflict: ImportConflict,
+    ) -> Result<bool, StorageError> {
+        let theme_str = snapshot.theme.as_ref().map(|t| t.as_str().to_string());
+        let data = serde_json::to_value(snapshot)?;
+        let sql = format!(
+            r#"
+            INSERT INTO dataset_snapshots (id, theme, created_at, data)
+            VALUES ($1, $2, $3, $4)
+            {}
+            "#,
+            conflict_clause(
+                conflict,
+                "theme = EXCLUDED.theme, \
+                 created_at = EXCLUDED.created_at, \
+                 data = EXCLUDED.data"
+            )
+        );
+        let result = sqlx::query(&sql)
+            .bind(&snapshot.id)
+            .bind(theme_str)
+            .bind(snapshot.created_at)
+            .bind(data)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Imports one training run manifest, returning `false` when an existing row was kept.
+    pub async fn import_training_run(
+        &self,
+        run: &TrainingRun,
+        conflict: ImportConflict,
+    ) -> Result<bool, StorageError> {
+        let data = serde_json::to_value(run)?;
+        let sql = format!(
+            r#"
+            INSERT INTO training_runs (id, dataset_snapshot_id, created_at, data)
+            VALUES ($1, $2, $3, $4)
+            {}
+            "#,
+            conflict_clause(
+                conflict,
+                "dataset_snapshot_id = EXCLUDED.dataset_snapshot_id, \
+                 created_at = EXCLUDED.created_at, \
+                 data = EXCLUDED.data"
+            )
+        );
+        let result = sqlx::query(&sql)
+            .bind(&run.id)
+            .bind(&run.dataset_snapshot_id)
+            .bind(run.created_at)
+            .bind(data)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Imports one LoRA adapter manifest, returning `false` when an existing row was kept.
+    pub async fn import_lora_adapter(
+        &self,
+        adapter: &LoraAdapter,
+        conflict: ImportConflict,
+    ) -> Result<bool, StorageError> {
+        let data = serde_json::to_value(adapter)?;
+        let sql = format!(
+            r#"
+            INSERT INTO lora_adapters (id, created_at, data)
+            VALUES ($1, $2, $3)
+            {}
+            "#,
+            conflict_clause(
+                conflict,
+                "created_at = EXCLUDED.created_at, data = EXCLUDED.data"
+            )
+        );
+        let result = sqlx::query(&sql)
+            .bind(&adapter.id)
+            .bind(adapter.created_at)
+            .bind(data)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Appends one rejection record, preserving its original timestamp and order.
+    ///
+    /// Returns `false` when an identical record (same candidate, reason, notes, and timestamp) is
+    /// already stored, so repeated imports never duplicate the append-only log.
+    pub async fn import_rejection(
+        &self,
+        record: &RejectionRecord,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO rejections (candidate_id, reason, notes, rejected_at)
+            SELECT $1::text, $2::text, $3::text, $4::timestamptz
+            WHERE NOT EXISTS (
+                SELECT 1 FROM rejections
+                WHERE candidate_id = $1::text
+                  AND reason = $2::text
+                  AND notes IS NOT DISTINCT FROM $3::text
+                  AND rejected_at = $4::timestamptz
+            )
+            "#,
+        )
+        .bind(&record.id)
+        .bind(record.reason.as_str())
+        .bind(record.notes.as_deref())
+        .bind(to_micros(record.timestamp))
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Appends one training metric sample, deduplicating identical samples on re-import.
+    pub async fn import_training_metric(
+        &self,
+        run_id: &str,
+        metric: &TrainingMetricSnapshot,
+    ) -> Result<bool, StorageError> {
+        let data = serde_json::to_value(metric)?;
+        let result = sqlx::query(
+            r#"
+            INSERT INTO training_metrics (run_id, data, recorded_at)
+            SELECT $1::text, $2::jsonb, $3::timestamptz
+            WHERE NOT EXISTS (
+                SELECT 1 FROM training_metrics
+                WHERE run_id = $1::text
+                  AND recorded_at = $3::timestamptz
+                  AND data = $2::jsonb
+            )
+            "#,
+        )
+        .bind(run_id)
+        .bind(data)
+        .bind(to_micros(metric.timestamp))
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
+        Ok(result.rows_affected() > 0)
     }
 }
 

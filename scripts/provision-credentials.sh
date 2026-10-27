@@ -319,7 +319,7 @@ say "datasets, training runs and adapters) from the on-disk catalog into Postgre
 note "Set DATABASE_URL to the in-cluster DSN to use PostgreSQL, e.g.:"
 note "  postgres://curator:<password>@shared-postgres-rw.database.svc.cluster.local:5432/curator"
 note "Leave empty to keep the filesystem catalog fallback."
-ask_secret DATABASE_URL "Paste the curator PostgreSQL DSN (or Enter to keep the filesystem catalog):" || true
+ask_secret DATABASE_URL "Paste the curator PostgreSQL DSN — Enter keeps the filesystem catalog fallback (empty DSN):" || true
 if [[ -n "${DATABASE_URL:-}" ]]; then
   write_env DATABASE_URL "$DATABASE_URL"
 fi

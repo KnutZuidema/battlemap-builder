@@ -593,7 +593,7 @@ fn test_ui_assets_expose_dataset_snapshot_controls() {
     assert!(js.contains("/api/training/datasets"));
     assert!(js.contains("DATASET_NOT_READY"));
     assert!(js.contains("SNAPSHOT_IN_USE"));
-    assert!(js.contains("DATASET_ISSUE_REMEDIATIONS"));
+    assert!(js.contains("DATASET_ISSUE_ACTIONS"));
     assert!(js.contains("freezeDatasetSnapshot"));
     assert!(js.contains("deleteDatasetSnapshot"));
     assert!(js.contains("fetchDatasetSnapshots"));

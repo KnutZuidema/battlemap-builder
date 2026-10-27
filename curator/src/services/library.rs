@@ -16,6 +16,7 @@ use crate::domain::{
 use crate::ports::blob_storage::{BlobKey, BlobStorage};
 use crate::ports::catalog_repository::{CandidateFilter, CatalogRepository};
 use crate::ports::storage_error::StorageError;
+use crate::services::sections::ground_dimensions;
 
 /// Application service for candidate/curated library mutations and image reads.
 #[derive(Clone)]
@@ -526,26 +527,16 @@ impl LibraryService {
         }
 
         let grid_requested = grid.is_some();
+        let mut grid_dimensions: Option<(u32, u32)> = None;
         if let Some(new_grid) = grid {
-            let ground_layer = map
-                .layers
-                .iter()
-                .find(|layer| layer.role == LayerRole::Ground)
-                .or_else(|| map.layers.first())
-                .cloned();
-            let (mut ground_w, mut ground_h) = ground_layer
-                .as_ref()
-                .map(|layer| layer.dimensions)
-                .filter(|&(w, h)| w > 0 && h > 0)
-                .unwrap_or(map.dimensions);
-            if (ground_w == 0 || ground_h == 0) && ground_layer.is_some() {
-                if let Ok((bytes, _)) = self.curated_ground_image(id).await {
-                    if let Some((w, h)) = Self::image_dimensions(&bytes) {
-                        ground_w = w;
-                        ground_h = h;
-                    }
-                }
-            }
+            // Same resolution the readiness audit uses: sections are cropped out of the decoded
+            // Ground pixels, so the grid is validated against them rather than stale metadata.
+            let ground_image = match self.curated_ground_image(id).await {
+                Ok((bytes, _)) => image::load_from_memory(&bytes).ok(),
+                Err(_) => None,
+            };
+            let (ground_w, ground_h) = ground_dimensions(&map, ground_image.as_ref());
+            grid_dimensions = Some((ground_w, ground_h));
             if !new_grid.is_curation_eligible(ground_w, ground_h) {
                 return Err(StorageError::InvalidData(
                     "New grid configuration yields fewer than 16×16 full Grid Cells".into(),
@@ -557,17 +548,8 @@ impl LibraryService {
         if let Some(sections) = sections {
             map.sections = sections;
         } else if grid_requested {
-            let ground_layer = map
-                .layers
-                .iter()
-                .find(|layer| layer.role == LayerRole::Ground)
-                .or_else(|| map.layers.first())
-                .cloned();
-            let (ground_w, ground_h) = ground_layer
-                .as_ref()
-                .map(|layer| layer.dimensions)
-                .filter(|&(w, h)| w > 0 && h > 0)
-                .unwrap_or(map.dimensions);
+            let (ground_w, ground_h) =
+                grid_dimensions.unwrap_or_else(|| ground_dimensions(&map, None));
             let origins = map.grid.section_origins(ground_w, ground_h);
             map.sections = synthesize_map_sections(&origins, map.description.as_deref());
         }

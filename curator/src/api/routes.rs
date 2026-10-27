@@ -1183,6 +1183,9 @@ pub async fn post_curated_describe(
     }
 
     let curated_map = state.catalog.get_curated(&id).await.ok();
+    if req.apply && curated_map.is_none() {
+        return Err(ApiError::not_found(format!("Curated map '{id}' not found")));
+    }
 
     let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
     let (bytes, filename) = library
@@ -1218,11 +1221,10 @@ pub async fn post_curated_describe(
         .describe(&bytes, filename, &tags, None)
         .await?;
 
-    if req.apply {
-        let stored = curated_map
-            .ok_or_else(|| ApiError::not_found(format!("Curated map '{id}' not found")))?;
+    let mut applied = false;
+    if let (true, Some(stored)) = (req.apply, curated_map.as_ref()) {
         let ground_image = image::load_from_memory(&bytes).ok();
-        let (ground_w, ground_h) = ground_dimensions(&stored, ground_image.as_ref());
+        let (ground_w, ground_h) = ground_dimensions(stored, ground_image.as_ref());
         let sections = describe_map_sections(
             &state.description_service,
             SectionDescriptionContext {
@@ -1245,6 +1247,7 @@ pub async fn post_curated_describe(
                 },
             )
             .await?;
+        applied = true;
         tracing::info!(
             id = %id,
             "Applied regenerated Physical Description and Map Section descriptions"
@@ -1254,7 +1257,7 @@ pub async fn post_curated_describe(
     Ok(Json(DescribeResponse {
         id,
         description,
-        applied: req.apply,
+        applied,
     }))
 }
 

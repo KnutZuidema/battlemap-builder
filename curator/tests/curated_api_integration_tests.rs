@@ -1573,10 +1573,11 @@ async fn test_curated_describe_apply_requires_post() {
 #[tokio::test]
 async fn test_patch_curated_regrid_plans_sections_from_the_ground_image() {
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(catalog.clone(), blobs.clone())
-        .with_description_service(Arc::new(DescriptionService::new(Some(Arc::new(
-            MockCuratedGen(Ok("Moss-slick stone crypt with two carved sarcophagi.".to_string())),
-        )))));
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_description_service(Arc::new(
+        DescriptionService::new(Some(Arc::new(MockCuratedGen(Ok(
+            "Moss-slick stone crypt with two carved sarcophagi.".to_string(),
+        ))))),
+    ));
     let app = create_router(state);
 
     // Same stale metadata as the apply regression: the grid editor must plan sections from the
@@ -1619,9 +1620,14 @@ async fn test_curated_describe_apply_mints_descriptions_for_a_legacy_map() {
 
     // Legacy bundle: a Map Section exists but carries no description, and the map has none either,
     // so the only remediation is to mint both.
-    let map = CuratedMap::with_now("legacy_undescribed", Theme::Cave, vec!["grotto".into()], (1024, 1024))
-        .with_grid(GridConfig::new(64, 0, 0))
-        .with_sections(vec![curator::domain::MapSection::new(0, 0, "   ")]);
+    let map = CuratedMap::with_now(
+        "legacy_undescribed",
+        Theme::Cave,
+        vec!["grotto".into()],
+        (1024, 1024),
+    )
+    .with_grid(GridConfig::new(64, 0, 0))
+    .with_sections(vec![curator::domain::MapSection::new(0, 0, "   ")]);
     seed_curated_ports(&catalog, &blobs, &map, &create_test_png(1024, 1024)).await;
 
     let before = readiness_report(app.clone()).await;
@@ -1651,6 +1657,56 @@ async fn test_curated_describe_apply_mints_descriptions_for_a_legacy_map() {
         .find(|layer| layer.role == LayerRole::Ground)
         .and_then(|layer| layer.caption.as_deref());
     assert_eq!(ground_caption, Some(neutral));
+
+    let after = readiness_report(app).await;
+    assert_eq!(after["ready"], true, "{after}");
+}
+
+#[tokio::test]
+async fn test_patch_curated_regrid_accepts_a_grid_the_pixels_support() {
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_description_service(Arc::new(
+        DescriptionService::new(Some(Arc::new(MockCuratedGen(Ok(
+            "Moss-slick stone crypt with two carved sarcophagi.".to_string(),
+        ))))),
+    ));
+    let app = create_router(state);
+
+    // The inverse stale case: the layer metadata understates a 2048×2048 raster as 512×512, so the
+    // persisted grid must be validated against the pixels that actually hold the sections.
+    let png = create_test_png(2048, 2048);
+    let mut map = CuratedMap::with_now(
+        "undersized_dims",
+        Theme::Dungeon,
+        vec!["dungeon".into()],
+        (512, 512),
+    )
+    .with_grid(GridConfig::new(64, 0, 0))
+    .with_description("Moss-slick stone crypt with two carved sarcophagi.");
+    map.layers = vec![CuratedLayer::new(
+        0,
+        CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), "png"),
+        LayerRole::Ground,
+        Some(0),
+        (512, 512),
+    )];
+    catalog.save_curated(&map).await.unwrap();
+    blobs
+        .write_blob(&curated_ground_key(&map), &png)
+        .await
+        .unwrap();
+
+    let req = Request::builder()
+        .uri("/api/curated/undersized_dims")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(regrid_payload(64).to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = catalog.get_curated("undersized_dims").await.unwrap();
+    assert_eq!(stored.sections.len(), 4, "{:?}", stored.sections);
 
     let after = readiness_report(app).await;
     assert_eq!(after["ready"], true, "{after}");

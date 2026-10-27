@@ -3743,6 +3743,15 @@ kbd {
     gap: 0.6rem;
 }
 
+.readiness-empty {
+    padding: 0.85rem 1rem;
+    border-radius: 8px;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.28);
+    color: #fcd34d;
+    font-size: 0.8rem;
+}
+
 .readiness-clean {
     padding: 0.85rem 1rem;
     border-radius: 8px;
@@ -3861,6 +3870,12 @@ kbd {
 .readiness-action-btn.is-busy {
     opacity: 0.7;
     cursor: progress;
+}
+
+/* A running batch owns the manifest writes; row actions wait for it. */
+.readiness-issues.is-batching .readiness-action-btn {
+    pointer-events: none;
+    opacity: 0.55;
 }
 
 .readiness-action-spinner {

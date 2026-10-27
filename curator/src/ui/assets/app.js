@@ -5049,13 +5049,6 @@
             .map(([code]) => code),
     );
 
-    const DATASET_ISSUE_REMEDIATIONS = {
-        ground_layer_missing: "Restore 0_ground.png in data/curated/<id>/",
-        ground_image_unreadable: "Re-ingest the map; an export would skip it entirely",
-        grid_below_minimum: "Recalibrate the grid (PATCH /api/curated/{id} with a grid that fits the Ground layer)",
-        section_unresolvable: "Regrid, or re-curate the map; the export skips that section",
-    };
-
     function datasetIssueLabel(code) {
         return DATASET_ISSUE_LABELS[code] || code;
     }
@@ -5110,6 +5103,10 @@
         const flagged = ((report && report.maps) || []).filter(map => (map.issues || []).length > 0);
         toggleFixAllDescriptions(flagged);
 
+        if (total === 0) {
+            datasetReadinessIssues.innerHTML = '<div class="readiness-empty">No curated maps in this scope: an empty dataset is not ready to train on. Curate at least one battlemap with 16×16 Map Sections, then re-audit.</div>';
+            return;
+        }
         if (flagged.length === 0) {
             datasetReadinessIssues.innerHTML = '<div class="readiness-clean">No issues: every curated map in scope exports clean 16×16 Map Section samples.</div>';
             return;
@@ -5126,16 +5123,14 @@
             .join("");
     }
 
-    /** One issue row: contextual fix button when the code is fixable, static hint otherwise. */
+    /** One issue row: the contextual fix for its code, rendered as a delegated action button. */
     function renderDatasetIssueRow(map, issue) {
         const fix = DATASET_ISSUE_ACTIONS[issue.code];
-        const rem = fix ? null : DATASET_ISSUE_REMEDIATIONS[issue.code];
-        const remHtml = rem ? `<span class="readiness-issue-remediation">Fix: ${escapeHtml(rem)}</span>` : "";
         const actionHtml = fix
             ? `<button type="button" class="btn btn-secondary btn-xs readiness-action-btn" data-remediate="${escapeHtml(fix.action)}" data-map-id="${escapeHtml(map.id)}" data-issue-code="${escapeHtml(issue.code)}">${escapeHtml(fix.label)}<span class="readiness-action-spinner hidden"></span></button>`
             : "";
         const actionsHtml = actionHtml ? `<div class="readiness-issue-actions">${actionHtml}</div>` : "";
-        return `<li class="readiness-issue-row" data-issue-code="${escapeHtml(issue.code)}" data-map-id="${escapeHtml(map.id)}"><div class="readiness-issue-text"><span class="readiness-issue-code mono">${escapeHtml(datasetIssueLabel(issue.code))}</span> ${escapeHtml(issue.detail)}</div><div class="readiness-issue-side">${actionsHtml}${remHtml}</div></li>`;
+        return `<li class="readiness-issue-row" data-issue-code="${escapeHtml(issue.code)}" data-map-id="${escapeHtml(map.id)}"><div class="readiness-issue-text"><span class="readiness-issue-code mono">${escapeHtml(datasetIssueLabel(issue.code))}</span> ${escapeHtml(issue.detail)}</div><div class="readiness-issue-side">${actionsHtml}</div></li>`;
     }
 
     /** Whether a flagged map carries an issue the batch action can resolve. */
@@ -5183,6 +5178,8 @@
         stopPanLoop();
         stopZoomLoop();
         state.datasetReadinessModalOpen = true;
+        state.datasetReadiness = null;
+        toggleFixAllDescriptions([]);
         datasetReadinessModal?.classList.remove("hidden");
         fetchDatasetReadiness();
         const titleEl = document.getElementById("dataset-readiness-title");
@@ -5280,11 +5277,12 @@
 
         let fixed = 0;
         let failed = 0;
+        datasetReadinessIssues?.classList.add("is-batching");
         try {
             for (let index = 0; index < mapIds.length; index += 1) {
                 const mapId = mapIds[index];
-                if (label) label.textContent = `Fixing descriptions ${index + 1}/${mapIds.length}…`;
                 if (state.datasetRemediating.has(mapId)) continue;
+                if (label) label.textContent = `Fixing descriptions ${index + 1}/${mapIds.length}…`;
                 state.datasetRemediating.add(mapId);
                 try {
                     await applyDatasetDescription(mapId);
@@ -5297,6 +5295,7 @@
                 }
             }
         } finally {
+            datasetReadinessIssues?.classList.remove("is-batching");
             if (label) label.textContent = "Fix All Descriptions";
             if (btnFixAllDescriptions) {
                 btnFixAllDescriptions.disabled = false;

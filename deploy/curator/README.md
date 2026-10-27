@@ -391,6 +391,41 @@ To verify that data survives across pod restarts and recreations on Hetzner CSI 
    ```
    Confirm that all staged maps and `cost_ledger.json` remain intact and populated.
 
+### 5.5. Scheduled Reddit Harvest (CronJob)
+
+`cronjob-harvest.yaml` runs an hourly sweep of `/r/battlemaps` (ADR-0011): every tick it `POST`s `{"sort":"hot","limit":25,"gridless_only":false}` to `http://curator:3002/api/harvest/reddit` from a throwaway `curlimages/curl` pod. It calls the internal `ClusterIP` service — there is no ingress — because the `ReadWriteOnce` data volume is held by the running Curator pod, so a second pod cannot mount `/data`.
+
+- **Schedule**: `0 * * * *` (top of every hour), `concurrencyPolicy: Forbid` and `startingDeadlineSeconds: 300`, so a slow or rate-limited harvest never overlaps the next tick; the delayed tick is visible as a missed job in `kubectl get events`.
+- **Timeouts**: the Job has `activeDeadlineSeconds: 900` and the curl call `--max-time 900`; `backoffLimit: 2`. Job history is capped at 3 succeeded / 5 failed Jobs, which is also the audit trail for ticks that never ran.
+- **Ledger**: each invocation writes a `harvest_runs` row (`subreddit`, `sort`, `posts_scanned`, `downloaded`, `skipped`, `error`, `started_at`, `finished_at`) into the PostgreSQL catalog. Post deduplication is done against live `Candidate`/`CuratedMap`/`RejectionRecord` rows rather than a timestamp watermark, since Reddit's `hot` ranking is non-monotonic.
+
+Apply and run it:
+
+```bash
+just harvest-apply          # kubectl apply -f cronjob-harvest.yaml
+just harvest-now            # one-off Job from the CronJob template
+just harvest-logs           # tail the newest harvest pod
+just harvest-logs curator-harvest-reddit-29123456   # a specific Job
+```
+
+Inspect results:
+
+```bash
+# Recent jobs, including skipped/failed ticks
+kubectl get jobs -n curator
+
+# Candidates currently staged for triage
+kubectl exec -n curator deployment/curator -- \
+  curl -s http://localhost:3002/api/staging | jq 'length'
+
+# Harvest ledger rows
+kubectl -n database exec shared-postgres-1 -- psql -U postgres -d curator -c \
+  'SELECT id, subreddit, sort, posts_scanned, downloaded, skipped, error, started_at, finished_at
+     FROM harvest_runs ORDER BY started_at DESC LIMIT 3;'
+```
+
+If harvesting fails with a 401/403, the Reddit credentials in `curator-secrets` are missing or stale (see §6).
+
 ---
 
 ## 6. Common Issues & Resolutions

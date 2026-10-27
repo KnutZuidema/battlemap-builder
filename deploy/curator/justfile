@@ -84,6 +84,24 @@ migrate-catalog-job:
     kubectl logs -n curator job/curator-catalog-migration
     kubectl delete job curator-catalog-migration -n curator
 
+# Apply the hourly Reddit harvest CronJob
+harvest-apply:
+    kubectl apply -f cronjob-harvest.yaml
+
+# Trigger one harvest immediately as a manual Job
+harvest-now:
+    kubectl create job --from=cronjob/curator-harvest-reddit "manual-harvest-$(date +%s)" -n curator
+
+# Tail harvest Job logs (optionally pass a job name, e.g. curator-harvest-reddit-29123456)
+harvest-logs job="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "{{job}}" ]; then
+        kubectl logs -l "job-name={{job}}" --tail=50 -n curator
+    else
+        kubectl logs -l app=curator-harvest --tail=50 -n curator
+    fi
+
 # Delete deployed manifests
 delete:
     kubectl delete -f service.yaml --ignore-not-found

@@ -1088,12 +1088,20 @@ pub struct DescribeRequest {
     pub themes: Option<Vec<String>>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// Curated maps only: persist the generated `Physical Description` onto the curated map and
+    /// recompute every Map Section description through the shared section policy. Staging
+    /// candidates reject it, because their description belongs to the curation decision.
+    #[serde(default)]
+    pub apply: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeResponse {
     pub id: String,
     pub description: String,
+    /// True when the description was persisted to the curated map (see [`DescribeRequest::apply`]).
+    #[serde(default)]
+    pub applied: bool,
 }
 
 /// POST /api/staging/{id}/describe or GET /api/staging/{id}/describe
@@ -1114,6 +1122,11 @@ pub async fn post_describe_candidate(
             .map_err(|e| ApiError::bad_request(format!("Invalid JSON payload: {e}")))?
             .unwrap_or_default()
     };
+    if req.apply {
+        return Err(ApiError::bad_request(
+            "apply is only supported for curated maps",
+        ));
+    }
 
     // 1. Locate staging candidate
     let candidate = state
@@ -1148,7 +1161,11 @@ pub async fn post_describe_candidate(
         )
         .await?;
 
-    Ok(Json(DescribeResponse { id, description }))
+    Ok(Json(DescribeResponse {
+        id,
+        description,
+        applied: false,
+    }))
 }
 
 /// POST /api/curated/{id}/describe or GET /api/curated/{id}/describe
@@ -1206,7 +1223,60 @@ pub async fn post_curated_describe(
         .describe(&bytes, filename, &tags, None)
         .await?;
 
-    Ok(Json(DescribeResponse { id, description }))
+    if req.apply {
+        let stored = curated_map
+            .ok_or_else(|| ApiError::not_found(format!("Curated map '{id}' not found")))?;
+        let ground_image = image::load_from_memory(&bytes).ok();
+        let (ground_w, ground_h) = ground_dimensions(&stored, ground_image.as_ref());
+        let sections = describe_map_sections(
+            &state.description_service,
+            SectionDescriptionContext {
+                grid: &stored.grid,
+                ground_image: ground_image.as_ref(),
+                ground_dimensions: (ground_w, ground_h),
+                tags: &tags,
+                title: None,
+                map_description: &description,
+            },
+        )
+        .await;
+        library
+            .update_curated(
+                &id,
+                CuratedMapUpdate {
+                    description: Some(description.clone()),
+                    sections: Some(sections),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        tracing::info!(
+            id = %id,
+            "Applied regenerated Physical Description and Map Section descriptions"
+        );
+    }
+
+    Ok(Json(DescribeResponse {
+        id,
+        description,
+        applied: req.apply,
+    }))
+}
+
+/// Ground layer dimensions of a curated map, preferring the recorded layer metadata over the
+/// decoded image and the map's own dimensions. Mirrors the resolution the grid and section
+/// policies use.
+fn ground_dimensions(map: &CuratedMap, ground_image: Option<&image::DynamicImage>) -> (u32, u32) {
+    let recorded = map
+        .layers
+        .iter()
+        .find(|layer| layer.role == LayerRole::Ground)
+        .or_else(|| map.layers.first())
+        .map(|layer| layer.dimensions)
+        .filter(|&(w, h)| w > 0 && h > 0);
+    recorded
+        .or_else(|| ground_image.map(|img| (img.width(), img.height())))
+        .unwrap_or(map.dimensions)
 }
 
 /// Request payload for rejecting a candidate.

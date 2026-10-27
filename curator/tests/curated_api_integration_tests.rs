@@ -1361,3 +1361,144 @@ async fn test_reject_endpoint_logs_rejection_and_purges_in_memory_staging() {
         .unwrap()
         .is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Dataset readiness remediation: `POST /api/curated/{id}/describe` with `apply`
+// ---------------------------------------------------------------------------
+
+/// Audit the current dataset readiness scope through the HTTP surface.
+async fn readiness_report(app: axum::Router) -> Value {
+    let req = Request::builder()
+        .uri("/api/dataset/readiness")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test]
+async fn test_curated_describe_apply_persists_neutral_description_and_sections() {
+    let neutral = "Moss-slick stone crypt with two carved sarcophagi and a flooded alcove.";
+    let generator = Arc::new(MockCuratedGen(Ok(neutral.to_string())));
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
+    let app = create_router(state);
+
+    curate_multi_section_map(
+        &catalog,
+        &blobs,
+        "remediate_descriptions",
+        Some("Top-down view of a stone crypt"),
+    )
+    .await;
+
+    // Precondition: the stored description fails the audit, so the remediation has a defect to
+    // clear rather than pinning a no-op.
+    let before = readiness_report(app.clone()).await;
+    assert_eq!(before["ready"], false);
+    assert_eq!(
+        before["maps"][0]["issues"][0]["code"],
+        "physical_description_not_neutral"
+    );
+
+    let req = Request::builder()
+        .uri("/api/curated/remediate_descriptions/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "apply": true }).to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let res: DescribeResponse = serde_json::from_slice(&body).unwrap();
+    assert!(res.applied, "apply must report the persisted remediation");
+    assert_eq!(res.description, neutral);
+
+    let stored = catalog.get_curated("remediate_descriptions").await.unwrap();
+    assert_eq!(stored.description.as_deref(), Some(neutral));
+    assert_eq!(stored.sections.len(), 4);
+    assert!(
+        stored.sections.iter().all(|s| s.description == neutral),
+        "every Map Section must carry the regenerated description: {:?}",
+        stored.sections
+    );
+    let ground_caption = stored
+        .layers
+        .iter()
+        .find(|layer| layer.role == LayerRole::Ground)
+        .and_then(|layer| layer.caption.as_deref());
+    assert_eq!(ground_caption, Some(neutral));
+
+    // Re-auditing the same scope now reports a clean dataset.
+    let after = readiness_report(app).await;
+    assert_eq!(after["ready"], true, "{after}");
+    assert_eq!(after["maps_ready"], 1);
+    assert_eq!(after["sections_ready"], 4);
+}
+
+#[tokio::test]
+async fn test_curated_describe_apply_unknown_map_is_not_found() {
+    let (app, _, _) = setup_test_app();
+
+    let req = Request::builder()
+        .uri("/api/curated/no_such_map/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "apply": true }).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_curated_describe_apply_propagates_vision_failure_without_persisting() {
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_description_service(Arc::new(DescriptionService::new(None)));
+    let app = create_router(state);
+
+    let kept = "Moss-slick stone crypt with two carved sarcophagi.";
+    curate_multi_section_map(&catalog, &blobs, "remediate_unconfigured", Some(kept)).await;
+
+    let req = Request::builder()
+        .uri("/api/curated/remediate_unconfigured/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "apply": true }).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let stored = catalog.get_curated("remediate_unconfigured").await.unwrap();
+    assert_eq!(stored.description.as_deref(), Some(kept));
+}
+
+#[tokio::test]
+async fn test_staging_describe_rejects_apply() {
+    let (app, _, _) = setup_test_app();
+
+    let req = Request::builder()
+        .uri("/api/staging/whatever/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "apply": true }).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let err: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        err["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("only supported for curated maps"),
+        "{err}"
+    );
+}

@@ -635,7 +635,8 @@ fn test_ui_assets_expose_dataset_readiness_remediation_actions() {
     // The action buttons are delegated from the issue list, so a re-render never stacks handlers.
     assert!(js.contains("datasetReadinessIssues?.addEventListener(\"click\""));
     assert!(js.contains("closest(\"[data-remediate]\")"));
-    assert!(js.contains("state.datasetRemediating"));
+    // Both the per-map action and the batch action share one in-flight request per map.
+    assert!(js.contains("state.describeRequests"));
 
     // Every successful remediation re-audits the scope it was opened for.
     assert!(js.contains("renderDatasetReadinessReport(refusal.readiness)"));
@@ -645,6 +646,38 @@ fn test_ui_assets_expose_dataset_readiness_remediation_actions() {
     assert!(css.contains(".readiness-action-btn"));
     assert!(css.contains(".readiness-action-btn.is-busy"));
     assert!(css.contains(".readiness-action-spinner"));
+}
+
+/// Bug: `fixAllDatasetDescriptions` skipped every map that already had a regeneration in flight,
+/// so a batch could await nothing and still toast "Fixed 0 descriptions". A second click must
+/// reuse the in-flight request, and the batch must report what it sent, reused and failed.
+#[test]
+fn test_batch_description_fix_reuses_in_flight_requests() {
+    let js = include_str!("../src/ui/assets/app.js");
+
+    // Single-flight per map: the helper hands back the request already in flight, and forgets it
+    // only once it settles.
+    assert!(js.contains("function applyDescriptionOnce(mapId)"));
+    assert!(js.contains("const inFlight = state.describeRequests.get(mapId);"));
+    assert!(js.contains("if (inFlight) return inFlight;"));
+    assert!(js.contains(
+        "applyDatasetDescription(mapId).finally(() => state.describeRequests.delete(mapId))"
+    ));
+    assert!(js.contains("state.describeRequests.set(mapId, request);"));
+
+    // Both entry points go through it, so the batch observes requests a per-map click started...
+    assert_eq!(js.matches("await applyDescriptionOnce(mapId);").count(), 2);
+    assert!(js.contains("const joinedInFlight = state.describeRequests.has(mapId);"));
+    // ...instead of skipping the map, which is what produced the zero-request batch, and nothing
+    // else tracks in-flight regenerations.
+    assert!(!js.contains("datasetRemediating"));
+    assert!(!js.contains("await applyDatasetDescription(mapId)"));
+
+    // The batch reports sent/reused/failed counts instead of collapsing them into one number.
+    assert!(js.contains("function reportBatchDescriptionOutcome(sent, reused, failed)"));
+    assert!(js.contains("reused ${reused} in-flight regeneration"));
+    assert!(js.contains("failed.push(`${mapId} (${err.message})`)"));
+    assert!(js.contains("reportBatchDescriptionOutcome(sent, reused, failed);"));
 }
 
 // ---------------------------------------------------------------------------

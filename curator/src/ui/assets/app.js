@@ -62,7 +62,8 @@
         datasetReadinessModalOpen: false,
         // Serialized Dataset Readiness audits: a remediation re-audit must observe its own write.
         datasetAuditQueue: Promise.resolve(),
-        datasetRemediating: new Set(),
+        // One in-flight `POST /api/curated/{id}/describe` per map, so a second click reuses it.
+        describeRequests: new Map(),
         datasetBatchActive: false,
         // Frozen Dataset Snapshots (Issue #216)
         isFreezingSnapshot: false,
@@ -5221,6 +5222,18 @@
         return payload;
     }
 
+    /**
+     * One regeneration request per map: a second click during an in-flight
+     * `POST /api/curated/{id}/describe` reuses that promise instead of skipping the map.
+     */
+    function applyDescriptionOnce(mapId) {
+        const inFlight = state.describeRequests.get(mapId);
+        if (inFlight) return inFlight;
+        const request = applyDatasetDescription(mapId).finally(() => state.describeRequests.delete(mapId));
+        state.describeRequests.set(mapId, request);
+        return request;
+    }
+
     function setRemediationBusy(button, busy) {
         if (!button) return;
         button.disabled = busy;
@@ -5235,7 +5248,7 @@
     }
 
     async function remediateDatasetIssue(mapId, action, issueCode, button) {
-        if (state.datasetBatchActive || state.datasetRemediating.has(mapId)) return;
+        if (state.datasetBatchActive) return;
         if (action === "grid") {
             closeDatasetReadinessModal();
             await openGridCalibrationForMap(mapId);
@@ -5248,9 +5261,8 @@
         }
 
         setRemediationBusy(button, true);
-        state.datasetRemediating.add(mapId);
         try {
-            await applyDatasetDescription(mapId);
+            await applyDescriptionOnce(mapId);
             showToast(`Description regenerated for ${mapId}`, "success");
             // Re-audit the current scope so the resolved issue leaves the list on its own, and
             // report against that fresh report rather than the pre-apply one.
@@ -5265,9 +5277,22 @@
         } catch (err) {
             showToast(`Description regeneration failed: ${err.message}`, "danger");
         } finally {
-            state.datasetRemediating.delete(mapId);
             setRemediationBusy(button, false);
         }
+    }
+
+    /**
+     * Say what a batch actually did: how many requests it sent, how many it reused from a click
+     * that was already in flight, and which maps failed and why. Never a bare "Fixed 0".
+     */
+    function reportBatchDescriptionOutcome(sent, reused, failed) {
+        const parts = [];
+        if (sent > 0) parts.push(`Fixed ${sent} description${sent === 1 ? "" : "s"}`);
+        if (reused > 0) parts.push(`reused ${reused} in-flight regeneration${reused === 1 ? "" : "s"}`);
+        if (failed.length > 0) parts.push(`${failed.length} failed: ${failed.join(", ")}`);
+        const message = parts.join("; ");
+        const level = failed.length > 0 ? "danger" : sent > 0 ? "success" : "info";
+        showToast(message.charAt(0).toUpperCase() + message.slice(1), level);
     }
 
     /** Batch description regeneration, one map at a time, with live progress on the button. */
@@ -5281,24 +5306,24 @@
             btnFixAllDescriptions.classList.add("is-busy");
         }
 
-        let fixed = 0;
-        let failed = 0;
+        let sent = 0;
+        let reused = 0;
+        const failed = [];
         datasetReadinessIssues?.classList.add("is-batching");
         state.datasetBatchActive = true;
         try {
             for (let index = 0; index < mapIds.length; index += 1) {
                 const mapId = mapIds[index];
-                if (state.datasetRemediating.has(mapId)) continue;
                 if (label) label.textContent = `Fixing descriptions ${index + 1}/${mapIds.length}…`;
-                state.datasetRemediating.add(mapId);
+                // Snapshot before awaiting: a request that settles must not count as reused.
+                const joinedInFlight = state.describeRequests.has(mapId);
                 try {
-                    await applyDatasetDescription(mapId);
-                    fixed += 1;
+                    await applyDescriptionOnce(mapId);
+                    if (joinedInFlight) reused += 1;
+                    else sent += 1;
                 } catch (err) {
-                    failed += 1;
+                    failed.push(`${mapId} (${err.message})`);
                     console.error(`Description remediation failed for ${mapId}:`, err);
-                } finally {
-                    state.datasetRemediating.delete(mapId);
                 }
             }
         } finally {
@@ -5311,11 +5336,7 @@
             }
         }
 
-        if (failed === 0) {
-            showToast(`Fixed ${fixed} description${fixed === 1 ? "" : "s"}`, "success");
-        } else {
-            showToast(`Fixed ${fixed} description(s); ${failed} map(s) failed`, "danger");
-        }
+        reportBatchDescriptionOutcome(sent, reused, failed);
         resetDatasetReadinessTitle();
         const report = await fetchDatasetReadiness();
         const remaining = fixableDescriptionMapIds(report);

@@ -632,6 +632,10 @@ fn test_ui_assets_expose_dataset_readiness_remediation_actions() {
     assert!(js.contains("openCuratedInspectorById"));
     assert!(js.contains("apply: true"));
     assert!(js.contains("fetchDatasetReadiness"));
+    // The action buttons are delegated from the issue list, so a re-render never stacks handlers.
+    assert!(js.contains("datasetReadinessIssues?.addEventListener(\"click\""));
+    assert!(js.contains("closest(\"[data-remediate]\")"));
+    assert!(js.contains("state.datasetRemediating"));
 
     // Every successful remediation re-audits the scope it was opened for.
     assert!(js.contains("renderDatasetReadinessReport(refusal.readiness)"));

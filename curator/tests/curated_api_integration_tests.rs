@@ -1543,3 +1543,115 @@ async fn test_curated_describe_apply_plans_sections_from_the_ground_image() {
     assert_eq!(after["ready"], true, "{after}");
     assert_eq!(after["sections_ready"], 4);
 }
+
+#[tokio::test]
+async fn test_curated_describe_apply_requires_post() {
+    let responder = Arc::new(MockCuratedGen(Ok("Moss-slick stone crypt.".to_string())));
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(responder))));
+    let app = create_router(state);
+
+    let kept = "Moss-slick stone crypt with two carved sarcophagi.";
+    curate_multi_section_map(&catalog, &blobs, "apply_via_get", Some(kept)).await;
+
+    let req = Request::builder()
+        .uri("/api/curated/apply_via_get/describe")
+        .method("GET")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "apply": true }).to_string()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // A safe method must never write the curated bundle.
+    let stored = catalog.get_curated("apply_via_get").await.unwrap();
+    assert_eq!(stored.description.as_deref(), Some(kept));
+}
+
+#[tokio::test]
+async fn test_patch_curated_regrid_plans_sections_from_the_ground_image() {
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(Arc::new(
+            MockCuratedGen(Ok("Moss-slick stone crypt with two carved sarcophagi.".to_string())),
+        )))));
+    let app = create_router(state);
+
+    // Same stale metadata as the apply regression: the grid editor must plan sections from the
+    // 2048×2048 pixels, not the 4096×4096 the layer metadata claims.
+    let png = create_test_png(2048, 2048);
+    let map = CuratedMap::with_now(
+        "stale_regrid",
+        Theme::Dungeon,
+        vec!["dungeon".into()],
+        (4096, 4096),
+    )
+    .with_grid(GridConfig::new(64, 0, 0))
+    .with_description("Moss-slick stone crypt with two carved sarcophagi.");
+    seed_curated_ports(&catalog, &blobs, &map, &png).await;
+
+    let req = Request::builder()
+        .uri("/api/curated/stale_regrid")
+        .method("PATCH")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(regrid_payload(64).to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = catalog.get_curated("stale_regrid").await.unwrap();
+    assert_eq!(stored.sections.len(), 4, "{:?}", stored.sections);
+
+    let after = readiness_report(app).await;
+    assert_eq!(after["ready"], true, "{after}");
+}
+
+#[tokio::test]
+async fn test_curated_describe_apply_mints_descriptions_for_a_legacy_map() {
+    let neutral = "Damp grotto with a still green pool and moss-crusted boulders.";
+    let generator = Arc::new(MockCuratedGen(Ok(neutral.to_string())));
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
+    let app = create_router(state);
+
+    // Legacy bundle: a Map Section exists but carries no description, and the map has none either,
+    // so the only remediation is to mint both.
+    let map = CuratedMap::with_now("legacy_undescribed", Theme::Cave, vec!["grotto".into()], (1024, 1024))
+        .with_grid(GridConfig::new(64, 0, 0))
+        .with_sections(vec![curator::domain::MapSection::new(0, 0, "   ")]);
+    seed_curated_ports(&catalog, &blobs, &map, &create_test_png(1024, 1024)).await;
+
+    let before = readiness_report(app.clone()).await;
+    assert_eq!(before["ready"], false);
+    assert_eq!(
+        before["maps"][0]["issues"][0]["code"],
+        "physical_description_missing"
+    );
+
+    let req = Request::builder()
+        .uri("/api/curated/legacy_undescribed/describe")
+        .method("POST")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "apply": true }).to_string()))
+        .unwrap();
+
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored = catalog.get_curated("legacy_undescribed").await.unwrap();
+    assert_eq!(stored.description.as_deref(), Some(neutral));
+    assert_eq!(stored.sections.len(), 1);
+    assert_eq!(stored.sections[0].description, neutral);
+    let ground_caption = stored
+        .layers
+        .iter()
+        .find(|layer| layer.role == LayerRole::Ground)
+        .and_then(|layer| layer.caption.as_deref());
+    assert_eq!(ground_caption, Some(neutral));
+
+    let after = readiness_report(app).await;
+    assert_eq!(after["ready"], true, "{after}");
+}

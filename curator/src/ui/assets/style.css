@@ -1675,6 +1675,10 @@ kbd {
     border-left: 3px solid var(--accent-cyan);
 }
 
+.toast.toast-warning {
+    border-left: 3px solid var(--accent-amber);
+}
+
 .toast-message {
     flex: 1;
 }

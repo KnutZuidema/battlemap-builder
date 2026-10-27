@@ -1,7 +1,7 @@
 use axum::{
     body::{Body, Bytes},
     extract::{Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{
         sse::{Event, Sse},
         IntoResponse, Response,
@@ -24,7 +24,7 @@ use crate::domain::{
 use crate::services::CreateTrainingRunRequest;
 use crate::ports::catalog_repository::{CandidateFilter, CuratedFilter};
 use crate::ports::cost_tracker::CostStats;
-use crate::services::sections::{describe_map_sections, SectionDescriptionContext};
+use crate::services::sections::{describe_map_sections, ground_dimensions, SectionDescriptionContext};
 use crate::services::{
     DatasetExportService, FreezeDatasetError, IngestionSummary, LibraryService,
     RedditIngestionService, StorageMaintenanceService,
@@ -133,18 +133,7 @@ pub async fn patch_curated(
             .map(|(bytes, _)| bytes);
 
         let ground_img = ground_bytes.as_ref().and_then(|b| image::load_from_memory(b).ok());
-        let (mut ground_w, mut ground_h) = ground_layer
-            .as_ref()
-            .map(|l| l.dimensions)
-            .filter(|&(w, h)| w > 0 && h > 0)
-            .unwrap_or(current_map.dimensions);
-
-        if ground_w == 0 || ground_h == 0 {
-            if let Some(img) = &ground_img {
-                ground_w = img.width();
-                ground_h = img.height();
-            }
-        }
+        let (ground_w, ground_h) = ground_dimensions(&current_map, ground_img.as_ref());
 
         if !new_grid.is_curation_eligible(ground_w, ground_h) {
             return Err(ApiError::bad_request(
@@ -1173,6 +1162,7 @@ pub async fn post_describe_candidate(
 pub async fn post_curated_describe(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    method: Method,
     body: Bytes,
 ) -> Result<Json<DescribeResponse>, ApiError> {
     if id.trim().is_empty() {
@@ -1186,6 +1176,11 @@ pub async fn post_curated_describe(
             .map_err(|e| ApiError::bad_request(format!("Invalid JSON payload: {e}")))?
             .unwrap_or_default()
     };
+    // `apply` writes the curated bundle, so it stays behind POST: the route also answers GET for
+    // headless inspection, and a safe method must never mutate storage.
+    if req.apply && method != Method::POST {
+        return Err(ApiError::bad_request("apply requires a POST request"));
+    }
 
     let curated_map = state.catalog.get_curated(&id).await.ok();
 
@@ -1261,26 +1256,6 @@ pub async fn post_curated_describe(
         description,
         applied: req.apply,
     }))
-}
-
-/// Ground layer dimensions used to derive Map Section origins.
-///
-/// The decoded image wins: the readiness audit crops sections out of exactly those pixels, so
-/// planning origins from stale layer metadata would mint sections whose boxes never fit the
-/// image, and a remediation could never clear `section_unresolvable`. Recorded metadata is the
-/// fallback when the image cannot be decoded.
-fn ground_dimensions(map: &CuratedMap, ground_image: Option<&image::DynamicImage>) -> (u32, u32) {
-    ground_image
-        .map(|img| (img.width(), img.height()))
-        .or_else(|| {
-            map.layers
-                .iter()
-                .find(|layer| layer.role == LayerRole::Ground)
-                .or_else(|| map.layers.first())
-                .map(|layer| layer.dimensions)
-                .filter(|&(w, h)| w > 0 && h > 0)
-        })
-        .unwrap_or(map.dimensions)
 }
 
 /// Request payload for rejecting a candidate.

@@ -99,10 +99,10 @@ impl DatasetIssueCode {
                 "Regrid, or re-curate the map; the export skips that section"
             }
             Self::PhysicalDescriptionMissing => {
-                "POST /api/curated/{id}/describe, then PATCH the description"
+                "POST /api/curated/{id}/describe with {\"apply\": true} to regenerate and persist the description and its Map Section descriptions"
             }
             Self::PhysicalDescriptionNotNeutral => {
-                "Regenerate the description, then PATCH /api/curated/{id} with a grid so section descriptions are recomputed per crop"
+                "POST /api/curated/{id}/describe with {\"apply\": true} to regenerate the description under the strict neutral prompt"
             }
         }
     }

@@ -854,6 +854,16 @@ impl RedditHarvester for MockHarvester {
     }
 }
 
+/// Real rasters for flows that resolve the Ground pixels (grid eligibility, section planning);
+/// `create_test_png` stays the 1×1 placeholder for tests that only need decodable bytes.
+fn create_test_png_sized(width: u32, height: u32) -> Vec<u8> {
+    let img = image::RgbaImage::new(width, height);
+    let mut bytes = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut bytes);
+    img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+    bytes
+}
+
 fn create_test_png() -> Vec<u8> {
     let img = image::RgbaImage::new(1, 1);
     let mut bytes = Vec::new();
@@ -2819,9 +2829,10 @@ async fn test_api_post_curate_delegates_to_curation_workflow_and_zero_store_scan
 async fn test_staging_grid_patch_and_curation_persistence() {
     let (app, catalog, blobs) = setup_test_app();
 
-    // Stage candidate with default grid (64, 0, 0)
+    // Stage candidate with default grid (64, 0, 0). The raster matches the declared dimensions:
+    // grid eligibility and Map Section planning resolve the stored Ground pixels.
     let cand = Candidate::with_now("cand_grid_test", Source::Reddit, "cand_grid_test.png", (2560, 2560));
-    let dummy_image = create_test_png();
+    let dummy_image = create_test_png_sized(2560, 2560);
     seed_staging(&catalog, &blobs, &cand, &dummy_image).await;
 
     // Verify initial candidate grid in storage

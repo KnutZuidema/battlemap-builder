@@ -60,7 +60,9 @@
         storageStats: null,
         // LoRA Training Dataset Readiness audit (Issue #184)
         datasetReadinessModalOpen: false,
-        isAuditingDataset: false,
+        // Serialized Dataset Readiness audits: a remediation re-audit must observe its own write.
+        datasetAuditQueue: Promise.resolve(),
+        datasetRemediating: new Set(),
         // Frozen Dataset Snapshots (Issue #216)
         isFreezingSnapshot: false,
         isFetchingSnapshots: false,
@@ -5052,8 +5054,6 @@
         ground_image_unreadable: "Re-ingest the map; an export would skip it entirely",
         grid_below_minimum: "Recalibrate the grid (PATCH /api/curated/{id} with a grid that fits the Ground layer)",
         section_unresolvable: "Regrid, or re-curate the map; the export skips that section",
-        physical_description_missing: "POST /api/curated/{id}/describe, then PATCH the description",
-        physical_description_not_neutral: "Regenerate the description, then PATCH /api/curated/{id} with a grid so section descriptions are recomputed per crop",
     };
 
     function datasetIssueLabel(code) {
@@ -5153,9 +5153,14 @@
         btnFixAllDescriptions.classList.toggle("hidden", !(flagged || []).some(hasDescriptionIssue));
     }
 
-    async function fetchDatasetReadiness() {
-        if (state.isAuditingDataset) return;
-        state.isAuditingDataset = true;
+    /** Re-audit the active scope; resolves to the fresh report, or null when it could not run. */
+    function fetchDatasetReadiness() {
+        const queued = state.datasetAuditQueue.then(() => runDatasetReadinessAudit());
+        state.datasetAuditQueue = queued.catch(() => null);
+        return queued;
+    }
+
+    async function runDatasetReadinessAudit() {
         if (btnDatasetReadiness) btnDatasetReadiness.disabled = true;
         try {
             const res = await fetch(`/api/dataset/readiness${datasetScopeQuery()}`);
@@ -5163,11 +5168,13 @@
                 const errData = await res.json().catch(() => ({}));
                 throw new Error(errData.error || `HTTP ${res.status}`);
             }
-            renderDatasetReadinessReport(await res.json());
+            const report = await res.json();
+            renderDatasetReadinessReport(report);
+            return report;
         } catch (err) {
             showToast(`Dataset audit failed: ${err.message}`, "danger");
+            return null;
         } finally {
-            state.isAuditingDataset = false;
             if (btnDatasetReadiness) btnDatasetReadiness.disabled = false;
         }
     }
@@ -5225,6 +5232,7 @@
     }
 
     async function remediateDatasetIssue(mapId, action, issueCode, button) {
+        if (state.datasetRemediating.has(mapId)) return;
         if (action === "grid") {
             closeDatasetReadinessModal();
             await openGridCalibrationForMap(mapId);
@@ -5237,20 +5245,24 @@
         }
 
         setRemediationBusy(button, true);
+        state.datasetRemediating.add(mapId);
         try {
             await applyDatasetDescription(mapId);
             showToast(`Description regenerated for ${mapId}`, "success");
-            // Re-audit the current scope so the resolved issue leaves the list on its own.
+            // Re-audit the current scope so the resolved issue leaves the list on its own, and
+            // report against that fresh report rather than the pre-apply one.
             resetDatasetReadinessTitle();
-            await fetchDatasetReadiness();
-            if ((state.datasetReadiness?.maps || [])
+            const report = await fetchDatasetReadiness();
+            const stillFlagged = ((report && report.maps) || [])
                 .find(map => map.id === mapId)?.issues
-                ?.some(issue => issue.code === issueCode)) {
+                ?.some(issue => issue.code === issueCode);
+            if (stillFlagged) {
                 showToast(`The regenerated description for ${mapId} still fails the audit`, "warning");
             }
         } catch (err) {
             showToast(`Description regeneration failed: ${err.message}`, "danger");
         } finally {
+            state.datasetRemediating.delete(mapId);
             setRemediationBusy(button, false);
         }
     }
@@ -5272,12 +5284,16 @@
             for (let index = 0; index < mapIds.length; index += 1) {
                 const mapId = mapIds[index];
                 if (label) label.textContent = `Fixing descriptions ${index + 1}/${mapIds.length}…`;
+                if (state.datasetRemediating.has(mapId)) continue;
+                state.datasetRemediating.add(mapId);
                 try {
                     await applyDatasetDescription(mapId);
                     fixed += 1;
                 } catch (err) {
                     failed += 1;
                     console.error(`Description remediation failed for ${mapId}:`, err);
+                } finally {
+                    state.datasetRemediating.delete(mapId);
                 }
             }
         } finally {
@@ -5294,7 +5310,11 @@
             showToast(`Fixed ${fixed} description(s); ${failed} map(s) failed`, "danger");
         }
         resetDatasetReadinessTitle();
-        await fetchDatasetReadiness();
+        const report = await fetchDatasetReadiness();
+        const remaining = fixableDescriptionMapIds(report);
+        if (remaining.length > 0) {
+            showToast(`${remaining.length} map(s) still fail the audit`, "warning");
+        }
     }
 
     /** Load the library scope, switch to it, and return the index of `mapId` in the filtered deck. */
@@ -5373,7 +5393,11 @@
 
         // The refusal carries the full audit, so the same per-issue remediation controls apply:
         // operators fix the flagged maps in place instead of closing the modal and re-auditing.
-        const hasReadiness = Boolean(refusal.readiness && Array.isArray(refusal.readiness.maps));
+        const hasReadiness = Boolean(
+            refusal.readiness
+            && Array.isArray(refusal.readiness.maps)
+            && refusal.readiness.maps_total > 0,
+        );
         const blocking = refusal.blocking_issues || [];
 
         if (hasReadiness) {

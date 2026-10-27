@@ -103,7 +103,7 @@ harvest-logs job="":
     fi
     pod=$(kubectl get pods -n curator -l "$selector" \
         --sort-by=.metadata.creationTimestamp \
-        -o jsonpath='{.items[-1:].metadata.name}')
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | tail -n 1)
     if [ -z "$pod" ]; then
         echo "no harvest pod matches $selector" >&2
         exit 1

@@ -15,6 +15,7 @@ import {
     formatDuration,
 } from "./kit/format.js";
 import { escapeHtml } from "./kit/dom.js";
+import { CANONICAL_THEMES } from "./kit/tags.js";
 import { dom } from "./dom.js";
 import {
     setupCanvas,
@@ -76,8 +77,6 @@ import {
     clearLibrarySelection,
     setLibraryFocus,
     handleLibraryKeydown,
-    datasetScopeTheme,
-    datasetScopeQuery,
     setupLibraryControls,
 } from "./views/library.js";
 import { closeDeleteCuratedModal } from "./views/library/bulk.js";
@@ -92,7 +91,6 @@ import {
     activeFsPanKeys,
     activeFsZoomKeys,
     setupFullscreenControls,
-    resizeFullscreenCanvas,
     requestFullscreenRender,
 } from "./views/library/fullscreen.js";
 import {
@@ -101,8 +99,6 @@ import {
     saveLibraryInspectorChanges,
     setupInspectorDrawerControls,
 } from "./views/inspector.js";
-
-export { resizeFullscreenCanvas, requestFullscreenRender };
 
     // Constants
     const BUDGET_GUARDRAIL_THRESHOLD = 2.00;
@@ -1872,6 +1868,18 @@ export { resizeFullscreenCanvas, requestFullscreenRender };
         if (READINESS_GRID_CODES.includes(code)) return { action: "grid", label: "Edit grid" };
         if (READINESS_GROUND_CODES.includes(code)) return { action: "inspect", label: "Inspect bundle" };
         return null;
+    }
+
+    /** Active library tag when it is a theme the dataset endpoints can scope to, else null. */
+    export function datasetScopeTheme() {
+        const tag = (state.libraryActiveTag || "").toLowerCase();
+        return CANONICAL_THEMES.includes(tag) ? tag : null;
+    }
+
+    /** Theme query for the current library tag filter, mirroring the export scope exactly. */
+    export function datasetScopeQuery() {
+        const theme = datasetScopeTheme();
+        return theme ? `?theme=${encodeURIComponent(theme)}` : "";
     }
 
     function readinessScopeKey() {
@@ -3929,6 +3937,7 @@ export { resizeFullscreenCanvas, requestFullscreenRender };
                     e.preventDefault();
                     return;
                 }
+                const activeEl = document.activeElement;
                 if (isInputFocused) {
                     activeEl.blur();
                 } else if (state.libraryFocusedIndex !== -1) {

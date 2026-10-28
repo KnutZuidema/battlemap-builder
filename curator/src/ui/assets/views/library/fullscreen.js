@@ -27,7 +27,7 @@ import { showToast, invalidateDatasetReadiness } from "../../app.js";
 // Fullscreen Stage Overlay with Reused 2D Canvas & HUD Controls (Issue #134)
 // ==========================================================================
 
-export function resizeFullscreenCanvas() {
+function resizeFullscreenCanvas() {
     if (!dom.libraryFullscreenCanvas || !dom.libraryFullscreenCanvas.parentElement) return;
     const container = dom.libraryFullscreenCanvas.parentElement;
     const width = container.clientWidth;
@@ -757,6 +757,13 @@ export function closeLibraryFullscreen() {
 
 export function setupFullscreenControls() {
     if (!dom.libraryFullscreenCanvas) return;
+
+    // The overlay owns its own sizing: the stage engine only resizes the triage canvas.
+    window.addEventListener("resize", () => {
+        if (!state.libraryFullscreenActive) return;
+        resizeFullscreenCanvas();
+        requestFullscreenRender();
+    });
 
     // Canvas Mouse Pan Dragging & Dynamic Grid Align Drag
     dom.libraryFullscreenCanvas.addEventListener("mousedown", (e) => {

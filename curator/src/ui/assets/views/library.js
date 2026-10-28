@@ -7,7 +7,6 @@ import { dom } from "../dom.js";
 import { state } from "../store.js";
 import { escapeHtml } from "../kit/dom.js";
 import { formatRoleName, formatBytes } from "../kit/format.js";
-import { CANONICAL_THEMES } from "../kit/tags.js";
 import { resizeCanvas, requestRender } from "../stage/canvas.js";
 import {
     openLibraryFullscreen,
@@ -45,6 +44,8 @@ import {
     syncReadinessToScope,
     freezeDatasetSnapshot,
     toggleSnapshotsShelf,
+    datasetScopeTheme,
+    datasetScopeQuery,
 } from "../app.js";
 
 // ==========================================================================
@@ -980,18 +981,6 @@ function renderCuratedCard(map, index) {
     });
 
     return card;
-}
-
-/** Active library tag when it is a theme the dataset endpoints can scope to, else null. */
-export function datasetScopeTheme() {
-    const tag = (state.libraryActiveTag || "").toLowerCase();
-    return CANONICAL_THEMES.includes(tag) ? tag : null;
-}
-
-/** Theme query for the current library tag filter, mirroring the export scope exactly. */
-export function datasetScopeQuery() {
-    const theme = datasetScopeTheme();
-    return theme ? `?theme=${encodeURIComponent(theme)}` : "";
 }
 
 async function exportLoraDataset() {

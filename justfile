@@ -15,6 +15,7 @@
 #   just test-server FILE     # one file under server/test/, e.g. routes.wiki.test.js
 #   just test-curator FILTER  # curator tests whose names match FILTER
 #   just test-curator-suite SUITE
+#   just test-ui              # curator UI unit tests (node:test)
 #   just check                # full local CI parity (heavy; reproduce CI failures only)
 #
 # The cluster nodes are arm64 (Hetzner cax11), so linux/arm64 is what gets published;
@@ -56,6 +57,10 @@ test-curator filter:
 # Run one curator integration suite (e.g. just test-curator-suite api_integration_tests)
 test-curator-suite suite:
     cargo test --manifest-path curator/Cargo.toml --test {{suite}}
+
+# Run the curator UI unit tests (node:test, native ES modules; needs Node 22+)
+test-ui:
+    node --test curator/src/ui/tests/*.test.js
 
 # Full client check: lint + production build (CI parity, not for routine local runs)
 check-client: lint-client

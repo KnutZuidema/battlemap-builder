@@ -26,6 +26,7 @@ Run from the repository root.
 | Client lint | `just lint-client` |
 | Focused server test | `just test-server <file>` (relative to `server/test/`) |
 | Focused curator test | `just test-curator <filter>` |
+| Focused curator UI test | `just test-ui` |
 | Curator integration suite | `just test-curator-suite <suite>` |
 | Full CI parity (heavy) | `just check` |
 | Curator service | `cargo run --manifest-path curator/Cargo.toml` |
@@ -63,7 +64,7 @@ PR CI is the authoritative full check; run it rather than rebuilding everything 
 | Workflow | Covers |
 | :--- | :--- |
 | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Client lint + production build, full server test suite |
-| [`.github/workflows/curator-ci.yml`](.github/workflows/curator-ci.yml) | Curator test suite + clippy (when sources change), container build |
+| [`.github/workflows/curator-ci.yml`](.github/workflows/curator-ci.yml) | Curator test suite + clippy (when sources change), UI unit tests, container build |
 
 Locally, run only the narrow recipe for what you touched — the `justfile` wraps every check. Do **not** run
 `just check`, `just check-client`, `just check-server`, `just check-curator`, `npm run build`, `npm test`,
@@ -71,6 +72,7 @@ Locally, run only the narrow recipe for what you touched — the `justfile` wrap
 or you are reproducing a CI failure:
 
 - Rust: `just test-curator <filter>`, or `just test-curator-suite <suite>` for one integration suite.
+- Curator UI: `just test-ui` (node:test, no browser).
 - Server: `just test-server <file>`.
 - Client: `just lint-client` only (no compile); exercise the change in the dev server/browser.
 

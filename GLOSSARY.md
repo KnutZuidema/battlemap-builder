@@ -183,3 +183,9 @@ _Avoid_: Model spec, model entry, catalog row
 **Routing Model Engine**:
 The inference engine that dispatches a Model Descriptor's request to OpenRouter or WaveSpeed by its provider kind.
 _Avoid_: Model dispatcher, provider selector, model multiplexer
+
+## Curator Workbench
+
+**Stage Viewport**:
+The surface on which a Battlemap is examined — during triage and in the Dataset Library's fullscreen mode — presenting pan, zoom and the VTT grid overlay over the same terrain and Grid Configuration.
+_Avoid_: Canvas view, map viewer, stage component

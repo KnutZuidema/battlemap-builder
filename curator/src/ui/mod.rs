@@ -556,6 +556,35 @@ mod tests {
     }
 
     #[test]
+    fn test_embedded_assets_contain_bulk_refine_action() {
+        let index_html = Assets::get("index.html").expect("index.html must be embedded");
+        let html = std::str::from_utf8(index_html.data.as_ref()).expect("index.html must be valid utf8");
+
+        // The bulk bar carries the per-map AI refinement action next to the other bulk buttons.
+        assert!(html.contains("id=\"btn-bulk-refine\""));
+        assert!(html.contains("id=\"btn-bulk-refine-label\""));
+        assert!(html.contains("btn btn-secondary btn-sm btn-bulk"));
+        assert!(html.contains(
+            "title=\"Generate and apply AI themes, tags and description for selected maps\""
+        ));
+        assert!(html.contains("AI Refine Selected"));
+
+        let css_file = Assets::get("style.css").expect("style.css must be embedded");
+        let css = std::str::from_utf8(css_file.data.as_ref()).expect("style.css must be valid utf8");
+        assert!(css.contains("#btn-bulk-refine {"));
+        assert!(css.contains("#btn-bulk-refine:hover:not(:disabled)"));
+
+        let js_file = Assets::get("app.js").expect("app.js must be embedded");
+        let js = std::str::from_utf8(js_file.data.as_ref()).expect("app.js must be valid utf8");
+        assert!(js.contains("refineSelectedMaps"));
+        assert!(js.contains("btnBulkRefineLabel"));
+        assert!(js.contains("/refine`"));
+        // Sequential progress label and readiness invalidation after a write.
+        assert!(js.contains("Refining ${i + 1}/${total}…"));
+        assert!(js.contains("isBulkRefining"));
+    }
+
+    #[test]
     fn test_embedded_assets_contain_library_filter_empty_state() {
         let index_html = Assets::get("index.html").expect("index.html must be embedded");
         let html = std::str::from_utf8(index_html.data.as_ref()).expect("index.html must be valid utf8");

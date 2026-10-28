@@ -35,6 +35,7 @@ pub fn create_router(state: AppState) -> Router {
             "/api/curated/{id}/describe",
             post(post_curated_describe).get(post_curated_describe),
         )
+        .route("/api/curated/{id}/refine", post(post_curated_refine))
         .route("/api/dataset/export", get(get_dataset_export))
         .route("/api/dataset/export-selected", post(post_dataset_export_selected))
         .route("/api/dataset/readiness", get(get_dataset_readiness))

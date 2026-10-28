@@ -347,3 +347,34 @@ unconfigured, `502` on upstream failure).
 Legacy bundles curated before ADR-0007 carry no `sections` and no `description`: their full-grid lattice
 still exports (one 16×16 window per lattice) but their captions have no `Physical Description`, which the
 audit reports as `physical_description_missing`.
+
+### Bulk AI refinement of selected library maps
+
+The library bulk bar (**AI Refine Selected**) refreshes every selected curated map in one action:
+`POST /api/curated/{id}/refine` (POST only, no payload) returns the persisted `CuratedMap`.
+
+The endpoint reuses the existing refinement machinery rather than a parallel pipeline:
+
+1. **Suggestions**: the curated Ground layer is sent through the same cached vision theme-suggestion
+   path as `POST /api/curated/{id}/suggest-themes`, so a suggestion set already in
+   `theme_suggestions_cache` is reused and a fresh set is stored. A missing or failing vision adapter
+   yields *empty* suggestions — it never fails the request on its own.
+2. **Merge rules**: `merged tags = normalize_tags(existing tags ++ suggestions)` — case-insensitive
+   de-duplication with first-seen wins, so the map's existing tags stay first and suggestions only add
+   new ones (`clean_tags` trims, formats and caps the suggestion list at 5 first).
+3. **Strict description**: the description engine is called exactly like the inspector/readiness
+   remediation path (`describe` with the merged tags and no title). Vision failures propagate through
+   the standard error mapping — `503` when unconfigured, `502` on upstream failure — and **nothing is
+   persisted** when it fails.
+4. **Sections**: Map Section descriptions are planned exactly like the `describe` apply branch, from
+   the decoded Ground layer and `ground_dimensions`, with the merged tags and the new map description.
+5. **Single write**: one `library.update_curated` stores `tags`, `description` and `sections` together,
+   so a map is never left with partially refreshed metadata.
+
+The UI loops the selected ids sequentially (never a batch endpoint), labels the button
+`Refining i/n…` and disables it while running. Each success replaces the map in `state.curatedMaps`;
+an open inspector on that map refreshes its draft tags, description and layers only when it has no
+unsaved edits (a dirty draft is kept). After any success the library filters are re-applied and
+`invalidateDatasetReadiness()` clears the cached audits, because tags, description and sections all
+feed the readiness contract above. The final toast is a success only when every map succeeded;
+otherwise it names the failed ids with the first error, and each failure is logged to the console.

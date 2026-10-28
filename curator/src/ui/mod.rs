@@ -92,6 +92,7 @@ mod tests {
             "stage/grid-panel.js",
             "views/triage.js",
             "views/curation.js",
+            "views/inspector.js",
             "views/library.js",
             "views/library/bulk.js",
             "views/library/fullscreen.js",

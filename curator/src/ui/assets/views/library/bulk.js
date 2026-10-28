@@ -18,9 +18,8 @@ import {
     renderInspectorThemeChips,
     renderInspectorTagChips,
     updateInspectorDescriptionCounter,
-    showToast,
-    invalidateDatasetReadiness,
-} from "../../app.js";
+} from "../inspector.js";
+import { showToast, invalidateDatasetReadiness } from "../../app.js";
 
 // ==========================================================================
 // Deletion Safeguard Modal & Multi-Select Bulk Operations (Issue #137)

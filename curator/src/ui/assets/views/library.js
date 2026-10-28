@@ -38,6 +38,8 @@ import {
     closeLibraryInspector,
     toggleLibraryInspector,
     saveLibraryInspectorChanges,
+} from "./inspector.js";
+import {
     showToast,
     fetchDatasetSnapshots,
     syncReadinessToScope,

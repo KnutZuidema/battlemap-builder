@@ -70,13 +70,16 @@ check-client: lint-client
 check-server:
     npm test
 
+# Full curator UI unit test suite (CI parity, not for routine local runs)
+check-ui: test-ui
+
 # Full curator test suite + clippy (CI parity, not for routine local runs)
 check-curator:
     cargo test --manifest-path curator/Cargo.toml
     cargo clippy --manifest-path curator/Cargo.toml -- -D warnings
 
 # Everything PR CI runs for code; heavy — use to reproduce CI failures, not per change
-check: check-client check-server check-curator
+check: check-client check-server check-curator check-ui
 
 # Run the interactive credentials provisioning wizard for local dev & k8s
 provision-secrets:

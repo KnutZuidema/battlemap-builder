@@ -15,8 +15,6 @@ export const CANONICAL_THEMES = [
     "building",
 ];
 
-export const THEMES = CANONICAL_THEMES;
-
 export function getKnownDatasetTags() {
     const tagMap = new Map();
     const defaultThemes = ["Dungeon", "Cave", "Tavern", "Wilderness", "Ruins", "Urban", "SciFi", "Building"];

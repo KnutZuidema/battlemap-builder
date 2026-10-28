@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import { state } from "../assets/store.js";
 import {
     CANONICAL_THEMES,
-    THEMES,
     getKnownDatasetTags,
     isCanonicalThemeTag,
     normalizeLayerRole,
@@ -21,7 +20,7 @@ const DEFAULT_TAGS = [
     "Building",
 ];
 
-test("the canonical theme list is the single source for THEMES", () => {
+test("the canonical theme list is the single source of theme tags", () => {
     assert.deepEqual(CANONICAL_THEMES, [
         "dungeon",
         "cave",
@@ -32,7 +31,6 @@ test("the canonical theme list is the single source for THEMES", () => {
         "scifi",
         "building",
     ]);
-    assert.equal(THEMES, CANONICAL_THEMES);
 });
 
 test("canonical theme tags are accepted case- and whitespace-insensitively", () => {

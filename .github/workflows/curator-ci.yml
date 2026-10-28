@@ -4,7 +4,6 @@ on:
   pull_request:
     paths:
       - 'curator/src/**'
-      - 'curator/src/ui/**'
       - 'curator/tests/**'
       - 'curator/migrations/**'
       - 'curator/Cargo.toml'

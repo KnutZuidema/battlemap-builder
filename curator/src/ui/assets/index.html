@@ -267,12 +267,6 @@
                 </div>
             </div>
 
-            <!-- Floating Onion-Skin Alignment Badge -->
-            <div id="onion-skin-badge" class="onion-skin-badge hidden" title="Base Ground Layer Alignment Overlay Active (Hotkey: O)">
-                <span class="onion-dot"></span>
-                <span class="onion-text">Onion Skin Active (50% Ground)</span>
-            </div>
-
             <!-- Synced Layer Filmstrip Deck (Canvas 2D Triage) -->
             <div id="layer-deck" class="layer-deck hidden" aria-label="Layer Filmstrip Deck">
                 <div class="layer-deck-header">
@@ -288,10 +282,6 @@
                     </div>
 
                     <div class="layer-deck-tools">
-                        <button type="button" id="btn-onion-skin" class="btn btn-tool btn-onion-skin" title="Toggle Onion-Skin base layer alignment overlay (Hotkey: O)">
-                            <kbd>O</kbd>
-                            <span>Onion Skin</span>
-                        </button>
                         <button type="button" id="btn-split-bundle" class="btn btn-tool btn-split-bundle" title="Split multi-layer bundle into standalone maps (Hotkey: U)">
                             <kbd>U</kbd>
                             <span id="btn-split-label">Split Bundle</span>
@@ -637,13 +627,6 @@
                                 </svg>
                             </button>
                         </div>
-
-                        <!-- Onion-skin toggle button (hotkey O) -->
-                        <button type="button" id="btn-fs-onion-skin" class="btn-hud" title="Toggle Onion-Skin Ground Layer Overlay (Hotkey: O)" aria-label="Toggle Onion Skin">
-                            <span class="onion-dot"></span>
-                            <span>Onion</span>
-                            <kbd>O</kbd>
-                        </button>
                     </div>
 
                     <div class="hud-divider"></div>
@@ -1223,7 +1206,6 @@
                             <div class="help-row"><kbd>3</kbd><span>Trigger Layer Role mode (then <kbd>1-6</kbd> for Ground, Upper, Basement, Roof, Variant, Exclude)</span></div>
                             <div class="help-row"><kbd>Alt+↑</kbd> / <kbd>Alt+↓</kbd><span>Increment / decrement floor elevation for active layer</span></div>
                             <div class="help-row"><kbd>Space</kbd><span>Quick-toggle active layer between Exclude and assigned role</span></div>
-                            <div class="help-row"><kbd>O</kbd><span>Toggle 50% opacity Onion-Skin overlay of base Ground layer</span></div>
                             <div class="help-row"><kbd>U</kbd><span>Split multi-layer bundle into standalone maps (or Undo / Regroup)</span></div>
                         </div>
                     </div>

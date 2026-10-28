@@ -20,7 +20,6 @@
         // Curation parameters
         labelingMode: null,
         currentLayerIndex: 0,
-        onionSkinActive: false,
         lastSplitParentId: null,
         // Canvas transform
         pan: { x: 0, y: 0 },
@@ -133,7 +132,6 @@
         libraryFullscreenIsDraggingGrid: false,
         libraryFullscreenGridDragStart: { x: 0, y: 0 },
         libraryFullscreenGridOffsetStart: { x: 0, y: 0 },
-        libraryFullscreenOnionSkinActive: false,
         libraryFullscreenCurrentImage: null,
         libraryFullscreenImageCache: new Map(),
         // Slide-Over Inspector Drawer & Curated Map Metadata Editing (Issue #135 & Issue #136)
@@ -200,8 +198,7 @@
 
     // Layer Deck & Filmstrip DOM Elements
     let layerDeck, layerDeckCount, layerDeckBundleTag, roleSelector, layerFilmstrip;
-    let btnOnionSkin, btnSplitBundle, btnSplitBundleHud, btnSplitHudText, btnSplitLabel;
-    let onionSkinBadge;
+    let btnSplitBundle, btnSplitBundleHud, btnSplitHudText, btnSplitLabel;
 
     // Benchmark Drawer & Guardrails DOM Elements
     let btnOpenBenchmarkDrawer;
@@ -270,7 +267,6 @@
     let fsMapIdBadge, fsMapDimensions, fsGridStatusBadge, fsMapCounter;
     let btnFsGridToggle, btnFsGridAdjust, btnFsFit;
     let btnFsZoomOut, btnFsZoomIn, fsZoomReadout;
-    let btnFsOnionSkin;
     let btnFsPrevMap, btnFsNextMap, btnFsClose;
     let libraryFullscreenGridPanel, btnFsCloseGridPanel;
     let btnFsGridSizeDec, btnFsGridSizeInc, fsGridSizeInput, fsGridSizeSlider;
@@ -369,12 +365,10 @@
         layerDeckBundleTag = document.getElementById("layer-deck-bundle-tag");
         roleSelector = document.getElementById("role-selector");
         layerFilmstrip = document.getElementById("layer-filmstrip");
-        btnOnionSkin = document.getElementById("btn-onion-skin");
         btnSplitBundle = document.getElementById("btn-split-bundle");
         btnSplitBundleHud = document.getElementById("btn-split-bundle-hud");
         btnSplitHudText = document.getElementById("btn-split-hud-text");
         btnSplitLabel = document.getElementById("btn-split-label");
-        onionSkinBadge = document.getElementById("onion-skin-badge");
 
         helpModal = document.getElementById("help-modal");
 
@@ -585,7 +579,6 @@
         btnFsZoomOut = document.getElementById("btn-fs-zoom-out");
         btnFsZoomIn = document.getElementById("btn-fs-zoom-in");
         fsZoomReadout = document.getElementById("fs-zoom-readout");
-        btnFsOnionSkin = document.getElementById("btn-fs-onion-skin");
         btnFsPrevMap = document.getElementById("btn-fs-prev-map");
         btnFsNextMap = document.getElementById("btn-fs-next-map");
         btnFsClose = document.getElementById("btn-fs-close");
@@ -830,23 +823,6 @@
             // Crisp rendering: disable smoothing when zoomed in past 200% for pixel examination
             ctx.imageSmoothingEnabled = state.zoom < 2.0;
             ctx.imageSmoothingQuality = "high";
-
-            // Onion-skin overlay: draw base Ground / layer 0 image with 50% opacity
-            if (state.onionSkinActive && state.currentLayerIndex !== 0 && state.currentIndex >= 0) {
-                const curCand = state.candidates[state.currentIndex];
-                if (curCand) {
-                    const groundKey = `${curCand.id}_layer_0`;
-                    const groundImg = state.imageCache.get(groundKey) || state.imageCache.get(curCand.id);
-                    if (groundImg && groundImg.complete && groundImg.naturalWidth > 0) {
-                        const gW = groundImg.naturalWidth || groundImg.width;
-                        const gH = groundImg.naturalHeight || groundImg.height;
-                        ctx.save();
-                        ctx.globalAlpha = 0.5;
-                        ctx.drawImage(groundImg, 0, 0, gW, gH);
-                        ctx.restore();
-                    }
-                }
-            }
 
             // Draw active layer battlemap at origin (0, 0)
             ctx.globalAlpha = 1.0;
@@ -1495,22 +1471,6 @@
             }
         });
 
-        // Sync Onion-Skin button
-        if (btnOnionSkin) {
-            if (state.onionSkinActive) {
-                btnOnionSkin.classList.add("active");
-            } else {
-                btnOnionSkin.classList.remove("active");
-            }
-        }
-        if (onionSkinBadge) {
-            if (state.onionSkinActive) {
-                onionSkinBadge.classList.remove("hidden");
-            } else {
-                onionSkinBadge.classList.add("hidden");
-            }
-        }
-
         // Render layer cards into filmstrip
         if (!layerFilmstrip) return;
         layerFilmstrip.innerHTML = "";
@@ -1829,29 +1789,6 @@
         } else {
             showToast("Candidate is not a multi-layer bundle", "info");
         }
-    }
-
-    /**
-     * Toggles 50% opacity Onion-Skin overlay of base Ground layer.
-     */
-    function toggleOnionSkin() {
-        state.onionSkinActive = !state.onionSkinActive;
-        if (btnOnionSkin) {
-            if (state.onionSkinActive) {
-                btnOnionSkin.classList.add("active");
-            } else {
-                btnOnionSkin.classList.remove("active");
-            }
-        }
-        if (onionSkinBadge) {
-            if (state.onionSkinActive) {
-                onionSkinBadge.classList.remove("hidden");
-            } else {
-                onionSkinBadge.classList.add("hidden");
-            }
-        }
-        requestRender();
-        showToast(`Onion-Skin overlay: ${state.onionSkinActive ? "Active (50% Ground)" : "Disabled"}`, "info");
     }
 
     // ==========================================================================
@@ -4416,15 +4353,6 @@
             // Toggle grid calibration panel: Shift+G
             if ((e.key === "g" || e.key === "G") && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
                 toggleFullscreenGridPanel();
-                e.preventDefault();
-                return;
-            }
-
-            // Toggle onion-skin overlay: O
-            if ((e.key === "o" || e.key === "O") && !e.ctrlKey && !e.metaKey && !e.altKey) {
-                state.libraryFullscreenOnionSkinActive = !state.libraryFullscreenOnionSkinActive;
-                if (btnFsOnionSkin) btnFsOnionSkin.classList.toggle("active", state.libraryFullscreenOnionSkinActive);
-                requestFullscreenRender();
                 e.preventDefault();
                 return;
             }
@@ -7111,7 +7039,7 @@
      * High-performance 60fps Canvas 2D render loop for the Fullscreen Stage Overlay.
      * Applies devicePixelRatio scaling, pan/zoom transformation matrix,
      * renders crisp pixel examination for zoom > 200%,
-     * onion-skin overlay (50% Ground layer), and single-draw-call 64px VTT grid overlay.
+     * and single-draw-call 64px VTT grid overlay.
      */
     function renderFullscreenCanvas() {
         if (!libraryFullscreenCtx || !libraryFullscreenCanvas) return;
@@ -7141,29 +7069,6 @@
             // Crisp rendering: disable smoothing when zoomed in past 200% for pixel examination
             c.imageSmoothingEnabled = state.libraryFullscreenZoom < 2.0;
             c.imageSmoothingQuality = "high";
-
-            // Onion-skin overlay: draw base Ground layer image with 50% opacity
-            if (state.libraryFullscreenOnionSkinActive && state.libraryFullscreenMap) {
-                const map = state.libraryFullscreenMap;
-                const layers = map.layers || [];
-                let groundIdx = layers.findIndex(l => (l.role || "").toLowerCase().replace(/[-_]/g, "") === "ground");
-                if (groundIdx < 0 && layers.length > 0) groundIdx = 0;
-
-                if (groundIdx >= 0 && groundIdx !== state.libraryFullscreenLayerIndex) {
-                    const gLayer = layers[groundIdx];
-                    const gActualIdx = (gLayer && gLayer.index !== undefined) ? gLayer.index : groundIdx;
-                    const groundKey = `${map.id}_layer_${gActualIdx}`;
-                    const groundImg = state.libraryFullscreenImageCache.get(groundKey);
-                    if (groundImg && groundImg.complete && groundImg.naturalWidth > 0) {
-                        const gW = groundImg.naturalWidth || groundImg.width;
-                        const gH = groundImg.naturalHeight || groundImg.height;
-                        c.save();
-                        c.globalAlpha = 0.5;
-                        c.drawImage(groundImg, 0, 0, gW, gH);
-                        c.restore();
-                    }
-                }
-            }
 
             // Draw active layer battlemap at origin (0, 0)
             c.globalAlpha = 1.0;
@@ -7478,7 +7383,7 @@
             }
         }
 
-        // Prefetch ground layer for onion-skin
+        // Prefetch ground layer
         let groundIdx = layers.findIndex(l => (l.role || "").toLowerCase().replace(/[-_]/g, "") === "ground");
         if (groundIdx < 0 && layers.length > 0) groundIdx = 0;
         if (groundIdx >= 0 && groundIdx !== validLayerIndex) {
@@ -7559,10 +7464,6 @@
 
         if (btnFsGridAdjust) {
             btnFsGridAdjust.classList.toggle("active", state.libraryFullscreenGridPanelOpen);
-        }
-
-        if (btnFsOnionSkin) {
-            btnFsOnionSkin.classList.toggle("active", state.libraryFullscreenOnionSkinActive);
         }
 
         if (btnFsPrevMap) {
@@ -7887,12 +7788,6 @@
         btnFsFit?.addEventListener("click", () => fullscreenFitToScreen());
         btnFsZoomOut?.addEventListener("click", () => fullscreenZoomStep(1 / 1.2));
         btnFsZoomIn?.addEventListener("click", () => fullscreenZoomStep(1.2));
-
-        btnFsOnionSkin?.addEventListener("click", () => {
-            state.libraryFullscreenOnionSkinActive = !state.libraryFullscreenOnionSkinActive;
-            if (btnFsOnionSkin) btnFsOnionSkin.classList.toggle("active", state.libraryFullscreenOnionSkinActive);
-            requestFullscreenRender();
-        });
 
         btnFsPrevMap?.addEventListener("click", () => {
             if (state.libraryFullscreenIndex > 0) {
@@ -8968,9 +8863,6 @@
 
 
         // Filmstrip deck buttons & role badges
-        if (btnOnionSkin) {
-            btnOnionSkin.addEventListener("click", () => toggleOnionSkin());
-        }
         if (btnSplitBundle) {
             btnSplitBundle.addEventListener("click", () => handleSplitOrRegroup());
         }
@@ -9345,13 +9237,6 @@
         // Space hotkey: Quick toggle Exclude on active layer
         if (e.key === " " || e.code === "Space") {
             toggleActiveLayerExclude();
-            e.preventDefault();
-            return;
-        }
-
-        // Onion-skin overlay toggle: O
-        if (e.key === "o" || e.key === "O") {
-            toggleOnionSkin();
             e.preventDefault();
             return;
         }

@@ -420,7 +420,6 @@ mod tests {
         assert!(html.contains("id=\"btn-fs-zoom-out\""));
         assert!(html.contains("id=\"btn-fs-zoom-in\""));
         assert!(html.contains("id=\"fs-zoom-readout\""));
-        assert!(html.contains("id=\"btn-fs-onion-skin\""));
         assert!(html.contains("id=\"btn-fs-prev-map\""));
         assert!(html.contains("id=\"btn-fs-next-map\""));
         assert!(html.contains("id=\"btn-fs-close\""));

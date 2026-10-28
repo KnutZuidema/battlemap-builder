@@ -14,7 +14,7 @@ Curator operates as a standalone service running on port `3002`:
   - Automated Reddit harvesting from `/r/battlemaps` with OAuth2 authentication and multi-image gallery bundle assembly.
   - Benchmark generation runs across the OpenRouter baselines (e.g. Gemini, Seedream, Muse) and published WaveSpeed LoRA adapters, driven by the derived model registry (`GET /api/models`).
   - Manual staging ingestion via the Ingestion Drawer.
-- **Multi-Layer Bundle Support**: Staged maps support multi-level floorplans (Ground, Upper Floor, Basement, Roof, Variant, Exclude) with floor elevation tagging, split/regroup operations, and onion-skin comparison.
+- **Multi-Layer Bundle Support**: Staged maps support multi-level floorplans (Ground, Upper Floor, Basement, Roof, Variant, Exclude) with floor elevation tagging and split/regroup operations.
 
 ### Derived Model Registry (`GET /api/models`)
 

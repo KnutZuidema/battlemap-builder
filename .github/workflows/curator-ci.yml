@@ -29,6 +29,7 @@ jobs:
     outputs:
       build_image: ${{ steps.filter.outputs.build_image }}
       run_tests: ${{ steps.filter.outputs.run_tests }}
+      run_ui: ${{ steps.filter.outputs.run_ui }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -54,6 +55,9 @@ jobs:
               - 'curator/Cargo.toml'
               - 'curator/Cargo.lock'
               - 'data/battlemap-reference-*'
+              - '.github/workflows/curator-ci.yml'
+            run_ui:
+              - 'curator/src/ui/**'
               - '.github/workflows/curator-ci.yml'
 
   test:
@@ -91,6 +95,23 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --manifest-path curator/Cargo.toml -- -D warnings
+
+  test-ui:
+    name: UI Tests
+    needs: detect-changes
+    if: github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.run_ui == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run UI unit tests
+        run: node --test curator/src/ui/tests/*.test.js
 
   build-container:
     name: Build Container

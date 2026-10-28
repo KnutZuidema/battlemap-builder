@@ -6,11 +6,11 @@ The Curator web UI is embedded at compile time by `rust-embed`, so the Curator c
 
 - **Native ES modules vs Vite build.** Vite matches `client/` conventions and gives minification and content hashing, but the UI is served from a private ClusterIP with no caching pressure, and a bundler reintroduces a node build stage into a Rust-only image. React + Vite was additionally rejected because JSX plus hooks do not reduce authored lines relative to the helper, while adding a second ecosystem to maintain.
 - **Local render helper vs vendored Preact/htm.** Preact + htm needs no build step (~10 KB embedded module) and gives a real component model, at the cost of owning vendored code inside the crate. The helper is kept as the first attempt because most of the estimated line savings come from deleting the element cache and duplicated status writes, not from the framework itself.
-- **Deleting the source-text UI tests.** `curator/src/ui/mod.rs` asserted that asset files contain substrings. Those tests pin identifiers rather than behaviour, so they are to be replaced by `node --test` over pure kit modules (`just test-ui`, run in the Curator CI test job) plus browser verification for views.
+- **Deleting the source-text UI tests.** `curator/src/ui/mod.rs` asserts that asset files contain substrings. Those tests pin identifiers rather than behaviour, so they are to be replaced by `node --test` over pure kit modules (`just test-ui`, run in the Curator CI test job) plus browser verification for views.
 
 ## Consequences
 
-- Embedded assets are neither minified nor cache-busted: a first load fetches roughly twenty module files. Revisit only if that measurably hurts.
+- Embedded assets are neither minified nor cache-busted: after the split, a first load will fetch roughly twenty module files. Revisit only if that measurably hurts.
 - UI unit tests will live in `curator/src/ui/tests/`, outside the embedded folder, so test code never ships in the binary.
 - The static handler's own contract (SPA fallback, `/api/*` returning JSON 404) is asserted in Rust, and that assertion survives the removal of the source-text tests.
 - Any future proposal to add a bundler or a framework to this frontend must clear the gate above rather than argue from taste.

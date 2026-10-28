@@ -4,146 +4,28 @@
  * zero-latency in-memory prefetching, and keyboard-driven hotkeys.
  */
 
-(() => {
-    "use strict";
-
-    // Application State
-    const state = {
-        // Queue data
-        candidates: [],
-        currentIndex: -1,
-        currentImage: null,
-
-        // In-memory image cache for 0ms transitions (id -> HTMLImageElement)
-        imageCache: new Map(),
-
-        // Curation parameters
-        labelingMode: null,
-        currentLayerIndex: 0,
-        lastSplitParentId: null,
-        // Canvas transform
-        pan: { x: 0, y: 0 },
-        zoom: 1.0,
-        isPanning: false,
-        dragStart: { x: 0, y: 0 },
-        panStart: { x: 0, y: 0 },
-
-        // Visual overlays
-        gridVisible: true,
-        gridSize: 64,
-        gridOffset: { x: 0, y: 0 },
-        gridAlignMode: false,
-        gridPanelOpen: false,
-        isDraggingGrid: false,
-        gridDragStart: { x: 0, y: 0 },
-        gridOffsetStart: { x: 0, y: 0 },
-        // Modal and UI dialog state
-        helpModalOpen: false,
-        drawerOpen: false,
-        isSubmitting: false,
-        isHarvesting: false,
-        // Candidate ids whose curation request is still in flight server-side.
-        pendingCurationIds: new Set(),
-        // Rejection undo stack tracking { candidate, index }
-        rejectedStack: [],
-        // Benchmark Drawer & Budget Guardrails
-        benchmarkDrawerOpen: false,
-        budgetGuardModalOpen: false,
-        isBenchmarking: false,
-        benchmarkAbortController: null,
-        benchmarkWindowMinimized: false,
-        // Storage Monitor & Purge (Issue #30)
-        storageModalOpen: false,
-        purgeModalOpen: false,
-        isPurging: false,
-        storageStats: null,
-        // LoRA Training Dataset Readiness audit (Issues #184, #245): cached in localStorage per
-        // theme scope and rendered inside the Frozen Dataset Snapshots drawer.
-        readinessScopeKey: null,
-        readinessReport: null,
-        readinessAuditedAt: null,
-        readinessRefusal: null,
-        readinessAudit: null,
-        // The scope and generation the in-flight audit was started for: a write bumps the epoch and
-        // a scope switch changes the key, and neither may join an audit that predates it.
-        readinessAuditEpoch: -1,
-        readinessAuditScope: null,
-        readinessBatch: null,
-        readinessEpoch: 0,
-        describeRequests: new Map(),
-        // Frozen Dataset Snapshots (Issue #216)
-        isFreezingSnapshot: false,
-        isFetchingSnapshots: false,
-        snapshotsCollapsed: false,
-        snapshots: [],
-        // LoRA Training Runs & Adapters (Issue #209, ADR-0009, ADR-0010)
-        trainingDrawerOpen: false,
-        trainingActiveTab: "runs", // 'runs' | 'adapters'
-        trainingRuns: [],
-        trainingAdapters: [],
-        isFetchingRuns: false,
-        isFetchingAdapters: false,
-        isLaunchingRun: false,
-        trainingSelectedPolicy: "calibration",
-        trainingRunsFilter: "all",
-        trainingAdaptersFilter: "all",
-        selectedSnapshotForRun: "",
-        launchFormCollapsed: false,
-        // Harvesting parameters
-        harvestSort: "hot",
-        harvestTime: "all",
-        // Dataset Library View state (Issue #31 & Issue #132)
-        currentView: "triage",
-        libraryActiveTag: null,
-        librarySearchQuery: "",
-        libraryDensity: (function() {
-            try {
-                const stored = localStorage.getItem("curator_library_density");
-                if (stored && ["compact", "comfortable", "large"].includes(stored)) {
-                    return stored;
-                }
-            } catch (_) {}
-            return "comfortable";
-        })(),
-        librarySort: "date-desc",
-        libraryFacet: "all",
-        libraryFocusedIndex: -1,
-        librarySelectedIds: new Set(),
-        libraryFilteredMaps: [],
-        curatedMaps: [],
-        isExporting: false,
-        isBulkRefining: false,
-        // Interactive Decision Modal (Issue #102)
-        decisionModalOpen: false,
-        // Fullscreen Stage Overlay state (Issue #134)
-        libraryFullscreenActive: false,
-        libraryFullscreenMap: null,
-        libraryFullscreenIndex: -1,
-        libraryFullscreenLayerIndex: 0,
-        libraryFullscreenPan: { x: 0, y: 0 },
-        libraryFullscreenZoom: 1.0,
-        libraryFullscreenIsPanning: false,
-        libraryFullscreenPanStart: { x: 0, y: 0 },
-        libraryFullscreenGridVisible: true,
-        libraryFullscreenGridSize: 64,
-        libraryFullscreenGridOffset: { x: 0, y: 0 },
-        libraryFullscreenGridPanelOpen: false,
-        libraryFullscreenGridAlignMode: false,
-        libraryFullscreenIsDraggingGrid: false,
-        libraryFullscreenGridDragStart: { x: 0, y: 0 },
-        libraryFullscreenGridOffsetStart: { x: 0, y: 0 },
-        libraryFullscreenCurrentImage: null,
-        libraryFullscreenImageCache: new Map(),
-        // Slide-Over Inspector Drawer & Curated Map Metadata Editing (Issue #135 & Issue #136)
-        libraryDrawerActive: false,
-        libraryDrawerMap: null,
-        libraryDraft: { tags: [], description: "", layers: [] },
-        libraryDraftDirty: false,
-        libraryAiLoading: { suggest: false, describe: false, combo: false },
-        // Deletion Safeguard Modal & Bulk Ops (Issue #137)
-        deleteModalOpen: false,
-        deleteModalTarget: null,
-    };
+import { state } from "./store.js";
+import {
+    VTT_GRID_SIZE,
+    MIN_GRID_SIZE,
+    MAX_GRID_SIZE,
+    MIN_ZOOM,
+    MAX_ZOOM,
+    calculateLatticeInfo,
+} from "./kit/grid-math.js";
+import {
+    formatRoleName,
+    formatBytes,
+    formatReadinessAge,
+    formatDuration,
+} from "./kit/format.js";
+import {
+    CANONICAL_THEMES,
+    getKnownDatasetTags,
+    isCanonicalThemeTag,
+    normalizeLayerRole,
+} from "./kit/tags.js";
+import { escapeHtml } from "./kit/dom.js";
 
     // Curate Decision Modal Flow State
     const decisionState = {
@@ -156,25 +38,9 @@
     };
 
     // Constants
-    const VTT_GRID_SIZE = 64; // 64px represents standard 5ft D&D VTT square
-    const MIN_GRID_SIZE = 16;
-    const MAX_GRID_SIZE = 300;
-    const MIN_ZOOM = 0.1;
-    const MAX_ZOOM = 5.0;
     const PREFETCH_AHEAD = 3;
 
     const BUDGET_GUARDRAIL_THRESHOLD = 2.00;
-    const CANONICAL_THEMES = [
-        "dungeon",
-        "cave",
-        "tavern",
-        "wilderness",
-        "ruins",
-        "urban",
-        "scifi",
-        "building",
-    ];
-    const THEMES = CANONICAL_THEMES;
 
 
     // DOM Elements cache
@@ -689,32 +555,6 @@
                 render();
             });
         }
-    }
-
-    /**
-     * Calculates the full-grid lattice dimensions, section counts, and eligibility.
-     */
-    function calculateLatticeInfo(width, height, cellSize, offsetX, offsetY) {
-        const size = Math.max(16, cellSize || 64);
-        const ox = ((Math.round(offsetX || 0) % size) + size) % size;
-        const oy = ((Math.round(offsetY || 0) % size) + size) % size;
-        const cols = Math.floor(Math.max(0, (width || 0) - ox) / size);
-        const rows = Math.floor(Math.max(0, (height || 0) - oy) / size);
-        const isEligible = cols >= 16 && rows >= 16;
-        const kx = isEligible ? Math.ceil(cols / 16) : null;
-        const ky = isEligible ? Math.ceil(rows / 16) : null;
-        return {
-            size,
-            ox,
-            oy,
-            cols,
-            rows,
-            isEligible,
-            kx,
-            ky,
-            fullW: cols * size,
-            fullH: rows * size,
-        };
     }
 
     /**
@@ -1305,23 +1145,6 @@
             elevation: 0,
             dimensions: candidate.dimensions || [2048, 2048],
         }];
-    }
-
-    function formatRoleName(role, elevation) {
-        const r = (role || "unassigned").toLowerCase().replace(/[-_]/g, "");
-        if (r === "ground") return "Ground (0)";
-        if (r === "upperfloor" || r === "upper") {
-            const elev = typeof elevation === "number" ? elevation : 1;
-            return `Upper (${elev >= 0 ? `+${elev}` : elev})`;
-        }
-        if (r === "basement" || r === "lower" || r === "lowerfloor" || r === "cellar") {
-            const elev = typeof elevation === "number" ? elevation : -1;
-            return `Basement (${elev >= 0 ? `+${elev}` : elev})`;
-        }
-        if (r === "roof") return "Roof";
-        if (r === "variant") return "Variant";
-        if (r === "exclude" || r === "excluded") return "Exclude";
-        return "Unassigned";
     }
 
     function getRoleCssClass(role) {
@@ -2190,34 +2013,6 @@
         if (decisionState.candidate) {
             fetchCandidateDescription(decisionState.candidate, false);
         }
-    }
-
-    function getKnownDatasetTags() {
-        const tagMap = new Map();
-        const defaultThemes = ["Dungeon", "Cave", "Tavern", "Wilderness", "Ruins", "Urban", "SciFi", "Building"];
-        for (const t of defaultThemes) {
-            tagMap.set(t.toLowerCase(), t);
-        }
-
-        if (state.curatedMaps && Array.isArray(state.curatedMaps)) {
-            for (const map of state.curatedMaps) {
-                const tags = map.tags || [];
-                for (const t of tags) {
-                    if (t && t.trim()) tagMap.set(t.trim().toLowerCase(), t.trim());
-                }
-            }
-        }
-
-        if (state.candidates && Array.isArray(state.candidates)) {
-            for (const c of state.candidates) {
-                const tags = c.tags || [];
-                for (const t of tags) {
-                    if (t && t.trim()) tagMap.set(t.trim().toLowerCase(), t.trim());
-                }
-            }
-        }
-
-        return Array.from(tagMap.values());
     }
 
     function renderAutocompletePills(query) {
@@ -3788,15 +3583,6 @@
     // Storage Footprint & Quota Monitor (Issue #30)
     // ==========================================================================
 
-    function formatBytes(bytes) {
-        if (!bytes || bytes === 0) return "0 B";
-        const k = 1024;
-        const sizes = ["B", "KB", "MB", "GB", "TB"];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        const val = bytes / Math.pow(k, i);
-        return (val >= 10 || i === 0 ? val.toFixed(0) : val.toFixed(1)) + " " + sizes[i];
-    }
-
     async function fetchStorageStats() {
         try {
             const res = await fetch("/api/storage/stats");
@@ -3969,16 +3755,6 @@
     // ==========================================================================
     // Dataset Library View & LoRA Export (Issue #31)
     // ==========================================================================
-
-    function escapeHtml(str) {
-        if (!str) return "";
-        return String(str)
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;")
-            .replace(/'/g, "&#039;");
-    }
 
     function switchView(view) {
         if (state.libraryFullscreenActive && view !== "library") {
@@ -5042,17 +4818,6 @@
         } catch (_) {}
     }
 
-    function formatReadinessAge(iso) {
-        if (!iso) return "never";
-        const age = Date.now() - new Date(iso).getTime();
-        if (!Number.isFinite(age) || age < 60000) return "just now";
-        const minutes = Math.floor(age / 60000);
-        if (minutes < 60) return `${minutes} min ago`;
-        const hours = Math.floor(minutes / 60);
-        if (hours < 24) return `${hours} h ago`;
-        return `${Math.floor(hours / 24)} d ago`;
-    }
-
     /** Codes aggregated across maps: one row per issue kind, never one row per failed map. */
     function aggregateDatasetIssues(report) {
         const byCode = new Map();
@@ -5883,17 +5648,6 @@
     // ==========================================================================
     // LoRA Training Runs & Adapter Studio (Issue #209, ADR-0009, ADR-0010)
     // ==========================================================================
-
-    function formatDuration(seconds) {
-        if (!seconds || seconds <= 0) return "0s";
-        const sec = Math.round(seconds);
-        const h = Math.floor(sec / 3600);
-        const m = Math.floor((sec % 3600) / 60);
-        const s = sec % 60;
-        if (h > 0) return `${h}h ${m}m ${s}s`;
-        if (m > 0) return `${m}m ${s}s`;
-        return `${s}s`;
-    }
 
     function toggleTrainingDrawer() {
         if (state.trainingDrawerOpen) {
@@ -8058,20 +7812,6 @@
         inspectorLayersList.appendChild(fragment);
     }
 
-    function normalizeLayerRole(role) {
-        const r = (role || "").toLowerCase().replace(/[-_]/g, "");
-        if (r === "ground") return "ground";
-        if (r === "upperfloor" || r === "upper") return "upper_floor";
-        if (r === "basement" || r === "lower" || r === "lowerfloor" || r === "cellar") return "basement";
-        if (r === "roof") return "roof";
-        if (r === "variant") return "variant";
-        return "ground";
-    }
-
-    function isCanonicalThemeTag(tag) {
-        return CANONICAL_THEMES.includes((tag || "").trim().toLowerCase());
-    }
-
     function renderInspectorThemeChips() {
         if (!inspectorThemeChips) return;
         inspectorThemeChips.innerHTML = "";
@@ -9643,4 +9383,3 @@
     } else {
         init();
     }
-})();

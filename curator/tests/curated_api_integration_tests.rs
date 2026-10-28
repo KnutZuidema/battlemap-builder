@@ -1711,3 +1711,185 @@ async fn test_patch_curated_regrid_accepts_a_grid_the_pixels_support() {
     let after = readiness_report(app).await;
     assert_eq!(after["ready"], true, "{after}");
 }
+
+// ---------------------------------------------------------------------------
+// Bulk AI refinement: `POST /api/curated/{id}/refine` (Issue #255)
+// ---------------------------------------------------------------------------
+
+async fn post_refine(app: axum::Router, id: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .uri(format!("/api/curated/{id}/refine"))
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    (status, value)
+}
+
+#[tokio::test]
+async fn test_curated_bulk_refine_merges_tags_and_persists_description_and_sections() {
+    let neutral = "Moss-slick stone crypt with two carved sarcophagi and a flooded alcove.";
+    let generator = Arc::new(RecordingDescriptionGen::new(Ok(neutral.to_string())));
+
+    let (catalog, blobs) = in_memory_ports();
+    // An unreachable adapter keeps the vision call out of this test: the suggestion set is
+    // seeded into the shared cache exactly as `suggest-themes` would leave it.
+    let adapter = Arc::new(OpenRouterAdapter::with_config("", "http://127.0.0.1:1".to_string(), 1));
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_openrouter(adapter)
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
+    state.theme_suggestions_cache.write().await.insert(
+        "bulk_refine_merge".to_string(),
+        vec!["Crypt".to_string(), "Flooded".to_string()],
+    );
+    let app = create_router(state.clone());
+
+    let png = create_test_png(2048, 2048);
+    let map = CuratedMap::with_now(
+        "bulk_refine_merge",
+        Theme::Dungeon,
+        vec!["dungeon".into(), "existing".into()],
+        (2048, 2048),
+    )
+    .with_grid(GridConfig::new(64, 0, 0))
+    .with_description("Top-down view of a stone crypt");
+    seed_curated_ports(&catalog, &blobs, &map, &png).await;
+
+    let (status, body) = post_refine(app.clone(), "bulk_refine_merge").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], "bulk_refine_merge");
+    // Existing tags come first, then the cleaned, de-duplicated vision suggestions.
+    assert_eq!(
+        body["tags"],
+        json!(["dungeon", "existing", "Crypt", "Flooded"]),
+        "{body}"
+    );
+    assert_eq!(body["description"], neutral);
+    assert_eq!(body["sections"].as_array().unwrap().len(), 4, "{body}");
+
+    // The cached suggestions are reused as-is: no extra vision call rewrites them.
+    assert_eq!(
+        state
+            .theme_suggestions_cache
+            .read()
+            .await
+            .get("bulk_refine_merge")
+            .cloned(),
+        Some(vec!["Crypt".to_string(), "Flooded".to_string()])
+    );
+
+    // The merged tags feed both the map description and every Map Section description.
+    let seen_tags = generator.seen_tags.lock().unwrap().clone();
+    let merged = vec![
+        "dungeon".to_string(),
+        "existing".to_string(),
+        "Crypt".to_string(),
+        "Flooded".to_string(),
+    ];
+    assert_eq!(seen_tags.len(), 5, "one map description plus four sections");
+    assert!(seen_tags.iter().all(|tags| tags == &merged), "{seen_tags:?}");
+
+    let stored = catalog.get_curated("bulk_refine_merge").await.unwrap();
+    assert_eq!(stored.tags, merged);
+    assert_eq!(stored.description.as_deref(), Some(neutral));
+    assert_eq!(stored.sections.len(), 4);
+    assert!(stored.sections.iter().all(|s| s.description == neutral));
+
+    // A second refinement reuses the cached suggestions and re-merges idempotently: the stored
+    // tags already carry them, so nothing is duplicated.
+    let (status2, body2) = post_refine(app, "bulk_refine_merge").await;
+    assert_eq!(status2, StatusCode::OK, "{body2}");
+    assert_eq!(body2["tags"], json!(["dungeon", "existing", "Crypt", "Flooded"]), "{body2}");
+}
+
+#[tokio::test]
+async fn test_curated_bulk_refine_without_vision_keeps_existing_tags() {
+    let neutral = "Moss-slick stone crypt with two carved sarcophagi.";
+    let generator = Arc::new(MockCuratedGen(Ok(neutral.to_string())));
+    let (catalog, blobs) = in_memory_ports();
+    // An unreachable adapter stands in for "no suggestions": the endpoint must not fail.
+    let adapter = Arc::new(OpenRouterAdapter::with_config("", "http://127.0.0.1:1".to_string(), 1));
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_openrouter(adapter)
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
+    let app = create_router(state);
+
+    curate_single_section_map(&catalog, &blobs, "bulk_refine_no_vision", None).await;
+
+    let (status, body) = post_refine(app, "bulk_refine_no_vision").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["tags"], json!(["dungeon"]), "{body}");
+    assert_eq!(body["description"], neutral);
+    assert_eq!(body["sections"].as_array().unwrap().len(), 1, "{body}");
+
+    let stored = catalog.get_curated("bulk_refine_no_vision").await.unwrap();
+    assert_eq!(stored.tags, vec!["dungeon".to_string()]);
+    assert_eq!(stored.description.as_deref(), Some(neutral));
+}
+
+#[tokio::test]
+async fn test_curated_bulk_refine_propagates_unconfigured_vision_without_persisting() {
+    let (catalog, blobs) = in_memory_ports();
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_description_service(Arc::new(DescriptionService::new(None)));
+    let app = create_router(state);
+
+    let kept = "Moss-slick stone crypt with two carved sarcophagi.";
+    curate_multi_section_map(&catalog, &blobs, "bulk_refine_unconfigured", Some(kept)).await;
+
+    let (status, _) = post_refine(app, "bulk_refine_unconfigured").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+    let stored = catalog.get_curated("bulk_refine_unconfigured").await.unwrap();
+    assert_eq!(stored.description.as_deref(), Some(kept));
+    assert!(stored.sections.is_empty(), "{:?}", stored.sections);
+    assert_eq!(stored.tags, vec!["dungeon".to_string()]);
+}
+
+#[tokio::test]
+async fn test_curated_bulk_refine_propagates_upstream_failure_without_persisting() {
+    let generator = Arc::new(MockCuratedGen(Err(DescriptionError::GenerationFailed(
+        "provider overloaded".to_string(),
+    ))));
+    let (catalog, blobs) = in_memory_ports();
+    let adapter = Arc::new(OpenRouterAdapter::with_config("", "http://127.0.0.1:1".to_string(), 1));
+    let state = AppState::new(catalog.clone(), blobs.clone())
+        .with_openrouter(adapter)
+        .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
+    let app = create_router(state);
+
+    let kept = "Moss-slick stone crypt with two carved sarcophagi.";
+    curate_multi_section_map(&catalog, &blobs, "bulk_refine_upstream", Some(kept)).await;
+
+    let (status, _) = post_refine(app, "bulk_refine_upstream").await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+    let stored = catalog.get_curated("bulk_refine_upstream").await.unwrap();
+    assert_eq!(stored.description.as_deref(), Some(kept));
+    assert!(stored.sections.is_empty(), "{:?}", stored.sections);
+}
+
+#[tokio::test]
+async fn test_curated_bulk_refine_unknown_map_is_not_found() {
+    let (app, _, _) = setup_test_app();
+    let (status, body) = post_refine(app, "no_such_map").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+#[tokio::test]
+async fn test_curated_bulk_refine_rejects_blank_id_and_get() {
+    let (app, _, _) = setup_test_app();
+    let (status, _) = post_refine(app.clone(), "%20").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let req = Request::builder()
+        .uri("/api/curated/whatever/refine")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}

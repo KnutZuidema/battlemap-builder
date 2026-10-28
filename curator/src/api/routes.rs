@@ -1071,6 +1071,111 @@ pub async fn post_curated_suggest_themes(
     Ok(Json(SuggestThemesResponse { id, suggestions }))
 }
 
+/// POST /api/curated/{id}/refine - One-shot AI refinement for a curated map.
+///
+/// Vision theme suggestions are merged into the stored tags, then the strict description engine
+/// produces the map-level `Physical Description` and every Map Section description from the same
+/// merged tags. A single `update_curated` persists all three, and the persisted map is returned.
+pub async fn post_curated_refine(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<CuratedMap>, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Curated map ID cannot be empty"));
+    }
+
+    let stored = state
+        .catalog
+        .get_curated(&id)
+        .await
+        .map_err(|_| ApiError::not_found(format!("Curated map '{id}' not found")))?;
+
+    let library = LibraryService::new(state.catalog.clone(), state.blobs.clone());
+    let (bytes, filename) = library
+        .curated_ground_image(&id)
+        .await
+        .map_err(|_| ApiError::not_found(format!("Curated map '{id}' not found")))?;
+    let mime = detect_image_mime(&bytes, filename.as_deref());
+
+    // 1. Vision suggestions share the `suggest-themes` cache. A missing or failing vision adapter
+    // yields no suggestions (existing semantics): advisory tags never fail the refinement alone.
+    let suggestions = {
+        let cached = state.theme_suggestions_cache.read().await.get(&id).cloned();
+        match cached {
+            Some(cached) => cached,
+            None => {
+                let raw_suggestions = match state.openrouter_client() {
+                    Some(adapter) => match adapter.suggest_themes(&bytes, mime).await {
+                        Ok(tags) => tags,
+                        Err(err) => {
+                            tracing::warn!(curated_id = %id, error = %err, "OpenRouter vision model call failed; refining without suggested tags");
+                            Vec::new()
+                        }
+                    },
+                    None => {
+                        tracing::warn!(curated_id = %id, "OpenRouter vision model not configured; refining without suggested tags");
+                        Vec::new()
+                    }
+                };
+                let suggestions = clean_tags(raw_suggestions);
+                if !suggestions.is_empty() {
+                    state
+                        .theme_suggestions_cache
+                        .write()
+                        .await
+                        .insert(id.clone(), suggestions.clone());
+                }
+                suggestions
+            }
+        }
+    };
+
+    // 2. Existing tags stay first; suggestions only add tags the map does not already carry.
+    let merged_tags = normalize_tags(stored.tags.clone().into_iter().chain(suggestions));
+
+    // 3. Strict description: an unavailable or failing vision engine fails the request here,
+    // before anything is written.
+    let description = state
+        .description_service
+        .describe(&bytes, filename.as_deref(), &merged_tags, None)
+        .await?;
+
+    // 4. Map Sections follow the same policy as the `describe` apply branch.
+    let ground_image = image::load_from_memory(&bytes).ok();
+    let (ground_w, ground_h) = ground_dimensions(&stored, ground_image.as_ref());
+    let sections = describe_map_sections(
+        &state.description_service,
+        SectionDescriptionContext {
+            grid: &stored.grid,
+            ground_image: ground_image.as_ref(),
+            ground_dimensions: (ground_w, ground_h),
+            tags: &merged_tags,
+            title: None,
+            map_description: &description,
+        },
+    )
+    .await;
+
+    // 5. One write keeps tags, description and sections consistent.
+    let updated = library
+        .update_curated(
+            &id,
+            CuratedMapUpdate {
+                tags: Some(merged_tags),
+                description: Some(description),
+                sections: Some(sections),
+                ..Default::default()
+            },
+        )
+        .await?;
+    tracing::info!(
+        id = %id,
+        "Applied bulk AI refinement: merged tags, Physical Description and Map Section descriptions"
+    );
+
+    Ok(Json(updated))
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DescribeRequest {
     #[serde(default)]

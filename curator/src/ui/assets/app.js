@@ -113,6 +113,7 @@
         libraryFilteredMaps: [],
         curatedMaps: [],
         isExporting: false,
+        isBulkRefining: false,
         // Interactive Decision Modal (Issue #102)
         decisionModalOpen: false,
         // Fullscreen Stage Overlay state (Issue #134)
@@ -294,7 +295,7 @@
     let deleteReasonSelect, deleteNotesInput, deleteNotesGroup;
     let btnCancelDelete, btnConfirmDelete, btnConfirmDeleteText, btnCloseDeleteModal;
     let libraryBulkBar, bulkSelectedCount;
-    let btnBulkDelete, btnBulkTag, btnBulkExport, btnBulkDeselect;
+    let btnBulkDelete, btnBulkTag, btnBulkRefine, btnBulkRefineLabel, btnBulkExport, btnBulkDeselect;
     let btnInspectorDelete;
 
     // ==========================================================================
@@ -649,6 +650,8 @@
         bulkSelectedCount = document.getElementById("bulk-selected-count");
         btnBulkDelete = document.getElementById("btn-bulk-delete");
         btnBulkTag = document.getElementById("btn-bulk-tag");
+        btnBulkRefine = document.getElementById("btn-bulk-refine");
+        btnBulkRefineLabel = document.getElementById("btn-bulk-refine-label");
         btnBulkExport = document.getElementById("btn-bulk-export");
         btnBulkDeselect = document.getElementById("btn-bulk-deselect");
         btnInspectorDelete = document.getElementById("btn-inspector-delete");
@@ -6947,6 +6950,91 @@
         }
     }
 
+    async function refineSelectedMaps() {
+        if (!state.librarySelectedIds || state.librarySelectedIds.size === 0) return;
+        if (state.isBulkRefining) return;
+
+        // Snapshot the selection: the loop outlives a selection change, and every map is refined
+        // one at a time so the progress label and the readiness audit never interleave.
+        const ids = Array.from(state.librarySelectedIds);
+        const total = ids.length;
+        const failures = [];
+        let successCount = 0;
+
+        state.isBulkRefining = true;
+        if (btnBulkRefine) btnBulkRefine.disabled = true;
+        const setLabel = (text) => {
+            if (btnBulkRefineLabel) btnBulkRefineLabel.textContent = text;
+        };
+        setLabel(`Refining 0/${total}…`);
+
+        try {
+            for (let i = 0; i < total; i++) {
+                const id = ids[i];
+                setLabel(`Refining ${i + 1}/${total}…`);
+                try {
+                    const res = await fetch(`/api/curated/${encodeURIComponent(id)}/refine`, {
+                        method: "POST",
+                    });
+                    if (!res.ok) {
+                        const errData = await res.json().catch(() => ({}));
+                        throw new Error(errData.error || `HTTP ${res.status}`);
+                    }
+                    const updated = await res.json();
+
+                    const idx = state.curatedMaps.findIndex(m => m.id === id);
+                    if (idx !== -1) state.curatedMaps[idx] = updated;
+
+                    if (state.libraryDrawerActive && state.libraryDrawerMap && state.libraryDrawerMap.id === id) {
+                        state.libraryDrawerMap = updated;
+                        // Unsaved operator edits win: only an untouched draft picks up the
+                        // refined tags, description and layers.
+                        if (!state.libraryDraftDirty) {
+                            state.libraryDraft = {
+                                tags: Array.isArray(updated.tags) ? [...updated.tags] : [],
+                                description: updated.description || "",
+                                layers: (updated.layers && updated.layers.length > 0)
+                                    ? updated.layers.map(l => ({ ...l }))
+                                    : state.libraryDraft.layers,
+                            };
+                            renderInspectorLayers();
+                            renderInspectorThemeChips();
+                            renderInspectorTagChips();
+                            if (inspectorDescriptionInput) {
+                                inspectorDescriptionInput.value = state.libraryDraft.description;
+                            }
+                            updateInspectorDescriptionCounter(state.libraryDraft.description);
+                        }
+                    }
+
+                    successCount++;
+                } catch (err) {
+                    failures.push({ id, message: err.message });
+                    console.error(`AI refine failed for #${id}:`, err);
+                }
+            }
+
+            if (successCount > 0) {
+                applyLibraryFilters();
+                invalidateDatasetReadiness();
+            }
+
+            if (failures.length === 0) {
+                showToast(`AI-refined ${successCount} map${successCount === 1 ? "" : "s"}`, "success");
+            } else {
+                const failedIds = failures.map(f => `#${f.id}`).join(", ");
+                showToast(
+                    `AI refine failed for ${failures.length} of ${total} maps (${failedIds}): ${failures[0].message}`,
+                    "danger"
+                );
+            }
+        } finally {
+            state.isBulkRefining = false;
+            if (btnBulkRefine) btnBulkRefine.disabled = false;
+            setLabel("AI Refine Selected");
+        }
+    }
+
     async function exportSelectedLoraDataset() {
         if (!state.librarySelectedIds || state.librarySelectedIds.size === 0) return;
         if (state.isExporting) return;
@@ -8634,6 +8722,7 @@
 
         btnBulkDelete?.addEventListener("click", () => openBulkDeleteModal());
         btnBulkTag?.addEventListener("click", () => bulkTagSelectedMaps());
+        btnBulkRefine?.addEventListener("click", () => refineSelectedMaps());
         btnBulkExport?.addEventListener("click", () => exportSelectedLoraDataset());
         btnBulkDeselect?.addEventListener("click", () => clearLibrarySelection());
     }

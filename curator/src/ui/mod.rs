@@ -86,6 +86,7 @@ mod tests {
             "kit/dom.js",
             "kit/format.js",
             "kit/grid-math.js",
+            "kit/layers.js",
             "kit/tags.js",
             "stage/canvas.js",
             "stage/grid-panel.js",

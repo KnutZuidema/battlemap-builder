@@ -81,11 +81,16 @@ mod tests {
             "index.html",
             "style.css",
             "app.js",
+            "dom.js",
             "store.js",
             "kit/dom.js",
             "kit/format.js",
             "kit/grid-math.js",
             "kit/tags.js",
+            "stage/canvas.js",
+            "stage/grid-panel.js",
+            "views/triage.js",
+            "views/curation.js",
         ] {
             assert!(Assets::get(asset).is_some(), "{asset} must be embedded");
         }

@@ -33,7 +33,11 @@ export class RequestError extends Error {
     }
 }
 
-function isAbort(error) {
+/**
+ * An abort is the caller's cancellation, not a failure: every layer rethrows it untouched so
+ * it never reaches the failure policy.
+ */
+export function isAbort(error) {
     return Boolean(error) && error.name === "AbortError";
 }
 
@@ -58,7 +62,7 @@ async function readErrorPayload(response) {
  * Map a non-OK response onto the failure envelope: the server's `{ error, code, debug }` when
  * the body carries it, the status line otherwise. Reported through the one failure policy.
  */
-export async function responseFailure(response, path, operation) {
+async function responseFailure(response, path, operation) {
     const failure = await readErrorPayload(response);
     const statusLine = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
     const message = (failure && typeof failure.error === "string" && failure.error) || statusLine;
@@ -95,14 +99,19 @@ export async function readJson(response, path, operation) {
 }
 
 /**
- * Perform one request and read the response body with `consume` (default: JSON).
+ * Perform one request and hand the 2xx response to `consume`, which owns the body.
+ *
+ * This is the one transport: the JSON and archive verbs below pass a body reader, and
+ * `stream.js` passes its event reader with `Accept: text/event-stream` — so the fetch, the
+ * abort rethrow, the `Could not reach` envelope and the non-OK mapping exist once. `headers`
+ * carries whatever the verb's response needs beyond JSON.
  *
  * A non-OK response becomes a `RequestError` carrying the server's error contract, a network
  * failure becomes a `RequestError` naming the path, and an abort is rethrown untouched: a
  * cancelled request is not a failure and must not raise the status pill. A success clears the
  * failure the policy reports.
  */
-async function request(path, { method = "GET", body, signal, operation, headers }, consume) {
+export async function request(path, { method = "GET", body, signal, operation, headers }, consume) {
     let response;
     try {
         response = await fetch(path, {

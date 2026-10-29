@@ -39,7 +39,9 @@ import {
  * raised the pill and toasted the operation, and a second toast would say the same thing.
  */
 export function showFreezeRefusal(refusal, scopeTheme, { toast = true } = {}) {
-    const readiness = refusal && refusal.readiness;
+    // A refusal arrives either as an in-stream `error` frame (the fields sit on the frame) or
+    // as a non-OK response, where `RequestError.payload` carries the same body.
+    const readiness = refusal?.readiness ?? refusal?.payload?.readiness;
     const error = (refusal && refusal.error) || refusal?.message || "Dataset is not ready";
     // The refusal audited the scope that was frozen, which the operator may have left since:
     // store it under that scope, never under whichever tag happens to be active now.

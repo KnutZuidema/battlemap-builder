@@ -6,16 +6,12 @@
  * JSON is the one-shot summary those endpoints offer when the caller cannot stream, and a
  * stream is read line by line with each `data:` frame parsed and handed to `onEvent`.
  *
- * The reader owns the transport only: what an event means (progress, complete, cancelled,
- * error) belongs to the view that asked for the stream.
+ * The transport is `http.js`'s one `request()` with `Accept: text/event-stream`; this module
+ * owns only the framing. What an event means (progress, complete, cancelled, error) belongs
+ * to the view that asked for the stream.
  */
 
-import { RequestError, failRequest, readJson, responseFailure } from "./http.js";
-import { clearRequestFailure } from "./failures.js";
-
-function isAbort(error) {
-    return Boolean(error) && error.name === "AbortError";
-}
+import { RequestError, failRequest, isAbort, readJson, request } from "./http.js";
 
 /**
  * Read a response body as server-sent events.
@@ -88,13 +84,26 @@ async function readEvents(response, { path, operation, onEvent }) {
 }
 
 /**
+ * Read a 2xx response: an event stream is framed into events, and anything else is the
+ * endpoint's one-shot JSON summary (its no-stream mode).
+ */
+async function consumeEvents(response, { path, operation, onEvent }) {
+    const contentType = response.headers?.get?.("content-type") || "";
+    if (!contentType.includes("text/event-stream") || !response.body) {
+        return readJson(response, path, operation);
+    }
+    await readEvents(response, { path, operation, onEvent });
+    return undefined;
+}
+
+/**
  * Perform one request and consume the response as an event stream.
  *
  * Resolves with the response's plain JSON payload when the server answered with a one-shot
  * summary instead of a stream (the endpoint's no-stream mode), and with `undefined` once a
- * stream has been read to its end. A non-OK response — including a validation error answered
- * as plain JSON — becomes a reported `RequestError` before any event is dispatched, and an
- * abort propagates untouched.
+ * stream has been read to its end. The transport is `http.js`'s one `request()`, so a non-OK
+ * response becomes a reported `RequestError` before any event is dispatched and an abort
+ * propagates untouched, exactly as for every JSON verb.
  *
  * @param {string} path
  * @param {{
@@ -106,36 +115,11 @@ async function readEvents(response, { path, operation, onEvent }) {
  * }} [options]
  * @returns {Promise<unknown>}
  */
-export async function requestEventStream(path, { method = "POST", body, signal, operation, onEvent } = {}) {
-    let response;
-    try {
-        response = await fetch(path, {
-            method,
-            signal,
-            headers: {
-                "Accept": "text/event-stream",
-                ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-            },
-            body: body === undefined ? undefined : JSON.stringify(body),
-        });
-    } catch (error) {
-        if (isAbort(error)) throw error;
-        const reason = error && error.message ? error.message : String(error);
-        throw failRequest(new RequestError(`Could not reach ${path}: ${reason}`, { path, operation, cause: error }));
-    }
-
-    if (!response.ok) {
-        throw await responseFailure(response, path, operation);
-    }
-
-    const contentType = response.headers?.get?.("content-type") || "";
-    if (!contentType.includes("text/event-stream") || !response.body) {
-        const payload = await readJson(response, path, operation);
-        clearRequestFailure(operation);
-        return payload;
-    }
-
-    await readEvents(response, { path, operation, onEvent });
-    clearRequestFailure(operation);
-    return undefined;
+export function requestEventStream(path, options = {}) {
+    const { method = "POST", body, signal, operation, onEvent } = options;
+    return request(
+        path,
+        { method, body, signal, operation, headers: { Accept: "text/event-stream" } },
+        (response) => consumeEvents(response, { path, operation, onEvent }),
+    );
 }

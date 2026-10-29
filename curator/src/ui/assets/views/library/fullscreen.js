@@ -14,12 +14,12 @@ import {
     MIN_ZOOM,
     MAX_ZOOM,
     calculateLatticeInfo,
+    formatLatticeStatus,
 } from "../../kit/grid-math.js";
 import {
     getLibraryFullscreenDimensions,
-    PAN_SPEED,
-    ZOOM_SPEED,
-} from "../../stage/canvas.js";
+} from "../../kit/layers.js";
+import { PAN_SPEED, ZOOM_SPEED } from "../../stage/viewport.js";
 import { setLibraryFocus } from "../library.js";
 import { showToast } from "../../shell/status.js";
 import { invalidateDatasetReadiness } from "../readiness.js";
@@ -500,13 +500,8 @@ function updateFullscreenHud() {
             state.libraryFullscreenGridOffset.x,
             state.libraryFullscreenGridOffset.y
         );
-        if (fsLattice.isEligible) {
-            dom.fsGridStatusBadge.textContent = `${fsLattice.cols} × ${fsLattice.rows} cells (${fsLattice.kx} × ${fsLattice.ky} sections)`;
-            dom.fsGridStatusBadge.classList.remove("hud-badge-warning");
-        } else {
-            dom.fsGridStatusBadge.textContent = `${fsLattice.cols} × ${fsLattice.rows} cells (< 16×16 cells)`;
-            dom.fsGridStatusBadge.classList.add("hud-badge-warning");
-        }
+        dom.fsGridStatusBadge.textContent = formatLatticeStatus(fsLattice);
+        dom.fsGridStatusBadge.classList.toggle("hud-badge-warning", !fsLattice.isEligible);
     }
 }
 

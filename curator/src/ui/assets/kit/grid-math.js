@@ -34,3 +34,27 @@ export function calculateLatticeInfo(width, height, cellSize, offsetX, offsetY) 
         fullH: rows * size,
     };
 }
+
+/**
+ * The HUD grid readout: cell size, offset (when set) and visibility.
+ */
+export function formatGridStatus(view) {
+    const size = view.gridSize || VTT_GRID_SIZE;
+    const ox = Math.round(view.gridOffset?.x ?? 0);
+    const oy = Math.round(view.gridOffset?.y ?? 0);
+    const visibility = view.gridVisible === false ? "OFF" : "ON";
+    if (ox !== 0 || oy !== 0) {
+        return `Grid: ${size}px (${ox > 0 ? `+${ox}` : ox}, ${oy > 0 ? `+${oy}` : oy}) [${visibility}]`;
+    }
+    return `Grid: ${size}px [${visibility}]`;
+}
+
+/**
+ * The lattice badge: whole cells, and their 16×16 section split when eligible.
+ */
+export function formatLatticeStatus(lattice) {
+    if (lattice.isEligible) {
+        return `${lattice.cols} × ${lattice.rows} cells (${lattice.kx} × ${lattice.ky} sections)`;
+    }
+    return `${lattice.cols} × ${lattice.rows} cells (< 16×16 cells)`;
+}

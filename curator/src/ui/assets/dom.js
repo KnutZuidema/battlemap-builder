@@ -155,8 +155,6 @@ export function initializeDom() {
     dom.freezeProgressBar = document.getElementById("freeze-progress-bar");
     dom.freezeDetailMap = document.getElementById("freeze-detail-map");
     dom.freezeDetailSection = document.getElementById("freeze-detail-section");
-    dom.snapshotsList = document.getElementById("snapshots-list");
-    dom.snapshotsEmpty = document.getElementById("snapshots-empty");
     dom.snapshotsCountBadge = document.getElementById("snapshots-count-badge");
     dom.btnRefreshSnapshots = document.getElementById("btn-refresh-snapshots");
     dom.btnToggleSnapshots = document.getElementById("btn-toggle-snapshots");

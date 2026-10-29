@@ -19,7 +19,7 @@ import {
     renderInspectorTagChips,
     updateInspectorDescriptionCounter,
 } from "../inspector.js";
-import { showToast } from "../../app.js";
+import { showToast } from "../../shell/status.js";
 import { invalidateDatasetReadiness } from "../readiness.js";
 
 // ==========================================================================

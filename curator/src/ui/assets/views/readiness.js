@@ -18,7 +18,7 @@ import {
     toggleFullscreenGridPanel,
 } from "./library/fullscreen.js";
 import { openLibraryInspector } from "./inspector.js";
-import { showToast } from "../app.js";
+import { showToast } from "../shell/status.js";
 import { datasetScopeTheme, datasetScopeQuery } from "../dataset-scope.js";
 import { toggleSnapshotsShelf } from "./snapshots.js";
 

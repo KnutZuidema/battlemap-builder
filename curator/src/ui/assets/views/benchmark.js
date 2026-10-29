@@ -8,7 +8,7 @@ import { dom } from "../dom.js";
 import { state } from "../store.js";
 import { closeHelpModal } from "../shell/help.js";
 import { fetchStatus, showEmptyState, showLoading, showToast, updateHud } from "../shell/status.js";
-import { fitToScreen, stopPanLoop, stopZoomLoop } from "../stage/canvas.js";
+import { fitToScreen, stopStageMotion } from "../stage/canvas.js";
 import { closeIngestionDrawer } from "./ingestion.js";
 import { fetchStagingQueue, loadCandidate } from "./triage.js";
 
@@ -214,8 +214,7 @@ export function toggleBenchmarkDrawer() {
 }
 
 async function openBenchmarkDrawer() {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     if (state.helpModalOpen) closeHelpModal();
     if (state.drawerOpen) closeIngestionDrawer();
     state.benchmarkDrawerOpen = true;
@@ -225,16 +224,14 @@ async function openBenchmarkDrawer() {
 }
 
 export function closeBenchmarkDrawer() {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     state.benchmarkDrawerOpen = false;
     dom.benchmarkDrawer?.classList.add("hidden");
     dom.canvas.focus();
 }
 
 function openBudgetGuardModal(estimatedCost, modelCount, promptCount, totalImages) {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     state.budgetGuardModalOpen = true;
     const costStr = `$${estimatedCost.toFixed(2)}`;
     if (dom.budgetGuardCostAmount) dom.budgetGuardCostAmount.textContent = costStr;
@@ -248,8 +245,7 @@ function openBudgetGuardModal(estimatedCost, modelCount, promptCount, totalImage
 }
 
 export function closeBudgetGuardModal() {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     state.budgetGuardModalOpen = false;
     dom.budgetGuardModal?.classList.add("hidden");
 }
@@ -280,8 +276,7 @@ function handleStartBenchmarkClick() {
 }
 
 function openBenchmarkProgressWindow(metrics) {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     state.benchmarkWindowMinimized = false;
     dom.benchmarkWindowPill?.classList.add("hidden");
     dom.benchmarkProgressWindow?.classList.remove("hidden");

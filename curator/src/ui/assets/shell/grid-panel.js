@@ -1,79 +1,34 @@
 /**
  * Grid Configuration panel: cell size, offset nudging, alignment mode, and the
  * full-grid lattice readout for the triage candidate.
+ *
+ * The display state itself lives in the triage Stage Viewport; this module only
+ * drives it and mirrors it into the panel DOM.
  */
 
 import { dom } from "../dom.js";
 import { state } from "../store.js";
-import { VTT_GRID_SIZE, MIN_GRID_SIZE, MAX_GRID_SIZE, calculateLatticeInfo } from "../kit/grid-math.js";
-import { requestRender, stopPanLoop, stopZoomLoop } from "./canvas.js";
+import { VTT_GRID_SIZE, MIN_GRID_SIZE, calculateLatticeInfo } from "../kit/grid-math.js";
+import { getTriageViewport, requestRender, stopStageMotion } from "../stage/canvas.js";
 import { getCurrentGroundDimensions } from "../kit/layers.js";
-import { showToast, updateHud } from "../shell/status.js";
-
-let saveCandidateGridTimeout = null;
-export function saveCurrentCandidateGrid() {
-    if (state.currentIndex >= 0 && state.currentIndex < state.candidates.length) {
-        const cand = state.candidates[state.currentIndex];
-        if (cand && cand.id) {
-            const payload = {
-                cell_size_px: state.gridSize,
-                offset_x: state.gridOffset.x,
-                offset_y: state.gridOffset.y,
-            };
-            cand.grid = { ...payload };
-
-            clearTimeout(saveCandidateGridTimeout);
-            saveCandidateGridTimeout = setTimeout(async () => {
-                try {
-                    await fetch(`/api/staging/${encodeURIComponent(cand.id)}/grid`, {
-                        method: "PATCH",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(payload),
-                    });
-                } catch (err) {
-                    console.error("Failed to save staging candidate grid config:", err);
-                }
-            }, 300);
-        }
-    }
-}
+import { showToast, updateHud } from "./status.js";
 
 export function setGridSize(size) {
-    const num = Number.isFinite(size) ? size : parseInt(size, 10);
-    if (isNaN(num)) return;
-    const clamped = Math.max(MIN_GRID_SIZE, Math.min(MAX_GRID_SIZE, Math.round(num)));
-    state.gridSize = clamped;
-    saveCurrentCandidateGrid();
+    getTriageViewport().setGridSize(size);
     updateHud();
     updateGridPanel();
-    requestRender();
 }
 
 export function nudgeGridOffset(dx, dy) {
-    state.gridOffset.x = Math.round(state.gridOffset.x + dx);
-    state.gridOffset.y = Math.round(state.gridOffset.y + dy);
-    saveCurrentCandidateGrid();
+    getTriageViewport().nudgeGrid(dx, dy);
     updateHud();
     updateGridPanel();
-    requestRender();
-}
-
-function setGridOffset(x, y) {
-    state.gridOffset.x = Math.round(x);
-    state.gridOffset.y = Math.round(y);
-    saveCurrentCandidateGrid();
-    updateHud();
-    updateGridPanel();
-    requestRender();
 }
 
 export function resetGrid() {
-    state.gridSize = 64;
-    state.gridOffset = { x: 0, y: 0 };
-    saveCurrentCandidateGrid();
+    getTriageViewport().resetGrid();
     updateHud();
     updateGridPanel();
-    requestRender();
     showToast("Grid reset to default 64px (0,0)", "info");
 }
 
@@ -103,14 +58,15 @@ export function toggleGridAlignMode(force) {
 }
 
 export function updateGridPanel() {
+    const grid = getTriageViewport().getView();
     if (dom.gridSizeInput) {
-        dom.gridSizeInput.value = state.gridSize;
+        dom.gridSizeInput.value = grid.gridSize;
     }
     if (dom.gridSizeSlider) {
-        dom.gridSizeSlider.value = Math.min(256, Math.max(16, state.gridSize));
+        dom.gridSizeSlider.value = Math.min(256, Math.max(MIN_GRID_SIZE, grid.gridSize));
     }
-    const ox = state.gridOffset ? Math.round(state.gridOffset.x) : 0;
-    const oy = state.gridOffset ? Math.round(state.gridOffset.y) : 0;
+    const ox = Math.round(grid.gridOffset.x);
+    const oy = Math.round(grid.gridOffset.y);
     if (dom.gridOffsetXVal) {
         dom.gridOffsetXVal.textContent = ox > 0 ? `+${ox}px` : `${ox}px`;
     }
@@ -120,11 +76,11 @@ export function updateGridPanel() {
     const chips = document.querySelectorAll(".preset-chip");
     chips.forEach((chip) => {
         const sz = parseInt(chip.getAttribute("data-size"), 10);
-        chip.classList.toggle("active", sz === state.gridSize);
+        chip.classList.toggle("active", sz === grid.gridSize);
     });
 
     const dims = getCurrentGroundDimensions();
-    const lattice = calculateLatticeInfo(dims.width, dims.height, state.gridSize, state.gridOffset.x, state.gridOffset.y);
+    const lattice = calculateLatticeInfo(dims.width, dims.height, grid.gridSize, grid.gridOffset.x, grid.gridOffset.y);
     if (dom.gridLatticeCells) {
         dom.gridLatticeCells.textContent = `${lattice.cols} × ${lattice.rows} cells`;
     }
@@ -148,13 +104,12 @@ export function toggleGrid() {
     }
     requestRender();
     updateHud();
-    const size = state.gridSize || VTT_GRID_SIZE;
+    const size = getTriageViewport().getView().gridSize || VTT_GRID_SIZE;
     showToast(`${size}px VTT Grid: ${state.gridVisible ? "Enabled" : "Disabled"}`, "info");
 }
 
 export function enterLabelingMode(mode) {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     state.labelingMode = mode;
     const roleSelectorEl = document.getElementById("role-selector");
     if (roleSelectorEl) roleSelectorEl.classList.remove("selecting-mode");
@@ -166,8 +121,7 @@ export function enterLabelingMode(mode) {
 }
 
 export function exitLabelingMode() {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     state.labelingMode = null;
     const roleSelectorEl = document.getElementById("role-selector");
     if (roleSelectorEl) roleSelectorEl.classList.remove("selecting-mode");

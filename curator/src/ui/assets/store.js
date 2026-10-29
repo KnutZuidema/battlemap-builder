@@ -19,22 +19,17 @@ export const state = {
     labelingMode: null,
     currentLayerIndex: 0,
     lastSplitParentId: null,
-    // Canvas transform
-    pan: { x: 0, y: 0 },
-    zoom: 1.0,
+    // Canvas pointer capture (pan, zoom and Grid Configuration live in the Stage Viewport)
     isPanning: false,
     dragStart: { x: 0, y: 0 },
-    panStart: { x: 0, y: 0 },
 
     // Visual overlays
     gridVisible: true,
-    gridSize: 64,
-    gridOffset: { x: 0, y: 0 },
     gridAlignMode: false,
     gridPanelOpen: false,
     isDraggingGrid: false,
     gridDragStart: { x: 0, y: 0 },
-    gridOffsetStart: { x: 0, y: 0 },
+    gridDragOrigin: { x: 0, y: 0 },
     // Modal and UI dialog state
     helpModalOpen: false,
     drawerOpen: false,

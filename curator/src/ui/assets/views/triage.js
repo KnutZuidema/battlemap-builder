@@ -5,9 +5,10 @@
 import { dom } from "../dom.js";
 import { state } from "../store.js";
 import { formatRoleName } from "../kit/format.js";
+import { VTT_GRID_SIZE } from "../kit/grid-math.js";
 import { getCandidateLayers } from "../kit/layers.js";
-import { requestRender, fitToScreen } from "../stage/canvas.js";
-import { enterLabelingMode, exitLabelingMode, updateGridPanel } from "../stage/grid-panel.js";
+import { fitToScreen, getTriageViewport, requestRender } from "../stage/canvas.js";
+import { enterLabelingMode, exitLabelingMode, updateGridPanel } from "../shell/grid-panel.js";
 import { fetchThemeSuggestions } from "./curation.js";
 import { showEmptyState, showLoading, showToast, updateHud } from "../shell/status.js";
 
@@ -53,6 +54,8 @@ export async function fetchStagingQueue() {
  */
 export function loadCandidate(index) {
     exitLabelingMode();
+    // Persist any pending edit burst against the candidate it belongs to.
+    getTriageViewport().flushGrid();
     if (index < 0 || index >= state.candidates.length) {
         state.currentIndex = -1;
         state.currentLayerIndex = 0;
@@ -69,16 +72,7 @@ export function loadCandidate(index) {
     state.currentLayerIndex = 0;
     const candidate = state.candidates[index];
     fetchThemeSuggestions(candidate);
-    if (candidate.grid) {
-        state.gridSize = candidate.grid.cell_size_px ?? 64;
-        state.gridOffset = {
-            x: candidate.grid.offset_x ?? 0,
-            y: candidate.grid.offset_y ?? 0,
-        };
-    } else {
-        state.gridSize = 64;
-        state.gridOffset = { x: 0, y: 0 };
-    }
+    restoreCandidateGrid(candidate);
     updateGridPanel();
     const cacheKey = `${candidate.id}_layer_0`;
 
@@ -121,6 +115,18 @@ export function loadCandidate(index) {
             }
         };
     }
+}
+
+/**
+ * Applies a candidate's persisted Grid Configuration to the triage viewport.
+ */
+function restoreCandidateGrid(candidate) {
+    const viewport = getTriageViewport();
+    viewport.setGridSize(candidate.grid?.cell_size_px ?? VTT_GRID_SIZE);
+    viewport.setGrid({
+        x: candidate.grid?.offset_x ?? 0,
+        y: candidate.grid?.offset_y ?? 0,
+    });
 }
 
 /**
@@ -233,7 +239,7 @@ function getRoleCssClass(role) {
 
 /**
  * Synchronized in-place layer switching.
- * Preserves state.pan and state.zoom exactly without resetting the viewport!
+ * Preserves the viewport pan and zoom exactly without resetting them!
  */
 export function setLayer(layerIndex) {
     if (state.currentIndex < 0 || state.currentIndex >= state.candidates.length) return;

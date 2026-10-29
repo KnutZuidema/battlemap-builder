@@ -4,8 +4,9 @@
 
 import { dom } from "../dom.js";
 import { state } from "../store.js";
-import { VTT_GRID_SIZE, calculateLatticeInfo } from "../kit/grid-math.js";
+import { calculateLatticeInfo, formatGridStatus, formatLatticeStatus } from "../kit/grid-math.js";
 import { getCurrentGroundDimensions } from "../kit/layers.js";
+import { getTriageViewport } from "../stage/canvas.js";
 
 export async function fetchStatus() {
     try {
@@ -23,32 +24,19 @@ export async function fetchStatus() {
     }
 }
 
-export function updateHud() {
-    const zoomPercent = Math.round(state.zoom * 100);
+export function updateHud(view = null) {
+    const grid = view || getTriageViewport().getView();
+    const zoomPercent = Math.round(grid.zoom * 100);
     dom.zoomLevelDisplay.textContent = `${zoomPercent}%`;
-    dom.hudPanZoom.textContent = `Zoom: ${zoomPercent}% (${Math.round(state.pan.x)}, ${Math.round(state.pan.y)})`;
+    dom.hudPanZoom.textContent = `Zoom: ${zoomPercent}% (${Math.round(grid.pan.x)}, ${Math.round(grid.pan.y)})`;
 
-    const size = state.gridSize || VTT_GRID_SIZE;
-    const ox = state.gridOffset ? Math.round(state.gridOffset.x) : 0;
-    const oy = state.gridOffset ? Math.round(state.gridOffset.y) : 0;
-    if (ox !== 0 || oy !== 0) {
-        const signX = ox > 0 ? `+${ox}` : `${ox}`;
-        const signY = oy > 0 ? `+${oy}` : `${oy}`;
-        dom.hudGridStatus.textContent = `Grid: ${size}px (${signX}, ${signY}) [${state.gridVisible ? "ON" : "OFF"}]`;
-    } else {
-        dom.hudGridStatus.textContent = `Grid: ${size}px [${state.gridVisible ? "ON" : "OFF"}]`;
-    }
+    dom.hudGridStatus.textContent = formatGridStatus({ ...grid, gridVisible: state.gridVisible });
 
     if (dom.hudLatticeStatus) {
         const dims = getCurrentGroundDimensions();
-        const lattice = calculateLatticeInfo(dims.width, dims.height, state.gridSize, state.gridOffset.x, state.gridOffset.y);
-        if (lattice.isEligible) {
-            dom.hudLatticeStatus.textContent = `${lattice.cols} × ${lattice.rows} cells (${lattice.kx} × ${lattice.ky} sections)`;
-            dom.hudLatticeStatus.classList.remove("hud-warning");
-        } else {
-            dom.hudLatticeStatus.textContent = `${lattice.cols} × ${lattice.rows} cells (< 16×16 cells)`;
-            dom.hudLatticeStatus.classList.add("hud-warning");
-        }
+        const lattice = calculateLatticeInfo(dims.width, dims.height, grid.gridSize, grid.gridOffset.x, grid.gridOffset.y);
+        dom.hudLatticeStatus.textContent = formatLatticeStatus(lattice);
+        dom.hudLatticeStatus.classList.toggle("hud-warning", !lattice.isEligible);
     }
 
     if (state.currentImage && state.currentImage.complete) {

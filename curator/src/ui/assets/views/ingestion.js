@@ -7,7 +7,7 @@ import { dom } from "../dom.js";
 import { state } from "../store.js";
 import { closeHelpModal } from "../shell/help.js";
 import { fetchStatus, showToast } from "../shell/status.js";
-import { stopPanLoop, stopZoomLoop } from "../stage/canvas.js";
+import { stopStageMotion } from "../stage/canvas.js";
 import { fetchStagingQueue } from "./triage.js";
 
 export function toggleIngestionDrawer() {
@@ -19,8 +19,7 @@ export function toggleIngestionDrawer() {
 }
 
 export function openIngestionDrawer() {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     if (state.helpModalOpen) closeHelpModal();
     state.drawerOpen = true;
     dom.ingestionDrawer?.classList.remove("hidden");
@@ -28,8 +27,7 @@ export function openIngestionDrawer() {
 }
 
 export function closeIngestionDrawer() {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     state.drawerOpen = false;
     dom.ingestionDrawer?.classList.add("hidden");
     dom.canvas.focus();

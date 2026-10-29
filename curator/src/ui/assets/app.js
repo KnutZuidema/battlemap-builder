@@ -6,10 +6,10 @@
  */
 
 import { initializeDom } from "./dom.js";
-import { setupCanvas } from "./stage/canvas.js";
-import { updateGridPanel } from "./stage/grid-panel.js";
+import { getTriageViewport, setupCanvas } from "./stage/canvas.js";
+import { updateGridPanel } from "./shell/grid-panel.js";
 import { setupEventListeners } from "./shell/hotkeys.js";
-import { fetchStatus } from "./shell/status.js";
+import { fetchStatus, updateHud } from "./shell/status.js";
 import { fetchCostStats } from "./views/benchmark.js";
 import { syncReadinessToScope } from "./views/readiness.js";
 import { fetchStorageStats } from "./views/storage.js";
@@ -19,6 +19,7 @@ import { fetchStagingQueue } from "./views/triage.js";
 function init() {
     initializeDom();
     setupCanvas();
+    getTriageViewport().subscribe(updateHud);
     setupEventListeners();
     updateGridPanel();
     fetchStatus();

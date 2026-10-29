@@ -8,7 +8,7 @@ import { dom } from "../dom.js";
 import { state } from "../store.js";
 import { escapeHtml } from "../kit/dom.js";
 import { formatDuration } from "../kit/format.js";
-import { stopPanLoop, stopZoomLoop } from "../stage/canvas.js";
+import { stopStageMotion } from "../stage/canvas.js";
 import { showToast } from "../shell/status.js";
 import { closeHelpModal } from "../shell/help.js";
 import { closeIngestionDrawer } from "./ingestion.js";
@@ -42,8 +42,7 @@ export function toggleTrainingDrawer() {
 }
 
 export async function openTrainingDrawer(options = {}) {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     if (state.helpModalOpen) closeHelpModal();
     if (state.drawerOpen) closeIngestionDrawer();
     if (state.benchmarkDrawerOpen) closeBenchmarkDrawer();
@@ -74,8 +73,7 @@ export async function openTrainingDrawer(options = {}) {
 }
 
 export function closeTrainingDrawer() {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     state.trainingDrawerOpen = false;
     dom.trainingDrawer?.classList.add("hidden");
     dom.canvas?.focus();

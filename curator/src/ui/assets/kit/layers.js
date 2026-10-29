@@ -52,3 +52,41 @@ export function getCurrentGroundDimensions() {
     }
     return { width: 2048, height: 2048 };
 }
+
+/**
+ * Retrieves Ground layer dimensions for the current fullscreen map.
+ */
+export function getLibraryFullscreenDimensions() {
+    if (state.libraryFullscreenMap) {
+        const map = state.libraryFullscreenMap;
+        if (map.layers && Array.isArray(map.layers) && map.layers.length > 0) {
+            const ground = map.layers.find(l => {
+                const r = (l.role || "").toLowerCase().replace(/[-_]/g, "");
+                return r === "ground";
+            });
+            if (ground && ground.dimensions && ground.dimensions[0] > 0 && ground.dimensions[1] > 0) {
+                return { width: ground.dimensions[0], height: ground.dimensions[1] };
+            }
+            const l0 = map.layers.find(l => l.index === 0);
+            if (l0 && l0.dimensions && l0.dimensions[0] > 0 && l0.dimensions[1] > 0) {
+                return { width: l0.dimensions[0], height: l0.dimensions[1] };
+            }
+            if (map.layers[0].dimensions && map.layers[0].dimensions[0] > 0 && map.layers[0].dimensions[1] > 0) {
+                return { width: map.layers[0].dimensions[0], height: map.layers[0].dimensions[1] };
+            }
+        }
+        if (map.dimensions && Array.isArray(map.dimensions) && map.dimensions[0] > 0 && map.dimensions[1] > 0) {
+            return { width: map.dimensions[0], height: map.dimensions[1] };
+        }
+        if (map.dimensions && map.dimensions.width && map.dimensions.height) {
+            return { width: map.dimensions.width, height: map.dimensions.height };
+        }
+    }
+    if (state.libraryFullscreenCurrentImage && state.libraryFullscreenCurrentImage.naturalWidth > 0) {
+        return {
+            width: state.libraryFullscreenCurrentImage.naturalWidth,
+            height: state.libraryFullscreenCurrentImage.naturalHeight,
+        };
+    }
+    return { width: 2048, height: 2048 };
+}

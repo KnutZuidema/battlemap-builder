@@ -8,7 +8,7 @@
 
 import { dom } from "../dom.js";
 import { state } from "../store.js";
-import { VTT_GRID_SIZE, MIN_GRID_SIZE, calculateLatticeInfo } from "../kit/grid-math.js";
+import { VTT_GRID_SIZE, MIN_GRID_SIZE, calculateLatticeInfo, formatLatticePanel } from "../kit/grid-math.js";
 import { getTriageViewport, requestRender, stopStageMotion } from "../stage/canvas.js";
 import { getCurrentGroundDimensions } from "../kit/layers.js";
 import { showToast, updateHud } from "./status.js";
@@ -33,26 +33,30 @@ export function resetGrid() {
 }
 
 export function toggleGridPanel(force) {
-    state.gridPanelOpen = typeof force === "boolean" ? force : !state.gridPanelOpen;
+    const viewport = getTriageViewport();
+    const next = typeof force === "boolean" ? force : !viewport.getView().gridPanelOpen;
+    viewport.setGridPanelOpen(next);
     if (dom.gridAdjustPanel) {
-        dom.gridAdjustPanel.classList.toggle("hidden", !state.gridPanelOpen);
+        dom.gridAdjustPanel.classList.toggle("hidden", !next);
     }
     if (dom.btnGridAdjust) {
-        dom.btnGridAdjust.classList.toggle("active", state.gridPanelOpen);
+        dom.btnGridAdjust.classList.toggle("active", next);
     }
-    if (state.gridPanelOpen) {
+    if (next) {
         updateGridPanel();
     }
     requestRender();
 }
 
 export function toggleGridAlignMode(force) {
-    state.gridAlignMode = typeof force === "boolean" ? force : !state.gridAlignMode;
+    const viewport = getTriageViewport();
+    const next = typeof force === "boolean" ? force : !viewport.getView().gridAlignMode;
+    viewport.setGridAlignMode(next);
     if (dom.btnGridAlignDrag) {
-        dom.btnGridAlignDrag.classList.toggle("active", state.gridAlignMode);
+        dom.btnGridAlignDrag.classList.toggle("active", next);
     }
     if (dom.canvas) {
-        dom.canvas.classList.toggle("grid-aligning", state.gridAlignMode);
+        dom.canvas.classList.toggle("grid-aligning", next);
     }
     requestRender();
 }
@@ -81,31 +85,31 @@ export function updateGridPanel() {
 
     const dims = getCurrentGroundDimensions();
     const lattice = calculateLatticeInfo(dims.width, dims.height, grid.gridSize, grid.gridOffset.x, grid.gridOffset.y);
+    const readout = formatLatticePanel(lattice);
     if (dom.gridLatticeCells) {
-        dom.gridLatticeCells.textContent = `${lattice.cols} × ${lattice.rows} cells`;
+        dom.gridLatticeCells.textContent = readout.cells;
     }
     if (dom.gridLatticeSections) {
-        if (lattice.isEligible) {
-            dom.gridLatticeSections.textContent = `${lattice.kx} × ${lattice.ky} sections`;
-            dom.gridLatticeSections.className = "grid-lattice-sections-val mono badge-sections badge-sections-valid";
-        } else {
-            dom.gridLatticeSections.textContent = "< 16×16 cells";
-            dom.gridLatticeSections.className = "grid-lattice-sections-val mono badge-sections badge-sections-warning";
-        }
+        dom.gridLatticeSections.textContent = readout.sections;
+        dom.gridLatticeSections.className = lattice.isEligible
+            ? "grid-lattice-sections-val mono badge-sections badge-sections-valid"
+            : "grid-lattice-sections-val mono badge-sections badge-sections-warning";
     }
 }
 
 export function toggleGrid() {
-    state.gridVisible = !state.gridVisible;
-    if (state.gridVisible) {
+    const viewport = getTriageViewport();
+    const visible = !viewport.getView().gridVisible;
+    viewport.setGridVisible(visible);
+    if (visible) {
         dom.btnGridToggle.classList.add("active");
     } else {
         dom.btnGridToggle.classList.remove("active");
     }
     requestRender();
     updateHud();
-    const size = getTriageViewport().getView().gridSize || VTT_GRID_SIZE;
-    showToast(`${size}px VTT Grid: ${state.gridVisible ? "Enabled" : "Disabled"}`, "info");
+    const size = viewport.getView().gridSize || VTT_GRID_SIZE;
+    showToast(`${size}px VTT Grid: ${visible ? "Enabled" : "Disabled"}`, "info");
 }
 
 export function enterLabelingMode(mode) {

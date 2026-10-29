@@ -23,10 +23,7 @@ export const state = {
     isPanning: false,
     dragStart: { x: 0, y: 0 },
 
-    // Visual overlays
-    gridVisible: true,
-    gridAlignMode: false,
-    gridPanelOpen: false,
+    // Visual overlays (grid visibility, panel and align mode live in the Stage Viewport)
     isDraggingGrid: false,
     gridDragStart: { x: 0, y: 0 },
     gridDragOrigin: { x: 0, y: 0 },

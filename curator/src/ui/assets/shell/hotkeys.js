@@ -80,7 +80,7 @@ import {
 export function setupEventListeners() {
     // --- Canvas Mouse Pan Dragging & Dynamic Grid Align Drag ---
     dom.canvas.addEventListener("mousedown", (e) => {
-        if ((e.button === 0) && (e.shiftKey || state.gridAlignMode)) {
+        if ((e.button === 0) && (e.shiftKey || getTriageViewport().getView().gridAlignMode)) {
             state.isDraggingGrid = true;
             state.gridDragStart = { x: e.clientX, y: e.clientY };
             const offset = getTriageViewport().getView().gridOffset;
@@ -101,7 +101,7 @@ export function setupEventListeners() {
 
     window.addEventListener("mousemove", (e) => {
         if (dom.canvas && !state.isDraggingGrid) {
-            dom.canvas.classList.toggle("grid-aligning", e.shiftKey || state.gridAlignMode);
+            dom.canvas.classList.toggle("grid-aligning", e.shiftKey || getTriageViewport().getView().gridAlignMode);
         }
         if (dom.libraryFullscreenCanvas?.parentElement && !state.libraryFullscreenIsDraggingGrid) {
             dom.libraryFullscreenCanvas.parentElement.classList.toggle("grid-aligning", e.shiftKey || state.libraryFullscreenGridAlignMode);
@@ -303,7 +303,7 @@ export function setupEventListeners() {
             dom.canvas.classList.remove("grid-dragging");
         }
         if (dom.canvas) {
-            dom.canvas.classList.toggle("grid-aligning", state.gridAlignMode);
+            dom.canvas.classList.toggle("grid-aligning", getTriageViewport().getView().gridAlignMode);
         }
         if (state.libraryFullscreenIsDraggingGrid) {
             state.libraryFullscreenIsDraggingGrid = false;
@@ -329,7 +329,7 @@ export function setupEventListeners() {
 
 function handleKeydown(e) {
     if (dom.canvas) {
-        dom.canvas.classList.toggle("grid-aligning", e.shiftKey || state.gridAlignMode);
+        dom.canvas.classList.toggle("grid-aligning", e.shiftKey || getTriageViewport().getView().gridAlignMode);
     }
     const tag = document.activeElement ? document.activeElement.tagName.toLowerCase() : "";
     const isInputFocused = tag === "input" || tag === "textarea" || tag === "select";
@@ -337,7 +337,7 @@ function handleKeydown(e) {
     // Global Modal Dismiss: Escape
     if (e.key === "Escape") {
         stopStageMotion();
-        if (state.gridPanelOpen) {
+        if (getTriageViewport().getView().gridPanelOpen) {
             toggleGridPanel(false);
             e.preventDefault();
             return;
@@ -700,7 +700,7 @@ function handleKeydown(e) {
 
 function handleKeyup(e) {
     if (dom.canvas) {
-        dom.canvas.classList.toggle("grid-aligning", e.shiftKey || state.gridAlignMode);
+        dom.canvas.classList.toggle("grid-aligning", e.shiftKey || getTriageViewport().getView().gridAlignMode);
     }
     if (dom.libraryFullscreenCanvas?.parentElement) {
         dom.libraryFullscreenCanvas.parentElement.classList.toggle("grid-aligning", e.shiftKey || state.libraryFullscreenGridAlignMode);

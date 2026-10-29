@@ -21,6 +21,8 @@ import { openLibraryInspector } from "./inspector.js";
 import { showToast } from "../shell/status.js";
 import { datasetScopeTheme, datasetScopeQuery } from "../dataset-scope.js";
 import { toggleSnapshotsShelf } from "./snapshots.js";
+import { describeCuratedMap } from "../requests/ai.js";
+import { has, join } from "../requests/tracker.js";
 
 // ==========================================================================
 // LoRA Training Dataset Readiness (Issues #184, #245)
@@ -328,34 +330,21 @@ export function invalidateDatasetReadiness() {
 // Remediation (Issue #245)
 // --------------------------------------------------------------------------
 
-/** Regenerate the map's Physical Description and persist it with its Map Sections. */
-async function applyDatasetDescription(mapId) {
-    const res = await fetch(`/api/curated/${encodeURIComponent(mapId)}/describe`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ apply: true }),
-    });
-    if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || `HTTP ${res.status}`);
-    }
-    const payload = await res.json();
-    if (payload.applied !== true) {
-        throw new Error("Description was generated but not persisted");
-    }
-    return payload;
-}
-
 /**
- * One regeneration request per map: a second click during an in-flight
- * `POST /api/curated/{id}/describe` reuses that promise instead of skipping the map.
+ * Regenerate the map's Physical Description and persist it with its Map Sections.
+ *
+ * One request per map: a second click during an in-flight
+ * `POST /api/curated/{id}/describe` joins that request instead of skipping the map.
  */
 function applyDescriptionOnce(mapId) {
-    const inFlight = state.describeRequests.get(mapId);
-    if (inFlight) return inFlight;
-    const request = applyDatasetDescription(mapId).finally(() => state.describeRequests.delete(mapId));
-    state.describeRequests.set(mapId, request);
-    return request;
+    return join(`describe:curated:${mapId}`, (signal) =>
+        describeCuratedMap(mapId, { signal, apply: true }).then((payload) => {
+            if (payload.applied !== true) {
+                throw new Error("Description was generated but not persisted");
+            }
+            return payload;
+        }),
+    );
 }
 
 function readinessActionButtons() {
@@ -421,14 +410,15 @@ async function fixDatasetDescriptions() {
             state.readinessBatch.done += 1;
             setReadinessActionsBusy(true);
             // Snapshot before awaiting: a request that settles must not count as reused.
-            const joinedInFlight = state.describeRequests.has(mapId);
+            const joinedInFlight = has(`describe:curated:${mapId}`);
             try {
                 await applyDescriptionOnce(mapId);
                 if (joinedInFlight) reused += 1;
                 else sent += 1;
             } catch (err) {
+                // The request module already raised the pill and the toast; the batch reports it
+                // again by map in its summary.
                 failed.push(`${mapId} (${err.message})`);
-                console.error(`Description remediation failed for ${mapId}:`, err);
             }
         }
     } finally {

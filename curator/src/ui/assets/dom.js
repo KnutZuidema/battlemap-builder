@@ -11,7 +11,6 @@ export const dom = {};
 
 export function initializeDom() {
     dom.canvas = document.getElementById("triage-canvas");
-    dom.ctx = dom.canvas.getContext("2d");
     dom.statusIndicator = document.getElementById("status-indicator");
     dom.statusText = document.getElementById("status-text");
     dom.candidateMetaBox = document.getElementById("candidate-meta-box");

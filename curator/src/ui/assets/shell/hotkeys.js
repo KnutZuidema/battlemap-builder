@@ -6,30 +6,19 @@
 import { dom } from "../dom.js";
 import { state } from "../store.js";
 import { closeHelpModal, toggleHelpModal } from "./help.js";
-import { fetchStatus, updateHud } from "./status.js";
-import {
-    activePanKeys,
-    activeZoomKeys,
-    fitToScreen,
-    requestRender,
-    startPanLoop,
-    startZoomLoop,
-    stopPanLoop,
-    stopZoomLoop,
-    zoomStep,
-} from "../stage/canvas.js";
+import { fetchStatus } from "./status.js";
+import { fitToScreen, getTriageViewport, stopStageMotion } from "../stage/canvas.js";
 import {
     enterLabelingMode,
     exitLabelingMode,
     nudgeGridOffset,
     resetGrid,
-    saveCurrentCandidateGrid,
     setGridSize,
     toggleGrid,
     toggleGridAlignMode,
     toggleGridPanel,
     updateGridPanel,
-} from "../stage/grid-panel.js";
+} from "./grid-panel.js";
 import {
     closeBenchmarkDrawer,
     closeBudgetGuardModal,
@@ -94,7 +83,8 @@ export function setupEventListeners() {
         if ((e.button === 0) && (e.shiftKey || state.gridAlignMode)) {
             state.isDraggingGrid = true;
             state.gridDragStart = { x: e.clientX, y: e.clientY };
-            state.gridOffsetStart = { x: state.gridOffset.x, y: state.gridOffset.y };
+            const offset = getTriageViewport().getView().gridOffset;
+            state.gridDragOrigin = { x: offset.x, y: offset.y };
             dom.canvas.classList.add("grid-dragging");
             e.preventDefault();
             return;
@@ -104,7 +94,6 @@ export function setupEventListeners() {
         if (e.button === 0 || e.button === 1) {
             state.isPanning = true;
             state.dragStart = { x: e.clientX, y: e.clientY };
-            state.panStart = { x: state.pan.x, y: state.pan.y };
             dom.canvas.classList.add("panning");
             e.preventDefault();
         }
@@ -139,24 +128,21 @@ export function setupEventListeners() {
         }
 
         if (state.isDraggingGrid) {
-            const imgDx = (e.clientX - state.gridDragStart.x) / state.zoom;
-            const imgDy = (e.clientY - state.gridDragStart.y) / state.zoom;
-            state.gridOffset.x = Math.round(state.gridOffsetStart.x + imgDx);
-            state.gridOffset.y = Math.round(state.gridOffsetStart.y + imgDy);
-            saveCurrentCandidateGrid();
-            requestRender();
-            updateHud();
+            const viewport = getTriageViewport();
+            const zoom = viewport.getView().zoom;
+            const imgDx = (e.clientX - state.gridDragStart.x) / zoom;
+            const imgDy = (e.clientY - state.gridDragStart.y) / zoom;
+            viewport.setGridOffset({
+                x: Math.round(state.gridDragOrigin.x + imgDx),
+                y: Math.round(state.gridDragOrigin.y + imgDy),
+            });
             updateGridPanel();
             return;
         }
 
         if (!state.isPanning) return;
-        const dx = e.clientX - state.dragStart.x;
-        const dy = e.clientY - state.dragStart.y;
-        state.pan.x = state.panStart.x + dx;
-        state.pan.y = state.panStart.y + dy;
-        requestRender();
-        updateHud();
+        getTriageViewport().panBy(e.clientX - state.dragStart.x, e.clientY - state.dragStart.y);
+        state.dragStart = { x: e.clientX, y: e.clientY };
     });
 
     window.addEventListener("mouseup", (e) => {
@@ -191,7 +177,7 @@ export function setupEventListeners() {
         };
 
         const factor = e.deltaY < 0 ? 1.15 : (1 / 1.15);
-        zoomStep(factor, point);
+        getTriageViewport().zoomBy(factor, point);
     }, { passive: false });
 
     // --- Toolbar Button Actions ---
@@ -210,10 +196,10 @@ export function setupEventListeners() {
         dom.btnGridReset.addEventListener("click", () => resetGrid());
     }
     if (dom.btnGridSizeDec) {
-        dom.btnGridSizeDec.addEventListener("click", () => setGridSize(state.gridSize - 1));
+        dom.btnGridSizeDec.addEventListener("click", () => setGridSize(getTriageViewport().getView().gridSize - 1));
     }
     if (dom.btnGridSizeInc) {
-        dom.btnGridSizeInc.addEventListener("click", () => setGridSize(state.gridSize + 1));
+        dom.btnGridSizeInc.addEventListener("click", () => setGridSize(getTriageViewport().getView().gridSize + 1));
     }
     if (dom.gridSizeInput) {
         dom.gridSizeInput.addEventListener("input", (e) => {
@@ -256,8 +242,8 @@ export function setupEventListeners() {
     });
 
     dom.btnFitScreen.addEventListener("click", () => fitToScreen());
-    document.getElementById("btn-zoom-in").addEventListener("click", () => zoomStep(1.25));
-    document.getElementById("btn-zoom-out").addEventListener("click", () => zoomStep(1 / 1.25));
+    document.getElementById("btn-zoom-in").addEventListener("click", () => getTriageViewport().zoomBy(1.25));
+    document.getElementById("btn-zoom-out").addEventListener("click", () => getTriageViewport().zoomBy(1 / 1.25));
 
     dom.btnPrev.addEventListener("click", () => navigatePrev());
     dom.btnNext.addEventListener("click", () => navigateNext());
@@ -309,8 +295,7 @@ export function setupEventListeners() {
     window.addEventListener("keydown", handleKeydown);
     window.addEventListener("keyup", handleKeyup);
     window.addEventListener("blur", () => {
-        stopPanLoop();
-        stopZoomLoop();
+        stopStageMotion();
         stopFsPanLoop();
         stopFsZoomLoop();
         if (state.isDraggingGrid) {
@@ -335,8 +320,7 @@ export function setupEventListeners() {
     window.addEventListener("focusin", (e) => {
         const tag = e.target?.tagName?.toLowerCase();
         if (tag === "input" || tag === "textarea" || tag === "select") {
-            stopPanLoop();
-            stopZoomLoop();
+            stopStageMotion();
             stopFsPanLoop();
             stopFsZoomLoop();
         }
@@ -352,8 +336,7 @@ function handleKeydown(e) {
 
     // Global Modal Dismiss: Escape
     if (e.key === "Escape") {
-        stopPanLoop();
-        stopZoomLoop();
+        stopStageMotion();
         if (state.gridPanelOpen) {
             toggleGridPanel(false);
             e.preventDefault();
@@ -576,13 +559,13 @@ function handleKeydown(e) {
     // Shift + [ / ]: Adjust Grid Size
     if (e.shiftKey && (e.key === "[" || e.key === "{" || e.code === "BracketLeft")) {
         const sizeStep = e.altKey ? 5 : 1;
-        setGridSize(state.gridSize - sizeStep);
+        setGridSize(getTriageViewport().getView().gridSize - sizeStep);
         e.preventDefault();
         return;
     }
     if (e.shiftKey && (e.key === "]" || e.key === "}" || e.code === "BracketRight")) {
         const sizeStep = e.altKey ? 5 : 1;
-        setGridSize(state.gridSize + sizeStep);
+        setGridSize(getTriageViewport().getView().gridSize + sizeStep);
         e.preventDefault();
         return;
     }
@@ -598,10 +581,7 @@ function handleKeydown(e) {
     if (!isInputFocused && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const key = e.key.toLowerCase();
         if (key === "w" || key === "a" || key === "s" || key === "d") {
-            if (!activePanKeys[key]) {
-                activePanKeys[key] = true;
-                startPanLoop();
-            }
+            getTriageViewport().pressPanKey(key);
             e.preventDefault();
             return;
         }
@@ -610,14 +590,12 @@ function handleKeydown(e) {
     // Viewport Zooming: [ and ]
     if (!isInputFocused && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
         if (e.key === "]" || e.code === "BracketRight") {
-            activeZoomKeys.in = true;
-            startZoomLoop();
+            getTriageViewport().setZoomKey("in", true);
             e.preventDefault();
             return;
         }
         if (e.key === "[" || e.code === "BracketLeft") {
-            activeZoomKeys.out = true;
-            startZoomLoop();
+            getTriageViewport().setZoomKey("out", true);
             e.preventDefault();
             return;
         }
@@ -674,12 +652,12 @@ function handleKeydown(e) {
 
     // Zoom: + or = / - or _
     if (e.key === "+" || e.key === "=") {
-        zoomStep(1.2);
+        getTriageViewport().zoomBy(1.2);
         e.preventDefault();
         return;
     }
     if (e.key === "-" || e.key === "_") {
-        zoomStep(1 / 1.2);
+        getTriageViewport().zoomBy(1 / 1.2);
         e.preventDefault();
         return;
     }
@@ -729,31 +707,22 @@ function handleKeyup(e) {
     }
     const key = e.key.toLowerCase();
     if (key === "w" || key === "a" || key === "s" || key === "d") {
-        activePanKeys[key] = false;
+        getTriageViewport().releasePanKey(key);
         activeFsPanKeys[key] = false;
-        if (!activePanKeys.w && !activePanKeys.a && !activePanKeys.s && !activePanKeys.d) {
-            stopPanLoop();
-        }
         if (!activeFsPanKeys.w && !activeFsPanKeys.a && !activeFsPanKeys.s && !activeFsPanKeys.d) {
             stopFsPanLoop();
         }
     }
     if (e.key === "]" || e.code === "BracketRight") {
-        activeZoomKeys.in = false;
+        getTriageViewport().setZoomKey("in", false);
         activeFsZoomKeys.in = false;
-        if (!activeZoomKeys.in && !activeZoomKeys.out) {
-            stopZoomLoop();
-        }
         if (!activeFsZoomKeys.in && !activeFsZoomKeys.out) {
             stopFsZoomLoop();
         }
     }
     if (e.key === "[" || e.code === "BracketLeft") {
-        activeZoomKeys.out = false;
+        getTriageViewport().setZoomKey("out", false);
         activeFsZoomKeys.out = false;
-        if (!activeZoomKeys.in && !activeZoomKeys.out) {
-            stopZoomLoop();
-        }
         if (!activeFsZoomKeys.in && !activeFsZoomKeys.out) {
             stopFsZoomLoop();
         }

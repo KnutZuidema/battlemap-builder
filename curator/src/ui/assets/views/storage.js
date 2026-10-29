@@ -5,7 +5,7 @@
 import { state } from "../store.js";
 import { formatBytes } from "../kit/format.js";
 import { fetchStatus, showToast } from "../shell/status.js";
-import { stopPanLoop, stopZoomLoop } from "../stage/canvas.js";
+import { stopStageMotion } from "../stage/canvas.js";
 import { fetchStagingQueue } from "./triage.js";
 
 export async function fetchStorageStats() {
@@ -86,8 +86,7 @@ function renderStorageStats(stats) {
 }
 
 function openStorageModal() {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     state.storageModalOpen = true;
     const modal = document.getElementById("storage-modal");
     modal?.classList.remove("hidden");
@@ -95,16 +94,14 @@ function openStorageModal() {
 }
 
 export function closeStorageModal() {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     state.storageModalOpen = false;
     const modal = document.getElementById("storage-modal");
     modal?.classList.add("hidden");
 }
 
 function openPurgeModal() {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     state.purgeModalOpen = true;
     const modal = document.getElementById("purge-confirm-modal");
     modal?.classList.remove("hidden");
@@ -116,8 +113,7 @@ function openPurgeModal() {
 }
 
 export function closePurgeModal() {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     state.purgeModalOpen = false;
     const modal = document.getElementById("purge-confirm-modal");
     modal?.classList.add("hidden");

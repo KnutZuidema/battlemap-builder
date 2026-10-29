@@ -4,11 +4,10 @@
 
 import { dom } from "../dom.js";
 import { state } from "../store.js";
-import { stopPanLoop, stopZoomLoop } from "../stage/canvas.js";
+import { stopStageMotion } from "../stage/canvas.js";
 
 export function toggleHelpModal() {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     state.helpModalOpen = !state.helpModalOpen;
     if (state.helpModalOpen) {
         dom.helpModal.classList.remove("hidden");
@@ -19,8 +18,7 @@ export function toggleHelpModal() {
 }
 
 export function closeHelpModal() {
-    stopPanLoop();
-    stopZoomLoop();
+    stopStageMotion();
     state.helpModalOpen = false;
     dom.helpModal.classList.add("hidden");
     dom.canvas.focus();

@@ -8,6 +8,8 @@ import {
     MIN_ZOOM,
     MAX_ZOOM,
     calculateLatticeInfo,
+    formatGridStatus,
+    formatLatticeStatus,
 } from "../assets/kit/grid-math.js";
 
 test("exposes the VTT grid and zoom bounds", () => {
@@ -106,4 +108,54 @@ test("cell size is clamped to the 16px minimum and defaults to 64", () => {
     assert.equal(defaulted.cols, 8);
     assert.equal(defaulted.rows, 8);
     assert.equal(defaulted.isEligible, false);
+});
+
+test("non-finite offsets collapse to zero and oversized cells leave no whole cells", () => {
+    const nonFinite = calculateLatticeInfo(1024, 1024, 64, NaN, undefined);
+    assert.equal(nonFinite.ox, 0);
+    assert.equal(nonFinite.oy, 0);
+    assert.equal(nonFinite.cols, 16);
+    assert.equal(nonFinite.rows, 16);
+
+    const oversized = calculateLatticeInfo(200, 100, 300, 0, 0);
+    assert.equal(oversized.size, 300);
+    assert.equal(oversized.cols, 0);
+    assert.equal(oversized.rows, 0);
+    assert.equal(oversized.isEligible, false);
+    assert.equal(oversized.fullW, 0);
+
+    const negative = calculateLatticeInfo(-500, 128, 64, 0, 0);
+    assert.equal(negative.cols, 0);
+    assert.equal(negative.rows, 2);
+    assert.equal(negative.isEligible, false);
+});
+
+test("formatGridStatus renders the cell size, signed offset and visibility", () => {
+    const base = { gridSize: 64, gridOffset: { x: 0, y: 0 }, gridVisible: true };
+    assert.equal(formatGridStatus(base), "Grid: 64px [ON]");
+    assert.equal(formatGridStatus({ ...base, gridVisible: false }), "Grid: 64px [OFF]");
+    assert.equal(
+        formatGridStatus({ ...base, gridSize: 32, gridOffset: { x: 12, y: -8 } }),
+        "Grid: 32px (+12, -8) [ON]"
+    );
+    assert.equal(
+        formatGridStatus({ ...base, gridVisible: false, gridOffset: { x: 0, y: 96 } }),
+        "Grid: 64px (0, +96) [OFF]"
+    );
+    assert.equal(
+        formatGridStatus({ gridSize: 0, gridOffset: null }),
+        "Grid: 64px [ON]",
+        "missing size and offset fall back to the VTT defaults"
+    );
+});
+
+test("formatLatticeStatus renders the eligible and ineligible badge text", () => {
+    assert.equal(
+        formatLatticeStatus(calculateLatticeInfo(2048, 2048, 64, 0, 0)),
+        "32 × 32 cells (2 × 2 sections)"
+    );
+    assert.equal(
+        formatLatticeStatus(calculateLatticeInfo(1024, 1024, 64, 1, 0)),
+        "15 × 16 cells (< 16×16 cells)"
+    );
 });

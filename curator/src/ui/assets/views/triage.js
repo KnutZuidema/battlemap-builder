@@ -6,8 +6,14 @@ import { dom } from "../dom.js";
 import { state } from "../store.js";
 import { formatRoleName } from "../kit/format.js";
 import { getCandidateLayers } from "../kit/layers.js";
-import { requestRender, fitToScreen } from "../stage/canvas.js";
-import { enterLabelingMode, exitLabelingMode, updateGridPanel } from "../stage/grid-panel.js";
+import {
+    fitToScreen,
+    flushGridEdits,
+    requestRender,
+    restoreCandidateGrid,
+    setGridOwner,
+} from "../stage/canvas.js";
+import { enterLabelingMode, exitLabelingMode, updateGridPanel } from "../shell/grid-panel.js";
 import { fetchThemeSuggestions } from "./curation.js";
 import { showEmptyState, showLoading, showToast, updateHud } from "../shell/status.js";
 
@@ -26,6 +32,9 @@ export async function fetchStagingQueue() {
             throw new Error(`HTTP ${res.status}`);
         }
         const data = await res.json();
+        // Persist a pending grid burst while the candidate that owns it is still in the
+        // queue we are about to replace.
+        flushGridEdits();
         // A candidate whose curation request is still in flight is already gone from the
         // reviewer's local queue; do not resurrect it from the server's staging listing.
         state.candidates = (Array.isArray(data) ? data : []).filter(
@@ -35,6 +44,7 @@ export async function fetchStagingQueue() {
         if (state.candidates.length > 0) {
             loadCandidate(0);
         } else {
+            setGridOwner(null);
             state.currentIndex = -1;
             state.currentImage = null;
             showEmptyState(true);
@@ -53,7 +63,10 @@ export async function fetchStagingQueue() {
  */
 export function loadCandidate(index) {
     exitLabelingMode();
+    // Persist any pending edit burst against the candidate that owns it.
+    flushGridEdits();
     if (index < 0 || index >= state.candidates.length) {
+        setGridOwner(null);
         state.currentIndex = -1;
         state.currentLayerIndex = 0;
         state.currentImage = null;
@@ -69,16 +82,7 @@ export function loadCandidate(index) {
     state.currentLayerIndex = 0;
     const candidate = state.candidates[index];
     fetchThemeSuggestions(candidate);
-    if (candidate.grid) {
-        state.gridSize = candidate.grid.cell_size_px ?? 64;
-        state.gridOffset = {
-            x: candidate.grid.offset_x ?? 0,
-            y: candidate.grid.offset_y ?? 0,
-        };
-    } else {
-        state.gridSize = 64;
-        state.gridOffset = { x: 0, y: 0 };
-    }
+    restoreCandidateGrid(candidate);
     updateGridPanel();
     const cacheKey = `${candidate.id}_layer_0`;
 
@@ -233,7 +237,7 @@ function getRoleCssClass(role) {
 
 /**
  * Synchronized in-place layer switching.
- * Preserves state.pan and state.zoom exactly without resetting the viewport!
+ * Preserves the viewport pan and zoom exactly without resetting them!
  */
 export function setLayer(layerIndex) {
     if (state.currentIndex < 0 || state.currentIndex >= state.candidates.length) return;
@@ -619,6 +623,7 @@ async function splitCandidate(id) {
         const splitCandidates = await res.json();
         const idx = state.candidates.findIndex((c) => c.id === id);
         if (idx !== -1) {
+            flushGridEdits();
             state.candidates.splice(idx, 1, ...splitCandidates);
             state.lastSplitParentId = id;
             loadCandidate(idx);
@@ -657,6 +662,7 @@ async function regroupCandidate(parentId) {
             const count = state.candidates.filter(
                 (c) => c.parent_group_id === parentId || c.id === parentId || c.id.startsWith(`${parentId}_`)
             ).length;
+            flushGridEdits();
             state.candidates.splice(firstIdx, Math.max(1, count), regroupedCandidate);
             state.lastSplitParentId = null;
             loadCandidate(firstIdx);

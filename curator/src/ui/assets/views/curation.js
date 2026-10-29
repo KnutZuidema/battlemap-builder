@@ -14,6 +14,7 @@ import { enterLabelingMode, exitLabelingMode, toggleGridPanel } from "../shell/g
 import { fetchStagingQueue, loadCandidate, setLayer } from "./triage.js";
 import { describeStagingCandidate, suggestStagingThemes } from "../requests/ai.js";
 import { abort, has, join, latest } from "../requests/tracker.js";
+import { curateCandidate, rejectCandidate, undoReject } from "../requests/curation.js";
 
 // Curate Decision Modal Flow State
 export const decisionState = {
@@ -660,22 +661,14 @@ function submitDecisionCuration() {
     loadCandidate(state.currentIndex);
     state.pendingCurationIds.add(candidate.id);
 
-    fetch("/api/curate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-    })
-        .then(async (res) => {
-            if (!res.ok) {
-                const errJson = await res.json().catch(() => ({}));
-                throw new Error(errJson.error || errJson.message || `HTTP ${res.status}`);
-            }
+    curateCandidate(payload)
+        .then(() => {
             showToast(`Candidate #${candidate.id} curated`, "success");
             invalidateDatasetReadiness();
         })
-        .catch((err) => {
+        .catch(() => {
+            // The request module raised the pill and fired the toast; put the candidate back.
             restoreUncuratedCandidate(candidate, removedIndex);
-            showToast(`Curate failed for #${candidate.id}: ${err.message}`, "danger");
         })
         .finally(() => {
             state.pendingCurationIds.delete(candidate.id);
@@ -801,20 +794,7 @@ export async function rejectCurrentCandidate() {
     state.isSubmitting = true;
 
     try {
-        const payload = {
-            id: candidate.id,
-        };
-
-        const res = await fetch("/api/reject", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
-
-        if (!res.ok) {
-            const errJson = await res.json().catch(() => ({}));
-            throw new Error(errJson.message || `HTTP ${res.status}`);
-        }
+        await rejectCandidate(candidate.id);
 
         state.rejectedStack.push({ candidate, index: removedIndex });
         updateUndoRejectButtonState();
@@ -841,8 +821,8 @@ export async function rejectCurrentCandidate() {
 
         loadCandidate(state.currentIndex);
         fetchStatus();
-    } catch (err) {
-        showToast(`Rejection failed: ${err.message}`, "danger");
+    } catch {
+        // The request module raised the pill and fired the toast; the queue is unchanged.
     } finally {
         state.isSubmitting = false;
     }
@@ -871,18 +851,7 @@ export async function undoRejectCandidate(candidateId = null) {
 
     state.isSubmitting = true;
     try {
-        const res = await fetch("/api/reject/undo", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: targetId }),
-        });
-
-        if (!res.ok) {
-            const errJson = await res.json().catch(() => ({}));
-            throw new Error(errJson.error || errJson.message || `HTTP ${res.status}`);
-        }
-
-        const data = await res.json();
+        const data = await undoReject(targetId);
         const restoredCandidate = data.candidate || (stackEntry ? stackEntry.candidate : null);
 
         if (restoredCandidate) {
@@ -907,12 +876,12 @@ export async function undoRejectCandidate(candidateId = null) {
             showToast(`Restored candidate #${targetId} to staging queue`, "success");
         }
         fetchStatus();
-    } catch (err) {
+    } catch {
         if (stackEntry) {
             state.rejectedStack.push(stackEntry);
             updateUndoRejectButtonState();
         }
-        showToast(`Undo rejection failed: ${err.message}`, "danger");
+        // The request module raised the pill and fired the toast; the rejection stays stacked.
     } finally {
         state.isSubmitting = false;
     }

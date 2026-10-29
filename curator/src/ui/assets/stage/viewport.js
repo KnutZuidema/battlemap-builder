@@ -22,8 +22,8 @@ import {
     MAX_ZOOM,
 } from "../kit/grid-math.js";
 
-export const PAN_SPEED = 700; // pixels per second
-export const ZOOM_SPEED = 2.0; // zoom factor per second of held bracket key
+const PAN_SPEED = 700; // pixels per second
+const ZOOM_SPEED = 2.0; // zoom factor per second of held bracket key
 
 const FIT_PADDING = 32;
 const GRID_PERSIST_DEBOUNCE_MS = 300;

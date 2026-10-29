@@ -52,11 +52,25 @@ export function getFullscreenViewport() {
     return viewport;
 }
 
+/**
+ * Content bounds `fit()` measures: the layer image the frame draws at its own
+ * `naturalWidth`/`naturalHeight`. Curated layers can differ in pixel bounds from the
+ * ground layer, so J/K landing on an upper floor must fit that floor, not the ground.
+ * The ground resolver only covers frames drawn before the image has loaded.
+ */
+function getFullscreenContentSize() {
+    const img = state.libraryFullscreenCurrentImage;
+    if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+        return { width: img.naturalWidth, height: img.naturalHeight };
+    }
+    return getLibraryFullscreenDimensions();
+}
+
 function ensureFullscreenViewport() {
     if (viewport || !dom.libraryFullscreenCanvas) return viewport;
     viewport = createViewport(dom.libraryFullscreenCanvas, {
         draw: drawFullscreenFrame,
-        contentSize: getLibraryFullscreenDimensions,
+        contentSize: getFullscreenContentSize,
         gridOwner: () => (state.libraryFullscreenMap ? state.libraryFullscreenMap.id : null),
         persistGrid: persistFullscreenGrid,
     });

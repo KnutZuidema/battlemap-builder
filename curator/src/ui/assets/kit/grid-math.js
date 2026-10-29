@@ -50,16 +50,6 @@ export function formatGridStatus(view) {
 }
 
 /**
- * The lattice badge: whole cells, and their 16×16 section split when eligible.
- */
-export function formatLatticeStatus(lattice) {
-    if (lattice.isEligible) {
-        return `${lattice.cols} × ${lattice.rows} cells (${lattice.kx} × ${lattice.ky} sections)`;
-    }
-    return `${lattice.cols} × ${lattice.rows} cells (< 16×16 cells)`;
-}
-
-/**
  * The Grid Configuration panel's two lattice readouts, split across the cells and
  * sections spans both panels render.
  */
@@ -68,4 +58,12 @@ export function formatLatticePanel(lattice) {
         cells: `${lattice.cols} × ${lattice.rows} cells`,
         sections: lattice.isEligible ? `${lattice.kx} × ${lattice.ky} sections` : "< 16×16 cells",
     };
+}
+
+/**
+ * The lattice badge: the panel's cells and sections readouts on one line.
+ */
+export function formatLatticeStatus(lattice) {
+    const readout = formatLatticePanel(lattice);
+    return `${readout.cells} (${readout.sections})`;
 }

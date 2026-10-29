@@ -8,7 +8,7 @@ import { calculateLatticeInfo } from "../kit/grid-math.js";
 import { getKnownDatasetTags } from "../kit/tags.js";
 import { fetchStatus, showToast } from "../shell/status.js";
 import { invalidateDatasetReadiness } from "./readiness.js";
-import { getTriageViewport, stopStageMotion } from "../stage/canvas.js";
+import { flushGridEdits, getTriageViewport, stopStageMotion } from "../stage/canvas.js";
 import { getCandidateLayers, getCurrentGroundDimensions } from "../kit/layers.js";
 import { enterLabelingMode, exitLabelingMode, toggleGridPanel } from "../shell/grid-panel.js";
 import { fetchStagingQueue, loadCandidate, setLayer } from "./triage.js";
@@ -672,6 +672,8 @@ function submitDecisionCuration() {
             state.imageCache.delete(`${candidate.id}_layer_${idx}`);
         });
     }
+    // Persist a pending grid burst while the candidate that owns it is still queued.
+    flushGridEdits();
     state.candidates.splice(removedIndex, 1);
 
     // Maintain index within remaining bounds
@@ -715,6 +717,7 @@ function restoreUncuratedCandidate(candidate, removedIndex) {
         return; // Queue was refetched meanwhile and already lists the candidate.
     }
     const insertAt = Math.min(Math.max(removedIndex, 0), state.candidates.length);
+    flushGridEdits();
     state.candidates.splice(insertAt, 0, candidate);
     if (state.currentIndex < 0) {
         state.currentIndex = insertAt;
@@ -852,6 +855,8 @@ export async function rejectCurrentCandidate() {
                 state.imageCache.delete(`${candidate.id}_layer_${idx}`);
             });
         }
+        // Persist a pending grid burst while the candidate that owns it is still queued.
+        flushGridEdits();
         state.candidates.splice(state.currentIndex, 1);
 
         if (state.currentIndex >= state.candidates.length) {
@@ -912,6 +917,7 @@ export async function undoRejectCandidate(candidateId = null) {
                 : 0;
 
             if (!state.candidates.some((c) => c.id === restoredCandidate.id)) {
+                flushGridEdits();
                 state.candidates.splice(insertAt, 0, restoredCandidate);
             }
             const targetIndex = state.candidates.findIndex((c) => c.id === restoredCandidate.id);

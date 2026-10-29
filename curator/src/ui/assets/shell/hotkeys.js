@@ -132,7 +132,7 @@ export function setupEventListeners() {
             const zoom = viewport.getView().zoom;
             const imgDx = (e.clientX - state.gridDragStart.x) / zoom;
             const imgDy = (e.clientY - state.gridDragStart.y) / zoom;
-            viewport.setGrid({
+            viewport.setGridOffset({
                 x: Math.round(state.gridDragOrigin.x + imgDx),
                 y: Math.round(state.gridDragOrigin.y + imgDy),
             });

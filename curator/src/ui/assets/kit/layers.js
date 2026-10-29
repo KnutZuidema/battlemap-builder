@@ -5,6 +5,8 @@
 
 import { state } from "../store.js";
 
+const DEFAULT_DIMENSIONS = { width: 2048, height: 2048 };
+
 export function getCandidateLayers(candidate) {
     if (!candidate) return [];
     if (candidate.layers && candidate.layers.length > 0) {
@@ -19,74 +21,70 @@ export function getCandidateLayers(candidate) {
     }];
 }
 
+function isUsableDimensionPair(dimensions) {
+    return Boolean(dimensions) && dimensions[0] > 0 && dimensions[1] > 0;
+}
+
+function isUsableSize(size) {
+    return Boolean(size) && size.width > 0 && size.height > 0;
+}
+
+/**
+ * Resolves the Ground layer dimensions of a layer bundle.
+ *
+ * Walks the layer list for a normalised `ground` role, then index 0, then the first
+ * layer, and finally falls back to the map/candidate dimensions (array or `{width,
+ * height}` form) and the loaded image's natural size. Everything missing yields the
+ * default 2048×2048 bounds.
+ *
+ * `getCurrentGroundDimensions` and `getLibraryFullscreenDimensions` are the two state
+ * readers over it; the resolution itself is identical for candidates and library maps.
+ */
+function resolveGroundDimensions(layers, dimensions, image) {
+    const list = Array.isArray(layers) ? layers : [];
+    const ground = list.find(l => (l.role || "").toLowerCase().replace(/[-_]/g, "") === "ground");
+    if (ground && isUsableDimensionPair(ground.dimensions)) {
+        return { width: ground.dimensions[0], height: ground.dimensions[1] };
+    }
+    const indexZero = list.find(l => l.index === 0);
+    if (indexZero && isUsableDimensionPair(indexZero.dimensions)) {
+        return { width: indexZero.dimensions[0], height: indexZero.dimensions[1] };
+    }
+    if (list.length > 0 && isUsableDimensionPair(list[0].dimensions)) {
+        return { width: list[0].dimensions[0], height: list[0].dimensions[1] };
+    }
+    if (Array.isArray(dimensions) && isUsableDimensionPair(dimensions)) {
+        return { width: dimensions[0], height: dimensions[1] };
+    }
+    if (isUsableSize(dimensions)) {
+        return { width: dimensions.width, height: dimensions.height };
+    }
+    if (image && image.naturalWidth > 0) {
+        return { width: image.naturalWidth, height: image.naturalHeight };
+    }
+    return { ...DEFAULT_DIMENSIONS };
+}
+
 /**
  * Retrieves Ground layer dimensions for the current triage candidate.
  */
 export function getCurrentGroundDimensions() {
     const cand = state.candidates && state.candidates[state.currentIndex];
-    if (cand) {
-        const layers = getCandidateLayers(cand);
-        const ground = layers.find(l => {
-            const r = (l.role || "").toLowerCase().replace(/[-_]/g, "");
-            return r === "ground";
-        });
-        if (ground && ground.dimensions && ground.dimensions[0] > 0 && ground.dimensions[1] > 0) {
-            return { width: ground.dimensions[0], height: ground.dimensions[1] };
-        }
-        const l0 = layers.find(l => l.index === 0);
-        if (l0 && l0.dimensions && l0.dimensions[0] > 0 && l0.dimensions[1] > 0) {
-            return { width: l0.dimensions[0], height: l0.dimensions[1] };
-        }
-        if (layers.length > 0 && layers[0].dimensions && layers[0].dimensions[0] > 0 && layers[0].dimensions[1] > 0) {
-            return { width: layers[0].dimensions[0], height: layers[0].dimensions[1] };
-        }
-        if (cand.dimensions && Array.isArray(cand.dimensions) && cand.dimensions[0] > 0 && cand.dimensions[1] > 0) {
-            return { width: cand.dimensions[0], height: cand.dimensions[1] };
-        }
-        if (cand.dimensions && cand.dimensions.width && cand.dimensions.height) {
-            return { width: cand.dimensions.width, height: cand.dimensions.height };
-        }
-    }
-    if (state.currentImage && state.currentImage.naturalWidth > 0) {
-        return { width: state.currentImage.naturalWidth, height: state.currentImage.naturalHeight };
-    }
-    return { width: 2048, height: 2048 };
+    return resolveGroundDimensions(
+        cand ? getCandidateLayers(cand) : null,
+        cand ? cand.dimensions : null,
+        state.currentImage
+    );
 }
 
 /**
  * Retrieves Ground layer dimensions for the current fullscreen map.
  */
 export function getLibraryFullscreenDimensions() {
-    if (state.libraryFullscreenMap) {
-        const map = state.libraryFullscreenMap;
-        if (map.layers && Array.isArray(map.layers) && map.layers.length > 0) {
-            const ground = map.layers.find(l => {
-                const r = (l.role || "").toLowerCase().replace(/[-_]/g, "");
-                return r === "ground";
-            });
-            if (ground && ground.dimensions && ground.dimensions[0] > 0 && ground.dimensions[1] > 0) {
-                return { width: ground.dimensions[0], height: ground.dimensions[1] };
-            }
-            const l0 = map.layers.find(l => l.index === 0);
-            if (l0 && l0.dimensions && l0.dimensions[0] > 0 && l0.dimensions[1] > 0) {
-                return { width: l0.dimensions[0], height: l0.dimensions[1] };
-            }
-            if (map.layers[0].dimensions && map.layers[0].dimensions[0] > 0 && map.layers[0].dimensions[1] > 0) {
-                return { width: map.layers[0].dimensions[0], height: map.layers[0].dimensions[1] };
-            }
-        }
-        if (map.dimensions && Array.isArray(map.dimensions) && map.dimensions[0] > 0 && map.dimensions[1] > 0) {
-            return { width: map.dimensions[0], height: map.dimensions[1] };
-        }
-        if (map.dimensions && map.dimensions.width && map.dimensions.height) {
-            return { width: map.dimensions.width, height: map.dimensions.height };
-        }
-    }
-    if (state.libraryFullscreenCurrentImage && state.libraryFullscreenCurrentImage.naturalWidth > 0) {
-        return {
-            width: state.libraryFullscreenCurrentImage.naturalWidth,
-            height: state.libraryFullscreenCurrentImage.naturalHeight,
-        };
-    }
-    return { width: 2048, height: 2048 };
+    const map = state.libraryFullscreenMap;
+    return resolveGroundDimensions(
+        map ? map.layers : null,
+        map ? map.dimensions : null,
+        state.libraryFullscreenCurrentImage
+    );
 }

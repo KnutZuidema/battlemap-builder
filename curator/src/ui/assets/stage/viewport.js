@@ -5,7 +5,8 @@
  * One viewport is created per canvas with a content-drawing callback. Callers read
  * a snapshot through `getView()` and subscribe for changes, which are coalesced to
  * one notification per rendered frame. Grid edits are handed to the caller-supplied
- * `persistGrid` callback at most once per debounce burst.
+ * `persistGrid` callback at most once per debounce burst, tagged with the owner that
+ * `gridOwner` resolved when that burst was armed.
  */
 
 import {
@@ -37,11 +38,18 @@ function clamp(value, min, max) {
  * @param {HTMLCanvasElement} canvas
  * @param {object} options
  * @param {(ctx: CanvasRenderingContext2D, view: object) => void} options.draw
- *        Paints one frame in CSS pixels; the context is already cleared.
- * @param {(view: object) => void} options.persistGrid
- *        Called after a burst of Grid Configuration edits settles.
- * @param {() => ({ width: number, height: number } | null)} [options.contentSize]
- *        Current content bounds in content pixels; `fit()` needs them.
+ *        Paints one frame in CSS pixels. The callback owns clearing: the viewport
+ *        hands over the context untouched, so a draw that skips `clearRect` leaves
+ *        the previous frame's pixels behind.
+ * @param {(owner: string | number | null, view: object) => void} options.persistGrid
+ *        Called after a burst of Grid Configuration edits settles. `owner` is what
+ *        `gridOwner()` returned when the burst was armed, not what it returns now,
+ *        so a queue that moves on mid-burst cannot retarget the write.
+ * @param {() => (string | number | null)} options.gridOwner
+ *        Resolves the owner (candidate id) of the grid currently displayed; read
+ *        once per burst, at the first edit that arms it.
+ * @param {() => ({ width: number, height: number } | null)} options.contentSize
+ *        Current content bounds in content pixels; `fit()` needs them. Required.
  * @param {(callback: (timestamp: number) => void) => number} [options.requestFrame]
  * @param {(handle: number) => void} [options.cancelFrame]
  */
@@ -49,10 +57,17 @@ export function createViewport(canvas, options) {
     const {
         draw,
         persistGrid,
-        contentSize = () => null,
+        gridOwner = () => null,
+        contentSize,
         requestFrame = (callback) => globalThis.requestAnimationFrame(callback),
         cancelFrame = (handle) => globalThis.cancelAnimationFrame(handle),
     } = options;
+
+    if (typeof contentSize !== "function") {
+        throw new TypeError(
+            "createViewport: options.contentSize is required (a function returning the content bounds in content pixels); without it fit() cannot size the content and would silently do nothing."
+        );
+    }
 
     const pan = { x: 0, y: 0 };
     let zoom = 1.0;
@@ -77,6 +92,7 @@ export function createViewport(canvas, options) {
 
     let gridDirty = false;
     let gridPersistTimer = null;
+    let pendingGridOwner = null;
 
     function getView() {
         return {
@@ -318,10 +334,15 @@ export function createViewport(canvas, options) {
         }
         if (!gridDirty) return;
         gridDirty = false;
-        persistGrid(getView());
+        const owner = pendingGridOwner;
+        pendingGridOwner = null;
+        persistGrid(owner, getView());
     }
 
     function scheduleGridPersist() {
+        // The burst belongs to whoever owned the grid when its first edit landed:
+        // the queue may have advanced by the time it flushes.
+        if (!gridDirty) pendingGridOwner = gridOwner();
         gridDirty = true;
         clearTimeout(gridPersistTimer); // trailing debounce: each edit re-arms the burst
         gridPersistTimer = setTimeout(flushGrid, GRID_PERSIST_DEBOUNCE_MS);
@@ -337,7 +358,7 @@ export function createViewport(canvas, options) {
         requestRender();
     }
 
-    function setGridOffset(x, y) {
+    function applyGridOffset(x, y) {
         const nextX = Math.round(x);
         const nextY = Math.round(y);
         if (nextX === gridOffset.x && nextY === gridOffset.y) return;
@@ -348,12 +369,15 @@ export function createViewport(canvas, options) {
     }
 
     function nudgeGrid(dx, dy) {
-        setGridOffset(gridOffset.x + dx, gridOffset.y + dy);
+        applyGridOffset(gridOffset.x + dx, gridOffset.y + dy);
     }
 
-    function setGrid(offset) {
+    /**
+     * Restores the grid offset (the cell size is `setGridSize`'s to restore).
+     */
+    function setGridOffset(offset) {
         if (!offset) return;
-        setGridOffset(offset.x ?? 0, offset.y ?? 0);
+        applyGridOffset(offset.x ?? 0, offset.y ?? 0);
     }
 
     function resetGrid() {
@@ -384,16 +408,6 @@ export function createViewport(canvas, options) {
         requestRender();
     }
 
-    function destroy() {
-        suspend();
-        if (gridPersistTimer !== null) {
-            clearTimeout(gridPersistTimer);
-            gridPersistTimer = null;
-        }
-        gridDirty = false;
-        listeners.clear();
-    }
-
     return {
         getView,
         subscribe,
@@ -408,11 +422,10 @@ export function createViewport(canvas, options) {
         setZoomKey,
         setGridSize,
         nudgeGrid,
-        setGrid,
+        setGridOffset,
         resetGrid,
         suspend,
         resume,
         flushGrid,
-        destroy,
     };
 }

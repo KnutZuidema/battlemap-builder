@@ -53,14 +53,30 @@ function createHarness({ width = 800, height = 600, content = null } = {}) {
     const canvas = createFakeCanvas(width, height);
     const draws = [];
     const persisted = [];
+    const owners = [];
+    let owner = null;
     const viewport = createViewport(canvas, {
         draw: (ctx, view) => draws.push(view),
-        persistGrid: (view) => persisted.push(view),
+        persistGrid: (gridOwner, view) => {
+            owners.push(gridOwner);
+            persisted.push(view);
+        },
+        gridOwner: () => owner,
         contentSize: () => content,
         requestFrame: (callback) => clock.requestFrame(callback),
         cancelFrame: (handle) => clock.cancelFrame(handle),
     });
-    return { clock, canvas, viewport, draws, persisted };
+    return {
+        clock,
+        canvas,
+        viewport,
+        draws,
+        persisted,
+        owners,
+        setOwner: (next) => {
+            owner = next;
+        },
+    };
 }
 
 test("coalesces N requestRender calls into one draw and one notification per subscriber", () => {
@@ -209,7 +225,7 @@ test("grid APIs clamp the cell size and round the offset", () => {
     h.viewport.nudgeGrid(3, -2);
     assert.deepEqual(h.viewport.getView().gridOffset, { x: 3, y: -2 });
 
-    h.viewport.setGrid({ x: 10.4, y: -7.6 });
+    h.viewport.setGridOffset({ x: 10.4, y: -7.6 });
     assert.deepEqual(h.viewport.getView().gridOffset, { x: 10, y: -8 });
 
     h.viewport.resetGrid();
@@ -338,4 +354,33 @@ test("the zoom loop scales the view while a bracket key is held", () => {
     h.clock.step(400);
     h.clock.step(500);
     assert.equal(h.clock.pending(), 0, "no loop frames remain after release");
+});
+
+test("a burst persists against the owner captured when it was armed", () => {
+    const h = createHarness();
+    h.viewport.resize();
+
+    h.setOwner(102);
+    h.viewport.setGridSize(96);
+    // The queue moves on while the burst is still pending.
+    h.setOwner(103);
+    h.viewport.nudgeGrid(4, 2);
+
+    h.viewport.flushGrid();
+    assert.deepEqual(h.owners, [102], "the burst keeps the owner it was armed with");
+    assert.equal(h.persisted[0].gridSize, 96);
+
+    h.viewport.flushGrid();
+    assert.equal(h.persisted.length, 1, "one burst persists exactly once");
+
+    h.viewport.setGridSize(128);
+    h.viewport.flushGrid();
+    assert.deepEqual(h.owners, [102, 103], "the next burst is armed with the new owner");
+});
+
+test("createViewport rejects a missing contentSize() callback", () => {
+    assert.throws(
+        () => createViewport(createFakeCanvas(), { draw() {}, persistGrid() {} }),
+        /contentSize is required/,
+    );
 });

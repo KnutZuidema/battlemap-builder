@@ -11,10 +11,51 @@ import { createViewport } from "./viewport.js";
 let viewport = null;
 
 /**
+ * The candidate id whose Grid Configuration the viewport displays. An edit burst
+ * captures it at its first edit and persists against it, so a burst armed for one
+ * candidate can never land on the candidate the queue advances to instead.
+ */
+let gridOwnerId = null;
+
+/**
  * The triage Stage Viewport; null until `setupCanvas()` runs.
  */
 export function getTriageViewport() {
     return viewport;
+}
+
+/**
+ * Binds subsequent Grid Configuration edits to a candidate id, and `null` when no
+ * candidate is loaded. Call before restoring a candidate's grid into the viewport.
+ */
+export function setGridOwner(candidateId) {
+    gridOwnerId = candidateId ?? null;
+}
+
+/**
+ * Applies a candidate's persisted Grid Configuration to the viewport and binds the
+ * persistence owner to it.
+ */
+export function restoreCandidateGrid(candidate) {
+    if (!candidate) {
+        setGridOwner(null);
+        return;
+    }
+    setGridOwner(candidate.id);
+    if (!viewport) return;
+    viewport.setGridSize(candidate.grid?.cell_size_px ?? VTT_GRID_SIZE);
+    viewport.setGridOffset({
+        x: candidate.grid?.offset_x ?? 0,
+        y: candidate.grid?.offset_y ?? 0,
+    });
+}
+
+/**
+ * Persists a pending Grid Configuration burst now, against the candidate that owns it.
+ * Call before replacing or splicing `state.candidates` so the burst still resolves.
+ */
+export function flushGridEdits() {
+    if (viewport) viewport.flushGrid();
 }
 
 export function setupCanvas() {
@@ -22,6 +63,7 @@ export function setupCanvas() {
         viewport = createViewport(dom.canvas, {
             draw: drawTriageFrame,
             persistGrid: persistTriageGrid,
+            gridOwner: () => gridOwnerId,
             contentSize: triageContentSize,
         });
     }
@@ -60,15 +102,20 @@ function triageContentSize() {
 }
 
 /**
- * Persists the active candidate's Grid Configuration to staging.
+ * Persists the Grid Configuration of the candidate that owned the settled edit burst.
  *
- * The viewport debounces this to one call per edit burst; a call that would write
- * the candidate's current (or default) configuration is skipped, so restoring a
+ * The viewport debounces this to one call per burst and passes the owner it captured
+ * when the burst was armed; the candidate is looked up by that id, never by
+ * `state.currentIndex`, because the queue may have been reordered or spliced since.
+ * A burst whose owner has left the queue is dropped. A call that would write the
+ * candidate's current (or default) configuration is skipped, so restoring a
  * candidate's grid on load never issues a request of its own.
  */
-function persistTriageGrid(view) {
-    const candidate = state.candidates[state.currentIndex];
-    if (!candidate || !candidate.id) return;
+function persistTriageGrid(ownerId, view) {
+    if (ownerId === null || ownerId === undefined) return;
+
+    const candidate = state.candidates.find((c) => c.id === ownerId);
+    if (!candidate) return;
 
     const payload = {
         cell_size_px: view.gridSize,

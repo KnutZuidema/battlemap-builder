@@ -5,9 +5,14 @@
 import { dom } from "../dom.js";
 import { state } from "../store.js";
 import { formatRoleName } from "../kit/format.js";
-import { VTT_GRID_SIZE } from "../kit/grid-math.js";
 import { getCandidateLayers } from "../kit/layers.js";
-import { fitToScreen, getTriageViewport, requestRender } from "../stage/canvas.js";
+import {
+    fitToScreen,
+    flushGridEdits,
+    requestRender,
+    restoreCandidateGrid,
+    setGridOwner,
+} from "../stage/canvas.js";
 import { enterLabelingMode, exitLabelingMode, updateGridPanel } from "../shell/grid-panel.js";
 import { fetchThemeSuggestions } from "./curation.js";
 import { showEmptyState, showLoading, showToast, updateHud } from "../shell/status.js";
@@ -27,6 +32,9 @@ export async function fetchStagingQueue() {
             throw new Error(`HTTP ${res.status}`);
         }
         const data = await res.json();
+        // Persist a pending grid burst while the candidate that owns it is still in the
+        // queue we are about to replace.
+        flushGridEdits();
         // A candidate whose curation request is still in flight is already gone from the
         // reviewer's local queue; do not resurrect it from the server's staging listing.
         state.candidates = (Array.isArray(data) ? data : []).filter(
@@ -36,6 +44,7 @@ export async function fetchStagingQueue() {
         if (state.candidates.length > 0) {
             loadCandidate(0);
         } else {
+            setGridOwner(null);
             state.currentIndex = -1;
             state.currentImage = null;
             showEmptyState(true);
@@ -54,9 +63,10 @@ export async function fetchStagingQueue() {
  */
 export function loadCandidate(index) {
     exitLabelingMode();
-    // Persist any pending edit burst against the candidate it belongs to.
-    getTriageViewport().flushGrid();
+    // Persist any pending edit burst against the candidate that owns it.
+    flushGridEdits();
     if (index < 0 || index >= state.candidates.length) {
+        setGridOwner(null);
         state.currentIndex = -1;
         state.currentLayerIndex = 0;
         state.currentImage = null;
@@ -115,18 +125,6 @@ export function loadCandidate(index) {
             }
         };
     }
-}
-
-/**
- * Applies a candidate's persisted Grid Configuration to the triage viewport.
- */
-function restoreCandidateGrid(candidate) {
-    const viewport = getTriageViewport();
-    viewport.setGridSize(candidate.grid?.cell_size_px ?? VTT_GRID_SIZE);
-    viewport.setGrid({
-        x: candidate.grid?.offset_x ?? 0,
-        y: candidate.grid?.offset_y ?? 0,
-    });
 }
 
 /**
@@ -625,6 +623,7 @@ async function splitCandidate(id) {
         const splitCandidates = await res.json();
         const idx = state.candidates.findIndex((c) => c.id === id);
         if (idx !== -1) {
+            flushGridEdits();
             state.candidates.splice(idx, 1, ...splitCandidates);
             state.lastSplitParentId = id;
             loadCandidate(idx);
@@ -663,6 +662,7 @@ async function regroupCandidate(parentId) {
             const count = state.candidates.filter(
                 (c) => c.parent_group_id === parentId || c.id === parentId || c.id.startsWith(`${parentId}_`)
             ).length;
+            flushGridEdits();
             state.candidates.splice(firstIdx, Math.max(1, count), regroupedCandidate);
             state.lastSplitParentId = null;
             loadCandidate(firstIdx);

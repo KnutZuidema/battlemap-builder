@@ -13,15 +13,8 @@ import {
     closeLibraryFullscreen,
     toggleFullscreenGridPanel,
     switchFullscreenLayer,
-    setFullscreenZoom100,
-    fullscreenZoomStep,
-    fullscreenFitToScreen,
-    startFsPanLoop,
-    startFsZoomLoop,
-    activeFsPanKeys,
-    activeFsZoomKeys,
+    getFullscreenViewport,
     loadFullscreenMap,
-    requestFullscreenRender,
 } from "./library/fullscreen.js";
 import {
     openDeleteCuratedModal,
@@ -344,9 +337,12 @@ function getGridColumnCount() {
 
 export function handleLibraryKeydown(e) {
     if (state.libraryFullscreenActive) {
+        const fsViewport = getFullscreenViewport();
+        const fsView = fsViewport ? fsViewport.getView() : null;
+
         // Escape: close grid panel if open, otherwise exit fullscreen
         if (e.key === "Escape") {
-            if (state.libraryFullscreenGridPanelOpen) {
+            if (fsView && fsView.gridPanelOpen) {
                 toggleFullscreenGridPanel(false);
             } else {
                 closeLibraryFullscreen();
@@ -358,39 +354,36 @@ export function handleLibraryKeydown(e) {
         // WASD: Pan continuous loop
         const keyLower = e.key.toLowerCase();
         if (["w", "a", "s", "d"].includes(keyLower) && !e.ctrlKey && !e.metaKey && !e.altKey) {
-            activeFsPanKeys[keyLower] = true;
-            startFsPanLoop();
+            if (fsViewport) fsViewport.pressPanKey(keyLower);
             e.preventDefault();
             return;
         }
 
         // Zoom in / out: [ and ] or - and + / =
         if (e.key === "]" || e.code === "BracketRight") {
-            activeFsZoomKeys.in = true;
-            startFsZoomLoop();
+            if (fsViewport) fsViewport.setZoomKey("in", true);
             e.preventDefault();
             return;
         }
         if (e.key === "[" || e.code === "BracketLeft") {
-            activeFsZoomKeys.out = true;
-            startFsZoomLoop();
+            if (fsViewport) fsViewport.setZoomKey("out", true);
             e.preventDefault();
             return;
         }
         if (e.key === "=" || e.key === "+") {
-            fullscreenZoomStep(1.2);
+            if (fsViewport) fsViewport.zoomBy(1.2);
             e.preventDefault();
             return;
         }
         if (e.key === "-" || e.key === "_") {
-            fullscreenZoomStep(1 / 1.2);
+            if (fsViewport) fsViewport.zoomBy(1 / 1.2);
             e.preventDefault();
             return;
         }
 
         // Fit to screen: F or 0
         if ((e.key === "f" || e.key === "F" || e.key === "0") && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
-            fullscreenFitToScreen();
+            if (fsViewport) fsViewport.fit();
             e.preventDefault();
             return;
         }
@@ -405,7 +398,7 @@ export function handleLibraryKeydown(e) {
                 }
             } else {
                 if (e.key === "1") {
-                    setFullscreenZoom100();
+                    if (fsViewport) fsViewport.zoomTo(1);
                 }
             }
             e.preventDefault();
@@ -414,9 +407,7 @@ export function handleLibraryKeydown(e) {
 
         // Toggle grid: G
         if ((e.key === "g" || e.key === "G") && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
-            state.libraryFullscreenGridVisible = !state.libraryFullscreenGridVisible;
-            if (dom.btnFsGridToggle) dom.btnFsGridToggle.classList.toggle("active", state.libraryFullscreenGridVisible);
-            requestFullscreenRender();
+            if (fsViewport) fsViewport.setGridVisible(!fsView.gridVisible);
             e.preventDefault();
             return;
         }

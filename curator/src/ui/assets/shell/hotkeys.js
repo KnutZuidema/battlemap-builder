@@ -65,16 +65,14 @@ import {
 } from "../views/triage.js";
 import { closeDeleteCuratedModal } from "../views/library/bulk.js";
 import {
-    activeFsPanKeys,
-    activeFsZoomKeys,
     closeLibraryFullscreen,
-    requestFullscreenRender,
-    saveFullscreenMapGrid,
+    endFullscreenPointer,
+    getFullscreenViewport,
+    moveFullscreenPointer,
     setupFullscreenControls,
-    stopFsPanLoop,
-    stopFsZoomLoop,
+    stopFullscreenMotion,
+    syncFullscreenAligningClass,
     toggleFullscreenGridPanel,
-    updateFullscreenGridPanel,
 } from "../views/library/fullscreen.js";
 
 export function setupEventListeners() {
@@ -103,28 +101,9 @@ export function setupEventListeners() {
         if (dom.canvas && !state.isDraggingGrid) {
             dom.canvas.classList.toggle("grid-aligning", e.shiftKey || getTriageViewport().getView().gridAlignMode);
         }
-        if (dom.libraryFullscreenCanvas?.parentElement && !state.libraryFullscreenIsDraggingGrid) {
-            dom.libraryFullscreenCanvas.parentElement.classList.toggle("grid-aligning", e.shiftKey || state.libraryFullscreenGridAlignMode);
-        }
-
         if (state.libraryFullscreenActive) {
-            if (state.libraryFullscreenIsDraggingGrid) {
-                const imgDx = (e.clientX - state.libraryFullscreenGridDragStart.x) / state.libraryFullscreenZoom;
-                const imgDy = (e.clientY - state.libraryFullscreenGridDragStart.y) / state.libraryFullscreenZoom;
-                state.libraryFullscreenGridOffset.x = Math.round(state.libraryFullscreenGridOffsetStart.x + imgDx);
-                state.libraryFullscreenGridOffset.y = Math.round(state.libraryFullscreenGridOffsetStart.y + imgDy);
-                saveFullscreenMapGrid();
-                updateFullscreenGridPanel();
-                requestFullscreenRender();
-                return;
-            }
-
-            if (state.libraryFullscreenIsPanning) {
-                state.libraryFullscreenPan.x = e.clientX - state.libraryFullscreenPanStart.x;
-                state.libraryFullscreenPan.y = e.clientY - state.libraryFullscreenPanStart.y;
-                requestFullscreenRender();
-                return;
-            }
+            syncFullscreenAligningClass(e.shiftKey);
+            if (moveFullscreenPointer(e.clientX, e.clientY)) return;
         }
 
         if (state.isDraggingGrid) {
@@ -145,16 +124,8 @@ export function setupEventListeners() {
         state.dragStart = { x: e.clientX, y: e.clientY };
     });
 
-    window.addEventListener("mouseup", (e) => {
-        if (state.libraryFullscreenIsDraggingGrid) {
-            state.libraryFullscreenIsDraggingGrid = false;
-            saveFullscreenMapGrid();
-            dom.libraryFullscreenCanvas?.parentElement?.classList.remove("grid-dragging");
-        }
-        if (state.libraryFullscreenIsPanning) {
-            state.libraryFullscreenIsPanning = false;
-            dom.libraryFullscreenCanvas?.parentElement?.classList.remove("panning");
-        }
+    window.addEventListener("mouseup", () => {
+        endFullscreenPointer();
         if (state.isDraggingGrid) {
             state.isDraggingGrid = false;
             dom.canvas.classList.remove("grid-dragging");
@@ -296,8 +267,8 @@ export function setupEventListeners() {
     window.addEventListener("keyup", handleKeyup);
     window.addEventListener("blur", () => {
         stopStageMotion();
-        stopFsPanLoop();
-        stopFsZoomLoop();
+        stopFullscreenMotion();
+        endFullscreenPointer();
         if (state.isDraggingGrid) {
             state.isDraggingGrid = false;
             dom.canvas.classList.remove("grid-dragging");
@@ -305,24 +276,13 @@ export function setupEventListeners() {
         if (dom.canvas) {
             dom.canvas.classList.toggle("grid-aligning", getTriageViewport().getView().gridAlignMode);
         }
-        if (state.libraryFullscreenIsDraggingGrid) {
-            state.libraryFullscreenIsDraggingGrid = false;
-            dom.libraryFullscreenCanvas?.parentElement?.classList.remove("grid-dragging");
-        }
-        if (state.libraryFullscreenIsPanning) {
-            state.libraryFullscreenIsPanning = false;
-            dom.libraryFullscreenCanvas?.parentElement?.classList.remove("panning");
-        }
-        if (dom.libraryFullscreenCanvas?.parentElement) {
-            dom.libraryFullscreenCanvas.parentElement.classList.toggle("grid-aligning", state.libraryFullscreenGridAlignMode);
-        }
+        syncFullscreenAligningClass(false);
     });
     window.addEventListener("focusin", (e) => {
         const tag = e.target?.tagName?.toLowerCase();
         if (tag === "input" || tag === "textarea" || tag === "select") {
             stopStageMotion();
-            stopFsPanLoop();
-            stopFsZoomLoop();
+            stopFullscreenMotion();
         }
     });
 }
@@ -394,7 +354,8 @@ function handleKeydown(e) {
                 return;
             }
             if (state.libraryFullscreenActive) {
-                if (state.libraryFullscreenGridPanelOpen) {
+                const fsViewport = getFullscreenViewport();
+                if (fsViewport && fsViewport.getView().gridPanelOpen) {
                     toggleFullscreenGridPanel(false);
                 } else {
                     closeLibraryFullscreen();
@@ -702,29 +663,19 @@ function handleKeyup(e) {
     if (dom.canvas) {
         dom.canvas.classList.toggle("grid-aligning", e.shiftKey || getTriageViewport().getView().gridAlignMode);
     }
-    if (dom.libraryFullscreenCanvas?.parentElement) {
-        dom.libraryFullscreenCanvas.parentElement.classList.toggle("grid-aligning", e.shiftKey || state.libraryFullscreenGridAlignMode);
-    }
+    syncFullscreenAligningClass(e.shiftKey);
     const key = e.key.toLowerCase();
+    const fsViewport = getFullscreenViewport();
     if (key === "w" || key === "a" || key === "s" || key === "d") {
         getTriageViewport().releasePanKey(key);
-        activeFsPanKeys[key] = false;
-        if (!activeFsPanKeys.w && !activeFsPanKeys.a && !activeFsPanKeys.s && !activeFsPanKeys.d) {
-            stopFsPanLoop();
-        }
+        if (fsViewport) fsViewport.releasePanKey(key);
     }
     if (e.key === "]" || e.code === "BracketRight") {
         getTriageViewport().setZoomKey("in", false);
-        activeFsZoomKeys.in = false;
-        if (!activeFsZoomKeys.in && !activeFsZoomKeys.out) {
-            stopFsZoomLoop();
-        }
+        if (fsViewport) fsViewport.setZoomKey("in", false);
     }
     if (e.key === "[" || e.code === "BracketLeft") {
         getTriageViewport().setZoomKey("out", false);
-        activeFsZoomKeys.out = false;
-        if (!activeFsZoomKeys.in && !activeFsZoomKeys.out) {
-            stopFsZoomLoop();
-        }
+        if (fsViewport) fsViewport.setZoomKey("out", false);
     }
 }

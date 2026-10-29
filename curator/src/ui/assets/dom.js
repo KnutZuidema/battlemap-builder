@@ -226,7 +226,6 @@ export function initializeDom() {
     dom.btnFinishDecision = document.getElementById("btn-finish-decision");
     dom.libraryFullscreenOverlay = document.getElementById("library-fullscreen-overlay");
     dom.libraryFullscreenCanvas = document.getElementById("library-fullscreen-canvas");
-    dom.libraryFullscreenCtx = dom.libraryFullscreenCanvas ? dom.libraryFullscreenCanvas.getContext("2d") : null;
     dom.fsMapIdBadge = document.getElementById("fs-map-id-badge");
     dom.fsMapDimensions = document.getElementById("fs-map-dimensions");
     dom.fsGridStatusBadge = document.getElementById("fs-grid-status-badge");

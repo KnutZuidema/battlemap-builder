@@ -1,7 +1,10 @@
 /**
- * Fullscreen stage overlay with its own canvas render loop, pan/zoom loops, layer deck
- * and per-map grid calibration. Kept separate from the triage stage until the Stage
- * Viewport extraction.
+ * Fullscreen stage overlay: the shared Stage Viewport mounted on the overlay canvas,
+ * plus the layer deck and per-map Grid Configuration persistence.
+ *
+ * Pan, zoom, fit, the grid overlay and the overlay flags all live in the viewport, so
+ * this module only loads maps/layers, binds the controls, and writes the edited Grid
+ * Configuration back to the curated map that owns the burst.
  */
 
 import { dom } from "../../dom.js";
@@ -10,103 +13,103 @@ import { escapeHtml } from "../../kit/dom.js";
 import {
     VTT_GRID_SIZE,
     MIN_GRID_SIZE,
-    MAX_GRID_SIZE,
-    MIN_ZOOM,
-    MAX_ZOOM,
     calculateLatticeInfo,
+    formatLatticePanel,
     formatLatticeStatus,
 } from "../../kit/grid-math.js";
-import {
-    getLibraryFullscreenDimensions,
-} from "../../kit/layers.js";
-import { PAN_SPEED, ZOOM_SPEED } from "../../stage/viewport.js";
+import { getLibraryFullscreenDimensions } from "../../kit/layers.js";
+import { createViewport, drawGridOverlay, isGridCalibrating } from "../../stage/viewport.js";
 import { setLibraryFocus } from "../library.js";
 import { showToast } from "../../shell/status.js";
 import { invalidateDatasetReadiness } from "../readiness.js";
 
+const WHEEL_ZOOM_FACTOR = 1.15;
+const BUTTON_ZOOM_FACTOR = 1.2;
+
 // ==========================================================================
-// Fullscreen Stage Overlay with Reused 2D Canvas & HUD Controls (Issue #134)
+// Fullscreen Stage Overlay mounted on the Stage Viewport (Issues #134, #265)
 // ==========================================================================
 
-function resizeFullscreenCanvas() {
-    if (!dom.libraryFullscreenCanvas || !dom.libraryFullscreenCanvas.parentElement) return;
-    const container = dom.libraryFullscreenCanvas.parentElement;
-    const width = container.clientWidth;
-    const height = container.clientHeight;
-    const dpr = window.devicePixelRatio || 1;
+let viewport = null;
 
-    if (dom.libraryFullscreenCanvas.width !== width * dpr || dom.libraryFullscreenCanvas.height !== height * dpr) {
-        dom.libraryFullscreenCanvas.width = width * dpr;
-        dom.libraryFullscreenCanvas.height = height * dpr;
-        dom.libraryFullscreenCanvas.style.width = `${width}px`;
-        dom.libraryFullscreenCanvas.style.height = `${height}px`;
-    }
+/**
+ * Pointer capture for the overlay: drag-to-align and drag-to-pan start at different
+ * points and are tracked here, not in the shared store.
+ */
+const pointer = {
+    panning: false,
+    panStart: { x: 0, y: 0 },
+    draggingGrid: false,
+    gridStart: { x: 0, y: 0 },
+    gridOffsetStart: { x: 0, y: 0 },
+};
+
+/**
+ * The fullscreen Stage Viewport; null until `setupFullscreenControls()` or
+ * `openLibraryFullscreen()` has mounted it.
+ */
+export function getFullscreenViewport() {
+    return viewport;
 }
 
-let fsRenderPending = false;
-export function requestFullscreenRender() {
-    if (!fsRenderPending) {
-        fsRenderPending = true;
-        requestAnimationFrame(() => {
-            fsRenderPending = false;
-            renderFullscreenCanvas();
-        });
-    }
+function ensureFullscreenViewport() {
+    if (viewport || !dom.libraryFullscreenCanvas) return viewport;
+    viewport = createViewport(dom.libraryFullscreenCanvas, {
+        draw: drawFullscreenFrame,
+        contentSize: getLibraryFullscreenDimensions,
+        gridOwner: () => (state.libraryFullscreenMap ? state.libraryFullscreenMap.id : null),
+        persistGrid: persistFullscreenGrid,
+    });
+    viewport.subscribe(updateFullscreenHud);
+    return viewport;
 }
 
 /**
- * High-performance 60fps Canvas 2D render loop for the Fullscreen Stage Overlay.
- * Applies devicePixelRatio scaling, pan/zoom transformation matrix,
- * renders crisp pixel examination for zoom > 200%,
- * and single-draw-call 64px VTT grid overlay.
+ * High-performance 60fps Canvas 2D render callback for the Fullscreen Stage Overlay.
+ * Applies devicePixelRatio scaling, the pan/zoom transform, crisp pixel examination
+ * past 200%, and the shared single-draw-call VTT grid overlay.
  */
-function renderFullscreenCanvas() {
-    if (!dom.libraryFullscreenCtx || !dom.libraryFullscreenCanvas) return;
-    const c = dom.libraryFullscreenCtx;
-    const dpr = window.devicePixelRatio || 1;
+function drawFullscreenFrame(c, view) {
+    const { width, height, dpr } = view;
 
     c.save();
-    c.clearRect(0, 0, dom.libraryFullscreenCanvas.width, dom.libraryFullscreenCanvas.height);
+    c.clearRect(0, 0, width * dpr, height * dpr);
 
     // Fill background
     c.fillStyle = "#070a10";
-    c.fillRect(0, 0, dom.libraryFullscreenCanvas.width, dom.libraryFullscreenCanvas.height);
+    c.fillRect(0, 0, width * dpr, height * dpr);
 
     // Normalize devicePixelRatio coordinates
     c.scale(dpr, dpr);
 
-    if (state.libraryFullscreenCurrentImage && state.libraryFullscreenCurrentImage.complete && state.libraryFullscreenCurrentImage.naturalWidth > 0) {
-        const img = state.libraryFullscreenCurrentImage;
+    const img = state.libraryFullscreenCurrentImage;
+    if (img && img.complete && img.naturalWidth > 0) {
         const imgW = img.naturalWidth || img.width;
         const imgH = img.naturalHeight || img.height;
 
         c.save();
         // Apply pan and zoom transformation
-        c.translate(state.libraryFullscreenPan.x, state.libraryFullscreenPan.y);
-        c.scale(state.libraryFullscreenZoom, state.libraryFullscreenZoom);
+        c.translate(view.pan.x, view.pan.y);
+        c.scale(view.zoom, view.zoom);
 
         // Crisp rendering: disable smoothing when zoomed in past 200% for pixel examination
-        c.imageSmoothingEnabled = state.libraryFullscreenZoom < 2.0;
+        c.imageSmoothingEnabled = view.zoom < 2.0;
         c.imageSmoothingQuality = "high";
 
         // Draw active layer battlemap at origin (0, 0)
         c.globalAlpha = 1.0;
         c.drawImage(img, 0, 0, imgW, imgH);
 
-        const isFsCalibrationActive = Boolean(
-            state.libraryFullscreenGridPanelOpen ||
-            state.libraryFullscreenGridAlignMode ||
-            state.libraryFullscreenIsDraggingGrid
-        );
+        const calibrating = isGridCalibrating(view, pointer.draggingGrid);
         // Draw crisp 64px VTT grid overlay in image space
-        if (state.libraryFullscreenGridVisible || isFsCalibrationActive) {
-            drawFullscreenVttGrid(c, imgW, imgH, isFsCalibrationActive);
+        if (view.gridVisible || calibrating) {
+            drawGridOverlay(c, imgW, imgH, view, calibrating);
         }
 
         // Draw image bounding border
         c.beginPath();
         c.rect(0, 0, imgW, imgH);
-        c.lineWidth = Math.max(1.0, 1.5 / state.libraryFullscreenZoom);
+        c.lineWidth = Math.max(1.0, 1.5 / view.zoom);
         c.strokeStyle = "rgba(56, 189, 248, 0.75)";
         c.stroke();
 
@@ -117,251 +120,89 @@ function renderFullscreenCanvas() {
 }
 
 /**
- * Single-draw-call crisp 64px VTT grid overlay for Fullscreen Stage.
+ * HUD refresh, driven by the viewport so zoom, grid display state and the lattice
+ * badge always come from the frame that was just drawn.
  */
-function drawFullscreenVttGrid(c, width, height, isCalibrationActive = false) {
-    c.save();
-    c.beginPath();
-    c.rect(0, 0, width, height);
-    c.clip();
+function updateFullscreenHud(view = viewport ? viewport.getView() : null) {
+    if (!view || !state.libraryFullscreenActive || !state.libraryFullscreenMap) return;
+    const map = state.libraryFullscreenMap;
 
-    const size = state.libraryFullscreenGridSize || VTT_GRID_SIZE;
-    const ox = ((Math.round(state.libraryFullscreenGridOffset.x) % size) + size) % size;
-    const oy = ((Math.round(state.libraryFullscreenGridOffset.y) % size) + size) % size;
-    const cols = Math.floor(Math.max(0, width - ox) / size);
-    const rows = Math.floor(Math.max(0, height - oy) / size);
-    const fullW = cols * size;
-    const fullH = rows * size;
-
-    // When calibration panel or align mode is active:
-    // Shade/dim discarded partial edge strips outside the active full-grid lattice [ox, oy, fullW, fullH]
-    if (isCalibrationActive && (cols > 0 || rows > 0)) {
-        c.save();
-        c.beginPath();
-        c.rect(0, 0, width, height);
-        c.rect(ox, oy, fullW, fullH);
-        c.fillStyle = "rgba(10, 15, 30, 0.65)";
-        c.fill("evenodd");
-        c.restore();
+    if (dom.fsMapIdBadge) {
+        dom.fsMapIdBadge.textContent = map.id;
+        dom.fsMapIdBadge.title = `Curated Map ID: ${map.id}`;
     }
 
-    c.beginPath();
-
-    // Vertical grid lines
-    for (let x = ox; x <= width; x += size) {
-        c.moveTo(x, 0);
-        c.lineTo(x, height);
-    }
-
-    // Horizontal grid lines
-    for (let y = oy; y <= height; y += size) {
-        c.moveTo(0, y);
-        c.lineTo(width, y);
-    }
-
-    c.lineWidth = Math.max(0.5, 1.0 / state.libraryFullscreenZoom);
-    c.strokeStyle = "rgba(56, 189, 248, 0.4)";
-    c.stroke();
-
-    // Draw boundary border around active full grid
-    if (isCalibrationActive && cols > 0 && rows > 0) {
-        c.save();
-        c.beginPath();
-        c.rect(ox, oy, fullW, fullH);
-        c.lineWidth = Math.max(1.5, 2.5 / state.libraryFullscreenZoom);
-        const isEligible = cols >= 16 && rows >= 16;
-        c.strokeStyle = isEligible ? "rgba(56, 189, 248, 0.95)" : "rgba(244, 63, 94, 0.95)";
-        c.stroke();
-        c.restore();
-    }
-
-    c.restore();
-}
-
-export function fullscreenFitToScreen() {
-    if (!state.libraryFullscreenCurrentImage || !dom.libraryFullscreenCanvas) return;
-    const img = state.libraryFullscreenCurrentImage;
-    const imgW = img.naturalWidth || img.width;
-    const imgH = img.naturalHeight || img.height;
-    const viewW = dom.libraryFullscreenCanvas.clientWidth;
-    const viewH = dom.libraryFullscreenCanvas.clientHeight;
-
-    if (!imgW || !imgH || !viewW || !viewH) return;
-
-    const padding = 40;
-    const availW = Math.max(20, viewW - padding * 2);
-    const availH = Math.max(20, viewH - padding * 2);
-
-    const fitScale = Math.min(availW / imgW, availH / imgH, 1.0);
-    state.libraryFullscreenZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, fitScale));
-
-    state.libraryFullscreenPan.x = Math.round((viewW - imgW * state.libraryFullscreenZoom) / 2);
-    state.libraryFullscreenPan.y = Math.round((viewH - imgH * state.libraryFullscreenZoom) / 2);
-
-    updateFullscreenHud();
-    requestFullscreenRender();
-}
-
-export function fullscreenZoomStep(factor, clientPoint = null) {
-    if (!state.libraryFullscreenCurrentImage || !dom.libraryFullscreenCanvas) return;
-    const prevZoom = state.libraryFullscreenZoom;
-    let newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, prevZoom * factor));
-    newZoom = Math.round(newZoom * 1000) / 1000;
-
-    if (newZoom === prevZoom) return;
-
-    const viewW = dom.libraryFullscreenCanvas.clientWidth;
-    const viewH = dom.libraryFullscreenCanvas.clientHeight;
-    const focusX = clientPoint ? clientPoint.x : viewW / 2;
-    const focusY = clientPoint ? clientPoint.y : viewH / 2;
-
-    state.libraryFullscreenPan.x = focusX - (focusX - state.libraryFullscreenPan.x) * (newZoom / prevZoom);
-    state.libraryFullscreenPan.y = focusY - (focusY - state.libraryFullscreenPan.y) * (newZoom / prevZoom);
-    state.libraryFullscreenZoom = newZoom;
-
-    updateFullscreenHud();
-    requestFullscreenRender();
-}
-
-export function setFullscreenZoom100() {
-    if (!state.libraryFullscreenCurrentImage || !dom.libraryFullscreenCanvas) return;
-    const prevZoom = state.libraryFullscreenZoom;
-    const newZoom = 1.0;
-    if (newZoom === prevZoom) return;
-
-    const viewW = dom.libraryFullscreenCanvas.clientWidth;
-    const viewH = dom.libraryFullscreenCanvas.clientHeight;
-    const focusX = viewW / 2;
-    const focusY = viewH / 2;
-
-    state.libraryFullscreenPan.x = focusX - (focusX - state.libraryFullscreenPan.x) * (newZoom / prevZoom);
-    state.libraryFullscreenPan.y = focusY - (focusY - state.libraryFullscreenPan.y) * (newZoom / prevZoom);
-    state.libraryFullscreenZoom = newZoom;
-
-    updateFullscreenHud();
-    requestFullscreenRender();
-}
-
-// --- Fullscreen Continuous Smooth WASD Pan Loop ---
-export const activeFsPanKeys = { w: false, a: false, s: false, d: false };
-let fsPanAnimationId = null;
-let lastFsPanTimestamp = 0;
-
-function fsPanLoop(timestamp) {
-    if (!lastFsPanTimestamp) lastFsPanTimestamp = timestamp;
-    const dt = Math.min((timestamp - lastFsPanTimestamp) / 1000, 0.1);
-    lastFsPanTimestamp = timestamp;
-
-    let moveX = 0;
-    let moveY = 0;
-    if (activeFsPanKeys.w) moveY += 1;
-    if (activeFsPanKeys.s) moveY -= 1;
-    if (activeFsPanKeys.a) moveX += 1;
-    if (activeFsPanKeys.d) moveX -= 1;
-
-    if (moveX !== 0 || moveY !== 0) {
-        if (moveX !== 0 && moveY !== 0) {
-            const invSqrt2 = 0.70710678;
-            moveX *= invSqrt2;
-            moveY *= invSqrt2;
+    if (dom.fsMapDimensions) {
+        let dimText = "";
+        if (state.libraryFullscreenCurrentImage && state.libraryFullscreenCurrentImage.naturalWidth > 0) {
+            dimText = `${state.libraryFullscreenCurrentImage.naturalWidth} × ${state.libraryFullscreenCurrentImage.naturalHeight}`;
+        } else if (map.dimensions && map.dimensions.width && map.dimensions.height) {
+            dimText = `${map.dimensions.width} × ${map.dimensions.height}`;
+        } else {
+            dimText = "2048 × 2048";
         }
-        if (state.libraryFullscreenCurrentImage) {
-            state.libraryFullscreenPan.x += moveX * PAN_SPEED * dt;
-            state.libraryFullscreenPan.y += moveY * PAN_SPEED * dt;
-            requestFullscreenRender();
-        }
-        fsPanAnimationId = requestAnimationFrame(fsPanLoop);
-    } else {
-        fsPanAnimationId = null;
-        lastFsPanTimestamp = 0;
+        dom.fsMapDimensions.textContent = dimText;
     }
-}
 
-export function startFsPanLoop() {
-    if (!fsPanAnimationId) {
-        lastFsPanTimestamp = performance.now();
-        fsPanAnimationId = requestAnimationFrame(fsPanLoop);
+    if (dom.fsMapCounter) {
+        const total = state.libraryFilteredMaps ? state.libraryFilteredMaps.length : 1;
+        const current = (state.libraryFullscreenIndex >= 0 ? state.libraryFullscreenIndex : 0) + 1;
+        dom.fsMapCounter.textContent = `Map ${current} of ${total}`;
     }
-}
 
-export function stopFsPanLoop() {
-    if (fsPanAnimationId) {
-        cancelAnimationFrame(fsPanAnimationId);
-        fsPanAnimationId = null;
+    if (dom.fsZoomReadout) {
+        const pct = Math.round(view.zoom * 100);
+        dom.fsZoomReadout.textContent = `${pct}%`;
     }
-    lastFsPanTimestamp = 0;
-    activeFsPanKeys.w = false;
-    activeFsPanKeys.a = false;
-    activeFsPanKeys.s = false;
-    activeFsPanKeys.d = false;
-}
 
-// --- Fullscreen Continuous Smooth Zoom Loop ---
-export const activeFsZoomKeys = { in: false, out: false };
-let fsZoomAnimationId = null;
-let lastFsZoomTimestamp = 0;
-
-function fsZoomLoop(timestamp) {
-    if (!lastFsZoomTimestamp) lastFsZoomTimestamp = timestamp;
-    const dt = Math.min((timestamp - lastFsZoomTimestamp) / 1000, 0.1);
-    lastFsZoomTimestamp = timestamp;
-
-    if (activeFsZoomKeys.in || activeFsZoomKeys.out) {
-        let factor = 1.0;
-        if (activeFsZoomKeys.in && !activeFsZoomKeys.out) {
-            factor = Math.pow(ZOOM_SPEED, dt);
-        } else if (activeFsZoomKeys.out && !activeFsZoomKeys.in) {
-            factor = Math.pow(1 / ZOOM_SPEED, dt);
-        }
-
-        if (factor !== 1.0 && state.libraryFullscreenCurrentImage) {
-            fullscreenZoomStep(factor);
-        }
-        fsZoomAnimationId = requestAnimationFrame(fsZoomLoop);
-    } else {
-        fsZoomAnimationId = null;
-        lastFsZoomTimestamp = 0;
+    if (dom.btnFsGridToggle) {
+        dom.btnFsGridToggle.classList.toggle("active", view.gridVisible);
     }
-}
 
-export function startFsZoomLoop() {
-    if (!fsZoomAnimationId) {
-        lastFsZoomTimestamp = performance.now();
-        fsZoomAnimationId = requestAnimationFrame(fsZoomLoop);
+    if (dom.btnFsGridAdjust) {
+        dom.btnFsGridAdjust.classList.toggle("active", view.gridPanelOpen);
     }
-}
 
-export function stopFsZoomLoop() {
-    if (fsZoomAnimationId) {
-        cancelAnimationFrame(fsZoomAnimationId);
-        fsZoomAnimationId = null;
+    if (dom.btnFsPrevMap) {
+        dom.btnFsPrevMap.disabled = state.libraryFullscreenIndex <= 0;
     }
-    lastFsZoomTimestamp = 0;
-    activeFsZoomKeys.in = false;
-    activeFsZoomKeys.out = false;
+    if (dom.btnFsNextMap) {
+        dom.btnFsNextMap.disabled = !state.libraryFilteredMaps || state.libraryFullscreenIndex >= state.libraryFilteredMaps.length - 1;
+    }
+    if (dom.fsGridStatusBadge) {
+        const fsDims = getLibraryFullscreenDimensions();
+        const fsLattice = calculateLatticeInfo(
+            fsDims.width,
+            fsDims.height,
+            view.gridSize,
+            view.gridOffset.x,
+            view.gridOffset.y
+        );
+        dom.fsGridStatusBadge.textContent = formatLatticeStatus(fsLattice);
+        dom.fsGridStatusBadge.classList.toggle("hud-badge-warning", !fsLattice.isEligible);
+    }
 }
 
 // --- Fullscreen Map & Layer Loading ---
 export function loadFullscreenMap(index, layerIndex = 0) {
     if (!state.libraryFilteredMaps || state.libraryFilteredMaps.length === 0) return;
+    if (!ensureFullscreenViewport()) return;
     const clampedIndex = Math.max(0, Math.min(index, state.libraryFilteredMaps.length - 1));
     const map = state.libraryFilteredMaps[clampedIndex];
     if (!map) return;
 
+    // Settle any burst armed for the outgoing map before it stops being current.
+    viewport.flushGrid();
+
     state.libraryFullscreenIndex = clampedIndex;
     state.libraryFullscreenMap = map;
 
-    // Restore or initialize grid settings for this curated map from the persisted grid
-    if (map.grid) {
-        state.libraryFullscreenGridSize = map.grid.cell_size_px ?? 64;
-        state.libraryFullscreenGridOffset = {
-            x: map.grid.offset_x ?? 0,
-            y: map.grid.offset_y ?? 0,
-        };
-    } else {
-        state.libraryFullscreenGridSize = 64;
-        state.libraryFullscreenGridOffset = { x: 0, y: 0 };
-    }
+    // Restore this curated map's persisted Grid Configuration.
+    viewport.setGridSize(map.grid?.cell_size_px ?? VTT_GRID_SIZE);
+    viewport.setGridOffset({
+        x: map.grid?.offset_x ?? 0,
+        y: map.grid?.offset_y ?? 0,
+    });
     updateFullscreenGridPanel();
 
     const layers = map.layers && map.layers.length > 0 ? map.layers : [{ index: 0, role: "ground" }];
@@ -377,9 +218,8 @@ export function loadFullscreenMap(index, layerIndex = 0) {
     let img = state.libraryFullscreenImageCache.get(cacheKey);
     if (img && img.complete && img.naturalWidth > 0) {
         state.libraryFullscreenCurrentImage = img;
-        fullscreenFitToScreen();
+        viewport.fit();
         renderFullscreenLayerDeck();
-        updateFullscreenHud();
     } else {
         if (!img) {
             img = new Image();
@@ -389,16 +229,14 @@ export function loadFullscreenMap(index, layerIndex = 0) {
         img.onload = () => {
             if (state.libraryFullscreenMap && state.libraryFullscreenMap.id === map.id && state.libraryFullscreenLayerIndex === validLayerIndex) {
                 state.libraryFullscreenCurrentImage = img;
-                fullscreenFitToScreen();
+                viewport.fit();
                 renderFullscreenLayerDeck();
-                updateFullscreenHud();
             }
         };
         if (img.complete && img.naturalWidth > 0) {
             state.libraryFullscreenCurrentImage = img;
-            fullscreenFitToScreen();
+            viewport.fit();
             renderFullscreenLayerDeck();
-            updateFullscreenHud();
         }
     }
 
@@ -441,68 +279,7 @@ export function loadFullscreenMap(index, layerIndex = 0) {
         }
     });
 
-    updateFullscreenHud();
     renderFullscreenLayerDeck();
-}
-
-function updateFullscreenHud() {
-    if (!state.libraryFullscreenActive || !state.libraryFullscreenMap) return;
-    const map = state.libraryFullscreenMap;
-
-    if (dom.fsMapIdBadge) {
-        dom.fsMapIdBadge.textContent = map.id;
-        dom.fsMapIdBadge.title = `Curated Map ID: ${map.id}`;
-    }
-
-    if (dom.fsMapDimensions) {
-        let dimText = "";
-        if (state.libraryFullscreenCurrentImage && state.libraryFullscreenCurrentImage.naturalWidth > 0) {
-            dimText = `${state.libraryFullscreenCurrentImage.naturalWidth} × ${state.libraryFullscreenCurrentImage.naturalHeight}`;
-        } else if (map.dimensions && map.dimensions.width && map.dimensions.height) {
-            dimText = `${map.dimensions.width} × ${map.dimensions.height}`;
-        } else {
-            dimText = "2048 × 2048";
-        }
-        dom.fsMapDimensions.textContent = dimText;
-    }
-
-    if (dom.fsMapCounter) {
-        const total = state.libraryFilteredMaps ? state.libraryFilteredMaps.length : 1;
-        const current = (state.libraryFullscreenIndex >= 0 ? state.libraryFullscreenIndex : 0) + 1;
-        dom.fsMapCounter.textContent = `Map ${current} of ${total}`;
-    }
-
-    if (dom.fsZoomReadout) {
-        const pct = Math.round((state.libraryFullscreenZoom || 1.0) * 100);
-        dom.fsZoomReadout.textContent = `${pct}%`;
-    }
-
-    if (dom.btnFsGridToggle) {
-        dom.btnFsGridToggle.classList.toggle("active", state.libraryFullscreenGridVisible);
-    }
-
-    if (dom.btnFsGridAdjust) {
-        dom.btnFsGridAdjust.classList.toggle("active", state.libraryFullscreenGridPanelOpen);
-    }
-
-    if (dom.btnFsPrevMap) {
-        dom.btnFsPrevMap.disabled = state.libraryFullscreenIndex <= 0;
-    }
-    if (dom.btnFsNextMap) {
-        dom.btnFsNextMap.disabled = !state.libraryFilteredMaps || state.libraryFullscreenIndex >= state.libraryFilteredMaps.length - 1;
-    }
-    if (dom.fsGridStatusBadge) {
-        const fsDims = getLibraryFullscreenDimensions();
-        const fsLattice = calculateLatticeInfo(
-            fsDims.width,
-            fsDims.height,
-            state.libraryFullscreenGridSize,
-            state.libraryFullscreenGridOffset.x,
-            state.libraryFullscreenGridOffset.y
-        );
-        dom.fsGridStatusBadge.textContent = formatLatticeStatus(fsLattice);
-        dom.fsGridStatusBadge.classList.toggle("hud-badge-warning", !fsLattice.isEligible);
-    }
 }
 
 function renderFullscreenLayerDeck() {
@@ -585,29 +362,51 @@ export function switchFullscreenLayer(layerIndex) {
     loadFullscreenMap(state.libraryFullscreenIndex, layerIndex);
 }
 
-// --- Fullscreen Grid Calibration Controls ---
+// --- Fullscreen Grid Configuration Controls ---
 export function toggleFullscreenGridPanel(force) {
-    state.libraryFullscreenGridPanelOpen = typeof force === "boolean" ? force : !state.libraryFullscreenGridPanelOpen;
+    const vp = ensureFullscreenViewport();
+    if (!vp) return;
+    const next = typeof force === "boolean" ? force : !vp.getView().gridPanelOpen;
+    vp.setGridPanelOpen(next);
     if (dom.libraryFullscreenGridPanel) {
-        dom.libraryFullscreenGridPanel.classList.toggle("hidden", !state.libraryFullscreenGridPanelOpen);
+        dom.libraryFullscreenGridPanel.classList.toggle("hidden", !next);
     }
     if (dom.btnFsGridAdjust) {
-        dom.btnFsGridAdjust.classList.toggle("active", state.libraryFullscreenGridPanelOpen);
+        dom.btnFsGridAdjust.classList.toggle("active", next);
     }
-    if (state.libraryFullscreenGridPanelOpen) {
+    if (next) {
         updateFullscreenGridPanel();
     }
-    requestFullscreenRender();
 }
 
-export function updateFullscreenGridPanel() {
-    if (!dom.fsGridSizeInput || !dom.fsGridSizeSlider) return;
-    const size = state.libraryFullscreenGridSize || 64;
-    dom.fsGridSizeInput.value = size;
-    dom.fsGridSizeSlider.value = Math.min(256, Math.max(16, size));
+function toggleFullscreenAlignMode(force) {
+    const vp = ensureFullscreenViewport();
+    if (!vp) return;
+    const next = typeof force === "boolean" ? force : !vp.getView().gridAlignMode;
+    vp.setGridAlignMode(next);
+    if (dom.btnFsGridAlignDrag) {
+        dom.btnFsGridAlignDrag.classList.toggle("active", next);
+    }
+    if (dom.libraryFullscreenCanvas && dom.libraryFullscreenCanvas.parentElement) {
+        dom.libraryFullscreenCanvas.parentElement.classList.toggle("grid-aligning", next);
+    }
+}
 
-    if (dom.fsGridOffsetXVal) dom.fsGridOffsetXVal.textContent = Math.round(state.libraryFullscreenGridOffset.x);
-    if (dom.fsGridOffsetYVal) dom.fsGridOffsetYVal.textContent = Math.round(state.libraryFullscreenGridOffset.y);
+function toggleFullscreenGridVisible() {
+    const vp = ensureFullscreenViewport();
+    if (!vp) return;
+    vp.setGridVisible(!vp.getView().gridVisible);
+}
+
+function updateFullscreenGridPanel() {
+    if (!viewport || !dom.fsGridSizeInput || !dom.fsGridSizeSlider) return;
+    const view = viewport.getView();
+    const size = view.gridSize || VTT_GRID_SIZE;
+    dom.fsGridSizeInput.value = size;
+    dom.fsGridSizeSlider.value = Math.min(256, Math.max(MIN_GRID_SIZE, size));
+
+    if (dom.fsGridOffsetXVal) dom.fsGridOffsetXVal.textContent = Math.round(view.gridOffset.x);
+    if (dom.fsGridOffsetYVal) dom.fsGridOffsetYVal.textContent = Math.round(view.gridOffset.y);
 
     const chips = document.querySelectorAll("#fs-grid-preset-chips .preset-chip");
     chips.forEach(chip => {
@@ -619,97 +418,181 @@ export function updateFullscreenGridPanel() {
     const fsLattice = calculateLatticeInfo(
         fsDims.width,
         fsDims.height,
-        state.libraryFullscreenGridSize,
-        state.libraryFullscreenGridOffset.x,
-        state.libraryFullscreenGridOffset.y
+        view.gridSize,
+        view.gridOffset.x,
+        view.gridOffset.y
     );
+    const readout = formatLatticePanel(fsLattice);
     if (dom.fsGridLatticeCells) {
-        dom.fsGridLatticeCells.textContent = `${fsLattice.cols} × ${fsLattice.rows} cells`;
+        dom.fsGridLatticeCells.textContent = readout.cells;
     }
     if (dom.fsGridLatticeSections) {
-        if (fsLattice.isEligible) {
-            dom.fsGridLatticeSections.textContent = `${fsLattice.kx} × ${fsLattice.ky} sections`;
-            dom.fsGridLatticeSections.className = "grid-lattice-sections-val mono badge-sections badge-sections-valid";
-        } else {
-            dom.fsGridLatticeSections.textContent = "< 16×16 cells";
-            dom.fsGridLatticeSections.className = "grid-lattice-sections-val mono badge-sections badge-sections-warning";
+        dom.fsGridLatticeSections.textContent = readout.sections;
+        dom.fsGridLatticeSections.className = fsLattice.isEligible
+            ? "grid-lattice-sections-val mono badge-sections badge-sections-valid"
+            : "grid-lattice-sections-val mono badge-sections badge-sections-warning";
+    }
+}
+
+function applyFullscreenGridSize(size) {
+    const vp = ensureFullscreenViewport();
+    if (!vp) return;
+    vp.setGridSize(size);
+    updateFullscreenGridPanel();
+}
+
+function nudgeFullscreenGrid(dx, dy) {
+    const vp = ensureFullscreenViewport();
+    if (!vp) return;
+    vp.nudgeGrid(dx, dy);
+    updateFullscreenGridPanel();
+}
+
+function resetFullscreenGridToDefault() {
+    const vp = ensureFullscreenViewport();
+    if (!vp) return;
+    vp.resetGrid();
+    updateFullscreenGridPanel();
+}
+
+/**
+ * PATCHes the Grid Configuration of the curated map that owned the settled edit burst.
+ *
+ * The viewport debounces this to one call per burst and passes the map id it captured
+ * when the burst was armed, so a J/K switch mid-burst cannot retarget the write. A call
+ * that would write the map's current (or default) configuration is skipped, so restoring
+ * a map's grid on load never issues a request of its own.
+ */
+function persistFullscreenGrid(mapId, view) {
+    if (!mapId) return;
+    const map = (state.libraryFilteredMaps || []).find((m) => m.id === mapId)
+        || (state.libraryFullscreenMap && state.libraryFullscreenMap.id === mapId ? state.libraryFullscreenMap : null);
+    if (!map) return;
+
+    const payload = {
+        grid: {
+            cell_size_px: view.gridSize,
+            offset_x: view.gridOffset.x,
+            offset_y: view.gridOffset.y,
+        },
+    };
+    const stored = map.grid;
+    const unchanged = stored
+        ? stored.cell_size_px === payload.grid.cell_size_px
+            && stored.offset_x === payload.grid.offset_x
+            && stored.offset_y === payload.grid.offset_y
+        : payload.grid.cell_size_px === VTT_GRID_SIZE
+            && payload.grid.offset_x === 0
+            && payload.grid.offset_y === 0;
+    map.grid = { ...payload.grid };
+    if (unchanged) return;
+
+    fetch(`/api/curated/${encodeURIComponent(mapId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+    }).then(async (res) => {
+        if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            throw new Error(errData.error || `HTTP ${res.status}`);
+        }
+        // The regrid recomputes Map Section descriptions server-side, so the cached
+        // audit this map was flagged in no longer describes the bundle.
+        invalidateDatasetReadiness();
+    }).catch((err) => {
+        showToast(`Grid not saved: ${err.message}`, "danger");
+    });
+}
+
+// --- Fullscreen Pointer Interaction ---
+
+/** Starts a drag-to-align (Shift or align mode) or drag-to-pan from a canvas press. */
+function beginFullscreenPointer(button, shiftKey, clientX, clientY) {
+    const vp = ensureFullscreenViewport();
+    if (!vp) return;
+    const view = vp.getView();
+    if (button === 0 && (shiftKey || view.gridAlignMode)) {
+        pointer.draggingGrid = true;
+        pointer.gridStart = { x: clientX, y: clientY };
+        pointer.gridOffsetStart = { x: view.gridOffset.x, y: view.gridOffset.y };
+        if (dom.libraryFullscreenCanvas && dom.libraryFullscreenCanvas.parentElement) {
+            dom.libraryFullscreenCanvas.parentElement.classList.add("grid-dragging");
+        }
+        return;
+    }
+    if (button === 0 || button === 1) {
+        pointer.panning = true;
+        pointer.panStart = { x: clientX - view.pan.x, y: clientY - view.pan.y };
+        if (dom.libraryFullscreenCanvas && dom.libraryFullscreenCanvas.parentElement) {
+            dom.libraryFullscreenCanvas.parentElement.classList.add("panning");
         }
     }
 }
 
-let saveFullscreenGridTimeout = null;
-export function saveFullscreenMapGrid() {
-    if (state.libraryFullscreenMap && state.libraryFullscreenMap.id) {
-        const map = state.libraryFullscreenMap;
-        const payload = {
-            grid: {
-                cell_size_px: state.libraryFullscreenGridSize,
-                offset_x: state.libraryFullscreenGridOffset.x,
-                offset_y: state.libraryFullscreenGridOffset.y,
-            },
-        };
-        map.grid = { ...payload.grid };
-
-        clearTimeout(saveFullscreenGridTimeout);
-        saveFullscreenGridTimeout = setTimeout(async () => {
-            try {
-                const res = await fetch(`/api/curated/${encodeURIComponent(map.id)}`, {
-                    method: "PATCH",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(payload),
-                });
-                if (!res.ok) {
-                    const errData = await res.json().catch(() => ({}));
-                    throw new Error(errData.error || `HTTP ${res.status}`);
-                }
-                // The regrid recomputes Map Section descriptions server-side, so the cached
-                // audit this map was flagged in no longer describes the bundle.
-                invalidateDatasetReadiness();
-            } catch (err) {
-                showToast(`Grid not saved: ${err.message}`, "danger");
-            }
-        }, 300);
+/**
+ * Continues the active pointer interaction. Returns true when the move belonged to the
+ * fullscreen stage, so the triage handlers can be skipped.
+ */
+export function moveFullscreenPointer(clientX, clientY) {
+    if (!viewport) return false;
+    if (pointer.draggingGrid) {
+        const view = viewport.getView();
+        const zoom = view.zoom || 1;
+        viewport.setGridOffset({
+            x: Math.round(pointer.gridOffsetStart.x + (clientX - pointer.gridStart.x) / zoom),
+            y: Math.round(pointer.gridOffsetStart.y + (clientY - pointer.gridStart.y) / zoom),
+        });
+        updateFullscreenGridPanel();
+        return true;
     }
-}
-
-function setFullscreenGridSize(size) {
-    const num = Number.isFinite(size) ? size : parseInt(size, 10);
-    if (isNaN(num)) return;
-    const clamped = Math.max(MIN_GRID_SIZE, Math.min(MAX_GRID_SIZE, Math.round(num)));
-    state.libraryFullscreenGridSize = clamped;
-    saveFullscreenMapGrid();
-    updateFullscreenGridPanel();
-    updateFullscreenHud();
-    requestFullscreenRender();
-}
-
-function nudgeFullscreenGridOffset(dx, dy) {
-    state.libraryFullscreenGridOffset.x = Math.round(state.libraryFullscreenGridOffset.x + dx);
-    state.libraryFullscreenGridOffset.y = Math.round(state.libraryFullscreenGridOffset.y + dy);
-    saveFullscreenMapGrid();
-    updateFullscreenGridPanel();
-    updateFullscreenHud();
-    requestFullscreenRender();
-}
-
-function resetFullscreenGrid() {
-    state.libraryFullscreenGridSize = 64;
-    state.libraryFullscreenGridOffset = { x: 0, y: 0 };
-    saveFullscreenMapGrid();
-    updateFullscreenGridPanel();
-    updateFullscreenHud();
-    requestFullscreenRender();
-}
-
-function toggleFullscreenGridAlignMode(force) {
-    state.libraryFullscreenGridAlignMode = typeof force === "boolean" ? force : !state.libraryFullscreenGridAlignMode;
-    if (dom.btnFsGridAlignDrag) {
-        dom.btnFsGridAlignDrag.classList.toggle("active", state.libraryFullscreenGridAlignMode);
+    if (pointer.panning) {
+        const view = viewport.getView();
+        viewport.panBy(
+            clientX - pointer.panStart.x - view.pan.x,
+            clientY - pointer.panStart.y - view.pan.y
+        );
+        return true;
     }
-    if (dom.libraryFullscreenCanvas && dom.libraryFullscreenCanvas.parentElement) {
-        dom.libraryFullscreenCanvas.parentElement.classList.toggle("grid-aligning", state.libraryFullscreenGridAlignMode);
+    return false;
+}
+
+/** Ends whichever pointer interaction is active; a finished grid drag settles its burst. */
+export function endFullscreenPointer() {
+    let wasActive = false;
+    if (pointer.draggingGrid) {
+        pointer.draggingGrid = false;
+        if (viewport) viewport.flushGrid();
+        if (dom.libraryFullscreenCanvas && dom.libraryFullscreenCanvas.parentElement) {
+            dom.libraryFullscreenCanvas.parentElement.classList.remove("grid-dragging");
+        }
+        wasActive = true;
     }
-    requestFullscreenRender();
+    if (pointer.panning) {
+        pointer.panning = false;
+        if (dom.libraryFullscreenCanvas && dom.libraryFullscreenCanvas.parentElement) {
+            dom.libraryFullscreenCanvas.parentElement.classList.remove("panning");
+        }
+        wasActive = true;
+    }
+    return wasActive;
+}
+
+/** Mirrors Shift/align-mode into the overlay's `grid-aligning` class while not dragging. */
+export function syncFullscreenAligningClass(shiftKey) {
+    if (!viewport || pointer.draggingGrid) return;
+    if (!dom.libraryFullscreenCanvas || !dom.libraryFullscreenCanvas.parentElement) return;
+    dom.libraryFullscreenCanvas.parentElement.classList.toggle(
+        "grid-aligning",
+        Boolean(shiftKey) || viewport.getView().gridAlignMode
+    );
+}
+
+/** Stops the fullscreen pan and zoom loops, e.g. while a modal takes the keyboard. */
+export function stopFullscreenMotion() {
+    if (!viewport) return;
+    for (const key of ["w", "a", "s", "d"]) viewport.releasePanKey(key);
+    viewport.setZoomKey("in", false);
+    viewport.setZoomKey("out", false);
 }
 
 // --- Fullscreen Open & Close Lifecycle ---
@@ -723,7 +606,10 @@ export function openLibraryFullscreen(index) {
     }
 
     setLibraryFocus(clampedIndex, false);
-    resizeFullscreenCanvas();
+    const vp = ensureFullscreenViewport();
+    if (!vp) return;
+    vp.resize();
+    vp.resume();
     loadFullscreenMap(clampedIndex, 0);
 
     if (dom.libraryFullscreenCanvas) {
@@ -734,8 +620,13 @@ export function openLibraryFullscreen(index) {
 export function closeLibraryFullscreen() {
     if (!state.libraryFullscreenActive) return;
 
-    stopFsPanLoop();
-    stopFsZoomLoop();
+    endFullscreenPointer();
+    stopFullscreenMotion();
+    if (viewport) {
+        // No edit survives the close: settle the pending burst, then stop rendering.
+        viewport.flushGrid();
+        viewport.suspend();
+    }
 
     state.libraryFullscreenActive = false;
     if (dom.libraryFullscreenOverlay) {
@@ -743,7 +634,7 @@ export function closeLibraryFullscreen() {
     }
 
     toggleFullscreenGridPanel(false);
-    toggleFullscreenGridAlignMode(false);
+    toggleFullscreenAlignMode(false);
 
     // Restore focus on card in library view and scroll into view smoothly
     if (state.libraryFullscreenIndex >= 0) {
@@ -753,40 +644,24 @@ export function closeLibraryFullscreen() {
 
 export function setupFullscreenControls() {
     if (!dom.libraryFullscreenCanvas) return;
+    ensureFullscreenViewport();
 
-    // The overlay owns its own sizing: the stage engine only resizes the triage canvas.
     window.addEventListener("resize", () => {
-        if (!state.libraryFullscreenActive) return;
-        resizeFullscreenCanvas();
-        requestFullscreenRender();
+        if (!state.libraryFullscreenActive || !viewport) return;
+        viewport.resize();
     });
 
     // Canvas Mouse Pan Dragging & Dynamic Grid Align Drag
     dom.libraryFullscreenCanvas.addEventListener("mousedown", (e) => {
-        if (e.button === 0 && (e.shiftKey || state.libraryFullscreenGridAlignMode)) {
-            state.libraryFullscreenIsDraggingGrid = true;
-            state.libraryFullscreenGridDragStart = { x: e.clientX, y: e.clientY };
-            state.libraryFullscreenGridOffsetStart = { x: state.libraryFullscreenGridOffset.x, y: state.libraryFullscreenGridOffset.y };
-            dom.libraryFullscreenCanvas.parentElement?.classList.add("grid-dragging");
-            e.preventDefault();
-            return;
-        }
-
-        if (e.button === 0 || e.button === 1) {
-            state.libraryFullscreenIsPanning = true;
-            state.libraryFullscreenPanStart = {
-                x: e.clientX - state.libraryFullscreenPan.x,
-                y: e.clientY - state.libraryFullscreenPan.y,
-            };
-            dom.libraryFullscreenCanvas.parentElement?.classList.add("panning");
-            e.preventDefault();
-        }
+        if (e.button !== 0 && e.button !== 1) return;
+        beginFullscreenPointer(e.button, e.shiftKey, e.clientX, e.clientY);
+        e.preventDefault();
     });
 
     // Wheel Zoom
     dom.libraryFullscreenCanvas.addEventListener("wheel", (e) => {
         e.preventDefault();
-        if (!state.libraryFullscreenCurrentImage) return;
+        if (!viewport || !state.libraryFullscreenCurrentImage) return;
 
         const rect = dom.libraryFullscreenCanvas.getBoundingClientRect();
         const point = {
@@ -794,21 +669,17 @@ export function setupFullscreenControls() {
             y: e.clientY - rect.top,
         };
 
-        const factor = e.deltaY < 0 ? 1.15 : (1 / 1.15);
-        fullscreenZoomStep(factor, point);
+        const factor = e.deltaY < 0 ? WHEEL_ZOOM_FACTOR : (1 / WHEEL_ZOOM_FACTOR);
+        viewport.zoomBy(factor, point);
     }, { passive: false });
 
     // HUD Buttons
-    dom.btnFsGridToggle?.addEventListener("click", () => {
-        state.libraryFullscreenGridVisible = !state.libraryFullscreenGridVisible;
-        if (dom.btnFsGridToggle) dom.btnFsGridToggle.classList.toggle("active", state.libraryFullscreenGridVisible);
-        requestFullscreenRender();
-    });
+    dom.btnFsGridToggle?.addEventListener("click", () => toggleFullscreenGridVisible());
 
     dom.btnFsGridAdjust?.addEventListener("click", () => toggleFullscreenGridPanel());
-    dom.btnFsFit?.addEventListener("click", () => fullscreenFitToScreen());
-    dom.btnFsZoomOut?.addEventListener("click", () => fullscreenZoomStep(1 / 1.2));
-    dom.btnFsZoomIn?.addEventListener("click", () => fullscreenZoomStep(1.2));
+    dom.btnFsFit?.addEventListener("click", () => viewport?.fit());
+    dom.btnFsZoomOut?.addEventListener("click", () => viewport?.zoomBy(1 / BUTTON_ZOOM_FACTOR));
+    dom.btnFsZoomIn?.addEventListener("click", () => viewport?.zoomBy(BUTTON_ZOOM_FACTOR));
 
     dom.btnFsPrevMap?.addEventListener("click", () => {
         if (state.libraryFullscreenIndex > 0) {
@@ -829,26 +700,26 @@ export function setupFullscreenControls() {
     // Fullscreen Grid Panel Controls
     dom.btnFsCloseGridPanel?.addEventListener("click", () => toggleFullscreenGridPanel(false));
     dom.btnFsGridDone?.addEventListener("click", () => toggleFullscreenGridPanel(false));
-    dom.btnFsGridReset?.addEventListener("click", () => resetFullscreenGrid());
+    dom.btnFsGridReset?.addEventListener("click", () => resetFullscreenGridToDefault());
 
-    dom.btnFsGridSizeDec?.addEventListener("click", () => setFullscreenGridSize(state.libraryFullscreenGridSize - 1));
-    dom.btnFsGridSizeInc?.addEventListener("click", () => setFullscreenGridSize(state.libraryFullscreenGridSize + 1));
+    dom.btnFsGridSizeDec?.addEventListener("click", () => applyFullscreenGridSize(viewport.getView().gridSize - 1));
+    dom.btnFsGridSizeInc?.addEventListener("click", () => applyFullscreenGridSize(viewport.getView().gridSize + 1));
 
     if (dom.fsGridSizeInput) {
         dom.fsGridSizeInput.addEventListener("input", (e) => {
             const val = parseInt(e.target.value, 10);
-            if (!isNaN(val)) setFullscreenGridSize(val);
+            if (!isNaN(val)) applyFullscreenGridSize(val);
         });
         dom.fsGridSizeInput.addEventListener("change", (e) => {
             const val = parseInt(e.target.value, 10);
-            if (!isNaN(val)) setFullscreenGridSize(val);
+            if (!isNaN(val)) applyFullscreenGridSize(val);
         });
     }
 
     if (dom.fsGridSizeSlider) {
         dom.fsGridSizeSlider.addEventListener("input", (e) => {
             const val = parseInt(e.target.value, 10);
-            if (!isNaN(val)) setFullscreenGridSize(val);
+            if (!isNaN(val)) applyFullscreenGridSize(val);
         });
     }
 
@@ -856,14 +727,14 @@ export function setupFullscreenControls() {
     fsPresets.forEach(chip => {
         chip.addEventListener("click", () => {
             const size = parseInt(chip.dataset.size, 10);
-            if (!isNaN(size)) setFullscreenGridSize(size);
+            if (!isNaN(size)) applyFullscreenGridSize(size);
         });
     });
 
-    dom.btnFsGridNudgeUp?.addEventListener("click", () => nudgeFullscreenGridOffset(0, -1));
-    dom.btnFsGridNudgeDown?.addEventListener("click", () => nudgeFullscreenGridOffset(0, 1));
-    dom.btnFsGridNudgeLeft?.addEventListener("click", () => nudgeFullscreenGridOffset(-1, 0));
-    dom.btnFsGridNudgeRight?.addEventListener("click", () => nudgeFullscreenGridOffset(1, 0));
+    dom.btnFsGridNudgeUp?.addEventListener("click", () => nudgeFullscreenGrid(0, -1));
+    dom.btnFsGridNudgeDown?.addEventListener("click", () => nudgeFullscreenGrid(0, 1));
+    dom.btnFsGridNudgeLeft?.addEventListener("click", () => nudgeFullscreenGrid(-1, 0));
+    dom.btnFsGridNudgeRight?.addEventListener("click", () => nudgeFullscreenGrid(1, 0));
 
-    dom.btnFsGridAlignDrag?.addEventListener("click", () => toggleFullscreenGridAlignMode());
+    dom.btnFsGridAlignDrag?.addEventListener("click", () => toggleFullscreenAlignMode());
 }

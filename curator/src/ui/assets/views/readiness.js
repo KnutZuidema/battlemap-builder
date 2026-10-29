@@ -333,11 +333,14 @@ export function invalidateDatasetReadiness() {
 /**
  * Regenerate the map's Physical Description and persist it with its Map Sections.
  *
- * One request per map: a second click during an in-flight
- * `POST /api/curated/{id}/describe` joins that request instead of skipping the map.
+ * One request per map, under a key of its own: the inspector's draft describe uses
+ * `describe:curated:<id>` with `latest`, so sharing that key would let the batch join an
+ * apply-less request (never persisting, and skipping the `applied` guard) and let an inspector
+ * describe abort the apply. Sharing the key among batch calls keeps a second click during an
+ * in-flight apply joined to that apply instead of skipping the map.
  */
 function applyDescriptionOnce(mapId) {
-    return join(`describe:curated:${mapId}`, (signal) =>
+    return join(`describe:curated:${mapId}:apply`, (signal) =>
         describeCuratedMap(mapId, { signal, apply: true }).then((payload) => {
             if (payload.applied !== true) {
                 throw new Error("Description was generated but not persisted");
@@ -379,6 +382,9 @@ function reportBatchDescriptionOutcome(sent, reused, failed) {
     if (reused > 0) parts.push(`reused ${reused} in-flight regeneration${reused === 1 ? "" : "s"}`);
     if (failed.length > 0) parts.push(`${failed.length} failed: ${failed.join(", ")}`);
     const message = parts.join("; ");
+    // A batch whose every apply was cancelled has nothing to report: the re-audit that follows
+    // names the maps that still fail.
+    if (!message) return;
     const level = failed.length > 0 ? "danger" : sent > 0 ? "success" : "info";
     showToast(message.charAt(0).toUpperCase() + message.slice(1), level);
 }
@@ -409,13 +415,20 @@ async function fixDatasetDescriptions() {
         for (const mapId of mapIds) {
             state.readinessBatch.done += 1;
             setReadinessActionsBusy(true);
-            // Snapshot before awaiting: a request that settles must not count as reused.
-            const joinedInFlight = has(`describe:curated:${mapId}`);
+            // Snapshot before awaiting: a request that settles must not count as reused. The
+            // apply key is the batch's own, so only another apply of the same map can be joined.
+            const joinedInFlight = has(`describe:curated:${mapId}:apply`);
             try {
                 await applyDescriptionOnce(mapId);
                 if (joinedInFlight) reused += 1;
                 else sent += 1;
             } catch (err) {
+                if (err && err.name === "AbortError") {
+                    // A superseded apply was cancelled, not attempted: not a failed map. The
+                    // request module already left the pill alone; the re-audit below reports
+                    // the map if it still needs a description.
+                    continue;
+                }
                 // The request module already raised the pill and the toast; the batch reports it
                 // again by map in its summary.
                 failed.push(`${mapId} (${err.message})`);

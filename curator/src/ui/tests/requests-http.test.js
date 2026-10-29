@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { RequestError, requestJson } from "../assets/requests/http.js";
 import { clearRequestFailure } from "../assets/requests/failures.js";
-import { installRequestDom, jsonResponse, stubFetch } from "./support/fakes.js";
+import { emptyResponse, installRequestDom, jsonResponse, stubFetch } from "./support/fakes.js";
 
 function enabledTimers(t) {
     // Toasts schedule their own removal; the tests must not wait for those timers.
@@ -158,4 +158,34 @@ test("a network failure becomes a RequestError naming the path", async (t) => {
         },
     );
     assert.equal(ui.toastContainer.children.length, 1);
+});
+
+test("a 2xx with no body resolves as a success, not an invalid-JSON failure", async (t) => {
+    enabledTimers(t);
+    const ui = installRequestDom();
+    // `DELETE /api/curated/{id}` answers 204; a 200 with no content is the same success.
+    const responses = [emptyResponse(), emptyResponse({ status: 200, statusText: "OK" })];
+    const server = stubFetch(async () => responses.shift());
+    t.after(() => {
+        server.restore();
+        clearRequestFailure();
+        ui.restore();
+    });
+
+    const deleted = await requestJson("/api/curated/m1", {
+        method: "DELETE",
+        operation: "Delete curated map",
+    });
+    assert.equal(deleted, null, "a 204 has no payload");
+
+    const empty = await requestJson("/api/curated/m2", {
+        method: "DELETE",
+        operation: "Delete curated map",
+    });
+    assert.equal(empty, null, "an empty 200 body has no payload");
+
+    assert.equal(server.calls.length, 2);
+    assert.equal(server.calls[0].init.method, "DELETE");
+    assert.equal(ui.pill.className, "status-pill status-connected", "an empty body raises no pill");
+    assert.equal(ui.toastContainer.children.length, 0, "an empty body raises no toast");
 });

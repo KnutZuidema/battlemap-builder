@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { abort, clear, has, join, latest } from "../assets/requests/tracker.js";
+import { abort, has, join, latest } from "../assets/requests/tracker.js";
 
 function deferred() {
     let resolve;
@@ -90,7 +90,7 @@ test("a superseded request cannot remove the entry that replaced it", async () =
     const second = deferred();
 
     const a = join("describe:curated:m1", () => first.promise);
-    clear("describe:curated:m1");
+    abort("describe:curated:m1");
     const b = join("describe:curated:m1", () => second.promise);
     assert.notEqual(a, b);
 
@@ -104,23 +104,18 @@ test("a superseded request cannot remove the entry that replaced it", async () =
     assert.equal(has("describe:curated:m1"), false);
 });
 
-test("clear forgets a request without aborting it and abort removes it", async () => {
-    const pending = deferred();
+test("abort forgets a registered request and an unknown key is a no-op", async () => {
     let signal;
-    join("suggest:curated:m1", (s) => {
+    const pending = join("suggest:curated:m1", (s) => {
         signal = s;
-        return pending.promise;
+        return abortable(s);
     });
     assert.equal(has("suggest:curated:m1"), true);
 
-    clear("suggest:curated:m1");
+    abort("suggest:curated:m1");
     assert.equal(has("suggest:curated:m1"), false);
-    assert.equal(signal.aborted, false, "clear only forgets");
-
-    join("suggest:curated:m2", abortable);
-    assert.equal(has("suggest:curated:m2"), true);
-    abort("suggest:curated:m2");
-    assert.equal(has("suggest:curated:m2"), false);
+    assert.equal(signal.aborted, true, "abort cancels the request");
+    await assert.rejects(pending, (error) => error.name === "AbortError");
     assert.equal(has("suggest:curated:never-started"), false);
     abort("suggest:curated:never-started");
 });

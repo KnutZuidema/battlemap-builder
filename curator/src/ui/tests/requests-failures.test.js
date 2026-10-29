@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 
 import { clearRequestFailure, reportRequestFailure } from "../assets/requests/failures.js";
 import { RequestError } from "../assets/requests/http.js";
-import { installRequestDom } from "./support/fakes.js";
+import { fetchStatus } from "../assets/shell/status.js";
+import { installRequestDom, jsonResponse, stubFetch } from "./support/fakes.js";
 
 function serverError(operation, { status = 502, code = "upstream_failed", debug = "trace-1" } = {}) {
     return new RequestError("upstream model unavailable", {
@@ -98,4 +99,23 @@ test("an aborted request is not a failure", (t) => {
 
     assert.equal(ui.toastContainer.children.length, 0);
     assert.equal(ui.pill.className, "status-pill status-connected");
+});
+
+test("a status refresh cannot repaint the pill behind an active failure", async (t) => {
+    const ui = setUp(t);
+    const server = stubFetch(async () => jsonResponse({ staging_count: 3, curated_count: 7 }));
+    t.after(() => server.restore());
+
+    reportRequestFailure(serverError("Describe curated map"), "Describe curated map");
+    assert.equal(ui.toastContainer.children.length, 1);
+
+    await fetchStatus();
+    assert.equal(ui.pill.className, "status-pill status-connected");
+    assert.equal(ui.statusText.textContent, "Online (3)");
+
+    // The refresh went through the policy, so the failure is forgotten rather than left active
+    // behind a connected pill: the next identical failure is a new transition and toasts.
+    reportRequestFailure(serverError("Describe curated map"), "Describe curated map");
+    assert.equal(ui.toastContainer.children.length, 2, "the refresh cleared the recorded failure");
+    assert.equal(ui.pill.className, "status-pill status-error");
 });

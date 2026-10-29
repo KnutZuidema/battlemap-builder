@@ -35,11 +35,6 @@ export function abort(key) {
     entry.controller.abort();
 }
 
-/** Forget the request in flight for `key` without aborting it. */
-export function clear(key) {
-    inFlight.delete(key);
-}
-
 /** Whether a request is currently in flight for `key`. */
 export function has(key) {
     return inFlight.has(key);

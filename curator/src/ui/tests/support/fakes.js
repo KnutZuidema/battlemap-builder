@@ -127,5 +127,26 @@ export function stubFetch(handler) {
 
 /** A JSON `Response`-like object for the fetch stub. */
 export function jsonResponse(payload, { status = 200, statusText = "OK" } = {}) {
-    return { ok: status >= 200 && status < 300, status, statusText, json: async () => payload };
+    const body = JSON.stringify(payload);
+    return {
+        ok: status >= 200 && status < 300,
+        status,
+        statusText,
+        json: async () => payload,
+        text: async () => body,
+    };
+}
+
+/** A 2xx response with no body, as `DELETE` endpoints answer (204, or an empty 200). */
+export function emptyResponse({ status = 204, statusText = "No Content" } = {}) {
+    return {
+        ok: true,
+        status,
+        statusText,
+        json: async () => {
+            // A real Response rejects on an empty body; the helper must not hide that.
+            throw new SyntaxError("Unexpected end of JSON input");
+        },
+        text: async () => "",
+    };
 }

@@ -56,7 +56,8 @@ async function readErrorPayload(response) {
  * A non-OK response becomes a `RequestError` carrying the server's `{ error, code, debug }`
  * (falling back to the status line when the body is not JSON), a network failure becomes a
  * `RequestError` naming the path, and an abort is rethrown untouched: a cancelled request is
- * not a failure and must not raise the status pill.
+ * not a failure and must not raise the status pill. A 2xx with no body (a 204, or an empty
+ * 200) resolves with `null`: a successful request does not have to answer with JSON.
  */
 export async function requestJson(path, { method = "GET", body, signal, operation } = {}) {
     let response;
@@ -88,9 +89,13 @@ export async function requestJson(path, { method = "GET", body, signal, operatio
         );
     }
 
-    let payload;
+    // A successful request may carry no payload: `DELETE /api/curated/{id}` answers 204, and a
+    // 200 with an empty body is equally a success. Only a body that is present but unparsable is
+    // an invalid-JSON failure.
+    let payload = null;
     try {
-        payload = await response.json();
+        const text = await response.text();
+        if (text) payload = JSON.parse(text);
     } catch (error) {
         if (isAbort(error)) throw error;
         const reason = error && error.message ? error.message : String(error);

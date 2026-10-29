@@ -33,7 +33,7 @@ import {
 import {
     closeBenchmarkDrawer,
     closeBudgetGuardModal,
-    setupDrawerControls,
+    setupBenchmarkControls,
     toggleBenchmarkDrawer,
 } from "../views/benchmark.js";
 import {
@@ -44,7 +44,7 @@ import {
     setupDecisionModalControls,
     undoRejectCandidate,
 } from "../views/curation.js";
-import { closeIngestionDrawer, toggleIngestionDrawer } from "../views/ingestion.js";
+import { closeIngestionDrawer, setupDrawerControls, toggleIngestionDrawer } from "../views/ingestion.js";
 import {
     closeLibraryInspector,
     saveLibraryInspectorChanges,
@@ -296,6 +296,7 @@ export function setupEventListeners() {
         if (e.target === dom.helpModal) closeHelpModal();
     });
     setupDrawerControls();
+    setupBenchmarkControls();
     setupStorageControls();
     setupReadinessControls();
     setupLibraryControls();

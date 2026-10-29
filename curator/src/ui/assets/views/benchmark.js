@@ -9,7 +9,7 @@ import { state } from "../store.js";
 import { closeHelpModal } from "../shell/help.js";
 import { fetchStatus, showEmptyState, showLoading, showToast, updateHud } from "../shell/status.js";
 import { fitToScreen, stopPanLoop, stopZoomLoop } from "../stage/canvas.js";
-import { closeIngestionDrawer, openIngestionDrawer, startRedditHarvest } from "./ingestion.js";
+import { closeIngestionDrawer } from "./ingestion.js";
 import { fetchStagingQueue, loadCandidate } from "./triage.js";
 
 // Guardrail for the one-click run: above this estimate the budget modal confirms first.
@@ -808,47 +808,7 @@ async function cancelBenchmarkExecution() {
     showToast("Benchmark batch cancellation requested", "info");
 }
 
-export function setupDrawerControls() {
-    dom.btnOpenDrawer?.addEventListener("click", () => openIngestionDrawer());
-    dom.btnEmptyHarvest?.addEventListener("click", () => openIngestionDrawer());
-    dom.btnCloseDrawer?.addEventListener("click", () => closeIngestionDrawer());
-    dom.btnCancelDrawer?.addEventListener("click", () => closeIngestionDrawer());
-
-    dom.ingestionDrawer?.addEventListener("click", (e) => {
-        if (e.target === dom.ingestionDrawer) {
-            closeIngestionDrawer();
-        }
-    });
-
-    dom.harvestLimitInput?.addEventListener("input", () => {
-        dom.harvestLimitValue.textContent = dom.harvestLimitInput.value;
-    });
-
-    const sortBtns = dom.harvestSortGroup?.querySelectorAll(".btn-toggle");
-    sortBtns?.forEach((btn) => {
-        btn.addEventListener("click", () => {
-            const sort = btn.getAttribute("data-sort");
-            if (sort) {
-                state.harvestSort = sort;
-                sortBtns.forEach((b) => b.classList.toggle("active", b === btn));
-            }
-        });
-    });
-
-    const timeBtns = dom.harvestTimeGroup?.querySelectorAll(".btn-toggle");
-    timeBtns?.forEach((btn) => {
-        btn.addEventListener("click", () => {
-            const time = btn.getAttribute("data-time");
-            if (time) {
-                state.harvestTime = time;
-                timeBtns.forEach((b) => b.classList.toggle("active", b === btn));
-            }
-        });
-    });
-
-    dom.btnStartHarvest?.addEventListener("click", () => startRedditHarvest());
-
-    // Benchmark Drawer Controls
+export function setupBenchmarkControls() {
     dom.btnOpenBenchmarkDrawer?.addEventListener("click", () => openBenchmarkDrawer());
     dom.btnCloseBenchmarkDrawer?.addEventListener("click", () => closeBenchmarkDrawer());
     dom.btnCancelBenchmarkDrawer?.addEventListener("click", () => closeBenchmarkDrawer());

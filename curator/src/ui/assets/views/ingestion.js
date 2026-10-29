@@ -1,6 +1,6 @@
 /**
  * Ingestion drawer: Reddit harvest configuration, the live harvest event
- * stream, and the staging drawer's open/close state.
+ * stream, the staging drawer's open/close state, and its control bindings.
  */
 
 import { dom } from "../dom.js";
@@ -129,4 +129,45 @@ function handleHarvestEvent(event, data) {
         dom.harvestProgressText.textContent = `Error: ${data.error || "Unknown"}`;
         showToast(`Harvest failed: ${data.error || "Unknown"}`, "danger");
     }
+}
+
+export function setupDrawerControls() {
+    dom.btnOpenDrawer?.addEventListener("click", () => openIngestionDrawer());
+    dom.btnEmptyHarvest?.addEventListener("click", () => openIngestionDrawer());
+    dom.btnCloseDrawer?.addEventListener("click", () => closeIngestionDrawer());
+    dom.btnCancelDrawer?.addEventListener("click", () => closeIngestionDrawer());
+
+    dom.ingestionDrawer?.addEventListener("click", (e) => {
+        if (e.target === dom.ingestionDrawer) {
+            closeIngestionDrawer();
+        }
+    });
+
+    dom.harvestLimitInput?.addEventListener("input", () => {
+        dom.harvestLimitValue.textContent = dom.harvestLimitInput.value;
+    });
+
+    const sortBtns = dom.harvestSortGroup?.querySelectorAll(".btn-toggle");
+    sortBtns?.forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const sort = btn.getAttribute("data-sort");
+            if (sort) {
+                state.harvestSort = sort;
+                sortBtns.forEach((b) => b.classList.toggle("active", b === btn));
+            }
+        });
+    });
+
+    const timeBtns = dom.harvestTimeGroup?.querySelectorAll(".btn-toggle");
+    timeBtns?.forEach((btn) => {
+        btn.addEventListener("click", () => {
+            const time = btn.getAttribute("data-time");
+            if (time) {
+                state.harvestTime = time;
+                timeBtns.forEach((b) => b.classList.toggle("active", b === btn));
+            }
+        });
+    });
+
+    dom.btnStartHarvest?.addEventListener("click", () => startRedditHarvest());
 }

@@ -21,7 +21,8 @@ import {
     ZOOM_SPEED,
 } from "../../stage/canvas.js";
 import { setLibraryFocus } from "../library.js";
-import { showToast, invalidateDatasetReadiness } from "../../app.js";
+import { showToast } from "../../app.js";
+import { invalidateDatasetReadiness } from "../readiness.js";
 
 // ==========================================================================
 // Fullscreen Stage Overlay with Reused 2D Canvas & HUD Controls (Issue #134)

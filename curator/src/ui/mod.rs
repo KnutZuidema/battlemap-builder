@@ -83,6 +83,7 @@ mod tests {
             "app.js",
             "dom.js",
             "store.js",
+            "dataset-scope.js",
             "kit/dom.js",
             "kit/format.js",
             "kit/grid-math.js",
@@ -96,6 +97,9 @@ mod tests {
             "views/library.js",
             "views/library/bulk.js",
             "views/library/fullscreen.js",
+            "views/readiness.js",
+            "views/snapshots.js",
+            "views/training.js",
         ] {
             assert!(Assets::get(asset).is_some(), "{asset} must be embedded");
         }

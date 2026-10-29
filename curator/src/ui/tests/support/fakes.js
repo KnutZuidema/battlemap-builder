@@ -150,3 +150,40 @@ export function emptyResponse({ status = 204, statusText = "No Content" } = {}) 
         text: async () => "",
     };
 }
+
+/**
+ * A `text/event-stream` `Response`-like object that yields `chunks` in order.
+ *
+ * Each chunk is the exact text one network read delivers, so a test can split a frame in the
+ * middle of a line and check the reader buffers it back together. `cancelled` records whether
+ * the reader stopped the body.
+ */
+export function eventStreamResponse(chunks, { status = 200, statusText = "OK" } = {}) {
+    const bytes = chunks.map((chunk) => new TextEncoder().encode(chunk));
+    const state = { cancelled: false, read: 0 };
+    return {
+        ok: status >= 200 && status < 300,
+        status,
+        statusText,
+        headers: {
+            get: (name) => (String(name).toLowerCase() === "content-type" ? "text/event-stream" : null),
+        },
+        body: {
+            getReader() {
+                return {
+                    async read() {
+                        if (state.read < bytes.length) {
+                            return { done: false, value: bytes[state.read++] };
+                        }
+                        return { done: true, value: undefined };
+                    },
+                    async cancel() {
+                        state.cancelled = true;
+                    },
+                    releaseLock() {},
+                };
+            },
+        },
+        stream: state,
+    };
+}

@@ -20,8 +20,8 @@ import {
 import { getLibraryFullscreenDimensions } from "../../kit/layers.js";
 import { createViewport, drawGridOverlay, isGridCalibrating } from "../../stage/viewport.js";
 import { setLibraryFocus } from "../library.js";
-import { showToast } from "../../shell/status.js";
 import { invalidateDatasetReadiness } from "../readiness.js";
+import { saveCuratedMap } from "../../requests/library.js";
 
 const WHEEL_ZOOM_FACTOR = 1.15;
 const BUTTON_ZOOM_FACTOR = 1.2;
@@ -501,20 +501,13 @@ function persistFullscreenGrid(mapId, view) {
     map.grid = { ...payload.grid };
     if (unchanged) return;
 
-    fetch(`/api/curated/${encodeURIComponent(mapId)}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-    }).then(async (res) => {
-        if (!res.ok) {
-            const errData = await res.json().catch(() => ({}));
-            throw new Error(errData.error || `HTTP ${res.status}`);
-        }
+    saveCuratedMap(mapId, payload).then(() => {
         // The regrid recomputes Map Section descriptions server-side, so the cached
         // audit this map was flagged in no longer describes the bundle.
         invalidateDatasetReadiness();
-    }).catch((err) => {
-        showToast(`Grid not saved: ${err.message}`, "danger");
+    }).catch(() => {
+        // The request module reported it; the map keeps the local configuration so the next
+        // burst retries it.
     });
 }
 

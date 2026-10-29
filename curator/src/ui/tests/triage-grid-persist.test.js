@@ -30,7 +30,7 @@ globalThis.fetch = (url, init = {}) => {
     if (init.method === "PATCH" && String(url).endsWith("/grid")) {
         patches.push({ url, body: JSON.parse(init.body) });
     }
-    return Promise.resolve({ ok: true, json: async () => ({}) });
+    return Promise.resolve({ ok: true, json: async () => ({}), text: async () => "{}" });
 };
 
 function fakeCanvas(width = 800, height = 600) {

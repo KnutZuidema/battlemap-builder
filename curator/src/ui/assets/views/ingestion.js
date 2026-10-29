@@ -9,6 +9,7 @@ import { closeHelpModal } from "../shell/help.js";
 import { fetchStatus, showToast } from "../shell/status.js";
 import { stopStageMotion } from "../stage/canvas.js";
 import { fetchStagingQueue } from "./triage.js";
+import { harvestReddit } from "../requests/harvest.js";
 
 export function toggleIngestionDrawer() {
     if (state.drawerOpen) {
@@ -49,63 +50,20 @@ export async function startRedditHarvest() {
     };
 
     try {
-        const res = await fetch("/api/harvest/reddit", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-            },
-            body: JSON.stringify(payload),
-        });
+        const summary = await harvestReddit(payload, { onEvent: handleHarvestEvent });
 
-        if (!res.ok) {
-            const errJson = await res.json().catch(() => ({}));
-            throw new Error(errJson.error || `HTTP ${res.status}`);
-        }
-
-        const contentType = res.headers.get("content-type") || "";
-
-        if (contentType.includes("text/event-stream") && res.body) {
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = "";
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                buffer += decoder.decode(value, { stream: true });
-
-                const lines = buffer.split("\n");
-                buffer = lines.pop(); // preserve trailing partial line
-
-                let currentEvent = "message";
-                for (const line of lines) {
-                    const trimmed = line.trim();
-                    if (trimmed.startsWith("event:")) {
-                        currentEvent = trimmed.slice(6).trim();
-                    } else if (trimmed.startsWith("data:")) {
-                        const dataStr = trimmed.slice(5).trim();
-                        try {
-                            const data = JSON.parse(dataStr);
-                            handleHarvestEvent(currentEvent, data);
-                        } catch (_) {
-                            // Ignore json parse errors on malformed lines
-                        }
-                    }
-                }
-            }
-        } else {
-            const data = await res.json();
-            const msg = `Harvest complete: ${data.downloaded} downloaded, ${data.skipped} skipped.`;
+        if (summary) {
+            const msg = `Harvest complete: ${summary.downloaded} downloaded, ${summary.skipped} skipped.`;
             dom.harvestProgressBar.style.width = "100%";
             dom.harvestProgressText.textContent = msg;
             showToast(msg, "success");
             await fetchStagingQueue();
             fetchStatus();
         }
-    } catch (err) {
-        dom.harvestProgressText.textContent = `Harvest failed: ${err.message}`;
-        showToast(`Harvest error: ${err.message}`, "danger");
+    } catch (_) {
+        // The failure policy names the operation; a harvest that failed mid-stream already
+        // reported its own `error` event through the drawer.
+        dom.harvestProgressText.textContent = "Harvest failed";
     } finally {
         state.isHarvesting = false;
         dom.btnStartHarvest.disabled = false;

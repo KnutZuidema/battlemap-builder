@@ -32,8 +32,8 @@ import {
     saveLibraryInspectorChanges,
 } from "./inspector.js";
 import { showToast } from "../shell/status.js";
-import { datasetScopeTheme, datasetScopeQuery } from "../dataset-scope.js";
 import { syncReadinessToScope } from "./readiness.js";
+import { exportDataset, fetchCuratedMaps } from "../requests/library.js";
 import {
     fetchDatasetSnapshots,
     freezeDatasetSnapshot,
@@ -74,17 +74,13 @@ export async function fetchLibraryMaps() {
     dom.libraryGrid.setAttribute("aria-busy", "true");
 
     try {
-        const res = await fetch("/api/curated");
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-        }
-        const maps = await res.json();
+        const maps = await fetchCuratedMaps();
         state.curatedMaps = maps;
 
         applyLibraryFilters();
         fetchDatasetSnapshots();
-    } catch (err) {
-        showToast(`Failed to load dataset library: ${err.message}`, "danger");
+    } catch (_) {
+        // The failure policy named the operation; the grid keeps the maps it already has.
     } finally {
         if (dom.libraryGrid) dom.libraryGrid.setAttribute("aria-busy", "false");
     }
@@ -984,13 +980,7 @@ async function exportLoraDataset() {
     showToast(`Packaging LoRA dataset ZIP archive (${tagLabel})...`, "info");
 
     try {
-        const url = `/api/dataset/export${datasetScopeQuery()}`;
-        const res = await fetch(url);
-        if (!res.ok) {
-            throw new Error(`Export failed (HTTP ${res.status}: ${res.statusText})`);
-        }
-
-        const blob = await res.blob();
+        const blob = await exportDataset();
         const filename = "lora-dataset.zip";
 
         const downloadUrl = window.URL.createObjectURL(blob);
@@ -1003,8 +993,8 @@ async function exportLoraDataset() {
         window.URL.revokeObjectURL(downloadUrl);
 
         showToast(`LoRA dataset downloaded (${formatBytes(blob.size)})!`, "success");
-    } catch (err) {
-        showToast(`Export error: ${err.message}`, "danger");
+    } catch (_) {
+        // The failure policy names the operation and carries the server's reason.
     } finally {
         state.isExporting = false;
         if (dom.btnExportLora) dom.btnExportLora.disabled = false;

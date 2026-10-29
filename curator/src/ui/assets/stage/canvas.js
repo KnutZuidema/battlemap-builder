@@ -7,6 +7,7 @@ import { dom } from "../dom.js";
 import { state } from "../store.js";
 import { VTT_GRID_SIZE } from "../kit/grid-math.js";
 import { createViewport, drawGridOverlay, isGridCalibrating } from "./viewport.js";
+import { saveStagingGrid } from "../requests/staging.js";
 
 let viewport = null;
 
@@ -131,12 +132,9 @@ function persistTriageGrid(ownerId, view) {
     candidate.grid = payload;
     if (unchanged) return;
 
-    fetch(`/api/staging/${encodeURIComponent(candidate.id)}/grid`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-    }).catch((err) => {
-        console.error("Failed to save staging candidate grid config:", err);
+    saveStagingGrid(candidate.id, payload).catch(() => {
+        // The request module reported the failure once; the candidate keeps the local
+        // configuration so the next burst retries it.
     });
 }
 

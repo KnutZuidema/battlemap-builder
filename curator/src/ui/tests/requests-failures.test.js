@@ -113,9 +113,46 @@ test("a status refresh cannot repaint the pill behind an active failure", async 
     assert.equal(ui.pill.className, "status-pill status-connected");
     assert.equal(ui.statusText.textContent, "Online (3)");
 
-    // The refresh went through the policy, so the failure is forgotten rather than left active
+    // The status probe answered, so every recorded failure is forgotten rather than left active
     // behind a connected pill: the next identical failure is a new transition and toasts.
     reportRequestFailure(serverError("Describe curated map"), "Describe curated map");
     assert.equal(ui.toastContainer.children.length, 2, "the refresh cleared the recorded failure");
     assert.equal(ui.pill.className, "status-pill status-error");
+});
+
+test("another operation's success does not clear the failure the pill names", (t) => {
+    const ui = setUp(t);
+
+    reportRequestFailure(serverError("Load training runs"), "Load training runs");
+    assert.equal(ui.toastContainer.children.length, 1);
+
+    // The same poll tick loaded cost telemetry successfully; that answers for its own
+    // operation, not for the listing that kept failing.
+    clearRequestFailure("Load cost stats");
+
+    assert.equal(ui.pill.className, "status-pill status-error");
+    assert.equal(ui.statusText.textContent, "Load training runs failed");
+
+    reportRequestFailure(serverError("Load training runs", { code: "timeout" }), "Load training runs");
+    assert.equal(ui.toastContainer.children.length, 1, "a retry of the recorded failure stays quiet");
+});
+
+test("clearing one operation repaints the newest remaining failure", (t) => {
+    const ui = setUp(t);
+
+    reportRequestFailure(serverError("Load training runs"), "Load training runs");
+    reportRequestFailure(serverError("Load cost stats", { code: "cost_down" }), "Load cost stats");
+    assert.equal(ui.statusText.textContent, "Load cost stats failed");
+    assert.equal(ui.toastContainer.children.length, 2);
+
+    clearRequestFailure("Load cost stats");
+
+    assert.equal(ui.pill.className, "status-pill status-error", "one failure is still outstanding");
+    assert.equal(ui.statusText.textContent, "Load training runs failed");
+    assert.match(ui.pill.title, /Load training runs/);
+
+    clearRequestFailure("Load training runs");
+
+    assert.equal(ui.pill.className, "status-pill status-connected", "all failures recovered");
+    assert.equal(ui.statusText.textContent, "Online (2)");
 });

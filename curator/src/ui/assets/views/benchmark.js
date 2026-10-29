@@ -11,6 +11,12 @@ import { fetchStatus, showEmptyState, showLoading, showToast, updateHud } from "
 import { fitToScreen, stopStageMotion } from "../stage/canvas.js";
 import { closeIngestionDrawer } from "./ingestion.js";
 import { fetchStagingQueue, loadCandidate } from "./triage.js";
+import {
+    cancelBenchmarkRun,
+    fetchBenchmarkModels,
+    fetchCostStats as requestCostStats,
+    runBenchmark,
+} from "../requests/benchmark.js";
 
 // Guardrail for the one-click run: above this estimate the budget modal confirms first.
 const BUDGET_GUARDRAIL_THRESHOLD = 2.00;
@@ -20,9 +26,7 @@ let benchmarkModelCatalog = [];
 
 export async function fetchCostStats() {
     try {
-        const res = await fetch("/api/cost/stats");
-        if (!res.ok) return;
-        const stats = await res.json();
+        const stats = await requestCostStats();
         const allTimeSpend = (stats.all_time_spend != null ? stats.all_time_spend : stats.total_spend_usd || 0).toFixed(2);
         const sessionSpend = (stats.session_spend != null ? stats.session_spend : stats.session_spend_usd || 0).toFixed(2);
         const trainingSpend = (stats.training_spend || 0).toFixed(2);
@@ -39,7 +43,8 @@ export async function fetchCostStats() {
             dom.costMonitorHud.title = `Session Spend: $${sessionSpend} | Lifetime Spend: $${allTimeSpend} (Training: $${trainingSpend} across ${trainingRunsCount} ${runWord}, Gen: $${generationSpend} across ${totalGens} ${mapWord})`;
         }
     } catch (_) {
-        // Silently ignore telemetry refresh failure
+        // The failure policy names the operation once per transition; the monitor keeps the
+        // last figures it showed.
     }
 }
 
@@ -70,11 +75,10 @@ function benchmarkModelBadgeClass(model) {
 // with no restart (ADR-0010).
 export async function loadBenchmarkModelCatalog() {
     try {
-        const res = await fetch("/api/models");
-        if (!res.ok) throw new Error(`GET /api/models returned ${res.status}`);
-        const models = await res.json();
+        const models = await fetchBenchmarkModels();
         benchmarkModelCatalog = Array.isArray(models) ? models : [];
     } catch (_) {
+        // The failure policy reported it; the drawer says the registry answered nothing.
         benchmarkModelCatalog = [];
     }
     renderBenchmarkModelChecklist();
@@ -522,52 +526,13 @@ async function startBenchmarkExecution(metrics) {
     }
 
     try {
-        const res = await fetch("/api/benchmark/run", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Accept": "text/event-stream",
-            },
-            body: JSON.stringify(payload),
+        const summary = await runBenchmark(payload, {
             signal: state.benchmarkAbortController.signal,
+            onEvent: handleBenchmarkEvent,
         });
 
-        if (!res.ok) {
-            const errJson = await res.json().catch(() => ({}));
-            throw new Error(errJson.error || errJson.message || `HTTP ${res.status}`);
-        }
-
-        const contentType = res.headers.get("content-type") || "";
-
-        if (contentType.includes("text/event-stream") && res.body) {
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = "";
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                buffer += decoder.decode(value, { stream: true });
-
-                const lines = buffer.split("\n");
-                buffer = lines.pop();
-
-                let currentEvent = "message";
-                for (const line of lines) {
-                    const trimmed = line.trim();
-                    if (trimmed.startsWith("event:")) {
-                        currentEvent = trimmed.slice(6).trim();
-                    } else if (trimmed.startsWith("data:")) {
-                        const dataStr = trimmed.slice(5).trim();
-                        try {
-                            const data = JSON.parse(dataStr);
-                            handleBenchmarkEvent(currentEvent, data);
-                        } catch (_) {}
-                    }
-                }
-            }
-        } else {
-            const data = await res.json();
+        if (summary) {
+            const data = summary;
             const msg = `Benchmark complete: ${data.completed}/${data.total} generated ($${(data.total_cost_usd || 0).toFixed(4)})`;
             if (dom.benchmarkProgressBar) dom.benchmarkProgressBar.style.width = "100%";
             if (dom.benchmarkProgressText) dom.benchmarkProgressText.textContent = msg;
@@ -614,7 +579,8 @@ async function startBenchmarkExecution(metrics) {
             appendBenchmarkLog("ERROR", `Benchmark failed: ${err.message}`);
             if (dom.btnBenchmarkWindowClose) dom.btnBenchmarkWindowClose.disabled = false;
             if (dom.btnBenchmarkWindowCancel) dom.btnBenchmarkWindowCancel.disabled = true;
-            showToast(`Benchmark error: ${err.message}`, "danger");
+            // The failure policy already raised the pill and toasted "Run benchmark failed";
+            // the progress window keeps the detail on screen instead of a second toast.
         }
     } finally {
         state.isBenchmarking = false;
@@ -795,8 +761,10 @@ async function cancelBenchmarkExecution() {
         state.benchmarkAbortController.abort();
     }
     try {
-        await fetch("/api/benchmark/cancel", { method: "POST" });
-    } catch (_) {}
+        await cancelBenchmarkRun();
+    } catch (_) {
+        // The failure policy reported it; the transport abort above still stops this tab's run.
+    }
     if (dom.benchmarkProgressText) dom.benchmarkProgressText.textContent = "Cancelling benchmark batch...";
     if (dom.benchmarkWindowCurrentStep) dom.benchmarkWindowCurrentStep.textContent = "Cancelling benchmark batch...";
     appendBenchmarkLog("CANCEL", "Cancellation requested by user.");

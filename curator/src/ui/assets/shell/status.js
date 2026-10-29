@@ -7,25 +7,21 @@ import { state } from "../store.js";
 import { calculateLatticeInfo, formatGridStatus, formatLatticeStatus } from "../kit/grid-math.js";
 import { getCurrentGroundDimensions } from "../kit/layers.js";
 import { getTriageViewport } from "../stage/canvas.js";
+import { fetchServerStatus } from "../requests/status.js";
 import { clearRequestFailure } from "../requests/failures.js";
 
 export async function fetchStatus() {
     try {
-        const res = await fetch("/api/status");
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-
-        // A status refresh answers a request, so it clears whatever failure the policy still
-        // reports. Painting the pill here without clearing it would leave `activeFailure` set
-        // behind a connected pill, and the next identical failure would repaint silently.
+        const data = await fetchServerStatus();
+        // The API answered its health check, so every recorded request failure is stale: the
+        // pill goes back to the connected state and the next failure is a new transition.
         clearRequestFailure();
         dom.statusIndicator.className = "status-pill status-connected";
         dom.statusText.textContent = `Online (${data.staging_count})`;
         dom.statusIndicator.title = `Curator API Online | Staging: ${data.staging_count} | Curated: ${data.curated_count}`;
-    } catch (err) {
-        dom.statusIndicator.className = "status-pill status-error";
-        dom.statusText.textContent = "Offline";
-        dom.statusIndicator.title = `API Disconnected: ${err.message}`;
+    } catch (_) {
+        // The request module reported it: the pill already names the failed operation and
+        // returns to the connected paint on the next refresh that reaches the server.
     }
 }
 

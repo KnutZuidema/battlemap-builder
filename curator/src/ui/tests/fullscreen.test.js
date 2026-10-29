@@ -158,7 +158,7 @@ globalThis.fetch = (url, init = {}) => {
     if (init.method === "PATCH") {
         patches.push({ url, body: JSON.parse(init.body) });
     }
-    return Promise.resolve({ ok: true, json: async () => ({}) });
+    return Promise.resolve({ ok: true, json: async () => ({}), text: async () => "{}" });
 };
 
 // ==========================================================================

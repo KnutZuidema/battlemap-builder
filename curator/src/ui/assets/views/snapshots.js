@@ -8,7 +8,13 @@ import { state } from "../store.js";
 import { escapeHtml } from "../kit/dom.js";
 import { formatBytes } from "../kit/format.js";
 import { showToast } from "../shell/status.js";
-import { datasetScopeTheme, datasetScopeQuery } from "../dataset-scope.js";
+import { datasetScopeTheme } from "../dataset-scope.js";
+import {
+    deleteDatasetSnapshot as requestDeleteSnapshot,
+    fetchDatasetSnapshots as requestDatasetSnapshots,
+    fetchFreezeStatus,
+    freezeDatasetSnapshot as requestFreezeSnapshot,
+} from "../requests/snapshots.js";
 import {
     applyReadinessReport,
     clearReadinessCache,
@@ -28,10 +34,15 @@ import {
 /**
  * A refused freeze carries the full audit, so the drawer renders it and the operator fixes the
  * flagged maps in place. No separate modal: the readiness block outlives the refusal.
+ *
+ * `toast` is off when the refusal arrived as a non-OK response: the failure policy has already
+ * raised the pill and toasted the operation, and a second toast would say the same thing.
  */
-export function showFreezeRefusal(refusal, scopeTheme) {
-    const readiness = refusal && refusal.readiness;
-    const error = (refusal && refusal.error) || "Dataset is not ready";
+export function showFreezeRefusal(refusal, scopeTheme, { toast = true } = {}) {
+    // A refusal arrives either as an in-stream `error` frame (the fields sit on the frame) or
+    // as a non-OK response, where `RequestError.payload` carries the same body.
+    const readiness = refusal?.readiness ?? refusal?.payload?.readiness;
+    const error = (refusal && refusal.error) || refusal?.message || "Dataset is not ready";
     // The refusal audited the scope that was frozen, which the operator may have left since:
     // store it under that scope, never under whichever tag happens to be active now.
     const scopeKey = (scopeTheme || "").toLowerCase() || "all";
@@ -44,31 +55,26 @@ export function showFreezeRefusal(refusal, scopeTheme) {
         state.readinessAuditedAt = null;
     }
     if (scopeKey !== readinessScopeKey()) {
-        showToast(`Freeze refused: ${error}`, "danger");
+        if (toast) showToast(`Freeze refused: ${error}`, "danger");
         return;
     }
-    state.readinessRefusal = { error, blocking: (refusal && refusal.blocking_issues) || [] };
+    state.readinessRefusal = { error, blocking: (refusal && refusal.blocking_issues) || refusal?.payload?.blocking_issues || [] };
     renderReadinessPanel();
     revealReadinessPanel();
-    showToast(`Freeze refused: ${error}`, "danger");
+    if (toast) showToast(`Freeze refused: ${error}`, "danger");
 }
 
 export async function fetchDatasetSnapshots() {
     if (state.isFetchingSnapshots) return;
     state.isFetchingSnapshots = true;
     try {
-        const res = await fetch(`/api/training/datasets${datasetScopeQuery()}`);
-        if (!res.ok) {
-            const errData = await res.json().catch(() => ({}));
-            throw new Error(errData.error || `HTTP ${res.status}`);
-        }
-        const snapshots = await res.json();
+        const snapshots = await requestDatasetSnapshots();
         state.snapshots = snapshots;
         renderDatasetSnapshots(snapshots);
         populateTrainingSnapshotSelect(snapshots);
         checkActiveFreezeStatus();
-    } catch (err) {
-        console.error("Failed to fetch dataset snapshots:", err);
+    } catch (_) {
+        // The request module reported it; the shelf keeps the snapshots it already has.
     } finally {
         state.isFetchingSnapshots = false;
     }
@@ -230,23 +236,27 @@ let freezePollingTimer = null;
 function startFreezeStatusPolling() {
     if (freezePollingTimer) return;
     freezePollingTimer = setInterval(async () => {
+        let data;
         try {
-            const res = await fetch("/api/training/datasets/freeze/status");
-            if (!res.ok) return;
-            const data = await res.json();
-            if (data.in_progress && data.progress) {
-                state.isFreezingSnapshot = true;
-                if (dom.btnFreezeSnapshot) dom.btnFreezeSnapshot.disabled = true;
-                updateFreezeProgressUI(data.progress);
-            } else {
-                stopFreezeStatusPolling();
-                state.isFreezingSnapshot = false;
-                if (dom.btnFreezeSnapshot) dom.btnFreezeSnapshot.disabled = false;
-                if (dom.btnFreezeLabel) dom.btnFreezeLabel.textContent = "Freeze Snapshot";
-                showFreezeProgressPanel(false);
-                fetchDatasetSnapshots();
-            }
-        } catch (_) {}
+            data = await fetchFreezeStatus();
+        } catch (_) {
+            // The request module names the failed operation on the pill, and toasts the
+            // transition once: a freeze-status check that fails every 1.5s is one failure,
+            // not one per attempt.
+            return;
+        }
+        if (data.in_progress && data.progress) {
+            state.isFreezingSnapshot = true;
+            if (dom.btnFreezeSnapshot) dom.btnFreezeSnapshot.disabled = true;
+            updateFreezeProgressUI(data.progress);
+        } else {
+            stopFreezeStatusPolling();
+            state.isFreezingSnapshot = false;
+            if (dom.btnFreezeSnapshot) dom.btnFreezeSnapshot.disabled = false;
+            if (dom.btnFreezeLabel) dom.btnFreezeLabel.textContent = "Freeze Snapshot";
+            showFreezeProgressPanel(false);
+            fetchDatasetSnapshots();
+        }
     }, 1500);
 }
 
@@ -258,87 +268,51 @@ function stopFreezeStatusPolling() {
 }
 
 async function checkActiveFreezeStatus() {
+    let data;
     try {
-        const res = await fetch("/api/training/datasets/freeze/status");
-        if (!res.ok) return;
-        const data = await res.json();
-        if (data.in_progress && data.progress) {
-            state.isFreezingSnapshot = true;
-            if (dom.btnFreezeSnapshot) dom.btnFreezeSnapshot.disabled = true;
-            updateFreezeProgressUI(data.progress);
-            startFreezeStatusPolling();
-        }
-    } catch (_) {}
+        data = await fetchFreezeStatus();
+    } catch (_) {
+        // Reported by the request module; the shelf keeps its current freeze state.
+        return;
+    }
+    if (data.in_progress && data.progress) {
+        state.isFreezingSnapshot = true;
+        if (dom.btnFreezeSnapshot) dom.btnFreezeSnapshot.disabled = true;
+        updateFreezeProgressUI(data.progress);
+        startFreezeStatusPolling();
+    }
 }
 
 export async function performFreezeSnapshotWithProgress(scopeTheme, onProgress) {
-    const body = scopeTheme ? { theme: scopeTheme } : {};
-    const query = scopeTheme ? `?theme=${encodeURIComponent(scopeTheme)}` : "";
-    const res = await fetch(`/api/training/datasets${query}`, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
+    let finalSnapshot = null;
+    let refusal = null;
+
+    const summary = await requestFreezeSnapshot(scopeTheme, {
+        onEvent(event, data) {
+            if (event === "progress") {
+                onProgress?.("progress", data);
+            } else if (event === "complete") {
+                finalSnapshot = data.snapshot || data;
+                onProgress?.("complete", data);
+            } else if (event === "error") {
+                // The stream answered 200 and reported the failure inside it, so the failure
+                // policy never saw a transport error: the refusal is the view's to render.
+                refusal = data;
+                onProgress?.("error", data);
+            }
         },
-        body: JSON.stringify(body),
     });
 
-    if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        errData.status = res.status;
-        throw errData;
+    if (refusal) throw refusal;
+    if (summary) {
+        // A non-stream answer is the finished snapshot, which is also the one-shot summary.
+        onProgress?.("complete", { snapshot: summary });
+        return summary;
     }
-
-    const contentType = res.headers.get("content-type") || "";
-    if (contentType.includes("text/event-stream") && res.body) {
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let finalSnapshot = null;
-        let currentEvent = "message";
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-
-            const lines = buffer.split("\n");
-            buffer = lines.pop();
-
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (trimmed.startsWith("event:")) {
-                    currentEvent = trimmed.slice(6).trim();
-                } else if (trimmed.startsWith("data:")) {
-                    const dataStr = trimmed.slice(5).trim();
-                    try {
-                        const data = JSON.parse(dataStr);
-                        if (currentEvent === "progress") {
-                            onProgress?.("progress", data);
-                        } else if (currentEvent === "complete") {
-                            finalSnapshot = data.snapshot || data;
-                            onProgress?.("complete", data);
-                        } else if (currentEvent === "error") {
-                            onProgress?.("error", data);
-                            throw data;
-                        }
-                    } catch (e) {
-                        if (currentEvent === "error") throw e;
-                    }
-                    currentEvent = "message";
-                }
-            }
-        }
-
-        if (!finalSnapshot) {
-            throw new Error("Freezing completed without receiving snapshot metadata");
-        }
-        return finalSnapshot;
-    } else {
-        const snapshot = await res.json();
-        onProgress?.("complete", { snapshot });
-        return snapshot;
+    if (!finalSnapshot) {
+        throw new Error("Freezing completed without receiving snapshot metadata");
     }
+    return finalSnapshot;
 }
 
 export async function freezeDatasetSnapshot() {
@@ -384,15 +358,19 @@ export async function freezeDatasetSnapshot() {
         fetchDatasetSnapshots();
     } catch (errData) {
         showFreezeProgressPanel(false);
+        // A `RequestError` was already raised by the failure policy: only a refusal the server
+        // reported inside a 200 stream still needs its own toast here.
+        const reported = errData?.name === "RequestError";
         if (errData?.status === 400 || errData?.status === 422 || errData?.code === "DATASET_NOT_READY") {
-            showFreezeRefusal(errData, scopeTheme);
+            showFreezeRefusal(errData, scopeTheme, { toast: !reported });
             return;
         }
         if (errData?.status === 409) {
-            showToast(errData.error || "A dataset snapshot freeze is already in progress", "warning");
+            // The policy names the refusal; polling picks the progress back up.
             startFreezeStatusPolling();
             return;
         }
+        if (reported) return;
         showToast(`Freeze error: ${errData?.message || errData?.error || "Unknown error"}`, "danger");
     } finally {
         state.isFreezingSnapshot = false;
@@ -407,20 +385,11 @@ async function deleteDatasetSnapshot(id) {
         return;
     }
     try {
-        const res = await fetch(`/api/training/datasets/${encodeURIComponent(id)}`, {
-            method: "DELETE",
-        });
-        if (!res.ok) {
-            const errData = await res.json().catch(() => ({}));
-            if (res.status === 409 || errData.code === "SNAPSHOT_IN_USE") {
-                showToast(`Cannot delete snapshot: ${errData.error || "Snapshot is in use by one or more training runs"}`, "danger");
-                return;
-            }
-            throw new Error(errData.error || `HTTP ${res.status}`);
-        }
+        await requestDeleteSnapshot(id);
         showToast(`Dataset snapshot '${id}' deleted`, "info");
         fetchDatasetSnapshots();
-    } catch (err) {
-        showToast(`Failed to delete snapshot: ${err.message}`, "danger");
+    } catch (_) {
+        // The failure policy names the operation and carries the server's reason, including the
+        // 409 a training run still using this snapshot answers with; the shelf keeps the card.
     }
 }

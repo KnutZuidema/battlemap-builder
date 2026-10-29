@@ -16,6 +16,12 @@ import {
 import { enterLabelingMode, exitLabelingMode, updateGridPanel } from "../shell/grid-panel.js";
 import { fetchThemeSuggestions } from "./curation.js";
 import { showEmptyState, showLoading, showToast, updateHud } from "../shell/status.js";
+import {
+    fetchStagingQueue as requestStagingQueue,
+    regroupStagingBundle,
+    saveStagingLayers,
+    splitStagingBundle,
+} from "../requests/staging.js";
 
 // Constants
 const PREFETCH_AHEAD = 3;
@@ -27,11 +33,7 @@ const PREFETCH_AHEAD = 3;
 export async function fetchStagingQueue() {
     showLoading(true, "Fetching staging queue...");
     try {
-        const res = await fetch("/api/staging");
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-        }
-        const data = await res.json();
+        const data = await requestStagingQueue();
         // Persist a pending grid burst while the candidate that owns it is still in the
         // queue we are about to replace.
         flushGridEdits();
@@ -51,8 +53,8 @@ export async function fetchStagingQueue() {
             showLoading(false);
             updateHud();
         }
-    } catch (err) {
-        showToast(`Failed to load staging queue: ${err.message}`, "danger");
+    } catch (_) {
+        // The request module reported the failure: leave the queue untouched and show why.
         showLoading(false);
         showEmptyState(true);
     }
@@ -588,20 +590,12 @@ export async function toggleActiveLayerExclude() {
  */
 async function persistCandidateLayers(candidate) {
     try {
-        const res = await fetch(`/api/staging/${encodeURIComponent(candidate.id)}/layers`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ layers: candidate.layers }),
-        });
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err.message || `HTTP ${res.status}`);
-        }
-        const updated = await res.json();
+        const updated = await saveStagingLayers(candidate.id, candidate.layers);
         candidate.layers = updated.layers;
         renderLayerDeck();
-    } catch (err) {
-        showToast(`Failed to persist layer metadata: ${err.message}`, "danger");
+    } catch (_) {
+        // The request module reported the failure; the deck keeps the local edit so the next
+        // change retries it instead of discarding the reviewer's work.
     }
 }
 
@@ -613,14 +607,7 @@ async function splitCandidate(id) {
     state.isSubmitting = true;
     showLoading(true, "Splitting bundle into standalone maps...");
     try {
-        const res = await fetch(`/api/staging/${encodeURIComponent(id)}/split`, {
-            method: "POST",
-        });
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err.message || `HTTP ${res.status}`);
-        }
-        const splitCandidates = await res.json();
+        const splitCandidates = await splitStagingBundle(id);
         const idx = state.candidates.findIndex((c) => c.id === id);
         if (idx !== -1) {
             flushGridEdits();
@@ -629,8 +616,8 @@ async function splitCandidate(id) {
             loadCandidate(idx);
             showToast("Bundle split into standalone maps. Press U or click Undo to regroup.", "info");
         }
-    } catch (err) {
-        showToast(`Split failed: ${err.message}`, "danger");
+    } catch (_) {
+        // The request module reported the failure; the queue is unchanged.
     } finally {
         state.isSubmitting = false;
         showLoading(false);
@@ -645,14 +632,7 @@ async function regroupCandidate(parentId) {
     state.isSubmitting = true;
     showLoading(true, "Regrouping multi-layer bundle...");
     try {
-        const res = await fetch(`/api/staging/${encodeURIComponent(parentId)}/regroup`, {
-            method: "POST",
-        });
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err.message || `HTTP ${res.status}`);
-        }
-        const regroupedCandidate = await res.json();
+        const regroupedCandidate = await regroupStagingBundle(parentId);
 
         // Find all split children belonging to parentId
         const firstIdx = state.candidates.findIndex(
@@ -668,8 +648,8 @@ async function regroupCandidate(parentId) {
             loadCandidate(firstIdx);
             showToast("Regrouped multi-layer bundle", "success");
         }
-    } catch (err) {
-        showToast(`Regroup failed: ${err.message}`, "danger");
+    } catch (_) {
+        // The request module reported the failure; the queue is unchanged.
     } finally {
         state.isSubmitting = false;
         showLoading(false);

@@ -21,6 +21,13 @@ import {
 } from "../inspector.js";
 import { showToast } from "../../shell/status.js";
 import { invalidateDatasetReadiness } from "../readiness.js";
+import {
+    bulkDeleteCuratedMaps,
+    deleteCuratedMap,
+    exportSelectedMaps,
+    refineCuratedMap,
+    saveCuratedMap,
+} from "../../requests/library.js";
 
 // ==========================================================================
 // Deletion Safeguard Modal & Multi-Select Bulk Operations (Issue #137)
@@ -95,17 +102,11 @@ export async function confirmDeleteCurated() {
     try {
         if (state.deleteModalTarget.type === "single") {
             const id = state.deleteModalTarget.id;
-            const res = await fetch(`/api/curated/${encodeURIComponent(id)}`, {
-                method: "DELETE",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    reason: reason,
-                    notes: notes,
-                }),
-            });
-            if (!res.ok) {
-                const errText = await res.text();
-                throw new Error(`HTTP ${res.status}: ${errText || res.statusText}`);
+            try {
+                await deleteCuratedMap(id, { reason, notes });
+            } catch (_) {
+                // The failure policy names the operation; the modal stays open for a retry.
+                return;
             }
 
             // Remove map from state.curatedMaps
@@ -131,21 +132,14 @@ export async function confirmDeleteCurated() {
             showToast(`Deleted curated map ${id} and logged rejection`, "danger");
         } else if (state.deleteModalTarget.type === "bulk") {
             const ids = state.deleteModalTarget.ids;
-            const res = await fetch("/api/curated/bulk-delete", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    ids: ids,
-                    reason: reason,
-                }),
-            });
-            if (!res.ok) {
-                const errText = await res.text();
-                throw new Error(`HTTP ${res.status}: ${errText || res.statusText}`);
+            let data;
+            try {
+                data = await bulkDeleteCuratedMaps(ids, { reason });
+            } catch (_) {
+                // The failure policy names the operation; the modal stays open for a retry.
+                return;
             }
-
-            const data = await res.json();
-            const deletedCount = data.deleted_count !== undefined ? data.deleted_count : ids.length;
+            const deletedCount = data?.deleted_count !== undefined ? data.deleted_count : ids.length;
 
             const idSet = new Set(ids);
             state.curatedMaps = state.curatedMaps.filter(m => !idSet.has(m.id));
@@ -165,8 +159,8 @@ export async function confirmDeleteCurated() {
             invalidateDatasetReadiness();
             showToast(`Deleted ${deletedCount} curated map${deletedCount === 1 ? "" : "s"} and logged rejection`, "danger");
         }
-    } catch (err) {
-        showToast(`Deletion failed: ${err.message}`, "danger");
+    } catch (_) {
+        // The failure policy named the operation; the modal stays open for a retry.
     } finally {
         if (dom.btnConfirmDelete) dom.btnConfirmDelete.disabled = false;
     }
@@ -192,26 +186,22 @@ export async function bulkTagSelectedMaps() {
                 currentTags.push(normalizedTag);
             }
 
-            const res = await fetch(`/api/curated/${encodeURIComponent(id)}`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ tags: currentTags }),
-            });
-
-            if (res.ok) {
-                const updated = await res.json();
+            try {
+                const updated = await saveCuratedMap(id, { tags: currentTags });
                 if (map) {
                     map.tags = updated.tags;
                 }
                 successCount++;
+            } catch (_) {
+                // The failure policy names the operation for the batch; the rest still tag.
             }
         }
 
         applyLibraryFilters();
         if (successCount > 0) invalidateDatasetReadiness();
-        showToast(`Added tag "${normalizedTag}" to ${successCount} map${successCount === 1 ? "" : "s"}`, "success");
-    } catch (err) {
-        showToast(`Bulk tag error: ${err.message}`, "danger");
+        if (successCount > 0) {
+            showToast(`Added tag "${normalizedTag}" to ${successCount} map${successCount === 1 ? "" : "s"}`, "success");
+        }
     } finally {
         if (dom.btnBulkTag) dom.btnBulkTag.disabled = false;
     }
@@ -225,7 +215,6 @@ export async function refineSelectedMaps() {
     // one at a time so the progress label and the readiness audit never interleave.
     const ids = Array.from(state.librarySelectedIds);
     const total = ids.length;
-    const failures = [];
     let successCount = 0;
 
     state.isBulkRefining = true;
@@ -240,14 +229,7 @@ export async function refineSelectedMaps() {
             const id = ids[i];
             setLabel(`Refining ${i + 1}/${total}…`);
             try {
-                const res = await fetch(`/api/curated/${encodeURIComponent(id)}/refine`, {
-                    method: "POST",
-                });
-                if (!res.ok) {
-                    const errData = await res.json().catch(() => ({}));
-                    throw new Error(errData.error || `HTTP ${res.status}`);
-                }
-                const updated = await res.json();
+                const updated = await refineCuratedMap(id);
 
                 const idx = state.curatedMaps.findIndex(m => m.id === id);
                 if (idx !== -1) state.curatedMaps[idx] = updated;
@@ -275,9 +257,9 @@ export async function refineSelectedMaps() {
                 }
 
                 successCount++;
-            } catch (err) {
-                failures.push({ id, message: err.message });
-                console.error(`AI refine failed for #${id}:`, err);
+            } catch (_) {
+                // The failure policy names the operation on the first failed map and stays
+                // quiet for the retries; the label keeps counting through the batch.
             }
         }
 
@@ -286,14 +268,8 @@ export async function refineSelectedMaps() {
             invalidateDatasetReadiness();
         }
 
-        if (failures.length === 0) {
+        if (successCount > 0) {
             showToast(`AI-refined ${successCount} map${successCount === 1 ? "" : "s"}`, "success");
-        } else {
-            const failedIds = failures.map(f => `#${f.id}`).join(", ");
-            showToast(
-                `AI refine failed for ${failures.length} of ${total} maps (${failedIds}): ${failures[0].message}`,
-                "danger"
-            );
         }
     } finally {
         state.isBulkRefining = false;
@@ -312,18 +288,7 @@ export async function exportSelectedLoraDataset() {
     showToast(`Packaging ${count} selected maps into LoRA dataset ZIP...`, "info");
 
     try {
-        const payload = { ids: Array.from(state.librarySelectedIds) };
-        const res = await fetch("/api/dataset/export-selected", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
-        if (!res.ok) {
-            const errText = await res.text();
-            throw new Error(`Export failed (HTTP ${res.status}: ${errText || res.statusText}`);
-        }
-
-        const blob = await res.blob();
+        const blob = await exportSelectedMaps(Array.from(state.librarySelectedIds));
         const filename = "lora-dataset.zip";
 
         const downloadUrl = window.URL.createObjectURL(blob);
@@ -336,8 +301,8 @@ export async function exportSelectedLoraDataset() {
         window.URL.revokeObjectURL(downloadUrl);
 
         showToast(`Downloaded LoRA dataset (${formatBytes(blob.size)}) for ${count} map${count === 1 ? "" : "s"}!`, "success");
-    } catch (err) {
-        showToast(`Export error: ${err.message}`, "danger");
+    } catch (_) {
+        // The failure policy names the operation and carries the server's reason.
     } finally {
         state.isExporting = false;
         if (dom.btnBulkExport) dom.btnBulkExport.disabled = false;

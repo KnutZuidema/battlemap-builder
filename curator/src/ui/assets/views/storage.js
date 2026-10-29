@@ -7,16 +7,15 @@ import { formatBytes } from "../kit/format.js";
 import { fetchStatus, showToast } from "../shell/status.js";
 import { stopStageMotion } from "../stage/canvas.js";
 import { fetchStagingQueue } from "./triage.js";
+import { fetchStorageStats as requestStorageStats, purgeStaging as requestPurgeStaging } from "../requests/storage.js";
 
 export async function fetchStorageStats() {
     try {
-        const res = await fetch("/api/storage/stats");
-        if (!res.ok) return;
-        const data = await res.json();
+        const data = await requestStorageStats();
         state.storageStats = data;
         renderStorageStats(data);
     } catch (_) {
-        // Silently ignore background stats fetch failures
+        // The request module reported it; the drawer keeps the last known footprint.
     }
 }
 
@@ -128,12 +127,7 @@ async function purgeStaging() {
     if (confirmText) confirmText.textContent = "Purging...";
 
     try {
-        const res = await fetch("/api/storage/purge-staging", { method: "POST" });
-        if (!res.ok) {
-            const errData = await res.json().catch(() => ({ error: "Purge failed" }));
-            throw new Error(errData.error || "Purge failed");
-        }
-        const data = await res.json();
+        const data = await requestPurgeStaging();
         closePurgeModal();
         showToast(`Staging purged: ${data.purged_files} files deleted, ${formatBytes(data.reclaimed_bytes)} reclaimed`, "success");
 
@@ -141,8 +135,8 @@ async function purgeStaging() {
         await fetchStagingQueue();
         fetchStatus();
         await fetchStorageStats();
-    } catch (err) {
-        showToast(`Failed to purge staging: ${err.message}`, "danger");
+    } catch (_) {
+        // The request module reported it; the confirmation modal stays open for a retry.
     } finally {
         state.isPurging = false;
         if (confirmBtn) confirmBtn.disabled = false;

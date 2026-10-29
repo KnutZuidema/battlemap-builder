@@ -17,8 +17,19 @@ import {
     fetchCostStats,
     loadBenchmarkModelCatalog,
 } from "./benchmark.js";
-import { datasetScopeTheme, datasetScopeQuery } from "../dataset-scope.js";
+import { datasetScopeTheme } from "../dataset-scope.js";
 import { datasetIssueLabel } from "./readiness.js";
+import { auditDatasetReadiness } from "../requests/readiness.js";
+import {
+    cancelTrainingRun as requestCancelTrainingRun,
+    dispatchTrainingRun as requestDispatchTrainingRun,
+    fetchTrainingAdapters as requestTrainingAdapters,
+    fetchTrainingRuns as requestTrainingRuns,
+    launchTrainingRun,
+    publishTrainingAdapter,
+    setAdapterRetired,
+    verifyTrainingArtifacts as requestVerifyArtifacts,
+} from "../requests/training.js";
 import {
     fetchDatasetSnapshots,
     showFreezeProgressPanel,
@@ -111,13 +122,7 @@ async function checkTrainingScopeReadiness() {
     dom.trainingReadinessIndicator.className = "gate-status mono";
 
     try {
-        const res = await fetch(`/api/dataset/readiness${datasetScopeQuery()}`);
-        if (!res.ok) {
-            dom.trainingReadinessIndicator.textContent = `Error ${res.status}`;
-            dom.trainingReadinessIndicator.className = "gate-status mono has-issues";
-            return null;
-        }
-        const report = await res.json();
+        const report = await auditDatasetReadiness();
         const total = report.maps_total || 0;
         const ready = Boolean(report.ready);
         if (ready) {
@@ -128,8 +133,9 @@ async function checkTrainingScopeReadiness() {
             dom.trainingReadinessIndicator.className = "gate-status mono has-issues";
         }
         return report;
-    } catch (err) {
-        dom.trainingReadinessIndicator.textContent = "Offline";
+    } catch (_) {
+        // The request module reported it; the gate says so without a second toast.
+        dom.trainingReadinessIndicator.textContent = "Audit failed";
         dom.trainingReadinessIndicator.className = "gate-status mono has-issues";
         return null;
     }
@@ -166,7 +172,7 @@ function showTrainingLaunchError(errorObj) {
     dom.trainingLaunchError.classList.remove("hidden");
     const code = errorObj.code || "ERROR";
     const message = errorObj.error || errorObj.message || "Failed to launch training run";
-    const blocking = errorObj.blocking_issues || [];
+    const blocking = errorObj.blocking_issues || errorObj.payload?.blocking_issues || [];
 
     let inner = `<div style="font-weight: 700; margin-bottom: 0.25rem;">[${escapeHtml(code)}] ${escapeHtml(message)}</div>`;
     if (blocking.length > 0) {
@@ -217,50 +223,33 @@ async function startTrainingRun() {
                 if (dom.trainingScopeHint) dom.trainingScopeHint.textContent = "Target: Current active theme scope.";
                 if (errData?.status === 422 || errData?.code === "DATASET_NOT_READY") {
                     showTrainingLaunchError(errData);
-                    showFreezeRefusal(errData, scopeTheme);
+                    showFreezeRefusal(errData, scopeTheme, { toast: errData?.name !== "RequestError" });
                     return;
                 }
+                // A non-OK freeze was already raised by the failure policy; only a freeze that
+                // ended without a snapshot still needs a message of its own.
+                if (errData?.name === "RequestError") return;
                 throw new Error(errData?.error || errData?.message || "Failed to freeze snapshot");
             }
         }
 
         // Create the queued training run
-        const runRes = await fetch("/api/training/runs", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                dataset_snapshot_id: snapshotId,
-                policy: policy,
-            }),
-        });
-
-        if (!runRes.ok) {
-            const errData = await runRes.json().catch(() => ({}));
-            showTrainingLaunchError(errData);
-            throw new Error(errData.error || `HTTP ${runRes.status}`);
+        let queuedRun;
+        try {
+            queuedRun = await launchTrainingRun({ snapshotId, policy });
+        } catch (err) {
+            showTrainingLaunchError(err);
+            return;
         }
-
-        const queuedRun = await runRes.json();
         showToast(`Created training run '${queuedRun.id}' in queued state. Dispatching to runner...`, "info");
 
-        // Attempt immediate dispatch
-        const dispatchRes = await fetch(`/api/training/runs/${encodeURIComponent(queuedRun.id)}/dispatch`, {
-            method: "POST",
-        });
-
-        if (!dispatchRes.ok) {
-            const errData = await dispatchRes.json().catch(() => ({}));
-            showTrainingLaunchError(errData);
-            if (errData.code === "RUN_ALREADY_ACTIVE") {
-                showToast(`Run queued as '${queuedRun.id}', but dispatch was refused: another run '${errData.active_run_id}' is active.`, "warning");
-            } else if (errData.code === "MODAL_NOT_CONFIGURED") {
-                showToast(`Run queued as '${queuedRun.id}', but runner is unconfigured: ${errData.error}`, "warning");
-            } else {
-                showToast(`Run queued as '${queuedRun.id}', but dispatch failed: ${errData.error || dispatchRes.status}`, "warning");
-            }
-        } else {
-            const activeRun = await dispatchRes.json();
+        // Attempt immediate dispatch. A refusal leaves the run queued, which the drawer shows:
+        // the failure policy has already named it, so the panel carries the actionable detail.
+        try {
+            const activeRun = await requestDispatchTrainingRun(queuedRun.id);
             showToast(`Training run '${activeRun.id}' dispatched successfully to Modal GPU runner!`, "success");
+        } catch (err) {
+            showTrainingLaunchError(err);
         }
 
         await fetchTrainingRuns();
@@ -278,26 +267,13 @@ async function dispatchTrainingRun(runId) {
     if (!runId) return;
     showToast(`Dispatching training run '${runId}'...`, "info");
     try {
-        const res = await fetch(`/api/training/runs/${encodeURIComponent(runId)}/dispatch`, {
-            method: "POST",
-        });
-        if (!res.ok) {
-            const errData = await res.json().catch(() => ({}));
-            if (errData.code === "RUN_ALREADY_ACTIVE") {
-                showToast(`Dispatch refused: another run '${errData.active_run_id}' is currently running.`, "danger");
-            } else if (errData.code === "MODAL_NOT_CONFIGURED") {
-                showToast(`Dispatch refused: ${errData.error}`, "danger");
-            } else {
-                showToast(`Dispatch error: ${errData.error || `HTTP ${res.status}`}`, "danger");
-            }
-            return;
-        }
-        const updated = await res.json();
+        const updated = await requestDispatchTrainingRun(runId);
         showToast(`Training run '${updated.id}' dispatched!`, "success");
         await fetchTrainingRuns();
         checkAndScheduleTrainingPoll();
-    } catch (err) {
-        showToast(`Failed to dispatch run: ${err.message}`, "danger");
+    } catch (_) {
+        // The failure policy names the operation and the server's reason (`RUN_ALREADY_ACTIVE`,
+        // `MODAL_NOT_CONFIGURED`); the run list already shows the state it was in.
     }
 }
 
@@ -308,13 +284,7 @@ async function cancelTrainingRun(runId) {
     }
 
     try {
-        const res = await fetch(`/api/training/runs/${encodeURIComponent(runId)}/cancel`, {
-            method: "POST",
-        });
-        if (!res.ok) {
-            const errData = await res.json().catch(() => ({}));
-            throw new Error(errData.error || `HTTP ${res.status}`);
-        }
+        await requestCancelTrainingRun(runId);
 
         // Immediately reflect cancelled state in UI
         const localRun = state.trainingRuns.find(r => r.id === runId);
@@ -326,8 +296,8 @@ async function cancelTrainingRun(runId) {
         showToast(`Training run '${runId}' cancelled.`, "info");
         await fetchTrainingRuns();
         checkAndScheduleTrainingPoll();
-    } catch (err) {
-        showToast(`Failed to cancel run: ${err.message}`, "danger");
+    } catch (_) {
+        // The failure policy names the operation; the run keeps the state the server reported.
     }
 }
 
@@ -335,18 +305,11 @@ async function verifyTrainingArtifacts(runId) {
     if (!runId) return;
     showToast(`Verifying storage artifacts for run '${runId}'...`, "info");
     try {
-        const res = await fetch(`/api/training/runs/${encodeURIComponent(runId)}/verify`, {
-            method: "POST",
-        });
-        if (!res.ok) {
-            const errData = await res.json().catch(() => ({}));
-            throw new Error(errData.error || `HTTP ${res.status}`);
-        }
-        const updated = await res.json();
+        await requestVerifyArtifacts(runId);
         showToast(`Artifact verification complete for run '${runId}'!`, "success");
         await fetchTrainingRuns();
-    } catch (err) {
-        showToast(`Artifact verification failed: ${err.message}`, "danger");
+    } catch (_) {
+        // The failure policy names the operation and carries the server's reason.
     }
 }
 
@@ -356,16 +319,7 @@ async function publishTrainingCheckpoint(runId, step, scale) {
     showToast(`Publishing adapter for run '${runId}' at step ${step} (scale ${scaleVal})...`, "info");
 
     try {
-        const res = await fetch(`/api/training/runs/${encodeURIComponent(runId)}/publish`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ step: Number(step), scale: scaleVal }),
-        });
-        if (!res.ok) {
-            const errData = await res.json().catch(() => ({}));
-            throw new Error(errData.error || `HTTP ${res.status}`);
-        }
-        const adapter = await res.json();
+        const adapter = await publishTrainingAdapter(runId, { step, scale: scaleVal });
         showToast(`LoRA Adapter '${adapter.id}' published! Available in Benchmark Drawer.`, "success");
 
         await Promise.all([
@@ -373,8 +327,8 @@ async function publishTrainingCheckpoint(runId, step, scale) {
             fetchTrainingAdapters(),
             loadBenchmarkModelCatalog(),
         ]);
-    } catch (err) {
-        showToast(`Failed to publish adapter: ${err.message}`, "danger");
+    } catch (_) {
+        // The failure policy names the operation and carries the server's reason.
     }
 }
 
@@ -384,16 +338,7 @@ async function setTrainingAdapterRetired(adapterId, retired) {
     showToast(`${verb} adapter '${adapterId}'...`, "info");
 
     try {
-        const res = await fetch(`/api/training/adapters/${encodeURIComponent(adapterId)}/retire`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ retired: Boolean(retired) }),
-        });
-        if (!res.ok) {
-            const errData = await res.json().catch(() => ({}));
-            throw new Error(errData.error || `HTTP ${res.status}`);
-        }
-        const adapter = await res.json();
+        const adapter = await setAdapterRetired(adapterId, retired);
         const msg = adapter.retired
             ? `LoRA Adapter '${adapter.id}' retired (hidden from Benchmark Drawer).`
             : `LoRA Adapter '${adapter.id}' restored (selectable in Benchmark Drawer).`;
@@ -403,8 +348,8 @@ async function setTrainingAdapterRetired(adapterId, retired) {
             fetchTrainingAdapters(),
             loadBenchmarkModelCatalog(),
         ]);
-    } catch (err) {
-        showToast(`Failed to update adapter: ${err.message}`, "danger");
+    } catch (_) {
+        // The failure policy names the operation and carries the server's reason.
     }
 }
 
@@ -413,11 +358,7 @@ export async function fetchTrainingRuns() {
     state.isFetchingRuns = true;
 
     try {
-        const res = await fetch("/api/training/runs");
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-        }
-        const runs = await res.json();
+        const runs = await requestTrainingRuns();
         state.trainingRuns = Array.isArray(runs) ? runs : [];
 
         const total = state.trainingRuns.length;
@@ -437,8 +378,8 @@ export async function fetchTrainingRuns() {
 
         renderTrainingRuns();
         checkAndScheduleTrainingPoll();
-    } catch (err) {
-        console.error("Failed to fetch training runs:", err);
+    } catch (_) {
+        // The failure policy named the operation; the drawer keeps the runs it already has.
     } finally {
         state.isFetchingRuns = false;
     }
@@ -449,9 +390,7 @@ async function fetchTrainingAdapters() {
     state.isFetchingAdapters = true;
 
     try {
-        const res = await fetch("/api/training/adapters");
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const adapters = await res.json();
+        const adapters = await requestTrainingAdapters();
         state.trainingAdapters = Array.isArray(adapters) ? adapters : [];
 
         const total = state.trainingAdapters.length;
@@ -459,8 +398,8 @@ async function fetchTrainingAdapters() {
         if (dom.adaptersCountBadge) dom.adaptersCountBadge.textContent = `${total} Adapter${total === 1 ? "" : "s"}`;
 
         renderTrainingAdapters();
-    } catch (err) {
-        console.error("Failed to fetch training adapters:", err);
+    } catch (_) {
+        // The failure policy named the operation; the drawer keeps the adapters it has.
     } finally {
         state.isFetchingAdapters = false;
     }

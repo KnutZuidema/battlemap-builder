@@ -19,9 +19,10 @@ import {
 } from "./library/fullscreen.js";
 import { openLibraryInspector } from "./inspector.js";
 import { showToast } from "../shell/status.js";
-import { datasetScopeTheme, datasetScopeQuery } from "../dataset-scope.js";
+import { datasetScopeTheme } from "../dataset-scope.js";
 import { toggleSnapshotsShelf } from "./snapshots.js";
 import { describeCuratedMap } from "../requests/ai.js";
+import { auditDatasetReadiness as requestDatasetReadiness } from "../requests/readiness.js";
 import { has, join } from "../requests/tracker.js";
 
 // ==========================================================================
@@ -278,19 +279,14 @@ async function auditDatasetReadiness({ force = false } = {}) {
     if (dom.btnAuditReadiness) dom.btnAuditReadiness.disabled = true;
     const run = (async () => {
         try {
-            const res = await fetch(`/api/dataset/readiness${datasetScopeQuery()}`);
-            if (!res.ok) {
-                const errData = await res.json().catch(() => ({}));
-                throw new Error(errData.error || `HTTP ${res.status}`);
-            }
-            const report = await res.json();
+            const report = await requestDatasetReadiness();
             // A write or a scope switch while the GET ran makes this report stale: never cache
             // it, and never let it overwrite the panel that now describes something else.
             if (epoch !== state.readinessEpoch || scopeKey !== readinessScopeKey()) return null;
             applyReadinessReport(scopeKey, report, new Date().toISOString());
             return report;
-        } catch (err) {
-            showToast(`Dataset audit failed: ${err.message}`, "danger");
+        } catch (_) {
+            // The request module reported it; the panel keeps its last audited report.
             return null;
         }
     })();

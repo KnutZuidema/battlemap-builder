@@ -18,6 +18,7 @@ import { openDeleteCuratedModal } from "./library/bulk.js";
 import { showToast } from "../shell/status.js";
 import { invalidateDatasetReadiness } from "./readiness.js";
 import { describeCuratedMap, suggestCuratedThemes } from "../requests/ai.js";
+import { saveCuratedMap } from "../requests/library.js";
 import { join, latest } from "../requests/tracker.js";
 
 // ==========================================================================
@@ -370,18 +371,7 @@ export async function saveLibraryInspectorChanges() {
             })),
         };
 
-        const res = await fetch(`/api/curated/${encodeURIComponent(mapId)}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
-
-        if (!res.ok) {
-            const errText = await res.text();
-            throw new Error(`HTTP ${res.status}: ${errText || res.statusText}`);
-        }
-
-        const updatedMap = await res.json();
+        const updatedMap = await saveCuratedMap(mapId, payload);
 
         // Update in state.curatedMaps
         if (state.curatedMaps && Array.isArray(state.curatedMaps)) {
@@ -405,8 +395,8 @@ export async function saveLibraryInspectorChanges() {
         markLibraryDraftDirty(false);
         applyLibraryFilters();
         showToast(`Saved changes for map ${mapId}`, "success");
-    } catch (err) {
-        showToast(`Failed to save changes: ${err.message}`, "danger");
+    } catch (_) {
+        // The failure policy names the operation; the draft stays editable for a retry.
     } finally {
         if (dom.btnInspectorSave) {
             dom.btnInspectorSave.disabled = false;

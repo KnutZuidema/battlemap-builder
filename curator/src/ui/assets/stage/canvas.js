@@ -7,7 +7,7 @@ import { dom } from "../dom.js";
 import { state } from "../store.js";
 import { VTT_GRID_SIZE, MIN_ZOOM, MAX_ZOOM } from "../kit/grid-math.js";
 import { getCandidateLayers } from "../kit/layers.js";
-import { updateHud, resizeFullscreenCanvas, requestFullscreenRender } from "../app.js";
+import { updateHud } from "../app.js";
 
 // ==========================================================================
 // Canvas 2D Engine & Rendering
@@ -18,10 +18,6 @@ export function setupCanvas() {
     window.addEventListener("resize", () => {
         resizeCanvas();
         requestRender();
-        if (state.libraryFullscreenActive) {
-            resizeFullscreenCanvas();
-            requestFullscreenRender();
-        }
     });
 }
 

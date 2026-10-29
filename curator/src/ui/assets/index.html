@@ -510,12 +510,8 @@
                             <span id="freeze-detail-section" class="freeze-detail-item mono"></span>
                         </div>
                     </div>
-                    <div id="snapshots-shelf" class="snapshots-shelf">
-                        <div id="snapshots-list" class="snapshots-list"></div>
-                        <div id="snapshots-empty" class="snapshots-empty hidden">
-                            <p>No frozen snapshots for this theme scope yet. Click <strong>Freeze Snapshot</strong> to create one.</p>
-                        </div>
-                    </div>
+                    <!-- Render target: views/snapshots.js owns this subtree. -->
+                    <div id="snapshots-shelf" class="snapshots-shelf"></div>
                 </div>
 
                 <div id="library-grid" class="curated-grid" role="feed" aria-busy="false">

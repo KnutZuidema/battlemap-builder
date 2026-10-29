@@ -1,6 +1,6 @@
 # Curator frontend stays bundler-free, with a measured framework gate
 
-The Curator web UI is embedded at compile time by `rust-embed`, so the Curator container builds Rust only and serves whatever sits in `curator/src/ui/assets/`. Today that is one ~9.7k-line `app.js` closure loaded by a plain `<script>`, meant to be split into native ES modules served verbatim: one `<script type="module">`, no bundler, no node stage in `curator/Dockerfile`, no bundler/build CI job. Replacing the DOM cache and the scattered state-to-DOM writes uses a local tagged-template helper returning `DocumentFragment`s rather than a framework; escalation to a vendored Preact module is permitted only if converting the library grid drops fewer than 25% of its authored lines.
+The Curator web UI is embedded at compile time by `rust-embed`, so the Curator container builds Rust only and serves whatever sits in `curator/src/ui/assets/`. Today that is one ~9.7k-line `app.js` closure loaded by a plain `<script>`, meant to be split into native ES modules served verbatim: one `<script type="module">`, no bundler, no node stage in `curator/Dockerfile`, no bundler/build CI job. Replacing the DOM cache and the scattered state-to-DOM writes uses a local node-construction helper returning `DocumentFragment`s, which never builds HTML strings, rather than a framework; escalation to a vendored Preact module is permitted only if converting the library grid drops fewer than 25% of its authored lines.
 
 ## Considered Options
 

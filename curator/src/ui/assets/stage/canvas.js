@@ -6,7 +6,7 @@
 import { dom } from "../dom.js";
 import { state } from "../store.js";
 import { VTT_GRID_SIZE } from "../kit/grid-math.js";
-import { createViewport } from "./viewport.js";
+import { createViewport, drawGridOverlay, isGridCalibrating } from "./viewport.js";
 
 let viewport = null;
 
@@ -175,10 +175,10 @@ function drawTriageFrame(ctx, view) {
         // Draw active layer battlemap at origin (0, 0)
         ctx.globalAlpha = 1.0;
         ctx.drawImage(img, 0, 0, imgW, imgH);
-        const isCalibrationActive = Boolean(state.gridPanelOpen || state.gridAlignMode || state.isDraggingGrid);
+        const calibrating = isGridCalibrating(view, state.isDraggingGrid);
         // Draw crisp 64px VTT grid overlay in image space
-        if (state.gridVisible || isCalibrationActive) {
-            drawVttGrid(ctx, imgW, imgH, isCalibrationActive, view);
+        if (view.gridVisible || calibrating) {
+            drawGridOverlay(ctx, imgW, imgH, view, calibrating);
         }
 
         // Draw image bounding border
@@ -192,68 +192,4 @@ function drawTriageFrame(ctx, view) {
     }
 
     ctx.restore();
-}
-
-/**
- * Single-draw-call crisp 64px VTT grid overlay.
- * Evaluates 5ft D&D tactical scale, door alignment, and poché wall consistency.
- */
-function drawVttGrid(c, width, height, isCalibrationActive, view) {
-    c.save();
-    c.beginPath();
-    c.rect(0, 0, width, height);
-    c.clip();
-
-    const size = view.gridSize || VTT_GRID_SIZE;
-    const ox = ((Math.round(view.gridOffset.x) % size) + size) % size;
-    const oy = ((Math.round(view.gridOffset.y) % size) + size) % size;
-    const cols = Math.floor(Math.max(0, width - ox) / size);
-    const rows = Math.floor(Math.max(0, height - oy) / size);
-    const fullW = cols * size;
-    const fullH = rows * size;
-
-    // When calibration panel or align mode is active:
-    // Shade/dim discarded partial edge strips outside the active full-grid lattice [ox, oy, fullW, fullH]
-    if (isCalibrationActive && (cols > 0 || rows > 0)) {
-        c.save();
-        c.beginPath();
-        c.rect(0, 0, width, height);
-        c.rect(ox, oy, fullW, fullH);
-        c.fillStyle = "rgba(10, 15, 30, 0.65)";
-        c.fill("evenodd");
-        c.restore();
-    }
-
-    c.beginPath();
-
-    // Vertical grid lines
-    for (let x = ox; x <= width; x += size) {
-        c.moveTo(x, 0);
-        c.lineTo(x, height);
-    }
-
-    // Horizontal grid lines
-    for (let y = oy; y <= height; y += size) {
-        c.moveTo(0, y);
-        c.lineTo(width, y);
-    }
-
-    // Inversely scale line width with zoom so grid remains ~1 screen pixel thin
-    c.lineWidth = Math.max(0.5, 1.0 / view.zoom);
-    c.strokeStyle = "rgba(56, 189, 248, 0.4)";
-    c.stroke();
-
-    // Draw boundary border around active full grid
-    if (isCalibrationActive && cols > 0 && rows > 0) {
-        c.save();
-        c.beginPath();
-        c.rect(ox, oy, fullW, fullH);
-        c.lineWidth = Math.max(1.5, 2.5 / view.zoom);
-        const isEligible = cols >= 16 && rows >= 16;
-        c.strokeStyle = isEligible ? "rgba(56, 189, 248, 0.95)" : "rgba(244, 63, 94, 0.95)";
-        c.stroke();
-        c.restore();
-    }
-
-    c.restore();
 }

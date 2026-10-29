@@ -23,10 +23,7 @@ export const state = {
     isPanning: false,
     dragStart: { x: 0, y: 0 },
 
-    // Visual overlays
-    gridVisible: true,
-    gridAlignMode: false,
-    gridPanelOpen: false,
+    // Visual overlays (grid visibility, panel, align mode and drag offset live in the Stage Viewport)
     isDraggingGrid: false,
     gridDragStart: { x: 0, y: 0 },
     gridDragOrigin: { x: 0, y: 0 },
@@ -113,18 +110,6 @@ export const state = {
     libraryFullscreenMap: null,
     libraryFullscreenIndex: -1,
     libraryFullscreenLayerIndex: 0,
-    libraryFullscreenPan: { x: 0, y: 0 },
-    libraryFullscreenZoom: 1.0,
-    libraryFullscreenIsPanning: false,
-    libraryFullscreenPanStart: { x: 0, y: 0 },
-    libraryFullscreenGridVisible: true,
-    libraryFullscreenGridSize: 64,
-    libraryFullscreenGridOffset: { x: 0, y: 0 },
-    libraryFullscreenGridPanelOpen: false,
-    libraryFullscreenGridAlignMode: false,
-    libraryFullscreenIsDraggingGrid: false,
-    libraryFullscreenGridDragStart: { x: 0, y: 0 },
-    libraryFullscreenGridOffsetStart: { x: 0, y: 0 },
     libraryFullscreenCurrentImage: null,
     libraryFullscreenImageCache: new Map(),
     // Slide-Over Inspector Drawer & Curated Map Metadata Editing (Issue #135 & Issue #136)

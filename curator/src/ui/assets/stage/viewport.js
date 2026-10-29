@@ -7,6 +7,11 @@
  * one notification per rendered frame. Grid edits are handed to the caller-supplied
  * `persistGrid` callback at most once per debounce burst, tagged with the owner that
  * `gridOwner` resolved when that burst was armed.
+ *
+ * The viewport also owns the per-stage overlay flags (`gridVisible`, `gridPanelOpen`,
+ * `gridAlignMode`), so each stage's display state travels with its canvas instead of
+ * living in the shared store. `drawGridOverlay` is the one VTT grid renderer both
+ * stages mount.
  */
 
 import {
@@ -17,8 +22,8 @@ import {
     MAX_ZOOM,
 } from "../kit/grid-math.js";
 
-export const PAN_SPEED = 700; // pixels per second
-export const ZOOM_SPEED = 2.0; // zoom factor per second of held bracket key
+const PAN_SPEED = 700; // pixels per second
+const ZOOM_SPEED = 2.0; // zoom factor per second of held bracket key
 
 const FIT_PADDING = 32;
 const GRID_PERSIST_DEBOUNCE_MS = 300;
@@ -73,6 +78,9 @@ export function createViewport(canvas, options) {
     let zoom = 1.0;
     let gridSize = VTT_GRID_SIZE;
     const gridOffset = { x: 0, y: 0 };
+    let gridVisible = true;
+    let gridPanelOpen = false;
+    let gridAlignMode = false;
 
     let metrics = { width: 0, height: 0, dpr: 1 };
     let context = null;
@@ -100,6 +108,9 @@ export function createViewport(canvas, options) {
             zoom,
             gridSize,
             gridOffset: { x: gridOffset.x, y: gridOffset.y },
+            gridVisible,
+            gridPanelOpen,
+            gridAlignMode,
             width: metrics.width,
             height: metrics.height,
             dpr: metrics.dpr,
@@ -389,6 +400,31 @@ export function createViewport(canvas, options) {
     }
 
     // ======================================================================
+    // Overlays
+    // ======================================================================
+
+    function setGridVisible(visible) {
+        const next = Boolean(visible);
+        if (next === gridVisible) return;
+        gridVisible = next;
+        requestRender();
+    }
+
+    function setGridPanelOpen(open) {
+        const next = Boolean(open);
+        if (next === gridPanelOpen) return;
+        gridPanelOpen = next;
+        requestRender();
+    }
+
+    function setGridAlignMode(align) {
+        const next = Boolean(align);
+        if (next === gridAlignMode) return;
+        gridAlignMode = next;
+        requestRender();
+    }
+
+    // ======================================================================
     // Lifecycle
     // ======================================================================
 
@@ -424,8 +460,86 @@ export function createViewport(canvas, options) {
         nudgeGrid,
         setGridOffset,
         resetGrid,
+        setGridVisible,
+        setGridPanelOpen,
+        setGridAlignMode,
         suspend,
         resume,
         flushGrid,
     };
+}
+
+/**
+ * Whether the grid is being calibrated on this viewport: the panel is open, align
+ * mode is armed, or the stage reports an in-progress drag through `extra`.
+ */
+export function isGridCalibrating(view, extra = false) {
+    return Boolean(view.gridPanelOpen || view.gridAlignMode || extra);
+}
+
+/**
+ * Single-draw-call crisp 64px VTT grid overlay, shared by every stage.
+ *
+ * Draws in content space, so the caller applies the pan/zoom transform first. The
+ * cell size, offset, zoom and calibration shading all come from `view`; nothing is
+ * read from the store.
+ */
+export function drawGridOverlay(c, width, height, view, isCalibrationActive = false) {
+    c.save();
+    c.beginPath();
+    c.rect(0, 0, width, height);
+    c.clip();
+
+    const size = view.gridSize || VTT_GRID_SIZE;
+    const ox = ((Math.round(view.gridOffset.x) % size) + size) % size;
+    const oy = ((Math.round(view.gridOffset.y) % size) + size) % size;
+    const cols = Math.floor(Math.max(0, width - ox) / size);
+    const rows = Math.floor(Math.max(0, height - oy) / size);
+    const fullW = cols * size;
+    const fullH = rows * size;
+
+    // When calibration panel or align mode is active:
+    // Shade/dim discarded partial edge strips outside the active full-grid lattice [ox, oy, fullW, fullH]
+    if (isCalibrationActive && (cols > 0 || rows > 0)) {
+        c.save();
+        c.beginPath();
+        c.rect(0, 0, width, height);
+        c.rect(ox, oy, fullW, fullH);
+        c.fillStyle = "rgba(10, 15, 30, 0.65)";
+        c.fill("evenodd");
+        c.restore();
+    }
+
+    c.beginPath();
+
+    // Vertical grid lines
+    for (let x = ox; x <= width; x += size) {
+        c.moveTo(x, 0);
+        c.lineTo(x, height);
+    }
+
+    // Horizontal grid lines
+    for (let y = oy; y <= height; y += size) {
+        c.moveTo(0, y);
+        c.lineTo(width, y);
+    }
+
+    // Inversely scale line width with zoom so grid remains ~1 screen pixel thin
+    c.lineWidth = Math.max(0.5, 1.0 / view.zoom);
+    c.strokeStyle = "rgba(56, 189, 248, 0.4)";
+    c.stroke();
+
+    // Draw boundary border around active full grid
+    if (isCalibrationActive && cols > 0 && rows > 0) {
+        c.save();
+        c.beginPath();
+        c.rect(ox, oy, fullW, fullH);
+        c.lineWidth = Math.max(1.5, 2.5 / view.zoom);
+        const isEligible = cols >= 16 && rows >= 16;
+        c.strokeStyle = isEligible ? "rgba(56, 189, 248, 0.95)" : "rgba(244, 63, 94, 0.95)";
+        c.stroke();
+        c.restore();
+    }
+
+    c.restore();
 }

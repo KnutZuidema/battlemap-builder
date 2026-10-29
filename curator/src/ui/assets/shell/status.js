@@ -30,7 +30,7 @@ export function updateHud(view = null) {
     dom.zoomLevelDisplay.textContent = `${zoomPercent}%`;
     dom.hudPanZoom.textContent = `Zoom: ${zoomPercent}% (${Math.round(grid.pan.x)}, ${Math.round(grid.pan.y)})`;
 
-    dom.hudGridStatus.textContent = formatGridStatus({ ...grid, gridVisible: state.gridVisible });
+    dom.hudGridStatus.textContent = formatGridStatus(grid);
 
     if (dom.hudLatticeStatus) {
         const dims = getCurrentGroundDimensions();

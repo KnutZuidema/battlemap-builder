@@ -12,6 +12,9 @@ import { flushGridEdits, getTriageViewport, stopStageMotion } from "../stage/can
 import { getCandidateLayers, getCurrentGroundDimensions } from "../kit/layers.js";
 import { enterLabelingMode, exitLabelingMode, toggleGridPanel } from "../shell/grid-panel.js";
 import { fetchStagingQueue, loadCandidate, setLayer } from "./triage.js";
+import { describeStagingCandidate, suggestStagingThemes } from "../requests/ai.js";
+import { abort, has, join, latest } from "../requests/tracker.js";
+import { curateCandidate, rejectCandidate, undoReject } from "../requests/curation.js";
 
 // Curate Decision Modal Flow State
 export const decisionState = {
@@ -29,7 +32,11 @@ export const decisionState = {
 
 /**
  * Proactively pre-fetches AI vision theme suggestions for candidate in background.
- * Caches suggestions on candidate._themeSuggestions or flags candidate._suggestionsOffline.
+ *
+ * The request is keyed per candidate, so the prefetch and the decision modal that waits for it
+ * share one request. The result is cached on the candidate either way; a failed request is
+ * reported once by the request module and leaves the candidate flagged offline, which the
+ * decision modal renders as its custom-tags step.
  */
 export function fetchThemeSuggestions(candidate) {
     if (!candidate) {
@@ -38,63 +45,71 @@ export function fetchThemeSuggestions(candidate) {
     if (candidate._themeSuggestions !== undefined) {
         return Promise.resolve(candidate._themeSuggestions);
     }
-    if (candidate._fetchPromise) {
-        return candidate._fetchPromise;
-    }
 
-    candidate._fetchPromise = fetch("/api/staging/" + encodeURIComponent(candidate.id) + "/suggest-themes", {
-        method: "POST",
-    })
-        .then((res) => {
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return res.json();
-        })
-        .then((data) => {
-            const suggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
+    return join(`suggest:staging:${candidate.id}`, (signal) => suggestStagingThemes(candidate.id, { signal }))
+        .then((suggestions) => {
             candidate._themeSuggestions = suggestions;
             candidate._suggestionsOffline = suggestions.length === 0;
             return candidate._themeSuggestions;
         })
-        .catch((err) => {
-            console.warn(`Vision theme suggestions offline/failed for candidate ${candidate.id}:`, err);
+        .catch((error) => {
+            if (error && error.name === "AbortError") {
+                // Cancelled: leave the candidate uncached so the next look retries.
+                return [];
+            }
             candidate._themeSuggestions = [];
             candidate._suggestionsOffline = true;
-            return [];
-        })
-        .finally(() => {
-            candidate._fetchPromise = null;
+            return candidate._themeSuggestions;
         });
-
-    return candidate._fetchPromise;
 }
 
-let currentDescribeAbortController = null;
+/** Put a description into the decision modal's description step. */
+function showDecisionDescription(description) {
+    if (dom.decisionDescriptionInput) {
+        dom.decisionDescriptionInput.value = description;
+        dom.decisionDescriptionInput.classList.remove("hidden");
+    }
+    if (dom.decisionDescriptionLoading) {
+        dom.decisionDescriptionLoading.classList.add("hidden");
+    }
+    if (dom.decisionDescriptionStatus) {
+        dom.decisionDescriptionStatus.className = "decision-description-indicator status-dot status-ready";
+        dom.decisionDescriptionStatus.title = "Description generated";
+    }
+}
+
+/** Keep whatever the reviewer typed, falling back to the text the candidate came with. */
+function showDecisionDescriptionFallback(candidate) {
+    if (dom.decisionDescriptionInput) {
+        if (!dom.decisionDescriptionInput.value.trim()) {
+            dom.decisionDescriptionInput.value = candidate.description || (candidate.layers && candidate.layers[0]?.caption) || "";
+        }
+        dom.decisionDescriptionInput.classList.remove("hidden");
+    }
+    if (dom.decisionDescriptionLoading) {
+        dom.decisionDescriptionLoading.classList.add("hidden");
+    }
+    if (dom.decisionDescriptionStatus) {
+        dom.decisionDescriptionStatus.className = "decision-description-indicator status-dot status-offline";
+        dom.decisionDescriptionStatus.title = "AI vision description unavailable / fallback";
+    }
+}
 
 /**
  * Asynchronously requests vision description for candidate.
+ *
+ * The request is keyed per candidate and supersedes an earlier describe of the same candidate.
+ * The guard on `decisionState.candidate` keeps an answer for a candidate the modal has left
+ * from landing in the next candidate's draft.
+ *
  * @param {Object} candidate
  * @param {boolean} force - if true, bypasses candidate._description cache
  */
 export async function fetchCandidateDescription(candidate, force = false) {
     if (!candidate) return;
 
-    if (currentDescribeAbortController) {
-        currentDescribeAbortController.abort();
-        currentDescribeAbortController = null;
-    }
-
     if (!force && candidate._description) {
-        if (dom.decisionDescriptionInput) {
-            dom.decisionDescriptionInput.value = candidate._description;
-            dom.decisionDescriptionInput.classList.remove("hidden");
-        }
-        if (dom.decisionDescriptionLoading) {
-            dom.decisionDescriptionLoading.classList.add("hidden");
-        }
-        if (dom.decisionDescriptionStatus) {
-            dom.decisionDescriptionStatus.className = "decision-description-indicator status-dot status-ready";
-            dom.decisionDescriptionStatus.title = "Description ready";
-        }
+        showDecisionDescription(candidate._description);
         return candidate._description;
     }
 
@@ -112,70 +127,31 @@ export async function fetchCandidateDescription(candidate, force = false) {
         dom.decisionDescriptionStatus.title = "Generating description with Gemini 3.5 Flash Lite...";
     }
 
-    const controller = new AbortController();
-    currentDescribeAbortController = controller;
-
-    const payload = {
-        tags: decisionState.acceptedTags && decisionState.acceptedTags.length > 0
-            ? decisionState.acceptedTags
-            : (candidate.tags || []),
-    };
+    const key = `describe:staging:${candidate.id}`;
+    const tags = decisionState.acceptedTags && decisionState.acceptedTags.length > 0
+        ? [...decisionState.acceptedTags]
+        : (candidate.tags || []);
 
     try {
-        const res = await fetch(`/api/staging/${encodeURIComponent(candidate.id)}/describe`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-            signal: controller.signal,
-        });
-
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-        }
-
-        const data = await res.json();
-        const desc = (data && typeof data.description === "string") ? data.description.trim() : "";
-        candidate._description = desc;
+        const { description } = await latest(key, (signal) =>
+            describeStagingCandidate(candidate.id, { signal, tags }),
+        );
+        candidate._description = description;
 
         if (decisionState.candidate && decisionState.candidate.id === candidate.id) {
-            if (dom.decisionDescriptionInput) {
-                dom.decisionDescriptionInput.value = desc;
-                dom.decisionDescriptionInput.classList.remove("hidden");
-            }
-            if (dom.decisionDescriptionLoading) {
-                dom.decisionDescriptionLoading.classList.add("hidden");
-            }
-            if (dom.decisionDescriptionStatus) {
-                dom.decisionDescriptionStatus.className = "decision-description-indicator status-dot status-ready";
-                dom.decisionDescriptionStatus.title = "Description generated";
-            }
+            showDecisionDescription(description);
         }
-        return desc;
-    } catch (err) {
-        if (err.name === "AbortError") {
+        return description;
+    } catch (error) {
+        if (error && error.name === "AbortError") {
             return;
         }
-        console.warn(`Vision description failed for candidate ${candidate.id}:`, err);
+        // The request module raised the pill and the toast; the draft keeps the reviewer's text.
         if (decisionState.candidate && decisionState.candidate.id === candidate.id) {
-            if (dom.decisionDescriptionInput) {
-                if (!dom.decisionDescriptionInput.value.trim()) {
-                    dom.decisionDescriptionInput.value = candidate.description || (candidate.layers && candidate.layers[0]?.caption) || "";
-                }
-                dom.decisionDescriptionInput.classList.remove("hidden");
-            }
-            if (dom.decisionDescriptionLoading) {
-                dom.decisionDescriptionLoading.classList.add("hidden");
-            }
-            if (dom.decisionDescriptionStatus) {
-                dom.decisionDescriptionStatus.className = "decision-description-indicator status-dot status-offline";
-                dom.decisionDescriptionStatus.title = "AI vision description unavailable / fallback";
-            }
+            showDecisionDescriptionFallback(candidate);
         }
     } finally {
-        if (currentDescribeAbortController === controller) {
-            currentDescribeAbortController = null;
-        }
-        if (dom.btnRegenerateDescription) {
+        if (!has(key) && dom.btnRegenerateDescription) {
             dom.btnRegenerateDescription.disabled = false;
         }
     }
@@ -263,8 +239,8 @@ async function openCurateDecisionModal() {
         toggleGridPanel(true);
         return;
     }
-    // If suggestions are still being fetched, wait for them
-    if (candidate._fetchPromise || (candidate._themeSuggestions === undefined && !candidate._suggestionsOffline)) {
+    // If suggestions are not cached yet, join the prefetch (or start one) and wait for it.
+    if (candidate._themeSuggestions === undefined && !candidate._suggestionsOffline) {
         await fetchThemeSuggestions(candidate);
     }
 
@@ -310,9 +286,10 @@ async function openCurateDecisionModal() {
 
 export function closeCurateDecisionModal() {
     stopStageMotion();
-    if (currentDescribeAbortController) {
-        currentDescribeAbortController.abort();
-        currentDescribeAbortController = null;
+    if (decisionState.candidate) {
+        // A description still in flight for the candidate being closed must not land in the
+        // draft the modal opens next.
+        abort(`describe:staging:${decisionState.candidate.id}`);
     }
     if (dom.decisionDescriptionInput) {
         dom.decisionDescriptionInput.value = "";
@@ -684,22 +661,14 @@ function submitDecisionCuration() {
     loadCandidate(state.currentIndex);
     state.pendingCurationIds.add(candidate.id);
 
-    fetch("/api/curate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-    })
-        .then(async (res) => {
-            if (!res.ok) {
-                const errJson = await res.json().catch(() => ({}));
-                throw new Error(errJson.error || errJson.message || `HTTP ${res.status}`);
-            }
+    curateCandidate(payload)
+        .then(() => {
             showToast(`Candidate #${candidate.id} curated`, "success");
             invalidateDatasetReadiness();
         })
-        .catch((err) => {
+        .catch(() => {
+            // The request module raised the pill and fired the toast; put the candidate back.
             restoreUncuratedCandidate(candidate, removedIndex);
-            showToast(`Curate failed for #${candidate.id}: ${err.message}`, "danger");
         })
         .finally(() => {
             state.pendingCurationIds.delete(candidate.id);
@@ -825,20 +794,7 @@ export async function rejectCurrentCandidate() {
     state.isSubmitting = true;
 
     try {
-        const payload = {
-            id: candidate.id,
-        };
-
-        const res = await fetch("/api/reject", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
-
-        if (!res.ok) {
-            const errJson = await res.json().catch(() => ({}));
-            throw new Error(errJson.message || `HTTP ${res.status}`);
-        }
+        await rejectCandidate(candidate.id);
 
         state.rejectedStack.push({ candidate, index: removedIndex });
         updateUndoRejectButtonState();
@@ -865,8 +821,8 @@ export async function rejectCurrentCandidate() {
 
         loadCandidate(state.currentIndex);
         fetchStatus();
-    } catch (err) {
-        showToast(`Rejection failed: ${err.message}`, "danger");
+    } catch {
+        // The request module raised the pill and fired the toast; the queue is unchanged.
     } finally {
         state.isSubmitting = false;
     }
@@ -895,18 +851,7 @@ export async function undoRejectCandidate(candidateId = null) {
 
     state.isSubmitting = true;
     try {
-        const res = await fetch("/api/reject/undo", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: targetId }),
-        });
-
-        if (!res.ok) {
-            const errJson = await res.json().catch(() => ({}));
-            throw new Error(errJson.error || errJson.message || `HTTP ${res.status}`);
-        }
-
-        const data = await res.json();
+        const data = await undoReject(targetId);
         const restoredCandidate = data.candidate || (stackEntry ? stackEntry.candidate : null);
 
         if (restoredCandidate) {
@@ -931,12 +876,12 @@ export async function undoRejectCandidate(candidateId = null) {
             showToast(`Restored candidate #${targetId} to staging queue`, "success");
         }
         fetchStatus();
-    } catch (err) {
+    } catch {
         if (stackEntry) {
             state.rejectedStack.push(stackEntry);
             updateUndoRejectButtonState();
         }
-        showToast(`Undo rejection failed: ${err.message}`, "danger");
+        // The request module raised the pill and fired the toast; the rejection stays stacked.
     } finally {
         state.isSubmitting = false;
     }

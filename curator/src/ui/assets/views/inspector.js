@@ -17,6 +17,8 @@ import { openLibraryFullscreen } from "./library/fullscreen.js";
 import { openDeleteCuratedModal } from "./library/bulk.js";
 import { showToast } from "../shell/status.js";
 import { invalidateDatasetReadiness } from "./readiness.js";
+import { describeCuratedMap, suggestCuratedThemes } from "../requests/ai.js";
+import { join, latest } from "../requests/tracker.js";
 
 // ==========================================================================
 // Slide-Over Inspector Drawer & Refinement Engine (Issue #135 & Issue #136)
@@ -449,6 +451,7 @@ function discardLibraryInspectorChanges() {
 
 // --- AI Refinements (Issue #136) ---
 
+/** Suggest themes and tags for the open map; a second click joins the request already running. */
 async function suggestInspectorThemes() {
     if (!state.libraryDrawerMap) return;
     const mapId = state.libraryDrawerMap.id;
@@ -460,16 +463,10 @@ async function suggestInspectorThemes() {
     }
 
     try {
-        const res = await fetch(`/api/curated/${encodeURIComponent(mapId)}/suggest-themes`, {
-            method: "POST",
-        });
-        if (!res.ok) {
-            const errText = await res.text();
-            throw new Error(`HTTP ${res.status}: ${errText || res.statusText}`);
-        }
-
-        const data = await res.json();
-        const suggestions = data.suggestions || [];
+        const suggestions = await join(`suggest:curated:${mapId}`, (signal) =>
+            suggestCuratedThemes(mapId, { signal }),
+        );
+        if (state.libraryDrawerMap?.id !== mapId) return;
 
         renderInspectorAiSuggestions(suggestions);
         if (suggestions.length > 0) {
@@ -477,8 +474,8 @@ async function suggestInspectorThemes() {
         } else {
             showToast("No new theme suggestions generated", "info");
         }
-    } catch (err) {
-        showToast(`Theme suggestion failed: ${err.message}`, "danger");
+    } catch {
+        // The request module raised the pill and fired the toast; the drawer keeps its draft.
     } finally {
         if (dom.btnInspectorSuggestThemes) {
             dom.btnInspectorSuggestThemes.disabled = false;
@@ -529,9 +526,18 @@ function addSuggestedItem(sug) {
     }
 }
 
-async function describeInspectorMap() {
+/**
+ * Regenerate the open map's Physical Description into its draft.
+ *
+ * The request is keyed per map and supersedes an earlier describe of the same map. The draft
+ * is captured before awaiting: if the drawer has moved on to another map by the time the
+ * answer lands, the answer is dropped instead of overwriting the newer draft.
+ */
+export async function describeInspectorMap() {
     if (!state.libraryDrawerMap) return;
     const mapId = state.libraryDrawerMap.id;
+    const draft = state.libraryDraft;
+    const tags = [...(draft.tags || [])];
 
     const spinner = dom.btnInspectorDescribe?.querySelector(".ai-spinner");
     if (dom.btnInspectorDescribe) {
@@ -540,33 +546,22 @@ async function describeInspectorMap() {
     }
 
     try {
-        const payload = {
-            tags: state.libraryDraft.tags,
-        };
-
-        const res = await fetch(`/api/curated/${encodeURIComponent(mapId)}/describe`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
-
-        if (!res.ok) {
-            const errText = await res.text();
-            throw new Error(`HTTP ${res.status}: ${errText || res.statusText}`);
+        const { description } = await latest(`describe:curated:${mapId}`, (signal) =>
+            describeCuratedMap(mapId, { signal, tags }),
+        );
+        if (!state.libraryDrawerActive || state.libraryDraft !== draft || state.libraryDrawerMap?.id !== mapId) {
+            return;
         }
 
-        const data = await res.json();
-        const description = data.description || "";
-
-        state.libraryDraft.description = description;
+        draft.description = description;
         if (dom.inspectorDescriptionInput) {
             dom.inspectorDescriptionInput.value = description;
         }
         updateInspectorDescriptionCounter(description);
         markLibraryDraftDirty();
         showToast("Generated physical description", "success");
-    } catch (err) {
-        showToast(`Description generation failed: ${err.message}`, "danger");
+    } catch {
+        // The request module raised the pill and fired the toast; the draft keeps its text.
     } finally {
         if (dom.btnInspectorDescribe) {
             dom.btnInspectorDescribe.disabled = false;
@@ -578,6 +573,7 @@ async function describeInspectorMap() {
 async function runAllInspectorAiRefinements() {
     if (!state.libraryDrawerMap) return;
     const mapId = state.libraryDrawerMap.id;
+    const draft = state.libraryDraft;
 
     const comboSpinner = dom.btnInspectorRunAll?.querySelector(".ai-spinner");
     if (dom.btnInspectorRunAll) {
@@ -586,41 +582,31 @@ async function runAllInspectorAiRefinements() {
     }
 
     try {
-        // Step 1: Suggest themes & tags
-        const themesRes = await fetch(`/api/curated/${encodeURIComponent(mapId)}/suggest-themes`, {
-            method: "POST",
+        // Step 1: Suggest themes & tags, auto-accepting the canonical themes.
+        const suggestions = await join(`suggest:curated:${mapId}`, (signal) =>
+            suggestCuratedThemes(mapId, { signal }),
+        );
+        if (!state.libraryDrawerActive || state.libraryDraft !== draft || state.libraryDrawerMap?.id !== mapId) {
+            return;
+        }
+        renderInspectorAiSuggestions(suggestions);
+        suggestions.forEach((sug) => {
+            const norm = sug.trim().toLowerCase();
+            if (CANONICAL_THEMES.includes(norm)) {
+                addInspectorTheme(norm);
+            }
         });
-        if (themesRes.ok) {
-            const data = await themesRes.json();
-            const suggestions = data.suggestions || [];
-            renderInspectorAiSuggestions(suggestions);
 
-            // Auto-add canonical themes and up to 3 relevant tags
-            suggestions.forEach((sug) => {
-                const norm = sug.trim().toLowerCase();
-                if (CANONICAL_THEMES.includes(norm)) {
-                    addInspectorTheme(norm);
-                }
-            });
+        // Step 2: Describe from the tags the refinement just settled on.
+        const tags = [...(draft.tags || [])];
+        const { description } = await latest(`describe:curated:${mapId}`, (signal) =>
+            describeCuratedMap(mapId, { signal, tags }),
+        );
+        if (!state.libraryDrawerActive || state.libraryDraft !== draft || state.libraryDrawerMap?.id !== mapId) {
+            return;
         }
 
-        // Step 2: Generate description using updated draft tags
-        const describePayload = {
-            tags: state.libraryDraft.tags,
-        };
-        const descRes = await fetch(`/api/curated/${encodeURIComponent(mapId)}/describe`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(describePayload),
-        });
-        if (!descRes.ok) {
-            const errText = await descRes.text();
-            throw new Error(`Description step failed: ${errText || descRes.statusText}`);
-        }
-
-        const descData = await descRes.json();
-        const description = descData.description || "";
-        state.libraryDraft.description = description;
+        draft.description = description;
         if (dom.inspectorDescriptionInput) {
             dom.inspectorDescriptionInput.value = description;
         }
@@ -628,8 +614,8 @@ async function runAllInspectorAiRefinements() {
         markLibraryDraftDirty();
 
         showToast("All AI refinements applied successfully", "success");
-    } catch (err) {
-        showToast(`AI Refinement failed: ${err.message}`, "danger");
+    } catch {
+        // The request module raised the pill and fired the toast; the drawer keeps its draft.
     } finally {
         if (dom.btnInspectorRunAll) {
             dom.btnInspectorRunAll.disabled = false;

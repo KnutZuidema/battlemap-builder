@@ -60,7 +60,6 @@ export const state = {
     readinessAuditScope: null,
     readinessBatch: null,
     readinessEpoch: 0,
-    describeRequests: new Map(),
     // Frozen Dataset Snapshots (Issue #216)
     isFreezingSnapshot: false,
     isFetchingSnapshots: false,

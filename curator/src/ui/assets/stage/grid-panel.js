@@ -6,8 +6,9 @@
 import { dom } from "../dom.js";
 import { state } from "../store.js";
 import { VTT_GRID_SIZE, MIN_GRID_SIZE, MAX_GRID_SIZE, calculateLatticeInfo } from "../kit/grid-math.js";
-import { getCurrentGroundDimensions, requestRender, stopPanLoop, stopZoomLoop } from "./canvas.js";
-import { showToast, updateHud } from "../app.js";
+import { requestRender, stopPanLoop, stopZoomLoop } from "./canvas.js";
+import { getCurrentGroundDimensions } from "../kit/layers.js";
+import { showToast, updateHud } from "../shell/status.js";
 
 let saveCandidateGridTimeout = null;
 export function saveCurrentCandidateGrid() {

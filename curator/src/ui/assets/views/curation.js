@@ -6,10 +6,10 @@ import { dom } from "../dom.js";
 import { state } from "../store.js";
 import { calculateLatticeInfo } from "../kit/grid-math.js";
 import { getKnownDatasetTags } from "../kit/tags.js";
-import { getCandidateLayers } from "../kit/layers.js";
-import { fetchStatus, showToast } from "../app.js";
+import { fetchStatus, showToast } from "../shell/status.js";
 import { invalidateDatasetReadiness } from "./readiness.js";
-import { getCurrentGroundDimensions, stopPanLoop, stopZoomLoop } from "../stage/canvas.js";
+import { stopPanLoop, stopZoomLoop } from "../stage/canvas.js";
+import { getCandidateLayers, getCurrentGroundDimensions } from "../kit/layers.js";
 import { enterLabelingMode, exitLabelingMode, toggleGridPanel } from "../stage/grid-panel.js";
 import { fetchStagingQueue, loadCandidate, setLayer } from "./triage.js";
 
@@ -933,5 +933,59 @@ export async function undoRejectCandidate(candidateId = null) {
         showToast(`Undo rejection failed: ${err.message}`, "danger");
     } finally {
         state.isSubmitting = false;
+    }
+}
+
+// ==========================================================================
+// Decision Modal Wiring
+// ==========================================================================
+
+export function setupDecisionModalControls() {
+    if (dom.btnCloseDecisionModal) {
+        dom.btnCloseDecisionModal.addEventListener("click", () => closeCurateDecisionModal());
+    }
+    if (dom.btnCancelDecision) {
+        dom.btnCancelDecision.addEventListener("click", () => closeCurateDecisionModal());
+    }
+    if (dom.btnDecisionReject) {
+        dom.btnDecisionReject.addEventListener("click", () => handleDecisionReject());
+    }
+    if (dom.btnDecisionAccept) {
+        dom.btnDecisionAccept.addEventListener("click", () => handleDecisionAccept());
+    }
+    if (dom.btnDecisionUndo) {
+        dom.btnDecisionUndo.addEventListener("click", () => handleDecisionUndo());
+    }
+    if (dom.btnAddCustomTag) {
+        dom.btnAddCustomTag.addEventListener("click", () => handleCustomTagAdd());
+    }
+    if (dom.btnFinishDecision) {
+        dom.btnFinishDecision.addEventListener("click", () => handleCustomTagSubmit());
+    }
+    if (dom.decisionTagInput) {
+        dom.decisionTagInput.addEventListener("input", (e) => onDecisionTagInput(e));
+        dom.decisionTagInput.addEventListener("keydown", (e) => onDecisionTagInputKeydown(e));
+    }
+    if (dom.btnRegenerateDescription) {
+        dom.btnRegenerateDescription.addEventListener("click", () => {
+            if (decisionState.candidate) {
+                fetchCandidateDescription(decisionState.candidate, true);
+            }
+        });
+    }
+    if (dom.decisionDescriptionInput) {
+        dom.decisionDescriptionInput.addEventListener("keydown", (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                e.preventDefault();
+                handleCustomTagSubmit();
+            }
+        });
+    }
+    if (dom.curateDecisionModal) {
+        dom.curateDecisionModal.addEventListener("click", (e) => {
+            if (e.target === dom.curateDecisionModal) {
+                closeCurateDecisionModal();
+            }
+        });
     }
 }

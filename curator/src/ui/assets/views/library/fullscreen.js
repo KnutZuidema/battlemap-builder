@@ -21,7 +21,7 @@ import {
     ZOOM_SPEED,
 } from "../../stage/canvas.js";
 import { setLibraryFocus } from "../library.js";
-import { showToast } from "../../app.js";
+import { showToast } from "../../shell/status.js";
 import { invalidateDatasetReadiness } from "../readiness.js";
 
 // ==========================================================================

@@ -9,7 +9,7 @@ import { getCandidateLayers } from "../kit/layers.js";
 import { requestRender, fitToScreen } from "../stage/canvas.js";
 import { enterLabelingMode, exitLabelingMode, updateGridPanel } from "../stage/grid-panel.js";
 import { fetchThemeSuggestions } from "./curation.js";
-import { showLoading, showEmptyState, showToast, updateHud } from "../app.js";
+import { showEmptyState, showLoading, showToast, updateHud } from "../shell/status.js";
 
 // Constants
 const PREFETCH_AHEAD = 3;

@@ -9,14 +9,14 @@ import { state } from "../store.js";
 import { escapeHtml } from "../kit/dom.js";
 import { formatDuration } from "../kit/format.js";
 import { stopPanLoop, stopZoomLoop } from "../stage/canvas.js";
+import { showToast } from "../shell/status.js";
+import { closeHelpModal } from "../shell/help.js";
+import { closeIngestionDrawer } from "./ingestion.js";
 import {
-    showToast,
-    closeHelpModal,
-    closeIngestionDrawer,
     closeBenchmarkDrawer,
     fetchCostStats,
     loadBenchmarkModelCatalog,
-} from "../app.js";
+} from "./benchmark.js";
 import { datasetScopeTheme, datasetScopeQuery } from "../dataset-scope.js";
 import { datasetIssueLabel } from "./readiness.js";
 import {

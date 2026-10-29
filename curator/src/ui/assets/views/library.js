@@ -38,7 +38,7 @@ import {
     toggleLibraryInspector,
     saveLibraryInspectorChanges,
 } from "./inspector.js";
-import { showToast } from "../app.js";
+import { showToast } from "../shell/status.js";
 import { datasetScopeTheme, datasetScopeQuery } from "../dataset-scope.js";
 import { syncReadinessToScope } from "./readiness.js";
 import {

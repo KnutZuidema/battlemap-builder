@@ -7,7 +7,7 @@ import { dom } from "../dom.js";
 import { state } from "../store.js";
 import { escapeHtml } from "../kit/dom.js";
 import { formatBytes } from "../kit/format.js";
-import { showToast } from "../app.js";
+import { showToast } from "../shell/status.js";
 import { datasetScopeTheme, datasetScopeQuery } from "../dataset-scope.js";
 import {
     applyReadinessReport,

@@ -10,6 +10,7 @@ import {
     calculateLatticeInfo,
     formatGridStatus,
     formatLatticeStatus,
+    formatLatticePanel,
 } from "../assets/kit/grid-math.js";
 
 test("exposes the VTT grid and zoom bounds", () => {
@@ -157,5 +158,16 @@ test("formatLatticeStatus renders the eligible and ineligible badge text", () =>
     assert.equal(
         formatLatticeStatus(calculateLatticeInfo(1024, 1024, 64, 1, 0)),
         "15 × 16 cells (< 16×16 cells)"
+    );
+});
+
+test("formatLatticePanel splits the same lattice into the two panel spans", () => {
+    assert.deepEqual(
+        formatLatticePanel(calculateLatticeInfo(2048, 2048, 64, 0, 0)),
+        { cells: "32 × 32 cells", sections: "2 × 2 sections" }
+    );
+    assert.deepEqual(
+        formatLatticePanel(calculateLatticeInfo(1024, 1024, 64, 1, 0)),
+        { cells: "15 × 16 cells", sections: "< 16×16 cells" }
     );
 });

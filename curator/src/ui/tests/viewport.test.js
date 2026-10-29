@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createViewport } from "../assets/stage/viewport.js";
+import { createViewport, isGridCalibrating } from "../assets/stage/viewport.js";
 import {
     VTT_GRID_SIZE,
     MIN_GRID_SIZE,
@@ -383,4 +383,35 @@ test("createViewport rejects a missing contentSize() callback", () => {
         () => createViewport(createFakeCanvas(), { draw() {}, persistGrid() {} }),
         /contentSize is required/,
     );
+});
+
+test("overlay flags live on the viewport and coalesce to one frame per change", () => {
+    const h = createHarness();
+    h.viewport.resize();
+    h.clock.step();
+
+    const initial = h.viewport.getView();
+    assert.equal(initial.gridVisible, true);
+    assert.equal(initial.gridPanelOpen, false);
+    assert.equal(initial.gridAlignMode, false);
+
+    const seen = [];
+    h.viewport.subscribe((view) => seen.push(view));
+
+    h.viewport.setGridVisible(false);
+    h.viewport.setGridPanelOpen(true);
+    h.viewport.setGridAlignMode(true);
+    assert.equal(h.clock.pending(), 1, "three flag changes share one frame");
+    h.clock.step();
+
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].gridVisible, false);
+    assert.equal(seen[0].gridPanelOpen, true);
+    assert.equal(seen[0].gridAlignMode, true);
+    assert.equal(isGridCalibrating(seen[0]), true);
+
+    // Unchanged values and a stage-reported drag both steer the same gate.
+    h.viewport.setGridVisible(false);
+    assert.equal(h.clock.pending(), 0, "a no-op setter schedules no frame");
+    assert.equal(isGridCalibrating({ gridPanelOpen: false, gridAlignMode: false }, true), true);
 });

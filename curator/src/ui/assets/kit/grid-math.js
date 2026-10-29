@@ -58,3 +58,14 @@ export function formatLatticeStatus(lattice) {
     }
     return `${lattice.cols} × ${lattice.rows} cells (< 16×16 cells)`;
 }
+
+/**
+ * The Grid Configuration panel's two lattice readouts, split across the cells and
+ * sections spans both panels render.
+ */
+export function formatLatticePanel(lattice) {
+    return {
+        cells: `${lattice.cols} × ${lattice.rows} cells`,
+        sections: lattice.isEligible ? `${lattice.kx} × ${lattice.ky} sections` : "< 16×16 cells",
+    };
+}

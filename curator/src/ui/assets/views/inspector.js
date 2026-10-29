@@ -15,7 +15,8 @@ import {
 import { applyLibraryFilters, getScrubPillRoleClass } from "./library.js";
 import { openLibraryFullscreen } from "./library/fullscreen.js";
 import { openDeleteCuratedModal } from "./library/bulk.js";
-import { showToast, invalidateDatasetReadiness } from "../app.js";
+import { showToast } from "../app.js";
+import { invalidateDatasetReadiness } from "./readiness.js";
 
 // ==========================================================================
 // Slide-Over Inspector Drawer & Refinement Engine (Issue #135 & Issue #136)

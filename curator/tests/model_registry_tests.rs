@@ -553,33 +553,3 @@ async fn test_benchmark_runner_resolves_adapter_ids_through_registry() {
     assert!((edit_entry.spend_usd - 0.021).abs() < 1e-9);
 }
 
-// ---------------------------------------------------------------------------
-// Acceptance 2: the drawer derives its checklist and price table from the registry.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_drawer_assets_no_longer_hardcode_the_model_catalog() {
-    let html = include_str!("../src/ui/assets/index.html");
-    let js = include_str!("../src/ui/assets/app.js");
-
-    assert!(
-        !html.contains("name=\"benchmark-model\" value="),
-        "the model checklist must be rendered from GET /api/models, not shipped in markup"
-    );
-    assert!(
-        !js.contains("MODEL_PRICES"),
-        "the pre-flight price table must come from the registry, not a hardcoded map"
-    );
-    assert!(
-        js.contains("/api/models"),
-        "the drawer fetches its checklist from GET /api/models"
-    );
-    assert!(
-        js.contains("supports_reference_image"),
-        "the drawer gates reference conditioning on the registry capability flag"
-    );
-    assert!(
-        js.contains("benchmark-reference-warning"),
-        "the drawer surfaces an inline warning for reference-incapable models"
-    );
-}

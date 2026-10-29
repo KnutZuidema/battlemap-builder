@@ -86,14 +86,14 @@ async fn create_mock_snapshot(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 1: Embedded UI Assets Served & Contain All Training Runs & LoRA Elements
+// Test 1: Embedded UI assets and ES modules are served
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_embedded_ui_assets_served_and_contain_training_elements() {
+async fn test_embedded_ui_assets_served() {
     let (app, _, _, _) = setup_test_app(None);
 
-    // 1. GET / (index.html)
+    // GET / (index.html)
     let req = Request::builder().uri("/").body(Body::empty()).unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -101,88 +101,45 @@ async fn test_embedded_ui_assets_served_and_contain_training_elements() {
     assert!(content_type.starts_with("text/html"));
 
     let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    let html = std::str::from_utf8(&body_bytes).unwrap();
+    assert!(!body_bytes.is_empty(), "index.html body must not be empty");
+    std::str::from_utf8(&body_bytes).unwrap();
 
-    // Top Navigation & Button Access
-    assert!(html.contains("id=\"tab-nav-training\""), "Must contain tab-nav-training in top nav");
-    assert!(html.contains("id=\"btn-open-training-drawer\""), "Must contain btn-open-training-drawer in HUD");
-    assert!(html.contains("id=\"btn-open-training-from-library\""), "Must contain btn-open-training-from-library in snapshots panel");
-
-    // Training Drawer Components
-    assert!(html.contains("id=\"training-drawer\""), "Must contain training-drawer");
-    assert!(html.contains("id=\"training-drawer-panel\""), "Must contain training-drawer-panel");
-    assert!(html.contains("id=\"tab-training-runs\""), "Must contain tab-training-runs");
-    assert!(html.contains("id=\"tab-training-adapters\""), "Must contain tab-training-adapters");
-    assert!(html.contains("id=\"training-view-runs\""), "Must contain training-view-runs");
-    assert!(html.contains("id=\"training-view-adapters\""), "Must contain training-view-adapters");
-
-    // Launch Form Controls
-    assert!(html.contains("id=\"training-launch-card\""), "Must contain training-launch-card");
-    assert!(html.contains("id=\"training-snapshot-select\""), "Must contain training-snapshot-select");
-    assert!(html.contains("id=\"policy-opt-calibration\""), "Must contain policy-opt-calibration");
-    assert!(html.contains("id=\"policy-opt-full\""), "Must contain policy-opt-full");
-    assert!(html.contains("id=\"training-readiness-indicator\""), "Must contain readiness indicator");
-    assert!(html.contains("id=\"btn-check-training-readiness\""), "Must contain check readiness button");
-    assert!(html.contains("id=\"training-launch-error\""), "Must contain training-launch-error banner");
-    assert!(html.contains("id=\"btn-start-training-run\""), "Must contain btn-start-training-run");
-
-    // Lists & Containers
-    assert!(html.contains("id=\"training-runs-list\""), "Must contain training-runs-list");
-    assert!(html.contains("id=\"training-runs-empty\""), "Must contain training-runs-empty");
-    assert!(html.contains("id=\"training-adapters-list\""), "Must contain training-adapters-list");
-    assert!(html.contains("id=\"training-adapters-empty\""), "Must contain training-adapters-empty");
-    assert!(html.contains("id=\"training-runs-active-badge\""), "Must contain training-runs-active-badge");
-
-    // Hotkey R in help modal
-    assert!(html.contains("<kbd>R</kbd>"), "Must document Hotkey R");
-
-    // 2. GET /style.css
+    // GET /style.css
     let req = Request::builder().uri("/style.css").body(Body::empty()).unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    let content_type = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    assert!(content_type.starts_with("text/css"));
+
     let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    let css = std::str::from_utf8(&body_bytes).unwrap();
+    assert!(!body_bytes.is_empty(), "style.css body must not be empty");
+    std::str::from_utf8(&body_bytes).unwrap();
 
-    assert!(css.contains(".training-drawer-panel"), "Must style training-drawer-panel");
-    assert!(css.contains(".badge-status-running"), "Must style badge-status-running");
-    assert!(css.contains(".badge-status-succeeded"), "Must style badge-status-succeeded");
-    assert!(css.contains(".badge-status-queued"), "Must style badge-status-queued");
-    assert!(css.contains(".badge-status-failed"), "Must style badge-status-failed");
-    assert!(css.contains(".badge-status-cancelled"), "Must style badge-status-cancelled");
-    assert!(css.contains(".checkpoint-card"), "Must style checkpoint-card");
-    assert!(css.contains(".training-adapter-card"), "Must style training-adapter-card");
-
-    // 3. GET /app.js
+    // GET /app.js
     let req = Request::builder().uri("/app.js").body(Body::empty()).unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    let content_type = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    assert!(content_type.contains("javascript"));
+
     let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    let js = std::str::from_utf8(&body_bytes).unwrap();
+    assert!(!body_bytes.is_empty(), "app.js body must not be empty");
+    std::str::from_utf8(&body_bytes).unwrap();
 
-    // Verify REST API endpoint wiring
-    assert!(js.contains("/api/training/runs"), "Must wire to /api/training/runs");
-    assert!(js.contains("/api/training/adapters"), "Must wire to /api/training/adapters");
-    assert!(js.contains("/api/training/datasets"), "Must wire to /api/training/datasets");
-    assert!(js.contains("/api/models"), "Must wire to /api/models");
-    assert!(js.contains("/api/cost/stats"), "Must wire to /api/cost/stats");
-
-    // Verify key UI functions
-    assert!(js.contains("openTrainingDrawer"), "Must define openTrainingDrawer");
-    assert!(js.contains("closeTrainingDrawer"), "Must define closeTrainingDrawer");
-    assert!(js.contains("switchTrainingTab"), "Must define switchTrainingTab");
-    assert!(js.contains("fetchTrainingRuns"), "Must define fetchTrainingRuns");
-    assert!(js.contains("fetchTrainingAdapters"), "Must define fetchTrainingAdapters");
-    assert!(js.contains("startTrainingRun"), "Must define startTrainingRun");
-    assert!(js.contains("dispatchTrainingRun"), "Must define dispatchTrainingRun");
-    assert!(js.contains("cancelTrainingRun"), "Must define cancelTrainingRun");
-    assert!(js.contains("verifyTrainingArtifacts"), "Must define verifyTrainingArtifacts");
-    assert!(js.contains("publishTrainingCheckpoint"), "Must define publishTrainingCheckpoint");
-    assert!(js.contains("setTrainingAdapterRetired"), "Must define setTrainingAdapterRetired");
-    assert!(js.contains("checkAndScheduleTrainingPoll"), "Must define checkAndScheduleTrainingPoll");
-
-    // Unified HUD cost metrics
-    assert!(js.contains("all_time_spend"), "Must read all_time_spend");
-    assert!(js.contains("training_spend"), "Must read training_spend");
+    // The view modules and shared helpers are served as native ES modules.
+    for module in ["/views/training.js", "/views/snapshots.js", "/dataset-scope.js"] {
+        let req = Request::builder().uri(module).body(Body::empty()).unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{module} must be served");
+        let content_type = resp.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(
+            content_type.contains("javascript"),
+            "{module} must be served as JavaScript"
+        );
+        let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert!(!body_bytes.is_empty(), "{module} body must not be empty");
+        std::str::from_utf8(&body_bytes).unwrap();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

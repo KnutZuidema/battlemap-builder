@@ -38,15 +38,14 @@ import {
     toggleLibraryInspector,
     saveLibraryInspectorChanges,
 } from "./inspector.js";
+import { showToast } from "../app.js";
+import { datasetScopeTheme, datasetScopeQuery } from "../dataset-scope.js";
+import { syncReadinessToScope } from "./readiness.js";
 import {
-    showToast,
     fetchDatasetSnapshots,
-    syncReadinessToScope,
     freezeDatasetSnapshot,
     toggleSnapshotsShelf,
-    datasetScopeTheme,
-    datasetScopeQuery,
-} from "../app.js";
+} from "./snapshots.js";
 
 // ==========================================================================
 // Dataset Library View & LoRA Export (Issue #31)

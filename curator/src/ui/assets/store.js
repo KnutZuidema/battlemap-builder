@@ -102,8 +102,6 @@ export const state = {
     libraryFocusedIndex: -1,
     librarySelectedIds: new Set(),
     libraryFilteredMaps: [],
-    // How many filtered maps the grid has rendered; the sentinel appends the next batch.
-    libraryRenderLimit: 0,
     curatedMaps: [],
     isExporting: false,
     isBulkRefining: false,

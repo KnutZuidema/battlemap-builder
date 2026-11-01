@@ -17,6 +17,8 @@ import {
     LIBRARY_SEARCH_DEBOUNCE_MS,
     applyLibraryFilters,
     appendLibraryBatch,
+    clearLibraryAuditFilter,
+    fetchLibraryMaps,
     renderLibraryThrough,
     setLibraryFocus,
     setupLibraryControls,
@@ -162,7 +164,27 @@ function makeMaps(count) {
     }));
 }
 
+let intersectionObservers = [];
+
+class FakeIntersectionObserver {
+    constructor(callback, options) {
+        this.callback = callback;
+        this.options = options;
+        intersectionObservers.push(this);
+    }
+
+    observe(node) {
+        this.node = node;
+    }
+
+    disconnect() {
+        this.disconnected = true;
+    }
+}
+
 function installDom() {
+    globalThis.IntersectionObserver = FakeIntersectionObserver;
+    intersectionObservers = [];
     globalThis.document = {
         activeElement: { tagName: "BODY" },
         getElementById: () => null,
@@ -192,7 +214,7 @@ function resetState(maps) {
     state.libraryFocusedIndex = -1;
     state.librarySelectedIds = new Set();
     state.libraryFilteredMaps = [];
-    state.libraryRenderLimit = 0;
+    state.libraryAuditFilter = null;
 }
 
 function mount(maps) {
@@ -214,7 +236,6 @@ test("the first library render is bounded to one batch", () => {
     applyLibraryFilters();
 
     assert.equal(cards().length, LIBRARY_RENDER_BATCH, "only the first batch is built");
-    assert.equal(state.libraryRenderLimit, LIBRARY_RENDER_BATCH);
     assert.ok(sentinel(), "a sentinel marks the end of the rendered batch");
     assert.equal(
         cards()[0].dataset.id,
@@ -238,40 +259,16 @@ test("appending the next batch extends the grid and drops the sentinel at the en
 });
 
 test("the sentinel observer appends a batch when it enters the viewport", () => {
-    const observers = [];
-    class FakeIntersectionObserver {
-        constructor(callback, options) {
-            this.callback = callback;
-            this.options = options;
-            observers.push(this);
-        }
+    mount(makeMaps(80));
+    applyLibraryFilters();
+    assert.equal(cards().length, LIBRARY_RENDER_BATCH);
 
-        observe(node) {
-            this.node = node;
-        }
+    const current = intersectionObservers[intersectionObservers.length - 1];
+    assert.equal(current.node, sentinel());
+    current.callback([{ isIntersecting: true }]);
 
-        disconnect() {
-            this.disconnected = true;
-        }
-    }
-
-    const previous = globalThis.IntersectionObserver;
-    globalThis.IntersectionObserver = FakeIntersectionObserver;
-    try {
-        mount(makeMaps(80));
-        applyLibraryFilters();
-        assert.equal(cards().length, LIBRARY_RENDER_BATCH);
-
-        const current = observers[observers.length - 1];
-        assert.equal(current.node, sentinel());
-        current.callback([{ isIntersecting: true }]);
-
-        assert.equal(cards().length, 80);
-        assert.equal(sentinel(), null);
-    } finally {
-        if (previous === undefined) delete globalThis.IntersectionObserver;
-        else globalThis.IntersectionObserver = previous;
-    }
+    assert.equal(cards().length, 80);
+    assert.equal(sentinel(), null);
 });
 
 test("a search, tag or sort change resets the rendered batch", () => {
@@ -294,6 +291,26 @@ test("a search, tag or sort change resets the rendered batch", () => {
     state.librarySort = "id-asc";
     applyLibraryFilters();
     assert.equal(cards().length, LIBRARY_RENDER_BATCH, "a sort change starts from the first batch");
+});
+
+test("a readiness audit filter change resets the rendered batch", () => {
+    mount(makeMaps(120));
+    applyLibraryFilters();
+    appendLibraryBatch();
+    assert.equal(cards().length, 80);
+
+    state.libraryAuditFilter = {
+        code: "physical_description_missing",
+        ids: new Set(state.curatedMaps.map((map) => map.id)),
+    };
+    applyLibraryFilters();
+    assert.equal(cards().length, LIBRARY_RENDER_BATCH, "showing the audit filter starts from the first batch");
+
+    appendLibraryBatch();
+    assert.equal(cards().length, 80);
+    clearLibraryAuditFilter();
+    assert.equal(state.libraryAuditFilter, null);
+    assert.equal(cards().length, LIBRARY_RENDER_BATCH, "clearing the audit filter starts from the first batch");
 });
 
 test("targeting an index past the batch renders through it before acting", () => {
@@ -345,4 +362,37 @@ test("the search input is debounced, applies the final query, and never fires af
     assert.equal(state.librarySearchQuery, "battlemap 2", "the final query is not swallowed");
     t.mock.timers.tick(LIBRARY_SEARCH_DEBOUNCE_MS * 2);
     assert.equal(cards()[0], rebuilt, "no render fires after the library view closed");
+});
+
+test("a refresh preserves a focus beyond the first batch", async () => {
+    mount(makeMaps(120));
+    applyLibraryFilters();
+    setLibraryFocus(85, false);
+    assert.equal(cards().length, 86);
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (path) => {
+        const url = String(path);
+        let body = "[]";
+        if (url === "/api/curated") {
+            body = JSON.stringify(state.curatedMaps);
+        } else if (url.includes("/freeze/status")) {
+            body = JSON.stringify({ in_progress: false });
+        }
+        return { ok: true, status: 200, statusText: "OK", text: async () => body };
+    };
+
+    try {
+        await fetchLibraryMaps();
+        // Let the un-awaited snapshots shelf requests settle under the stub as well.
+        await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+
+    assert.equal(state.libraryFocusedIndex, 85);
+    assert.equal(cards().length, 86, "the refresh renders through the focused target again");
+    const focused = cards().filter((card) => card.classList.contains("focused"));
+    assert.equal(focused.length, 1, "exactly the preserved target is focused");
+    assert.equal(focused[0].dataset.id, state.libraryFilteredMaps[85].id);
 });

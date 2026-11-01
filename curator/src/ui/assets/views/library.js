@@ -106,8 +106,9 @@ export function switchView(view) {
     if (view !== "library") {
         // A debounced keystroke must never rebuild a grid the curator has already left, but the
         // query itself is still committed so returning to the library filters by what was typed.
+        // The grid keeps its sentinel: a failed refresh on re-entry must not strand the cards
+        // past the current batch with no way to append them.
         settleLibrarySearch();
-        teardownLibrarySentinel();
     }
     state.currentView = view;
     if (view === "triage") {
@@ -139,6 +140,11 @@ export async function fetchLibraryMaps() {
         renderedMapObjects.clear();
 
         applyLibraryFilters();
+        // A focus set while the listing was in flight (readiness remediation switches to the
+        // library and focuses its target before this resolves) survives the re-render.
+        if (state.currentView === "library" && state.libraryFocusedIndex >= 0) {
+            renderLibraryThrough(state.libraryFocusedIndex);
+        }
         fetchDatasetSnapshots();
     } catch (_) {
         // The failure policy named the operation; the grid keeps the maps it already has.
@@ -202,9 +208,6 @@ export function applyLibraryFilters() {
 
     sortCuratedMaps(filtered, state.librarySort);
     state.libraryFilteredMaps = filtered;
-
-    // Any search, tag, facet, sort or density change starts the grid over at its first batch.
-    state.libraryRenderLimit = LIBRARY_RENDER_BATCH;
 
     // Keep focused index within valid bounds
     if (state.libraryFocusedIndex >= filtered.length) {
@@ -272,13 +275,8 @@ function sortCuratedMaps(maps, sortKey) {
     }
 }
 
-function setLibraryDensity(density) {
-    if (!["compact", "comfortable", "large"].includes(density)) return;
-    state.libraryDensity = density;
-    try {
-        localStorage.setItem("curator_library_density", density);
-    } catch (_) {}
-
+/** Apply the density classes and button state; boot uses this without a state change. */
+function paintLibraryDensity(density) {
     if (dom.libraryGrid) {
         dom.libraryGrid.classList.remove("density-compact", "density-comfortable", "density-large");
         dom.libraryGrid.classList.add(`density-${density}`);
@@ -288,9 +286,19 @@ function setLibraryDensity(density) {
     densityButtons.forEach((btn) => {
         btn.classList.toggle("active", btn.dataset.density === density);
     });
+}
+
+function setLibraryDensity(density) {
+    if (!["compact", "comfortable", "large"].includes(density)) return;
+    if (state.libraryDensity === density) return;
+    state.libraryDensity = density;
+    try {
+        localStorage.setItem("curator_library_density", density);
+    } catch (_) {}
+
+    paintLibraryDensity(density);
 
     // Density changes the column count, so the bounded batch restarts from the top as well.
-    state.libraryRenderLimit = LIBRARY_RENDER_BATCH;
     if (state.libraryFilteredMaps && state.libraryFilteredMaps.length > 0) {
         applyLibraryFilters();
     }
@@ -650,7 +658,6 @@ export function handleLibraryKeydown(e) {
     if ((e.key === "f" || e.key === "F") && !e.shiftKey) {
         if (state.libraryFilteredMaps && state.libraryFilteredMaps.length > 0) {
             const targetIdx = state.libraryFocusedIndex >= 0 ? state.libraryFocusedIndex : 0;
-            renderLibraryThrough(targetIdx);
             openLibraryFullscreen(targetIdx);
         }
         e.preventDefault();
@@ -791,7 +798,7 @@ function renderLibraryAuditChip() {
     }
 }
 
-function renderLibraryGrid(maps) {
+function renderLibraryGrid(maps, requested = LIBRARY_RENDER_BATCH) {
     if (!dom.libraryGrid || !dom.libraryEmpty) return;
     teardownLibrarySentinel();
     dom.libraryGrid.innerHTML = "";
@@ -815,8 +822,7 @@ function renderLibraryGrid(maps) {
 
     if (!showGrid) return;
 
-    const limit = Math.min(maps.length, Math.max(LIBRARY_RENDER_BATCH, state.libraryRenderLimit || 0));
-    state.libraryRenderLimit = limit;
+    const limit = Math.min(maps.length, Math.max(LIBRARY_RENDER_BATCH, requested));
     appendLibraryCards(maps, 0, limit);
     placeLibrarySentinel();
 }
@@ -841,25 +847,17 @@ function appendLibraryCards(maps, start, end) {
  * Append the next batch after the sentinel scrolls into range. Exported so a re-render or a
  * targeted focus can extend the batch without waiting for the observer.
  */
-export function appendLibraryBatch(count = LIBRARY_RENDER_BATCH) {
+export function appendLibraryBatch() {
     const maps = state.libraryFilteredMaps;
     if (!dom.libraryGrid || !maps || maps.length === 0) return 0;
     if (state.currentView !== "library") return 0;
 
-    if (renderedLibraryCards === 0) {
-        // The observer can deliver before the first paint; paint the bounded first batch.
-        state.libraryRenderLimit = Math.max(LIBRARY_RENDER_BATCH, state.libraryRenderLimit || 0);
-        renderLibraryGrid(maps);
-        return Math.min(maps.length, state.libraryRenderLimit);
-    }
     if (renderedLibraryCards >= maps.length) {
         teardownLibrarySentinel();
         return 0;
     }
 
-    const step = Math.max(1, Number(count) || LIBRARY_RENDER_BATCH);
-    const end = Math.min(maps.length, renderedLibraryCards + step);
-    state.libraryRenderLimit = Math.max(state.libraryRenderLimit || 0, end);
+    const end = Math.min(maps.length, renderedLibraryCards + LIBRARY_RENDER_BATCH);
     const added = appendLibraryCards(maps, renderedLibraryCards, end);
     placeLibrarySentinel();
     return added;
@@ -879,12 +877,10 @@ export function renderLibraryThrough(index) {
     if (target <= renderedLibraryCards) return;
 
     if (renderedLibraryCards === 0) {
-        state.libraryRenderLimit = Math.max(LIBRARY_RENDER_BATCH, target);
-        renderLibraryGrid(maps);
+        renderLibraryGrid(maps, target);
         return;
     }
 
-    state.libraryRenderLimit = Math.max(state.libraryRenderLimit || 0, target);
     appendLibraryCards(maps, renderedLibraryCards, target);
     placeLibrarySentinel();
 }
@@ -905,12 +901,8 @@ function placeLibrarySentinel() {
     dom.libraryGrid.appendChild(sentinel);
     librarySentinel = sentinel;
 
-    if (typeof IntersectionObserver !== "function") return;
-
     const generation = librarySentinelGeneration;
-    const root = typeof dom.libraryGrid.closest === "function"
-        ? dom.libraryGrid.closest(".library-scroll-container")
-        : null;
+    const root = dom.libraryGrid.closest(".library-scroll-container");
     librarySentinelObserver = new IntersectionObserver((entries) => {
         // A re-render discards this observer; never append a batch for a grid that is gone.
         if (generation !== librarySentinelGeneration) return;
@@ -928,11 +920,7 @@ function teardownLibrarySentinel() {
         librarySentinelObserver = null;
     }
     if (librarySentinel) {
-        if (typeof librarySentinel.remove === "function") {
-            librarySentinel.remove();
-        } else if (librarySentinel.parentElement) {
-            librarySentinel.parentElement.removeChild(librarySentinel);
-        }
+        librarySentinel.remove();
         librarySentinel = null;
     }
 }
@@ -1353,7 +1341,7 @@ export function setupLibraryControls() {
         });
     });
 
-    setLibraryDensity(state.libraryDensity);
+    paintLibraryDensity(state.libraryDensity);
     if (dom.librarySortSelect) {
         dom.librarySortSelect.value = state.librarySort;
     }

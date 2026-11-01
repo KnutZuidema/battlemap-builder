@@ -5,7 +5,7 @@
 
 import { dom } from "../dom.js";
 import { state } from "../store.js";
-import { escapeHtml } from "../kit/dom.js";
+import { h } from "../kit/html.js";
 import { formatBytes } from "../kit/format.js";
 import { showToast } from "../shell/status.js";
 import { datasetScopeTheme } from "../dataset-scope.js";
@@ -80,70 +80,171 @@ export async function fetchDatasetSnapshots() {
     }
 }
 
-function renderDatasetSnapshots(snapshots) {
-    if (!dom.snapshotsList || !dom.snapshotsCountBadge) return;
-    const total = (snapshots && snapshots.length) || 0;
-    dom.snapshotsCountBadge.textContent = `${total} Snapshot${total === 1 ? "" : "s"}`;
+/**
+ * The shelf render target's own nodes. Created once per root, then reused: the list and
+ * the empty notice never move, and a card is replaced only when its snapshot id leaves the
+ * list. Everything below the root belongs to this module.
+ */
+const shelf = {
+    root: null,
+    list: null,
+    empty: null,
+    cards: new Map(),
+};
 
-    if (!snapshots || snapshots.length === 0) {
-        dom.snapshotsList.innerHTML = "";
-        dom.snapshotsEmpty?.classList.remove("hidden");
-        return;
+function attachShelf(root) {
+    if (shelf.root !== root) {
+        shelf.root = root;
+        shelf.list = null;
+        shelf.empty = null;
+        shelf.cards = new Map();
+        while (root.firstChild) root.removeChild(root.firstChild);
+    }
+    if (shelf.list) return;
+
+    shelf.list = h("div", { class: "snapshots-list" });
+    shelf.empty = h(
+        "div",
+        { class: "snapshots-empty hidden" },
+        h(
+            "p",
+            null,
+            "No frozen snapshots for this theme scope yet. Click ",
+            h("strong", null, "Freeze Snapshot"),
+            " to create one.",
+        ),
+    );
+    root.appendChild(shelf.list);
+    root.appendChild(shelf.empty);
+}
+
+function createSnapshotCard(snapshot) {
+    const id = snapshot.id;
+    const nodes = {
+        id: h("span", { class: "snapshot-id mono", title: id }, id),
+        theme: h("span", { class: "snapshot-theme-badge" }),
+        sha: h("span", { class: "snapshot-sha256 mono" }),
+        counts: h("span", { class: "snapshot-counts mono" }),
+        size: h("span", { class: "snapshot-size mono" }),
+        time: h("span", { class: "snapshot-time mono" }),
+        download: h(
+            "a",
+            {
+                class: "btn btn-secondary btn-xs",
+                href: `/api/training/datasets/${encodeURIComponent(id)}/archive`,
+                download: `${id}.zip`,
+                title: "Download ZIP Archive",
+            },
+            "Download ZIP",
+        ),
+    };
+
+    nodes.train = h(
+        "button",
+        {
+            type: "button",
+            class: "btn btn-primary btn-xs btn-train-snapshot",
+            dataset: { id },
+            title: "Launch Training Run on this snapshot",
+            onclick: () => openTrainingDrawer({ snapshotId: id }),
+        },
+        "Train LoRA",
+    );
+    nodes.delete = h(
+        "button",
+        {
+            type: "button",
+            class: "btn btn-danger btn-xs btn-delete-snapshot",
+            dataset: { id },
+            title: "Delete Snapshot",
+            onclick: () => deleteDatasetSnapshot(id),
+        },
+        "Delete",
+    );
+
+    const card = h(
+        "div",
+        { class: "snapshot-card", dataset: { id } },
+        h("div", { class: "snapshot-card-head" }, nodes.id, nodes.theme),
+        h("div", { class: "snapshot-meta-row" }, nodes.sha, nodes.counts, nodes.size),
+        h("div", { class: "snapshot-meta-row" }, nodes.time),
+        h("div", { class: "snapshot-card-actions" }, nodes.train, nodes.download, nodes.delete),
+    );
+
+    return { id, card, nodes };
+}
+
+function setText(node, text) {
+    if (node.textContent !== text) node.textContent = text;
+}
+
+function setAttribute(node, name, value) {
+    if (node.getAttribute(name) !== value) node.setAttribute(name, value);
+}
+
+/** Write the card's current data and nothing else: unchanged nodes are left untouched. */
+function updateSnapshotCard(record, snapshot) {
+    const id = snapshot.id;
+    const themeLabel = snapshot.theme ? snapshot.theme : "All Themes";
+    const shaHead = snapshot.sha256 ? snapshot.sha256.substring(0, 12) : "";
+    const shaFull = snapshot.sha256 || "";
+    const counts = `${snapshot.samples_count} sample${snapshot.samples_count === 1 ? "" : "s"} (${snapshot.maps_count} map${snapshot.maps_count === 1 ? "" : "s"})`;
+    const sizeStr = formatBytes(snapshot.size_bytes);
+    const dateStr = snapshot.created_at ? new Date(snapshot.created_at).toLocaleString() : "";
+
+    setText(record.nodes.id, id);
+    setAttribute(record.nodes.id, "title", id);
+    setText(record.nodes.theme, themeLabel);
+    setText(record.nodes.sha, `SHA: ${shaHead}…`);
+    setAttribute(record.nodes.sha, "title", `SHA-256: ${shaFull}`);
+    setText(record.nodes.counts, counts);
+    setText(record.nodes.size, sizeStr);
+    setText(record.nodes.time, dateStr);
+    setAttribute(record.nodes.download, "href", `/api/training/datasets/${encodeURIComponent(id)}/archive`);
+    setAttribute(record.nodes.download, "download", `${id}.zip`);
+}
+
+/**
+ * Render the snapshot shelf from its state.
+ *
+ * Keyed by snapshot id and in place: a re-render keeps every surviving card's nodes, so a
+ * scroll position, a focused button or an in-flight interaction inside the shelf survives
+ * the freeze-progress refresh that triggered it.
+ */
+export function renderDatasetSnapshots(snapshots) {
+    const list = Array.isArray(snapshots) ? snapshots : [];
+    const total = list.length;
+    if (dom.snapshotsCountBadge) {
+        dom.snapshotsCountBadge.textContent = `${total} Snapshot${total === 1 ? "" : "s"}`;
     }
 
-    dom.snapshotsEmpty?.classList.add("hidden");
-    dom.snapshotsList.innerHTML = snapshots.map(s => {
-        const id = escapeHtml(s.id);
-        const themeLabel = s.theme ? escapeHtml(s.theme) : "All Themes";
-        const shaHead = s.sha256 ? escapeHtml(s.sha256.substring(0, 12)) : "";
-        const shaFull = escapeHtml(s.sha256 || "");
-        const counts = `${s.samples_count} sample${s.samples_count === 1 ? "" : "s"} (${s.maps_count} map${s.maps_count === 1 ? "" : "s"})`;
-        const sizeStr = formatBytes(s.size_bytes);
-        const dateStr = s.created_at ? new Date(s.created_at).toLocaleString() : "";
-        const downloadUrl = `/api/training/datasets/${encodeURIComponent(s.id)}/archive`;
+    const root = dom.snapshotsShelf;
+    if (!root) return;
+    attachShelf(root);
 
-        return `
-            <div class="snapshot-card" data-id="${id}">
-                <div class="snapshot-card-head">
-                    <span class="snapshot-id mono" title="${id}">${id}</span>
-                    <span class="snapshot-theme-badge">${themeLabel}</span>
-                </div>
-                <div class="snapshot-meta-row">
-                    <span class="snapshot-sha256 mono" title="SHA-256: ${shaFull}">SHA: ${shaHead}…</span>
-                    <span class="snapshot-counts mono">${counts}</span>
-                    <span class="snapshot-size mono">${sizeStr}</span>
-                </div>
-                <div class="snapshot-meta-row">
-                    <span class="snapshot-time mono">${escapeHtml(dateStr)}</span>
-                </div>
-                <div class="snapshot-card-actions">
-                    <button type="button" class="btn btn-primary btn-xs btn-train-snapshot" data-id="${id}" title="Launch Training Run on this snapshot">
-                        Train LoRA
-                    </button>
-                    <a href="${downloadUrl}" download="${id}.zip" class="btn btn-secondary btn-xs" title="Download ZIP Archive">
-                        Download ZIP
-                    </a>
-                    <button type="button" class="btn btn-danger btn-xs btn-delete-snapshot" data-id="${id}" title="Delete Snapshot">
-                        Delete
-                    </button>
-                </div>
-            </div>
-        `;
-    }).join("");
+    const wanted = new Set(list.map((snapshot) => snapshot.id));
+    for (const [id, record] of shelf.cards) {
+        if (wanted.has(id)) continue;
+        record.card.remove();
+        shelf.cards.delete(id);
+    }
 
-    dom.snapshotsList.querySelectorAll(".btn-delete-snapshot").forEach(btn => {
-        btn.addEventListener("click", () => {
-            const id = btn.getAttribute("data-id");
-            if (id) deleteDatasetSnapshot(id);
-        });
-    });
-    dom.snapshotsList.querySelectorAll(".btn-train-snapshot").forEach(btn => {
-        btn.addEventListener("click", () => {
-            const id = btn.getAttribute("data-id");
-            if (id) openTrainingDrawer({ snapshotId: id });
-        });
-    });
-    populateTrainingSnapshotSelect(snapshots);
+    let index = 0;
+    for (const snapshot of list) {
+        let record = shelf.cards.get(snapshot.id);
+        if (!record) {
+            record = createSnapshotCard(snapshot);
+            shelf.cards.set(snapshot.id, record);
+        }
+        updateSnapshotCard(record, snapshot);
+
+        const current = shelf.list.childNodes[index] || null;
+        if (current !== record.card) shelf.list.insertBefore(record.card, current);
+        index += 1;
+    }
+
+    shelf.empty.classList.toggle("hidden", total > 0);
+    populateTrainingSnapshotSelect(list);
 }
 
 export function toggleSnapshotsShelf() {

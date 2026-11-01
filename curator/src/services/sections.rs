@@ -14,8 +14,8 @@ pub struct SectionDescriptionContext<'a> {
     /// Grid configuration used to derive the overlapping 16×16 section windows.
     pub grid: &'a GridConfig,
     /// Decoded Ground layer, holding the process-wide image-work permit. `None` when the bytes
-    /// could not be read or decoded. Owned rather than borrowed so the decode can be dropped once
-    /// the section crops exist, before the first vision round-trip.
+    /// could not be read or decoded. Owned so the decode lives exactly as long as the section
+    /// descriptions derived from it, and never longer.
     pub ground: Option<GroundImage>,
     /// Ground layer dimensions used to derive section origins.
     pub ground_dimensions: (u32, u32),
@@ -92,13 +92,11 @@ pub async fn describe_map_sections(
         return synthesize_map_sections(&section_origins, Some(map_description));
     }
 
-    // Crop every Map Section up front and release the decoded Ground layer before the first vision
-    // call: each crop is a PNG of one section, while the decode is hundreds of MiB and holds the
-    // process-wide image-work permit that must not stay taken across the vision round-trips.
-    let section_pngs = match ground {
-        Some(ground) => crop_sections(ground, *grid, &section_origins).await,
-        None => HashMap::new(),
-    };
+    // The decoded Ground layer stays alive (and keeps the image-work permit) for the whole loop:
+    // cropping one section at a time is cheap, while collecting every crop up front would hold a
+    // second copy of the map's pixels next to the decode. Other image pipelines wait for this
+    // refinement instead of stacking their own decode on top of it.
+    let ground_image = ground.as_ref().and_then(|decoded| decoded.image());
 
     // Section descriptions are best-effort: a failed vision call or an unavailable crop reuses the
     // map-level `Physical Description` (the section is a window onto the same encounter space).
@@ -109,9 +107,11 @@ pub async fn describe_map_sections(
 
     let mut section_descriptions = HashMap::with_capacity(section_origins.len());
     for &(col, row) in &section_origins {
-        let description = match section_pngs.get(&(col, row)) {
+        let section_png = ground_image.and_then(|image| crop_section_png(image, grid, col, row));
+
+        let description = match section_png {
             Some(bytes) => match description_service
-                .describe(bytes, Some("image/png"), tags, title)
+                .describe(&bytes, Some("image/png"), tags, title)
                 .await
             {
                 Ok(description) => description,
@@ -147,33 +147,4 @@ pub async fn describe_map_sections(
                 .unwrap_or_else(&fallback)
         },
     )
-}
-
-/// Crops every planned section on the blocking pool and drops the decoded Ground layer.
-///
-/// The closure owns the decode, so the image and the image-work permit are released when it
-/// returns; a panicked crop task is logged and yields no crops, which the caller already handles
-/// as an unavailable crop per section.
-async fn crop_sections(
-    mut ground: GroundImage,
-    grid: GridConfig,
-    origins: &[(u32, u32)],
-) -> HashMap<(u32, u32), Vec<u8>> {
-    let Some(image) = ground.take_image() else {
-        return HashMap::new();
-    };
-    let origins = origins.to_vec();
-    tokio::task::spawn_blocking(move || {
-        origins
-            .into_iter()
-            .filter_map(|(col, row)| {
-                crop_section_png(&image, &grid, col, row).map(|bytes| ((col, row), bytes))
-            })
-            .collect()
-    })
-    .await
-    .unwrap_or_else(|err| {
-        tracing::error!(error = %err, "Section crop task failed");
-        HashMap::new()
-    })
 }

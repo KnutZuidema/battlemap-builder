@@ -96,11 +96,6 @@ impl GroundImage {
     pub fn image(&self) -> Option<&DynamicImage> {
         self.image.as_ref()
     }
-
-    /// Moves the decoded pixels out, keeping the permit in `self` until it is dropped.
-    pub fn take_image(&mut self) -> Option<DynamicImage> {
-        self.image.take()
-    }
 }
 
 #[cfg(test)]

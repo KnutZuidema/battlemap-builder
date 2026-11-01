@@ -456,10 +456,11 @@ If harvesting fails with a 401/403, the Reddit credentials in `curator-secrets` 
   buffers exceed the container's `1Gi` limit, so the kernel kills the process; the probe failures
   are a consequence of the dead process, not their cause.
 - **Resolution**: `curator/src/services/image_work.rs` holds one process-wide permit that every
-  pipeline must take for as long as a full-resolution decode is alive, and `describe_map_sections`
-  crops every Map Section before the first vision round-trip so a refinement does not keep its
-  decode alive across the vision calls. Keep the `1Gi` limit and the single image-work permit in
-  sync: a new full-image pipeline must decode through `GroundImage::decode` or `image_work::run`.
+  pipeline must take for as long as a full-resolution decode is alive: a refinement keeps its
+  decode until the last Map Section is described, and the readiness audit, LoRA export, regrid
+  validation, benchmark reference and Thumbnail render wait for it instead of decoding on top.
+  Keep the `1Gi` limit and the single image-work permit in sync: a new full-image pipeline must
+  decode through `GroundImage::decode` or `image_work::run`.
 - **Probes**: `deployment.yaml` probes `/api/healthz`, which answers without touching the catalog,
   blobs or a model. `/api/status` stays the UI's metrics endpoint and is deliberately not a probe
   target — it lists the catalog and would turn a slow database into a restart.

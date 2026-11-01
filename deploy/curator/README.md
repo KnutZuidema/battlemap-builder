@@ -450,16 +450,17 @@ If harvesting fails with a 401/403, the Reddit credentials in `curator-secrets` 
 - **Symptom**: The pod restarts while the library view bulk-refines maps; events show liveness and
   readiness probe failures immediately before the restart, and the container's `lastState` is
   `terminated` with `exitCode: 137` and `reason: OOMKilled`.
-- **Cause**: A decoded multi-megapixel Ground layer (a `9000×9400` map is roughly 250 MiB) held by
-  one pipeline — a bulk refinement, the readiness audit, a Thumbnail render or a LoRA export —
-  while a second pipeline decoded another. Two full-resolution decodes plus their PNG/base64
-  buffers exceed the container's `1Gi` limit, so the kernel kills the process; the probe failures
-  are a consequence of the dead process, not their cause.
+- **Cause**: A decoded multi-megapixel Ground layer (a `9000×9400` map is roughly 250 MiB; the
+  largest curated map peaks near 770 MiB while decoding) held by one pipeline — a bulk
+  refinement, the readiness audit, a Thumbnail render or a LoRA export — while a second pipeline
+  decoded another. Two full-resolution decodes plus their PNG/base64 buffers exceed the
+  container's memory limit, so the kernel kills the process; the probe failures are a consequence
+  of the dead process, not their cause.
 - **Resolution**: `curator/src/services/image_work.rs` holds one process-wide permit that every
   pipeline must take for as long as a full-resolution decode is alive: a refinement keeps its
   decode until the last Map Section is described, and the readiness audit, LoRA export, regrid
   validation, benchmark reference and Thumbnail render wait for it instead of decoding on top.
-  Keep the `1Gi` limit and the single image-work permit in sync: a new full-image pipeline must
+  Keep the `1536Mi` limit and the single image-work permit in sync: a new full-image pipeline must
   decode through `GroundImage::decode` or `image_work::run`.
 - **Probes**: `deployment.yaml` probes `/api/healthz`, which answers without touching the catalog,
   blobs or a model. `/api/status` stays the UI's metrics endpoint and is deliberately not a probe

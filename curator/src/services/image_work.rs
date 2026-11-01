@@ -1,11 +1,12 @@
 //! Process-wide gate for pipelines that hold a full-resolution Ground-layer decode.
 //!
 //! A `9000×9400` Ground layer is roughly 250 MiB once [`image::DynamicImage`] has decoded it, and
-//! the curator pod runs with a 1 GiB memory limit. Bulk AI refinement keeps a decode alive while
-//! the vision model describes every Map Section, the readiness audit decodes every stored Ground
-//! layer in turn, and a Thumbnail render decodes its source before resampling. Any two of those
-//! overlapping exhaust the cgroup: the kernel OOM-kills the process, and Kubernetes records the
-//! probe failures that follow as the restart reason.
+//! the largest curated map (`13312×10240`) peaks near 770 MiB while decoding. The curator pod runs
+//! with a 1536 MiB memory limit. Bulk AI refinement keeps a decode alive while the vision model
+//! describes every Map Section, the readiness audit decodes every stored Ground layer in turn, and
+//! a Thumbnail render decodes its source before resampling. Two of those overlapping exhaust the
+//! cgroup: the kernel OOM-kills the process, and Kubernetes records the probe failures that follow
+//! as the restart reason.
 //!
 //! Every pipeline that holds a decoded Ground layer therefore takes this single process-wide
 //! permit for as long as the decode is alive, and decodes on the blocking pool so the HTTP

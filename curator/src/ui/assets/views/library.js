@@ -76,6 +76,9 @@ export async function fetchLibraryMaps() {
     try {
         const maps = await fetchCuratedMaps();
         state.curatedMaps = maps;
+        // A listing reload is not an edit: forget the previous object identities so the next
+        // render does not treat every map as freshly edited and bust its Thumbnail URL.
+        renderedMapObjects.clear();
 
         applyLibraryFilters();
         fetchDatasetSnapshots();
@@ -766,6 +769,24 @@ function showThumbnailUnavailable(card, thumbImg) {
     thumbImg.insertAdjacentElement("afterend", unavailable);
 }
 
+/**
+ * Per-edit cache-buster for card Thumbnails.
+ *
+ * Every curated-bundle write invalidates that map's Thumbnails on the server, but the browser
+ * still holds the previous JPEG under the plain URL for up to the one-hour cache lifetime. When
+ * the same map is rendered again with a different object (the edit paths replace
+ * `state.curatedMaps[idx]` before re-rendering), bump only that map's `?v=` so its card fetches
+ * the new bytes. `renderedMapObjects` is cleared on a listing reload, which is not an edit.
+ */
+const thumbnailVersions = new Map();
+const renderedMapObjects = new Map();
+
+function curatedThumbnailUrl(id) {
+    const base = `/api/thumb/curated/${encodeURIComponent(id)}`;
+    const version = thumbnailVersions.get(id);
+    return version ? `${base}?v=${version}` : base;
+}
+
 function renderCuratedCard(map, index) {
     const card = document.createElement("div");
     const isSelected = state.librarySelectedIds.has(map.id);
@@ -776,9 +797,14 @@ function renderCuratedCard(map, index) {
     const primaryTheme = tags[0] || "dungeon";
     card.dataset.theme = primaryTheme;
 
-    // Cards only ever load the derived Thumbnail; the full-resolution Layer stays behind
-    // /api/image/curated/... for the scrubber, fullscreen inspection and the inspector.
-    const thumbUrl = `/api/thumb/curated/${encodeURIComponent(map.id)}`;
+    // Cards only ever load derived Thumbnails; the full-resolution Layers stay behind
+    // /api/image/curated/... for fullscreen inspection and the inspector.
+    const previousMap = renderedMapObjects.get(map.id);
+    if (previousMap && previousMap !== map) {
+        thumbnailVersions.set(map.id, String(Date.now()));
+    }
+    renderedMapObjects.set(map.id, map);
+    const thumbUrl = curatedThumbnailUrl(map.id);
     const layerCount = (map.layers && map.layers.length > 0) ? map.layers.length : 1;
     const layerLabel = `${layerCount} Layer${layerCount === 1 ? "" : "s"}`;
     const isBundle = map.layers && Array.isArray(map.layers) && map.layers.length > 1;
@@ -886,8 +912,8 @@ function renderCuratedCard(map, index) {
 
     const cardThumbImg = card.querySelector(".curated-thumb-img");
     cardThumbImg?.addEventListener("error", () => {
-        // Only a failed Thumbnail marks the card unavailable; the scrubber swaps this element to
-        // full-resolution Layer images served from their own route.
+        // Only a failed Ground Thumbnail marks the card unavailable; the scrubber swaps this
+        // element to a per-layer Thumbnail served from its own route.
         if (cardThumbImg.getAttribute("src") !== thumbUrl) return;
         showThumbnailUnavailable(card, cardThumbImg);
     });
@@ -909,7 +935,7 @@ function renderCuratedCard(map, index) {
                 pill.classList.add("active");
 
                 const layerIdx = layer.index !== undefined ? layer.index : parseInt(pill.dataset.layerIdx, 10);
-                const directUrl = `/api/image/curated/${encodeURIComponent(map.id)}/${layerIdx}`;
+                const directUrl = `/api/thumb/curated/${encodeURIComponent(map.id)}/${layerIdx}`;
 
                 if (thumbImg.src !== directUrl && !thumbImg.src.endsWith(directUrl)) {
                     thumbImg.src = directUrl;

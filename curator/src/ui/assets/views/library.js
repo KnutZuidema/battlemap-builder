@@ -745,6 +745,27 @@ function computeElevationSpan(layers) {
     return `${fmt(minElev)} to ${fmt(maxElev)}`;
 }
 
+/**
+ * Replaces a card's failed Thumbnail with an explicit unavailable state: no placeholder art, no
+ * retry loop. The card keeps its metadata, badges and actions, only the image is gone.
+ */
+function showThumbnailUnavailable(card, thumbImg) {
+    if (card.dataset.thumbUnavailable === "true") return;
+    card.dataset.thumbUnavailable = "true";
+    thumbImg.removeAttribute("src");
+    thumbImg.hidden = true;
+    // The scrubber only reassigns this element's src; once the image is hidden every pill is
+    // inert, so the unavailable state takes the layer control with it instead of leaving focusable
+    // pills that would re-request the failing Thumbnail URL.
+    card.querySelector(".curated-layer-scrubber")?.remove();
+    const unavailable = document.createElement("div");
+    unavailable.className = "curated-thumb-unavailable text-muted";
+    unavailable.setAttribute("role", "img");
+    unavailable.setAttribute("aria-label", "Thumbnail unavailable");
+    unavailable.textContent = "Thumbnail unavailable";
+    thumbImg.insertAdjacentElement("afterend", unavailable);
+}
+
 function renderCuratedCard(map, index) {
     const card = document.createElement("div");
     const isSelected = state.librarySelectedIds.has(map.id);
@@ -755,7 +776,9 @@ function renderCuratedCard(map, index) {
     const primaryTheme = tags[0] || "dungeon";
     card.dataset.theme = primaryTheme;
 
-    const thumbUrl = `/api/image/curated/${encodeURIComponent(map.id)}`;
+    // Cards only ever load the derived Thumbnail; the full-resolution Layer stays behind
+    // /api/image/curated/... for the scrubber, fullscreen inspection and the inspector.
+    const thumbUrl = `/api/thumb/curated/${encodeURIComponent(map.id)}`;
     const layerCount = (map.layers && map.layers.length > 0) ? map.layers.length : 1;
     const layerLabel = `${layerCount} Layer${layerCount === 1 ? "" : "s"}`;
     const isBundle = map.layers && Array.isArray(map.layers) && map.layers.length > 1;
@@ -860,6 +883,14 @@ function renderCuratedCard(map, index) {
             </div>
         </div>
     `;
+
+    const cardThumbImg = card.querySelector(".curated-thumb-img");
+    cardThumbImg?.addEventListener("error", () => {
+        // Only a failed Thumbnail marks the card unavailable; the scrubber swaps this element to
+        // full-resolution Layer images served from their own route.
+        if (cardThumbImg.getAttribute("src") !== thumbUrl) return;
+        showThumbnailUnavailable(card, cardThumbImg);
+    });
 
     if (isBundle) {
         const scrubber = card.querySelector(".curated-layer-scrubber");

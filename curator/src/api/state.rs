@@ -38,6 +38,8 @@ pub struct AppState {
     pub training_service: Arc<TrainingService>,
     pub training_runner: Option<Arc<dyn TrainingRunner + Send + Sync>>,
     pub model_registry: Arc<crate::services::ModelRegistry>,
+    /// Derived Thumbnails of curated Layers served to the dataset library (ADR-0013).
+    pub thumbnails: Arc<crate::services::ThumbnailService>,
     pub start_time: Instant,
     pub snapshot_freeze_status: Arc<std::sync::RwLock<Option<crate::domain::FreezeProgressUpdate>>>,
     pub snapshot_freeze_lock: Arc<tokio::sync::Mutex<()>>,
@@ -65,6 +67,13 @@ impl AppState {
         Arc::new(TrainingService::new(catalog, blobs, training_runner, cost_tracker))
     }
 
+    fn default_thumbnail_service(
+        catalog: Arc<dyn CatalogRepository + Send + Sync>,
+        blobs: Arc<dyn BlobStorage + Send + Sync>,
+    ) -> Arc<crate::services::ThumbnailService> {
+        Arc::new(crate::services::ThumbnailService::new(catalog, blobs))
+    }
+
 
 
     /// Creates a new `AppState` over the catalog and blob ports with the default RedditCrawler.
@@ -85,6 +94,7 @@ impl AppState {
         let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
         let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
         let model_registry = Arc::new(crate::services::ModelRegistry::new(catalog.clone(), blobs.clone()));
+        let thumbnails = Self::default_thumbnail_service(catalog.clone(), blobs.clone());
         Self {
             catalog,
             blobs,
@@ -100,6 +110,7 @@ impl AppState {
             training_service,
             training_runner,
             model_registry,
+            thumbnails,
             harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
@@ -126,6 +137,7 @@ impl AppState {
         let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
         let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
         let model_registry = Arc::new(crate::services::ModelRegistry::new(catalog.clone(), blobs.clone()));
+        let thumbnails = Self::default_thumbnail_service(catalog.clone(), blobs.clone());
         Self {
             catalog,
             blobs,
@@ -141,6 +153,7 @@ impl AppState {
             training_service,
             training_runner,
             model_registry,
+            thumbnails,
             harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
@@ -166,6 +179,7 @@ impl AppState {
         let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
         let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
         let model_registry = Arc::new(crate::services::ModelRegistry::new(catalog.clone(), blobs.clone()));
+        let thumbnails = Self::default_thumbnail_service(catalog.clone(), blobs.clone());
         Self {
             catalog,
             blobs,
@@ -181,6 +195,7 @@ impl AppState {
             training_service,
             training_runner,
             model_registry,
+            thumbnails,
             harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
@@ -207,6 +222,7 @@ impl AppState {
         let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
         let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
         let model_registry = Arc::new(crate::services::ModelRegistry::new(catalog.clone(), blobs.clone()));
+        let thumbnails = Self::default_thumbnail_service(catalog.clone(), blobs.clone());
         Self {
             catalog,
             blobs,
@@ -222,6 +238,7 @@ impl AppState {
             training_service,
             training_runner,
             model_registry,
+            thumbnails,
             harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
@@ -243,6 +260,7 @@ impl AppState {
         let training_runner = ModalTrainingRunner::from_env().ok().map(|r| Arc::new(r) as Arc<dyn TrainingRunner + Send + Sync>);
         let training_service = Self::default_training_service(catalog.clone(), blobs.clone(), cost_tracker.clone(), training_runner.clone());
         let model_registry = Arc::new(crate::services::ModelRegistry::new(catalog.clone(), blobs.clone()));
+        let thumbnails = Self::default_thumbnail_service(catalog.clone(), blobs.clone());
         Self {
             catalog,
             blobs,
@@ -258,6 +276,7 @@ impl AppState {
             training_service,
             training_runner,
             model_registry,
+            thumbnails,
             harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),

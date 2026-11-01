@@ -1070,6 +1070,25 @@ impl CuratedMap {
         self.tags.iter().find_map(|t| t.parse::<Theme>().ok())
     }
 
+    /// The Layer that represents this map's image: the `Ground` role, or the first Layer of a
+    /// legacy manifest that never carried roles.
+    ///
+    /// The derived Thumbnail route and `LibraryService::curated_ground_image` — the source of
+    /// `GET /api/image/curated/<id>` — both resolve their Layer here, so a card and the
+    /// full-resolution image of the same map cannot disagree about which Layer is the map.
+    ///
+    /// Other curated-map consumers still inline their own Ground-or-first fallback, so this list is
+    /// not exhaustive: `patch_curated`, `LibraryService::ensure_curated_caption`, dataset export,
+    /// reference conditioning and section grids each carry a copy. `patch_curated` nevertheless
+    /// reads the image it validates through `curated_ground_image`, so its grid-update branch
+    /// follows this method's resolution even though its filename lookup does not.
+    pub fn ground_layer(&self) -> Option<&Layer> {
+        self.layers
+            .iter()
+            .find(|layer| layer.role == LayerRole::Ground)
+            .or_else(|| self.layers.first())
+    }
+
     /// Validates that the map has at least one tag label.
     pub fn validate_tags(&self) -> Result<(), String> {
         if self.tags.is_empty() || self.tags.iter().all(|t| t.trim().is_empty()) {

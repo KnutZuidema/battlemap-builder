@@ -8,9 +8,9 @@ use crate::ports::storage_error::StorageError;
 /// Strongly-typed address of a stored blob.
 ///
 /// Each variant is the single source of truth for one location in the storage layout
-/// (`staging/{id}/{index}.png`, flat `curated/{id}/` bundles per ADR-0003, dataset export
-/// archives, the rejection log, telemetry ledgers, and public training artifacts), so no caller
-/// ever hand-builds a path string.
+/// (`staging/{id}/{index}.png`, flat `curated/{id}/` bundles per ADR-0003, derived
+/// `thumbs/curated/{id}/` Thumbnails per ADR-0013, dataset export archives, the rejection log,
+/// telemetry ledgers, and public training artifacts), so no caller ever hand-builds a path string.
 ///
 /// # Identity is the canonical path
 ///
@@ -30,6 +30,11 @@ pub enum BlobKey {
     TrashLayer { id: String, index: usize },
     /// Curated bundle layer inside the flat `curated/{id}/` directory.
     CuratedLayer { id: String, index: usize, role: LayerRole, elevation: Option<i8> },
+    /// Derived Thumbnail of one curated bundle layer at `thumbs/curated/{id}/{index}_{slug}.jpg`.
+    ///
+    /// The `thumbs/` tree is rebuildable (ADR-0013): nothing here is authoritative, so the whole
+    /// namespace may be deleted and every Thumbnail regenerated from its [`BlobKey::CuratedLayer`].
+    CuratedThumbnail { id: String, index: usize, role: LayerRole, elevation: Option<i8> },
     /// ZIP archive containing an exported dataset, stored at `exports/{name}.zip`.
     ///
     /// `name` is the bare archive name and MUST NOT carry a file extension: [`BlobKey::to_path`]
@@ -51,6 +56,8 @@ pub enum BlobKey {
     TrashDir { id: Option<String> },
     /// Directory prefix `curated/` (id=None) or `curated/{id}/`.
     CuratedDir { id: Option<String> },
+    /// Directory prefix `thumbs/curated/{id}/`, holding every derived Thumbnail of one map.
+    CuratedThumbsDir { id: String },
     /// Directory prefix `telemetry/`, used to enumerate every [`BlobKey::TelemetryLog`].
     TelemetryDir,
     /// Dataset snapshot ZIP archive stored at `artifacts/datasets/{id}.zip`.
@@ -112,12 +119,17 @@ impl BlobKey {
                 "curated/{id}/{}",
                 Layer::format_filename(*index, *role, *elevation, "png")
             ),
+            BlobKey::CuratedThumbnail { id, index, role, elevation } => format!(
+                "thumbs/curated/{id}/{}",
+                Layer::format_filename(*index, *role, *elevation, "jpg")
+            ),
             BlobKey::ExportArchive { name } => format!("exports/{name}.zip"),
             BlobKey::RejectionLog => "rejected/rejections.json".to_string(),
             BlobKey::TelemetryLog { name } => format!("telemetry/{name}"),
             BlobKey::StagingDir { id } => directory_prefix("staging", id.as_deref()),
             BlobKey::TrashDir { id } => directory_prefix("trash", id.as_deref()),
             BlobKey::CuratedDir { id } => directory_prefix("curated", id.as_deref()),
+            BlobKey::CuratedThumbsDir { id } => directory_prefix("thumbs/curated", Some(id)),
             BlobKey::TelemetryDir => directory_prefix("telemetry", None),
             BlobKey::DatasetSnapshot { id } => format!("artifacts/datasets/{id}.zip"),
             BlobKey::CheckpointAdapter { run_id, step } => {
@@ -189,6 +201,9 @@ impl BlobKey {
             ["staging", id, ""] => BlobKey::StagingDir { id: Some((*id).to_string()) },
             ["curated", ""] => BlobKey::CuratedDir { id: None },
             ["curated", id, ""] => BlobKey::CuratedDir { id: Some((*id).to_string()) },
+            ["thumbs", "curated", id, ""] => BlobKey::CuratedThumbsDir {
+                id: (*id).to_string(),
+            },
             ["trash", ""] => BlobKey::TrashDir { id: None },
             ["trash", id, ""] => BlobKey::TrashDir { id: Some((*id).to_string()) },
             ["telemetry", ""] => BlobKey::TelemetryDir,
@@ -224,6 +239,15 @@ impl BlobKey {
             ["curated", id, file] => {
                 let (index, role, elevation) = parse_curated_filename(file)?;
                 BlobKey::CuratedLayer {
+                    id: (*id).to_string(),
+                    index,
+                    role,
+                    elevation,
+                }
+            }
+            ["thumbs", "curated", id, file] => {
+                let (index, role, elevation) = parse_thumbnail_filename(file)?;
+                BlobKey::CuratedThumbnail {
                     id: (*id).to_string(),
                     index,
                     role,
@@ -276,7 +300,16 @@ fn directory_prefix(root: &str, id: Option<&str>) -> String {
 
 /// Parses a canonical curated layer filename (`{index}_{slug}.png`) back into its components.
 pub fn parse_curated_filename(file: &str) -> Option<(usize, LayerRole, Option<i8>)> {
-    let stem = file.strip_suffix(".png")?;
+    parse_layer_filename_stem(file.strip_suffix(".png")?)
+}
+
+/// Parses a canonical derived Thumbnail filename (`{index}_{slug}.jpg`) back into its components.
+pub fn parse_thumbnail_filename(file: &str) -> Option<(usize, LayerRole, Option<i8>)> {
+    parse_layer_filename_stem(file.strip_suffix(".jpg")?)
+}
+
+/// Parses the `{index}_{slug}` stem shared by curated layer and derived Thumbnail filenames.
+fn parse_layer_filename_stem(stem: &str) -> Option<(usize, LayerRole, Option<i8>)> {
     let (index, slug) = stem.split_once('_')?;
     let index = parse_canonical_usize(index)?;
     let (role, elevation) = match slug {

@@ -177,6 +177,20 @@ impl From<crate::services::TrainingServiceError> for ApiError {
 }
 
 
+impl From<crate::services::ThumbnailError> for ApiError {
+    fn from(err: crate::services::ThumbnailError) -> Self {
+        use crate::services::ThumbnailError;
+        match err {
+            ThumbnailError::NotFound(msg) => ApiError::NotFound(msg),
+            ThumbnailError::Storage(storage_err) => storage_err.into(),
+            // A broken derived image is an upstream pipeline failure, never a reason to serve the
+            // multi-megabyte original in its place.
+            ThumbnailError::Generation(msg) => ApiError::BadGateway(msg),
+        }
+    }
+}
+
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {

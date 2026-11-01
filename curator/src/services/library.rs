@@ -17,6 +17,7 @@ use crate::ports::blob_storage::{BlobKey, BlobStorage};
 use crate::ports::catalog_repository::{CandidateFilter, CatalogRepository};
 use crate::ports::storage_error::StorageError;
 use crate::services::sections::ground_dimensions;
+use crate::services::thumbnails::invalidate_curated_thumbnails;
 
 /// Application service for candidate/curated library mutations and image reads.
 #[derive(Clone)]
@@ -112,14 +113,9 @@ impl LibraryService {
         id: &str,
     ) -> Result<(Vec<u8>, Option<String>), StorageError> {
         let map = self.catalog.get_curated(id).await?;
-        let layer = map
-            .layers
-            .iter()
-            .find(|layer| layer.role == LayerRole::Ground)
-            .or_else(|| map.layers.first())
-            .ok_or_else(|| {
-                StorageError::NotFound(format!("Curated map '{id}' has no layer to serve"))
-            })?;
+        let layer = map.ground_layer().ok_or_else(|| {
+            StorageError::NotFound(format!("Curated map '{id}' has no layer to serve"))
+        })?;
         let bytes = self
             .blobs
             .read_blob(&Self::curated_key(id, layer.index, layer))
@@ -517,6 +513,11 @@ impl LibraryService {
                 }
             }
 
+            // Layer edits invalidate the derived Thumbnails (ADR-0013); the seam also
+            // serializes with a generation that may still be rendering the old bytes.
+            invalidate_curated_thumbnails(self.blobs.as_ref(), id)
+                .await?;
+
             if map.dimensions == (0, 0) {
                 map.dimensions = updated_layers
                     .first()
@@ -679,7 +680,8 @@ impl LibraryService {
         }
     }
 
-    /// Delete curated map `id`, its layer blobs, and append its rejection record.
+    /// Delete curated map `id`, its layer blobs, its derived Thumbnails, and append its rejection
+    /// record.
     pub async fn delete_curated(
         &self,
         id: &str,
@@ -692,6 +694,9 @@ impl LibraryService {
             id: Some(id.to_string()),
         })
         .await?;
+        // Thumbnails are derived, so purging them cannot lose data: a map that is deleted can
+        // never be regenerated, and leaving the `thumbs/` tree behind would strand the bytes.
+        invalidate_curated_thumbnails(self.blobs.as_ref(), id).await?;
         self.catalog.delete_curated(id).await?;
         self.catalog.log_rejection(id, reason, notes).await?;
         Ok(())

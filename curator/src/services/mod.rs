@@ -10,6 +10,7 @@ pub mod reference_provider;
 pub mod sections;
 pub mod storage_maintenance;
 pub mod storage_migration;
+pub mod thumbnails;
 pub mod training;
 pub use description::*;
 pub use sections::{describe_map_sections, ground_dimensions, SectionDescriptionContext};
@@ -20,6 +21,7 @@ pub use model_registry::ModelRegistry;
 pub use dataset_export::{DatasetExportService, DeleteDatasetError, FreezeDatasetError};
 pub use training::{compute_poll_backoff, CreateTrainingRunRequest, TrainingService, TrainingServiceError};
 pub use storage_maintenance::StorageMaintenanceService;
+pub use thumbnails::{ThumbnailError, ThumbnailService};
 pub use storage_migration::{
     discover_disk_blobs, is_migration_completed, run_storage_migration, MigrationOptions,
     MigrationReport, MIGRATION_MARKER_FILE,

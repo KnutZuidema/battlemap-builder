@@ -794,6 +794,24 @@ pub async fn get_curated_image_or_layer(
     get_curated_layer_image_by_id(state, Path((id, layer_index))).await
 }
 
+/// GET /api/thumb/curated/{id} - Stream the derived Ground-layer Thumbnail of a curated map.
+///
+/// Serves `image/jpeg` from the rebuildable `thumbs/curated/{id}/` namespace (ADR-0013), with the
+/// same cache policy as the full-resolution image routes. A Layer that cannot be rendered answers
+/// `502`; the original bytes are never substituted.
+pub async fn get_curated_thumbnail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Map ID cannot be empty"));
+    }
+
+    let bytes = state.thumbnails.curated_thumbnail(&id).await?;
+
+    Ok(image_response(bytes, "image/jpeg"))
+}
+
 
 /// Request payload for curating a candidate.
 #[derive(Debug, Clone, Serialize, Deserialize)]

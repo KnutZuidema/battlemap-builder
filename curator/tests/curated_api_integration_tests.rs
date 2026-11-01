@@ -1893,3 +1893,181 @@ async fn test_curated_bulk_refine_rejects_blank_id_and_get() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
+
+/// GETs `/api/thumb/curated/{id}` and returns the raw response.
+async fn get_curated_thumbnail(app: &axum::Router, id: &str) -> axum::response::Response {
+    let req = Request::builder()
+        .uri(format!("/api/thumb/curated/{id}"))
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap()
+}
+
+/// Blob key of the derived Thumbnail of a map's `Ground` layer, resolved like the route resolves it.
+fn curated_thumbnail_key(map: &CuratedMap) -> BlobKey {
+    match map
+        .layers
+        .iter()
+        .find(|layer| layer.role == LayerRole::Ground)
+        .or_else(|| map.layers.first())
+    {
+        Some(layer) => BlobKey::CuratedThumbnail {
+            id: map.id.clone(),
+            index: layer.index,
+            role: layer.role,
+            elevation: layer.elevation,
+        },
+        None => BlobKey::CuratedThumbnail {
+            id: map.id.clone(),
+            index: 0,
+            role: LayerRole::Ground,
+            elevation: Some(0),
+        },
+    }
+}
+
+#[tokio::test]
+async fn test_curated_thumbnail_route_serves_a_bounded_jpeg_of_the_ground_layer() {
+    let (app, catalog, blobs) = setup_test_app();
+    let map = curate_map_with_grid(&catalog, &blobs, "thumb_dimensions", (1600, 1200), 64, None).await;
+
+    let resp = get_curated_thumbnail(&app, "thumb_dimensions").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Derived Thumbnails are JPEGs served with the same cache policy as the image routes.
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/jpeg"
+    );
+    assert_eq!(
+        resp.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=3600"
+    );
+
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&bytes[..3], &[0xFF, 0xD8, 0xFF], "JPEG SOI marker");
+
+    let decoded = image::load_from_memory(&bytes).expect("decode Thumbnail");
+    assert_eq!(decoded.width(), 768);
+    assert_eq!(decoded.height(), 576);
+
+    // The Thumbnail is persisted under its derived key so later requests can skip generation.
+    let stored = blobs
+        .read_blob(&curated_thumbnail_key(&map))
+        .await
+        .expect("stored Thumbnail");
+    assert_eq!(stored, bytes.to_vec());
+}
+
+#[tokio::test]
+async fn test_curated_thumbnail_is_generated_once_and_served_from_storage() {
+    let (app, catalog, blobs) = setup_test_app();
+    let map = curate_map_with_grid(&catalog, &blobs, "thumb_idempotent", (1024, 1024), 64, None).await;
+    let key = curated_thumbnail_key(&map);
+
+    let first = to_bytes(
+        get_curated_thumbnail(&app, "thumb_idempotent")
+            .await
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+
+    // Overwriting the stored Thumbnail proves the next request reads storage instead of decoding
+    // the Layer again: a regeneration would replace these sentinel bytes.
+    blobs
+        .write_blob(&key, b"stored-thumbnail-bytes")
+        .await
+        .unwrap();
+
+    let second = to_bytes(
+        get_curated_thumbnail(&app, "thumb_idempotent")
+            .await
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    assert_eq!(second.as_ref(), b"stored-thumbnail-bytes");
+    assert_ne!(first, second);
+
+    // Repeated requests stay byte-identical and never regenerate.
+    let third = to_bytes(
+        get_curated_thumbnail(&app, "thumb_idempotent")
+            .await
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    assert_eq!(third, second);
+}
+
+#[tokio::test]
+async fn test_delete_curated_purges_the_maps_thumbnails() {
+    let (app, catalog, blobs) = setup_test_app();
+    let map = curate_map_with_grid(&catalog, &blobs, "thumb_purge", (1024, 1024), 64, None).await;
+    let key = curated_thumbnail_key(&map);
+
+    let resp = get_curated_thumbnail(&app, "thumb_purge").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(blobs.exists_blob(&key).await.unwrap());
+
+    let req = Request::builder()
+        .uri("/api/curated/thumb_purge")
+        .method("DELETE")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "reason": "Irrelevant" }).to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    assert!(!blobs.exists_blob(&key).await.unwrap());
+    assert!(blobs
+        .list_prefix(&BlobKey::CuratedThumbsDir {
+            id: Some("thumb_purge".into()),
+        })
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn test_curated_thumbnail_fails_with_502_on_an_undecodable_layer() {
+    let (app, catalog, blobs) = setup_test_app();
+    let map = CuratedMap::with_now(
+        "thumb_broken",
+        Theme::Dungeon,
+        vec!["dungeon".into()],
+        (512, 512),
+    );
+    seed_curated_ports(&catalog, &blobs, &map, b"not a png").await;
+
+    let resp = get_curated_thumbnail(&app, "thumb_broken").await;
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "application/json"
+    );
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    // The original bytes are never substituted for the failed Thumbnail.
+    assert_ne!(body.as_ref(), b"not a png");
+    let payload: Value = serde_json::from_slice(&body).expect("JSON error body");
+    assert!(payload["error"].is_string());
+
+    // Nothing was persisted for a failed generation either.
+    assert!(!blobs
+        .exists_blob(&BlobKey::CuratedThumbnail {
+            id: "thumb_broken".into(),
+            index: 0,
+            role: LayerRole::Ground,
+            elevation: Some(0),
+        })
+        .await
+        .unwrap());
+
+    // An unknown map is a plain 404, not a generation failure.
+    let resp = get_curated_thumbnail(&app, "no_such_map_thumb").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

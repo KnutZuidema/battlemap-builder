@@ -517,6 +517,13 @@ impl LibraryService {
                 }
             }
 
+            // Layer edits invalidate the derived Thumbnails (ADR-0013): they are cheap to rebuild,
+            // so they are dropped rather than tracked against the rewritten layer blobs.
+            self.purge_blobs_under(BlobKey::CuratedThumbsDir {
+                id: Some(id.to_string()),
+            })
+            .await?;
+
             if map.dimensions == (0, 0) {
                 map.dimensions = updated_layers
                     .first()
@@ -679,7 +686,8 @@ impl LibraryService {
         }
     }
 
-    /// Delete curated map `id`, its layer blobs, and append its rejection record.
+    /// Delete curated map `id`, its layer blobs, its derived Thumbnails, and append its rejection
+    /// record.
     pub async fn delete_curated(
         &self,
         id: &str,
@@ -689,6 +697,12 @@ impl LibraryService {
         self.catalog.get_curated(id).await?;
 
         self.purge_blobs_under(BlobKey::CuratedDir {
+            id: Some(id.to_string()),
+        })
+        .await?;
+        // Thumbnails are derived, so purging them cannot lose data: a map that is deleted can
+        // never be regenerated, and leaving the `thumbs/` tree behind would strand the bytes.
+        self.purge_blobs_under(BlobKey::CuratedThumbsDir {
             id: Some(id.to_string()),
         })
         .await?;

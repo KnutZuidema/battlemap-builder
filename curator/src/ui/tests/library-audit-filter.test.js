@@ -15,16 +15,20 @@ import { state } from "../assets/store.js";
 import {
     applyLibraryFilters,
     clearLibraryAuditFilter,
+    clearLibraryFilters,
+    setupLibraryControls,
     showLibraryAuditFilter,
 } from "../assets/views/library.js";
 import {
     applyReadinessReport,
     auditFilterMapIds,
+    invalidateDatasetReadiness,
     readinessScopeKey,
     renderReadinessPanel,
     setupReadinessControls,
     syncReadinessToScope,
 } from "../assets/views/readiness.js";
+import { clearRequestFailure } from "../assets/requests/failures.js";
 import { element, installRequestDom, jsonResponse, stubFetch } from "./support/fakes.js";
 
 const MISSING = "physical_description_missing";
@@ -83,7 +87,15 @@ function visibleIds() {
 }
 
 function setUp(t) {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const ui = installRequestDom();
+    const stored = new Map();
+    const previousStorage = globalThis.localStorage;
+    globalThis.localStorage = {
+        getItem: (key) => (stored.has(key) ? stored.get(key) : null),
+        setItem: (key, value) => stored.set(key, String(value)),
+        removeItem: (key) => stored.delete(key),
+    };
     DOM_NAMES.forEach((name) => {
         dom[name] = element("div");
     });
@@ -118,7 +130,10 @@ function setUp(t) {
     applyLibraryFilters();
 
     t.after(() => {
+        clearRequestFailure();
+        globalThis.localStorage = previousStorage;
         DOM_NAMES.forEach((name) => delete dom[name]);
+        delete dom.btnClearLibraryAuditFilter;
         delete dom.datasetReadinessIssues;
         delete dom.datasetReadinessSummary;
         state.curatedMaps = [];
@@ -130,6 +145,8 @@ function setUp(t) {
         state.librarySelectedIds = new Set();
         state.readinessReport = null;
         state.readinessScopeKey = null;
+        state.snapshots = [];
+        state.isFetchingSnapshots = false;
         ui.restore();
     });
 
@@ -318,4 +335,90 @@ test("the delegated Show N maps action filters the grid and sends no request", a
     assert.equal(state.readinessBatch, null);
     assert.equal(server.calls.length, 0);
     assert.ok(!server.calls.some((call) => call.path.includes("/describe")));
+});
+
+/** Let the requests `clearLibraryFilters()` starts settle before asserting on their effects. */
+async function settle() {
+    for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+test("Clear Filters drops the audit selection and restores the grid", async (t) => {
+    setUp(t);
+    const server = stubFetch((path) => {
+        if (path === "/api/dataset/readiness") return jsonResponse(auditedReport());
+        return jsonResponse([]);
+    });
+    t.after(() => server.restore());
+
+    showLibraryAuditFilter(MISSING);
+    assert.deepEqual(visibleIds(), ["map-a", "map-b"]);
+
+    clearLibraryFilters();
+
+    // The selection and the grid are restored before the re-audit it also starts lands.
+    assert.equal(state.libraryAuditFilter, null);
+    assert.deepEqual(visibleIds(), ["map-a", "map-b", "map-c"]);
+    assert.equal(dom.libraryCountBadge.textContent, "3 Maps");
+    assert.equal(dom.libraryAuditFilterChip.classList.contains("hidden"), true);
+
+    await settle();
+    assert.equal(state.libraryAuditFilter, null, "the re-applied report does not resurrect the selection");
+    assert.deepEqual(visibleIds(), ["map-a", "map-b", "map-c"]);
+});
+
+test("the chip's remove button clears the audit filter", (t) => {
+    setUp(t);
+    showLibraryAuditFilter(MISSING);
+
+    let removeListener = null;
+    dom.btnClearLibraryAuditFilter = element("button");
+    dom.btnClearLibraryAuditFilter.addEventListener = (type, handler) => {
+        if (type === "click") removeListener = handler;
+    };
+    setupLibraryControls();
+
+    assert.equal(typeof removeListener, "function", "setupLibraryControls wires the chip's remove button");
+    removeListener();
+
+    assert.equal(state.libraryAuditFilter, null);
+    assert.deepEqual(visibleIds(), ["map-a", "map-b", "map-c"]);
+    assert.equal(dom.libraryAuditFilterChip.classList.contains("hidden"), true);
+    assert.equal(dom.libraryCountBadge.textContent, "3 Maps");
+});
+
+test("the filtered badge pluralises the scope total", (t) => {
+    setUp(t);
+    state.curatedMaps = curatedMaps().filter((map) => map.id === "map-a");
+
+    showLibraryAuditFilter(MISSING);
+
+    assert.deepEqual(visibleIds(), ["map-a"]);
+    assert.equal(dom.libraryCountBadge.textContent, "1 of 1 Map");
+});
+
+test("discarding the report drops the audit filter instead of leaving it over Not audited", async (t) => {
+    setUp(t);
+    const server = stubFetch((path) => {
+        // The re-audit that invalidation starts fails: no new report replaces the discarded one.
+        if (path === "/api/dataset/readiness") {
+            return jsonResponse({ error: "audit unavailable" }, { status: 503, statusText: "Service Unavailable" });
+        }
+        return jsonResponse([]);
+    });
+    t.after(() => server.restore());
+
+    showLibraryAuditFilter(MISSING);
+    assert.equal(state.libraryAuditFilter.code, MISSING);
+
+    invalidateDatasetReadiness();
+
+    assert.equal(state.readinessReport, null);
+    assert.equal(state.libraryAuditFilter, null);
+    assert.deepEqual(visibleIds(), ["map-a", "map-b", "map-c"]);
+    assert.equal(dom.libraryAuditFilterChip.classList.contains("hidden"), true);
+    assert.equal(dom.libraryCountBadge.textContent, "3 Maps");
+
+    await settle();
+    assert.equal(state.readinessReport, null);
+    assert.equal(state.libraryAuditFilter, null, "a failed audit leaves the discarded selection dropped");
 });

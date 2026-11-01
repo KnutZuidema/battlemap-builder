@@ -1086,3 +1086,149 @@ fn test_blob_backend_loud_failure_on_missing_config() {
     // Cleanup
     clear_all();
 }
+
+#[test]
+fn curated_thumbnail_keys_round_trip_through_storage_paths() {
+    let thumbnail = BlobKey::CuratedThumbnail {
+        id: "map-1".into(),
+        index: 1,
+        role: LayerRole::UpperFloor,
+        elevation: Some(2),
+    };
+    assert_eq!(thumbnail.to_path(), "thumbs/curated/map-1/1_upper_2.jpg");
+    // The `.jpg` stem parser recovers every component, including the derived elevation.
+    assert_eq!(
+        BlobKey::from_path("thumbs/curated/map-1/1_upper_2.jpg"),
+        Some(thumbnail.clone())
+    );
+    assert_eq!(
+        BlobKey::from_path(&thumbnail.to_path()),
+        Some(thumbnail.clone())
+    );
+
+    let ground = BlobKey::CuratedThumbnail {
+        id: "map-1".into(),
+        index: 0,
+        role: LayerRole::Ground,
+        elevation: Some(0),
+    };
+    assert_eq!(ground.to_path(), "thumbs/curated/map-1/0_ground.jpg");
+    assert_eq!(BlobKey::from_path(&ground.to_path()), Some(ground.clone()));
+
+    // The directory prefixes round trip too, so the tree can be enumerated and purged.
+    assert_eq!(BlobKey::ThumbsDir.to_path(), "thumbs/");
+    assert_eq!(
+        BlobKey::CuratedThumbsDir { id: None }.to_path(),
+        "thumbs/curated/"
+    );
+    assert_eq!(
+        BlobKey::CuratedThumbsDir { id: Some("map-1".into()) }.to_path(),
+        "thumbs/curated/map-1/"
+    );
+    assert_eq!(BlobKey::from_path("thumbs/"), Some(BlobKey::ThumbsDir));
+    assert_eq!(
+        BlobKey::from_path("thumbs/curated/"),
+        Some(BlobKey::CuratedThumbsDir { id: None })
+    );
+    assert_eq!(
+        BlobKey::from_path("thumbs/curated/map-1/"),
+        Some(BlobKey::CuratedThumbsDir { id: Some("map-1".into()) })
+    );
+
+    // Extensions are part of each namespace: a PNG never parses as a Thumbnail and a JPEG never
+    // parses as a curated Layer.
+    assert_eq!(BlobKey::from_path("thumbs/curated/map-1/0_ground.png"), None);
+    assert_eq!(BlobKey::from_path("curated/map-1/0_ground.jpg"), None);
+    assert_eq!(BlobKey::from_path("thumbs/map-1/0_ground.jpg"), None);
+
+    // Prefix matching scopes a bundle's thumbnails to that bundle only.
+    let bundle_thumbs = BlobKey::CuratedThumbsDir { id: Some("map-1".into()) };
+    assert!(BlobKey::ThumbsDir.is_prefix_of(&bundle_thumbs));
+    assert!(BlobKey::CuratedThumbsDir { id: None }.is_prefix_of(&bundle_thumbs));
+    assert!(bundle_thumbs.is_prefix_of(&ground));
+    assert!(!bundle_thumbs.is_prefix_of(&BlobKey::CuratedThumbnail {
+        id: "map-10".into(),
+        index: 0,
+        role: LayerRole::Ground,
+        elevation: Some(0),
+    }));
+    assert!(!bundle_thumbs.is_prefix_of(&BlobKey::CuratedLayer {
+        id: "map-1".into(),
+        index: 0,
+        role: LayerRole::Ground,
+        elevation: Some(0),
+    }));
+    assert!(!BlobKey::CuratedDir { id: None }.is_prefix_of(&ground));
+}
+
+#[tokio::test]
+async fn curated_thumbnail_blobs_enumerate_by_prefix() {
+    let dir = tempdir().unwrap();
+    let fs = FilesystemBlobStorage::new(dir.path());
+    let mem = InMemoryBlobStorage::new();
+    let adapters: [&dyn BlobStorage; 2] = [&fs, &mem];
+
+    let ground = BlobKey::CuratedThumbnail {
+        id: "map-1".into(),
+        index: 0,
+        role: LayerRole::Ground,
+        elevation: Some(0),
+    };
+    let upper = BlobKey::CuratedThumbnail {
+        id: "map-1".into(),
+        index: 1,
+        role: LayerRole::UpperFloor,
+        elevation: Some(1),
+    };
+    let sibling = BlobKey::CuratedThumbnail {
+        id: "map-2".into(),
+        index: 0,
+        role: LayerRole::Ground,
+        elevation: Some(0),
+    };
+
+    for storage in adapters {
+        for key in [&ground, &upper, &sibling] {
+            storage.write_blob(key, b"thumb").await.unwrap();
+        }
+
+        // The filesystem adapter re-derives each key from its file name, so this asserts the
+        // `.jpg` parser rather than the keys that were written.
+        assert_eq!(
+            storage
+                .list_prefix(&BlobKey::CuratedThumbsDir { id: Some("map-1".into()) })
+                .await
+                .unwrap(),
+            vec![ground.clone(), upper.clone()]
+        );
+        assert_eq!(
+            storage.list_prefix(&BlobKey::ThumbsDir).await.unwrap(),
+            vec![ground.clone(), upper.clone(), sibling.clone()]
+        );
+        assert_eq!(
+            storage
+                .list_prefix(&BlobKey::CuratedThumbsDir { id: None })
+                .await
+                .unwrap(),
+            vec![ground.clone(), upper.clone(), sibling.clone()]
+        );
+        assert!(storage
+            .list_prefix(&BlobKey::CuratedThumbsDir { id: Some("map-3".into()) })
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Purging the bundle's directory leaves the sibling untouched.
+        for key in storage
+            .list_prefix(&BlobKey::CuratedThumbsDir { id: Some("map-1".into()) })
+            .await
+            .unwrap()
+        {
+            storage.delete_blob(&key).await.unwrap();
+        }
+        assert!(!storage.exists_blob(&ground).await.unwrap());
+        assert!(!storage.exists_blob(&upper).await.unwrap());
+        assert!(storage.exists_blob(&sibling).await.unwrap());
+        storage.delete_blob(&sibling).await.unwrap();
+    }
+}

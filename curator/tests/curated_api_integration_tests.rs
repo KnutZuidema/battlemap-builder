@@ -2076,7 +2076,7 @@ async fn test_curated_thumbnail_fails_with_502_on_an_undecodable_layer() {
 }
 
 #[tokio::test]
-async fn test_re_curation_drops_the_previous_thumbnail() {
+async fn test_re_curation_replaces_the_previous_thumbnail() {
     let (app, catalog, blobs) = setup_test_app();
     let (map, ..) =
         curate_test_bundle(&catalog, &blobs, "thumbnail_recurated", vec!["temple".into()]).await;
@@ -2143,9 +2143,10 @@ async fn test_re_curation_drops_the_previous_thumbnail() {
     .await
     .expect("re-curate the committed bundle");
 
-    // The Thumbnail rendered from the superseded bytes is dropped at the curation seam instead of
-    // being served until the next layer edit.
-    assert!(!blobs.exists_blob(&key).await.unwrap());
+    // Re-curation invalidates the Thumbnail rendered from the superseded bytes; the detached
+    // precompute then regenerates it from the new Layer bytes.
+    let precomputed = wait_for_blob(&blobs, &key).await;
+    assert_ne!(precomputed, first);
 
     let regenerated = to_bytes(
         get_curated_thumbnail(&app, "thumbnail_recurated")
@@ -2155,7 +2156,364 @@ async fn test_re_curation_drops_the_previous_thumbnail() {
     )
     .await
     .unwrap();
+    assert_eq!(regenerated.as_ref(), precomputed.as_slice());
     assert_ne!(regenerated, first);
     let decoded = image::load_from_memory(&regenerated).expect("decode regenerated Thumbnail");
     assert_eq!((decoded.width(), decoded.height()), first_dimensions);
+}
+
+/// GETs `/api/thumb/curated/{id}/{layer_index}` and returns the raw response.
+async fn get_curated_layer_thumbnail(
+    app: &axum::Router,
+    id: &str,
+    layer_index: usize,
+) -> axum::response::Response {
+    let req = Request::builder()
+        .uri(format!("/api/thumb/curated/{id}/{layer_index}"))
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap()
+}
+
+/// Blob key of one curated Layer, resolved exactly like the Thumbnail routes.
+fn curated_layer_key(map: &CuratedMap, index: usize) -> BlobKey {
+    let layer = map
+        .layers
+        .iter()
+        .find(|layer| layer.index == index)
+        .expect("curated map has the requested layer");
+    BlobKey::CuratedLayer {
+        id: map.id.clone(),
+        index: layer.index,
+        role: layer.role,
+        elevation: layer.elevation,
+    }
+}
+
+/// Blob key of one curated Layer's derived Thumbnail.
+fn curated_layer_thumbnail_key(map: &CuratedMap, index: usize) -> BlobKey {
+    let layer = map
+        .layers
+        .iter()
+        .find(|layer| layer.index == index)
+        .expect("curated map has the requested layer");
+    BlobKey::CuratedThumbnail {
+        id: map.id.clone(),
+        index: layer.index,
+        role: layer.role,
+        elevation: layer.elevation,
+    }
+}
+
+/// Waits for a detached precompute (or any other writer) to store `key`, panicking on timeout.
+async fn wait_for_blob(
+    blobs: &Arc<dyn BlobStorage + Send + Sync>,
+    key: &BlobKey,
+) -> Vec<u8> {
+    for _ in 0..500 {
+        match blobs.read_blob(key).await {
+            Ok(bytes) => return bytes,
+            Err(curator::ports::storage_error::StorageError::NotFound(_)) => {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(err) => panic!("unexpected storage error while waiting for a Thumbnail: {err}"),
+        }
+    }
+    panic!("Thumbnail was not stored at {}", key.to_path());
+}
+
+#[tokio::test]
+async fn test_curated_layer_thumbnail_route_serves_the_requested_layer_and_404s_unknown() {
+    let (app, catalog, blobs) = setup_test_app();
+    let mut map = CuratedMap::with_now(
+        "thumb_layer_selector",
+        Theme::Dungeon,
+        vec!["dungeon".into()],
+        (512, 512),
+    )
+    .with_grid(GridConfig::new(32, 0, 0));
+    map.layers = vec![
+        CuratedLayer::new(
+            0,
+            CuratedLayer::format_filename(0, LayerRole::Ground, Some(0), "png"),
+            LayerRole::Ground,
+            Some(0),
+            (512, 512),
+        ),
+        CuratedLayer::new(
+            1,
+            CuratedLayer::format_filename(1, LayerRole::UpperFloor, Some(1), "png"),
+            LayerRole::UpperFloor,
+            Some(1),
+            (512, 512),
+        ),
+    ];
+    catalog.save_curated(&map).await.expect("save curated map");
+    blobs
+        .write_blob(
+            &curated_layer_key(&map, 0),
+            &solid_png(512, 512, [10, 10, 10, 255]),
+        )
+        .await
+        .unwrap();
+    blobs
+        .write_blob(
+            &curated_layer_key(&map, 1),
+            &solid_png(512, 512, [220, 30, 30, 255]),
+        )
+        .await
+        .unwrap();
+
+    let ground = get_curated_layer_thumbnail(&app, "thumb_layer_selector", 0).await;
+    assert_eq!(ground.status(), StatusCode::OK);
+    assert_eq!(
+        ground.headers().get(header::CONTENT_TYPE).unwrap(),
+        "image/jpeg"
+    );
+    assert_eq!(
+        ground.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=3600"
+    );
+    let ground = to_bytes(ground.into_body(), usize::MAX).await.unwrap();
+
+    let upper = get_curated_layer_thumbnail(&app, "thumb_layer_selector", 1).await;
+    assert_eq!(upper.status(), StatusCode::OK);
+    let upper = to_bytes(upper.into_body(), usize::MAX).await.unwrap();
+
+    // The two layers differ, so serving the Ground for every index would fail these samples.
+    assert_ne!(ground, upper, "each index must serve its own Layer");
+    let ground_pixel = image::load_from_memory(&ground)
+        .expect("decode Ground Thumbnail")
+        .to_rgb8()
+        .get_pixel(32, 32)
+        .0;
+    let upper_pixel = image::load_from_memory(&upper)
+        .expect("decode Upper Thumbnail")
+        .to_rgb8()
+        .get_pixel(32, 32)
+        .0;
+    assert!(ground_pixel[0] < 60, "Ground sample was {ground_pixel:?}");
+    assert!(
+        upper_pixel[0] > 150 && upper_pixel[1] < 90,
+        "Upper sample was {upper_pixel:?}"
+    );
+
+    // Both Thumbnails persist under their own derived keys.
+    assert!(blobs
+        .exists_blob(&curated_layer_thumbnail_key(&map, 0))
+        .await
+        .unwrap());
+    assert!(blobs
+        .exists_blob(&curated_layer_thumbnail_key(&map, 1))
+        .await
+        .unwrap());
+
+    // An unknown index is a 404 and never falls back to the Ground or another Layer.
+    let missing = get_curated_layer_thumbnail(&app, "thumb_layer_selector", 2).await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(missing.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).expect("JSON error body");
+    assert!(payload["error"].is_string());
+
+    // A non-numeric selector is the same 404, matching the full-resolution layer dispatcher.
+    let req = Request::builder()
+        .uri("/api/thumb/curated/thumb_layer_selector/not-a-layer")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_curation_precomputes_every_layer_thumbnail_and_skips_existing_ones() {
+    let (_, catalog, blobs) = setup_test_app();
+    let (map, ..) =
+        curate_test_bundle(&catalog, &blobs, "thumb_precompute", vec!["temple".into()]).await;
+    assert_eq!(map.layers.len(), 2, "fixture must be a two-layer bundle");
+
+    // The detached precompute fills in every Layer, not only the Ground.
+    for index in 0..map.layers.len() {
+        let bytes = wait_for_blob(&blobs, &curated_layer_thumbnail_key(&map, index)).await;
+        assert_eq!(&bytes[..3], &[0xFF, 0xD8, 0xFF], "JPEG SOI marker");
+    }
+
+    // A stored Thumbnail is never regenerated: a sentinel survives a second precompute.
+    let ground_key = curated_layer_thumbnail_key(&map, 0);
+    blobs
+        .write_blob(&ground_key, b"sentinel-thumbnail")
+        .await
+        .unwrap();
+    curator::services::ThumbnailService::new(catalog.clone(), blobs.clone())
+        .precompute_curated_thumbnails(&map)
+        .await;
+    assert_eq!(
+        blobs.read_blob(&ground_key).await.unwrap().as_slice(),
+        b"sentinel-thumbnail".as_slice()
+    );
+    let upper = blobs
+        .read_blob(&curated_layer_thumbnail_key(&map, 1))
+        .await
+        .unwrap();
+    assert_eq!(&upper[..3], &[0xFF, 0xD8, 0xFF]);
+}
+
+/// [`BlobStorage`] double whose writes of derived Thumbnails fail while `failing` is set.
+struct ThumbnailFailingBlobStorage {
+    inner: InMemoryBlobStorage,
+    failing: AtomicBool,
+    thumbnail_write_attempts: AtomicUsize,
+}
+
+impl ThumbnailFailingBlobStorage {
+    fn new() -> Self {
+        Self {
+            inner: InMemoryBlobStorage::new(),
+            failing: AtomicBool::new(true),
+            thumbnail_write_attempts: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl BlobStorage for ThumbnailFailingBlobStorage {
+    async fn read_blob(&self, key: &BlobKey) -> Result<Vec<u8>, curator::ports::storage_error::StorageError> {
+        self.inner.read_blob(key).await
+    }
+
+    async fn write_blob(
+        &self,
+        key: &BlobKey,
+        bytes: &[u8],
+    ) -> Result<(), curator::ports::storage_error::StorageError> {
+        if matches!(key, BlobKey::CuratedThumbnail { .. }) {
+            self.thumbnail_write_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(curator::ports::storage_error::StorageError::Io(
+                    std::io::Error::other("simulated Thumbnail write failure"),
+                ));
+            }
+        }
+        self.inner.write_blob(key, bytes).await
+    }
+
+    async fn delete_blob(
+        &self,
+        key: &BlobKey,
+    ) -> Result<(), curator::ports::storage_error::StorageError> {
+        self.inner.delete_blob(key).await
+    }
+
+    async fn exists_blob(
+        &self,
+        key: &BlobKey,
+    ) -> Result<bool, curator::ports::storage_error::StorageError> {
+        self.inner.exists_blob(key).await
+    }
+
+    async fn blob_size(
+        &self,
+        key: &BlobKey,
+    ) -> Result<u64, curator::ports::storage_error::StorageError> {
+        self.inner.blob_size(key).await
+    }
+
+    async fn list_prefix(
+        &self,
+        prefix: &BlobKey,
+    ) -> Result<Vec<BlobKey>, curator::ports::storage_error::StorageError> {
+        self.inner.list_prefix(prefix).await
+    }
+}
+
+#[tokio::test]
+async fn test_thumbnail_precompute_failure_does_not_fail_curation_and_the_lazy_route_retries() {
+    let blobs_impl = Arc::new(ThumbnailFailingBlobStorage::new());
+    let blobs: Arc<dyn BlobStorage + Send + Sync> = blobs_impl.clone();
+    let catalog: Arc<dyn CatalogRepository + Send + Sync> =
+        Arc::new(InMemoryCatalogRepository::new());
+
+    let ground = solid_png(300, 300, [40, 90, 160, 255]);
+    let upper = solid_png(300, 300, [200, 120, 40, 255]);
+    let mut candidate = Candidate::with_now(
+        "thumb_precompute_failure",
+        Source::Manual,
+        "0.png",
+        (300, 300),
+    )
+    .with_grid(GridConfig::new(16, 0, 0));
+    candidate.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (300, 300)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (300, 300)),
+    ];
+    catalog.save_candidate(&candidate).await.unwrap();
+    for (index, bytes) in [&ground, &upper].into_iter().enumerate() {
+        blobs
+            .write_blob(
+                &BlobKey::StagingLayer {
+                    id: "thumb_precompute_failure".into(),
+                    index,
+                },
+                bytes,
+            )
+            .await
+            .unwrap();
+    }
+
+    let map = CurationService::new(
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(DescriptionService::new(None)),
+    )
+    .curate(
+        "thumb_precompute_failure",
+        vec!["dungeon".into()],
+        None,
+        Some("A precompute failure must not undo curation".to_string()),
+    )
+    .await
+    .expect("curation succeeds even when Thumbnail precompute cannot write");
+    assert_eq!(map.layers.len(), 2);
+
+    // Wait for the detached precompute to actually attempt (and fail) a Thumbnail write.
+    for _ in 0..500 {
+        if blobs_impl
+            .thumbnail_write_attempts
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        blobs_impl
+            .thumbnail_write_attempts
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0,
+        "precompute never attempted a Thumbnail write"
+    );
+    for index in 0..map.layers.len() {
+        assert!(
+            !blobs
+                .exists_blob(&curated_layer_thumbnail_key(&map, index))
+                .await
+                .unwrap(),
+            "a failed precompute must not store a Thumbnail"
+        );
+    }
+
+    // The lazy route retries once writes work again.
+    blobs_impl
+        .failing
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let app = create_router(AppState::new(catalog.clone(), blobs.clone()));
+    for index in 0..map.layers.len() {
+        let resp = get_curated_layer_thumbnail(&app, "thumb_precompute_failure", index).await;
+        assert_eq!(resp.status(), StatusCode::OK, "layer {index}");
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&bytes[..3], &[0xFF, 0xD8, 0xFF], "layer {index}");
+    }
 }

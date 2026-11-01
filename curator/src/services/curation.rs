@@ -10,7 +10,7 @@ use crate::ports::catalog_repository::CatalogRepository;
 use crate::ports::storage_error::StorageError;
 use crate::services::description::{DescriptionError, DescriptionService};
 use crate::services::sections::{describe_map_sections, SectionDescriptionContext};
-use crate::services::thumbnails::invalidate_curated_thumbnails;
+use crate::services::thumbnails::{invalidate_curated_thumbnails, ThumbnailService};
 
 /// Errors arising during the curation and rejection workflow.
 #[derive(Debug, Error)]
@@ -350,6 +350,19 @@ impl CurationWorkflow for CurationService {
 
         // 10. Success: the staging bundle is superseded by the curated bundle.
         self.purge_staging(id).await;
+
+        // 11. Precompute the derived Thumbnails of every Layer, detached from this response.
+        //     Invalidation ran before the manifest commit, so this task always observes the
+        //     purged namespace and renders the new Layer bytes. A failure only warns; the lazy
+        //     `GET /api/thumb/curated/{id}[/{layer_index}]` route retries the missing Thumbnail.
+        let thumbnails = ThumbnailService::new(self.catalog.clone(), self.blobs.clone());
+        let precomputed_map = map.clone();
+        tokio::spawn(async move {
+            thumbnails
+                .precompute_curated_thumbnails(&precomputed_map)
+                .await;
+        });
+
         Ok(map)
     }
 

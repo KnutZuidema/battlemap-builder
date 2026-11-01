@@ -4,15 +4,16 @@
 //! most [`THUMBNAIL_LONG_EDGE`] pixels, aspect preserved, Lanczos3-resampled, alpha composited over
 //! [`PADDING_COLOR_RGB`], JPEG-encoded at quality [`THUMBNAIL_JPEG_QUALITY`]. It is stored under
 //! [`BlobKey::CuratedThumbnail`] (`thumbs/curated/{id}/{index}_{slug}.jpg`) and served by
-//! `GET /api/thumb/curated/{id}` instead of transferring the multi-megabyte Ground layer.
+//! `GET /api/thumb/curated/{id}` (Ground layer) and `GET /api/thumb/curated/{id}/{layer_index}`
+//! (that Layer) instead of transferring the multi-megabyte original.
 //!
-//! Generation happens on first request and is bounded twice: a semaphore of one serializes the
-//! decode, and a per-bundle single flight makes concurrent requests for the same Thumbnail await
-//! one generation and share its bytes, while also serializing generation with the invalidation
-//! every curated-bundle write performs ([`invalidate_curated_thumbnails`]). Once stored, a
-//! Thumbnail is served from storage and never regenerated. Failures surface as
-//! [`ThumbnailError`] (502 at the HTTP edge); the original Layer bytes are never substituted for a
-//! Thumbnail.
+//! Generation happens on first request, and eagerly after curation for every Layer, and is
+//! bounded twice: a process-wide semaphore of one serializes the decode, and a per-bundle single
+//! flight makes concurrent requests for the same Thumbnail await one generation and share its
+//! bytes, while also serializing generation with the invalidation every curated-bundle write
+//! performs ([`invalidate_curated_thumbnails`]). Once stored, a Thumbnail is served from storage
+//! and never regenerated. Failures surface as [`ThumbnailError`] (502 at the HTTP edge); the
+//! original Layer bytes are never substituted for a Thumbnail.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Weak};
@@ -20,7 +21,7 @@ use std::sync::{Arc, LazyLock, Weak};
 use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::domain::Layer;
+use crate::domain::{CuratedMap, Layer};
 use crate::ports::blob_storage::{BlobKey, BlobStorage};
 use crate::ports::catalog_repository::CatalogRepository;
 use crate::ports::image_processor::PADDING_COLOR_RGB;
@@ -47,11 +48,17 @@ pub enum ThumbnailError {
     Generation(String),
 }
 
+/// Single decode permit for the whole process.
+///
+/// The lazy route, the curation precompute and every other [`ThumbnailService`] instance share
+/// it, so two services cannot decode a multi-megabyte Layer at the same time.
+static DECODE_LIMIT: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
+
 /// Application service generating and serving derived Thumbnails of curated Layers.
 pub struct ThumbnailService {
     catalog: Arc<dyn CatalogRepository + Send + Sync>,
     blobs: Arc<dyn BlobStorage + Send + Sync>,
-    /// Single permit: exactly one Thumbnail is decoded at a time on this pod.
+    /// Single process-wide permit: exactly one Thumbnail is decoded at a time on this pod.
     decode_limit: Arc<Semaphore>,
 }
 
@@ -64,7 +71,7 @@ impl ThumbnailService {
         Self {
             catalog,
             blobs,
-            decode_limit: Arc::new(Semaphore::new(1)),
+            decode_limit: DECODE_LIMIT.clone(),
         }
     }
 
@@ -76,6 +83,49 @@ impl ThumbnailService {
             ThumbnailError::NotFound(format!("Curated map '{id}' has no layer to thumbnail"))
         })?;
         self.ensure_curated_thumbnail(id, layer).await
+    }
+
+    /// Returns the Thumbnail bytes of layer `layer_index` of Curated Map `id`, generating and
+    /// persisting it on first request.
+    ///
+    /// An index that the map does not have is a [`ThumbnailError::NotFound`]; it never falls back
+    /// to the Ground or another Layer.
+    pub async fn curated_layer_thumbnail(
+        &self,
+        id: &str,
+        layer_index: usize,
+    ) -> Result<Vec<u8>, ThumbnailError> {
+        let map = self.catalog.get_curated(id).await?;
+        let layer = map
+            .layers
+            .iter()
+            .find(|layer| layer.index == layer_index)
+            .ok_or_else(|| {
+                ThumbnailError::NotFound(format!(
+                    "Curated image layer {layer_index} for '{id}' not found"
+                ))
+            })?;
+        self.ensure_curated_thumbnail(id, layer).await
+    }
+
+    /// Generates every missing Thumbnail of `map`, skipping Layers whose Thumbnail is already
+    /// stored.
+    ///
+    /// Curation spawns this detached after the manifest commits: the response does not wait for
+    /// it, a failure only warns, and the lazy route retries the missing Thumbnail later. Each
+    /// Layer goes through [`Self::ensure_curated_thumbnail`], so it shares the bundle flight and
+    /// the process-wide decode permit with request-driven generation.
+    pub async fn precompute_curated_thumbnails(&self, map: &CuratedMap) {
+        for layer in &map.layers {
+            if let Err(err) = self.ensure_curated_thumbnail(&map.id, layer).await {
+                tracing::warn!(
+                    map = %map.id,
+                    layer = layer.index,
+                    error = %err,
+                    "Thumbnail precompute failed; the lazy route will retry"
+                );
+            }
+        }
     }
 
     /// Returns the stored Thumbnail of `layer` of Curated Map `id`, generating it when absent.

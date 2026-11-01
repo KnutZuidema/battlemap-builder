@@ -812,6 +812,40 @@ pub async fn get_curated_thumbnail(
     Ok(image_response(bytes, "image/jpeg"))
 }
 
+/// GET /api/thumb/curated/{id}/{layer_index} - Stream the derived Thumbnail of one Layer.
+///
+/// Mirrors the full-resolution layer selector: `layer_index` is the Layer's `index`, and an index
+/// the map does not have is a `404` with no fallback to another Layer. Generation, single-flight,
+/// storage key and cache policy are shared with the Ground-layer Thumbnail route.
+pub async fn get_curated_layer_thumbnail(
+    State(state): State<AppState>,
+    Path((id, layer_index)): Path<(String, usize)>,
+) -> Result<Response, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Map ID cannot be empty"));
+    }
+
+    let bytes = state
+        .thumbnails
+        .curated_layer_thumbnail(&id, layer_index)
+        .await?;
+
+    Ok(image_response(bytes, "image/jpeg"))
+}
+
+/// Dispatcher for GET /api/thumb/curated/{id}/{layer_index}: a non-numeric selector is a `404`
+/// naming the requested Layer, exactly like the full-resolution layer dispatcher.
+pub async fn get_curated_thumbnail_or_layer(
+    state: State<AppState>,
+    Path((id, selector)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let layer_index = selector.parse::<usize>().map_err(|_| {
+        ApiError::not_found(format!(
+            "Curated thumbnail layer '{selector}' for '{id}' not found"
+        ))
+    })?;
+    get_curated_layer_thumbnail(state, Path((id, layer_index))).await
+}
 
 /// Request payload for curating a candidate.
 #[derive(Debug, Clone, Serialize, Deserialize)]

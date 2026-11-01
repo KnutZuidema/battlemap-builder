@@ -78,6 +78,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/image/curated/{id}/{layer_index}", get(get_curated_image_or_layer))
         .route("/api/thumb/curated/{id}", get(get_curated_thumbnail))
         .route(
+            "/api/thumb/curated/{id}/{layer_index}",
+            get(get_curated_thumbnail_or_layer),
+        )
+        .route(
             "/api/staging/{id}/layers",
             patch(patch_staging_layers).post(patch_staging_layers),
         )

@@ -1073,9 +1073,11 @@ impl CuratedMap {
     /// The Layer that represents this map's image: the `Ground` role, or the first Layer of a
     /// legacy manifest that never carried roles.
     ///
-    /// Every consumer that renders a curated map picks its image through this method, so the card
-    /// image, the fullscreen original and the inspector can never disagree about which Layer is
-    /// the map.
+    /// The derived Thumbnail route and `LibraryService::curated_ground_image` — the source of
+    /// `GET /api/image/curated/<id>` — both resolve their Layer here, so a card and the
+    /// full-resolution image of the same map cannot disagree about which Layer is the map. Other
+    /// curated-map consumers (dataset export, reference conditioning, section grids) still carry
+    /// their own copy of the fallback.
     pub fn ground_layer(&self) -> Option<&Layer> {
         self.layers
             .iter()

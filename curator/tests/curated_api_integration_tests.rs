@@ -2096,8 +2096,24 @@ async fn test_re_curation_drops_the_previous_thumbnail() {
     };
     assert_eq!(first_dimensions, (300, 300));
 
-    // Re-ingesting the same id restores its staging Layers, then the Support re-curates the
-    // already committed bundle: the curated Layer blobs change behind the same Thumbnail key.
+    // Re-ingestion restores the staging Candidate — its manifest, because curation's success path
+    // deletes it, plus its layer blobs — and then re-curates the already committed bundle, so the
+    // curated Layer blobs change behind the same Thumbnail key.
+    let mut reingested_candidate = Candidate::with_now(
+        "thumbnail_recurated",
+        Source::Manual,
+        "0.png",
+        (300, 300),
+    )
+    .with_grid(GridConfig::new(16, 0, 0));
+    reingested_candidate.layers = vec![
+        CandidateLayer::new(0, "0.png", LayerRole::Ground, Some(0), (300, 300)),
+        CandidateLayer::new(1, "1.png", LayerRole::UpperFloor, Some(1), (300, 300)),
+    ];
+    catalog
+        .save_candidate(&reingested_candidate)
+        .await
+        .expect("restore the re-ingested candidate manifest");
     let reingested = solid_png(300, 300, [200, 40, 40, 255]);
     for index in 0..2 {
         blobs

@@ -116,6 +116,10 @@ _Avoid_: Approved map, dataset item, manifest
 An individual image within a Candidate or Curated Map representing a single vertical level or visual variation of the same encounter space.
 _Avoid_: Slice, image file, sub-map, page
 
+**Thumbnail**:
+A derived, rebuildable downscaled rendering of a Layer used only by library cards and their layer scrubber, never an authoritative image or dataset input.
+_Avoid_: Preview, card image, cached image, sprite
+
 **Layer Role**:
 The structural function assigned to a Layer: `Ground`, `Upper Floor`, `Basement`, `Roof`, `Variant`, or `Exclude` (with `Unassigned` prior to triage).
 _Avoid_: Layer type, floor kind, category

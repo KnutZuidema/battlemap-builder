@@ -44,12 +44,71 @@ import {
 // Dataset Library View & LoRA Export (Issue #31)
 // ==========================================================================
 
+// The grid renders in bounded batches so opening a large library never builds every card at
+// once. A sentinel at the end of the grid appends the next batch as it approaches the viewport.
+export const LIBRARY_RENDER_BATCH = 40;
+export const LIBRARY_SEARCH_DEBOUNCE_MS = 150;
+
+// The sentinel is re-created on every render; the generation makes callbacks from a discarded
+// observer inert even if the browser delivers them after `disconnect()`.
+let librarySentinel = null;
+let librarySentinelObserver = null;
+let librarySentinelGeneration = 0;
+// Cards appended so far, contiguous from index 0. The batch only ever grows; filters reset it.
+let renderedLibraryCards = 0;
+
+let librarySearchTimer = null;
+let pendingLibrarySearch = null;
+
+/**
+ * Debounce a library search keystroke. The grid only rebuilds once the curator pauses, and the
+ * pending query is committed on view exit so it is never lost.
+ */
+export function queueLibrarySearch(query) {
+    pendingLibrarySearch = String(query ?? "");
+    clearTimeout(librarySearchTimer);
+    librarySearchTimer = setTimeout(flushLibrarySearch, LIBRARY_SEARCH_DEBOUNCE_MS);
+}
+
+function flushLibrarySearch() {
+    clearTimeout(librarySearchTimer);
+    librarySearchTimer = null;
+    if (pendingLibrarySearch === null) return;
+    const query = pendingLibrarySearch;
+    pendingLibrarySearch = null;
+    if (state.librarySearchQuery === query) return;
+    state.librarySearchQuery = query;
+    applyLibraryFilters();
+}
+
+/** Commit a pending query without rebuilding a view the curator has already left. */
+function settleLibrarySearch() {
+    clearTimeout(librarySearchTimer);
+    librarySearchTimer = null;
+    if (pendingLibrarySearch === null) return;
+    state.librarySearchQuery = pendingLibrarySearch;
+    pendingLibrarySearch = null;
+}
+
+function cancelLibrarySearch() {
+    clearTimeout(librarySearchTimer);
+    librarySearchTimer = null;
+    pendingLibrarySearch = null;
+}
+
 export function switchView(view) {
     if (state.libraryFullscreenActive && view !== "library") {
         closeLibraryFullscreen();
     }
     if (state.libraryDrawerActive && view !== "library") {
         closeLibraryInspector();
+    }
+    if (view !== "library") {
+        // A debounced keystroke must never rebuild a grid the curator has already left, but the
+        // query itself is still committed so returning to the library filters by what was typed.
+        // The grid keeps its sentinel: a failed refresh on re-entry must not strand the cards
+        // past the current batch with no way to append them.
+        settleLibrarySearch();
     }
     state.currentView = view;
     if (view === "triage") {
@@ -81,6 +140,11 @@ export async function fetchLibraryMaps() {
         renderedMapObjects.clear();
 
         applyLibraryFilters();
+        // A focus set while the listing was in flight (readiness remediation switches to the
+        // library and focuses its target before this resolves) survives the re-render.
+        if (state.currentView === "library" && state.libraryFocusedIndex >= 0) {
+            renderLibraryThrough(state.libraryFocusedIndex);
+        }
         fetchDatasetSnapshots();
     } catch (_) {
         // The failure policy named the operation; the grid keeps the maps it already has.
@@ -211,13 +275,8 @@ function sortCuratedMaps(maps, sortKey) {
     }
 }
 
-function setLibraryDensity(density) {
-    if (!["compact", "comfortable", "large"].includes(density)) return;
-    state.libraryDensity = density;
-    try {
-        localStorage.setItem("curator_library_density", density);
-    } catch (_) {}
-
+/** Apply the density classes and button state; boot uses this without a state change. */
+function paintLibraryDensity(density) {
     if (dom.libraryGrid) {
         dom.libraryGrid.classList.remove("density-compact", "density-comfortable", "density-large");
         dom.libraryGrid.classList.add(`density-${density}`);
@@ -227,6 +286,22 @@ function setLibraryDensity(density) {
     densityButtons.forEach((btn) => {
         btn.classList.toggle("active", btn.dataset.density === density);
     });
+}
+
+function setLibraryDensity(density) {
+    if (!["compact", "comfortable", "large"].includes(density)) return;
+    if (state.libraryDensity === density) return;
+    state.libraryDensity = density;
+    try {
+        localStorage.setItem("curator_library_density", density);
+    } catch (_) {}
+
+    paintLibraryDensity(density);
+
+    // Density changes the column count, so the bounded batch restarts from the top as well.
+    if (state.libraryFilteredMaps && state.libraryFilteredMaps.length > 0) {
+        applyLibraryFilters();
+    }
 }
 
 function setLibraryFacet(facet) {
@@ -239,6 +314,7 @@ function setLibraryFacet(facet) {
 }
 
 export function clearLibraryFilters() {
+    cancelLibrarySearch();
     state.librarySearchQuery = "";
     if (dom.librarySearchInput) {
         dom.librarySearchInput.value = "";
@@ -345,6 +421,10 @@ export function setLibraryFocus(index, scrollIntoView = true) {
     const maxIdx = state.libraryFilteredMaps.length - 1;
     const newIdx = Math.max(0, Math.min(index, maxIdx));
     state.libraryFocusedIndex = newIdx;
+
+    // Keyboard navigation and selection-focus can outrun the rendered batch; make sure the
+    // target card exists before querying it or scrolling to it.
+    renderLibraryThrough(newIdx);
 
     if (!dom.libraryGrid) return;
     const cards = dom.libraryGrid.querySelectorAll(".curated-card");
@@ -558,6 +638,8 @@ export function handleLibraryKeydown(e) {
 
     // Toggle / Open drawer on focused card: E
     if (e.key === "e" || e.key === "E") {
+        const targetIdx = state.libraryFocusedIndex >= 0 ? state.libraryFocusedIndex : 0;
+        renderLibraryThrough(targetIdx);
         toggleLibraryInspector();
         e.preventDefault();
         return;
@@ -566,6 +648,7 @@ export function handleLibraryKeydown(e) {
     // Open drawer on Enter or Space on focused card:
     if (e.key === "Enter" || e.key === " ") {
         if (state.libraryFilteredMaps && state.libraryFocusedIndex >= 0 && state.libraryFocusedIndex < state.libraryFilteredMaps.length) {
+            renderLibraryThrough(state.libraryFocusedIndex);
             openLibraryInspector(state.libraryFilteredMaps[state.libraryFocusedIndex]);
             e.preventDefault();
             return;
@@ -715,9 +798,11 @@ function renderLibraryAuditChip() {
     }
 }
 
-function renderLibraryGrid(maps) {
+function renderLibraryGrid(maps, requested = LIBRARY_RENDER_BATCH) {
     if (!dom.libraryGrid || !dom.libraryEmpty) return;
+    teardownLibrarySentinel();
     dom.libraryGrid.innerHTML = "";
+    renderedLibraryCards = 0;
 
     const hasAnyCuratedMaps = state.curatedMaps && state.curatedMaps.length > 0;
     const hasMatchingMaps = maps && maps.length > 0;
@@ -736,12 +821,108 @@ function renderLibraryGrid(maps) {
     dom.libraryGrid.classList.toggle("hidden", !showGrid);
 
     if (!showGrid) return;
-    const fragment = document.createDocumentFragment();
-    maps.forEach((map, idx) => {
-        fragment.appendChild(renderCuratedCard(map, idx));
-    });
 
+    const limit = Math.min(maps.length, Math.max(LIBRARY_RENDER_BATCH, requested));
+    appendLibraryCards(maps, 0, limit);
+    placeLibrarySentinel();
+}
+
+/** Append cards `[start, end)` of `maps` after the cards already in the grid. */
+function appendLibraryCards(maps, start, end) {
+    if (!dom.libraryGrid) return 0;
+    const from = Math.max(0, start);
+    const to = Math.min(maps.length, end);
+    if (to <= from) return 0;
+
+    const fragment = document.createDocumentFragment();
+    for (let index = from; index < to; index++) {
+        fragment.appendChild(renderCuratedCard(maps[index], index));
+    }
     dom.libraryGrid.appendChild(fragment);
+    renderedLibraryCards = to;
+    return to - from;
+}
+
+/**
+ * Append the next batch after the sentinel scrolls into range. Exported so a re-render or a
+ * targeted focus can extend the batch without waiting for the observer.
+ */
+export function appendLibraryBatch() {
+    const maps = state.libraryFilteredMaps;
+    if (!dom.libraryGrid || !maps || maps.length === 0) return 0;
+    if (state.currentView !== "library") return 0;
+
+    if (renderedLibraryCards >= maps.length) {
+        teardownLibrarySentinel();
+        return 0;
+    }
+
+    const end = Math.min(maps.length, renderedLibraryCards + LIBRARY_RENDER_BATCH);
+    const added = appendLibraryCards(maps, renderedLibraryCards, end);
+    placeLibrarySentinel();
+    return added;
+}
+
+/**
+ * Make sure the card at `index` is in the DOM before focus, selection, fullscreen or the
+ * inspector act on it. The rendered batch only grows here; a filter change resets it.
+ */
+export function renderLibraryThrough(index) {
+    if (!Number.isInteger(index) || index < 0) return;
+    const maps = state.libraryFilteredMaps;
+    if (!dom.libraryGrid || !maps || maps.length === 0) return;
+    if (index >= maps.length) return;
+
+    const target = index + 1;
+    if (target <= renderedLibraryCards) return;
+
+    if (renderedLibraryCards === 0) {
+        renderLibraryGrid(maps, target);
+        return;
+    }
+
+    appendLibraryCards(maps, renderedLibraryCards, target);
+    placeLibrarySentinel();
+}
+
+/** The sentinel is always re-created with a fresh observer; a stale observer is disconnected. */
+function placeLibrarySentinel() {
+    const maps = state.libraryFilteredMaps || [];
+    teardownLibrarySentinel();
+    if (!dom.libraryGrid || renderedLibraryCards >= maps.length) return;
+
+    const sentinel = document.createElement("div");
+    sentinel.className = "library-grid-sentinel";
+    sentinel.dataset.librarySentinel = "true";
+    sentinel.setAttribute("aria-hidden", "true");
+    // Inline because the sentinel is a grid item that must not take a card slot.
+    sentinel.style.gridColumn = "1 / -1";
+    sentinel.style.height = "1px";
+    dom.libraryGrid.appendChild(sentinel);
+    librarySentinel = sentinel;
+
+    const generation = librarySentinelGeneration;
+    const root = dom.libraryGrid.closest(".library-scroll-container");
+    librarySentinelObserver = new IntersectionObserver((entries) => {
+        // A re-render discards this observer; never append a batch for a grid that is gone.
+        if (generation !== librarySentinelGeneration) return;
+        if (state.currentView !== "library") return;
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        appendLibraryBatch();
+    }, { root: root || null, rootMargin: "800px 0px" });
+    librarySentinelObserver.observe(sentinel);
+}
+
+function teardownLibrarySentinel() {
+    librarySentinelGeneration += 1;
+    if (librarySentinelObserver) {
+        librarySentinelObserver.disconnect();
+        librarySentinelObserver = null;
+    }
+    if (librarySentinel) {
+        librarySentinel.remove();
+        librarySentinel = null;
+    }
 }
 
 function getShortRoleChip(role, elevation) {
@@ -1134,8 +1315,7 @@ export function setupLibraryControls() {
     dom.btnToggleSnapshots?.addEventListener("click", () => toggleSnapshotsShelf());
 
     dom.librarySearchInput?.addEventListener("input", (e) => {
-        state.librarySearchQuery = e.target.value;
-        applyLibraryFilters();
+        queueLibrarySearch(e.target.value);
     });
 
     const facetButtons = document.querySelectorAll(".lib-facet-chip");
@@ -1161,7 +1341,7 @@ export function setupLibraryControls() {
         });
     });
 
-    setLibraryDensity(state.libraryDensity);
+    paintLibraryDensity(state.libraryDensity);
     if (dom.librarySortSelect) {
         dom.librarySortSelect.value = state.librarySort;
     }

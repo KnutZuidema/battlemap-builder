@@ -14,6 +14,7 @@ import {
     applyLibraryFilters,
     showLibraryAuditFilter,
     clearLibraryAuditFilter,
+    setLibraryFocus,
 } from "./library.js";
 import {
     openLibraryFullscreen,
@@ -498,6 +499,9 @@ async function focusLibraryMap(mapId) {
         applyLibraryFilters();
         index = (state.libraryFilteredMaps || []).findIndex(map => map.id === mapId);
     }
+    // Rendering is batched: the remediation target may sit past the first batch, so render
+    // through it (and highlight it) before the caller opens fullscreen or the inspector.
+    if (index >= 0) setLibraryFocus(index, false);
     return index;
 }
 

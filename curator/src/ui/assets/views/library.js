@@ -149,7 +149,7 @@ export function applyLibraryFilters() {
 
     if (dom.libraryCountBadge) {
         dom.libraryCountBadge.textContent = state.libraryAuditFilter
-            ? `${filtered.length} of ${state.curatedMaps.length} Maps`
+            ? `${filtered.length} of ${state.curatedMaps.length} Map${state.curatedMaps.length === 1 ? "" : "s"}`
             : `${filtered.length} Map${filtered.length === 1 ? "" : "s"}`;
     }
 

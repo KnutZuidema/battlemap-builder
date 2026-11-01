@@ -299,17 +299,21 @@ test("a readiness audit filter change resets the rendered batch", () => {
     appendLibraryBatch();
     assert.equal(cards().length, 80);
 
+    // A strict subset: dropping the audit predicate would keep all 120 maps and leave this
+    // test at 40 → 80 → 40, so the narrowed deck and the 70-card append are the assertion.
     state.libraryAuditFilter = {
         code: "physical_description_missing",
-        ids: new Set(state.curatedMaps.map((map) => map.id)),
+        ids: new Set(state.curatedMaps.slice(0, 70).map((map) => map.id)),
     };
     applyLibraryFilters();
+    assert.equal(state.libraryFilteredMaps.length, 70, "the audit filter narrows the deck");
     assert.equal(cards().length, LIBRARY_RENDER_BATCH, "showing the audit filter starts from the first batch");
 
     appendLibraryBatch();
-    assert.equal(cards().length, 80);
+    assert.equal(cards().length, 70, "appending stops at the narrowed deck");
     clearLibraryAuditFilter();
     assert.equal(state.libraryAuditFilter, null);
+    assert.equal(state.libraryFilteredMaps.length, 120, "clearing the audit filter restores the deck");
     assert.equal(cards().length, LIBRARY_RENDER_BATCH, "clearing the audit filter starts from the first batch");
 });
 
@@ -362,6 +366,44 @@ test("the search input is debounced, applies the final query, and never fires af
     assert.equal(state.librarySearchQuery, "battlemap 2", "the final query is not swallowed");
     t.mock.timers.tick(LIBRARY_SEARCH_DEBOUNCE_MS * 2);
     assert.equal(cards()[0], rebuilt, "no render fires after the library view closed");
+});
+
+test("the sentinel and observer survive a failed refresh on view re-entry", async () => {
+    mount(makeMaps(120));
+    applyLibraryFilters();
+    assert.equal(cards().length, LIBRARY_RENDER_BATCH);
+    assert.ok(sentinel());
+    const observer = intersectionObservers[intersectionObservers.length - 1];
+    assert.equal(observer.node, sentinel());
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+        ok: false,
+        status: 503,
+        statusText: "Service Unavailable",
+        json: async () => ({ error: "curated listing unavailable" }),
+        text: async () => JSON.stringify({ error: "curated listing unavailable" }),
+    });
+
+    try {
+        switchView("triage");
+        assert.ok(sentinel(), "leaving the library keeps the sentinel");
+        switchView("library");
+        // switchView fires the refresh without awaiting it; await the same failure explicitly.
+        await fetchLibraryMaps();
+        await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+
+    assert.equal(state.currentView, "library");
+    assert.equal(cards().length, LIBRARY_RENDER_BATCH, "the failed refresh keeps the rendered batch");
+    assert.equal(sentinel(), observer.node, "the failed refresh keeps the sentinel in place");
+    assert.equal(observer.disconnected, undefined, "the observer was never disconnected");
+
+    observer.callback([{ isIntersecting: true }]);
+    assert.equal(cards().length, 80, "the retained observer still appends the next batch");
+    assert.ok(sentinel(), "a fresh sentinel is placed for the remaining cards");
 });
 
 test("a refresh preserves a focus beyond the first batch", async () => {

@@ -754,6 +754,10 @@ function showThumbnailUnavailable(card, thumbImg) {
     card.dataset.thumbUnavailable = "true";
     thumbImg.removeAttribute("src");
     thumbImg.hidden = true;
+    // The scrubber only reassigns this element's src; once the image is hidden every pill is
+    // inert, so the unavailable state takes the layer control with it instead of leaving focusable
+    // pills that would re-request the failing Thumbnail URL.
+    card.querySelector(".curated-layer-scrubber")?.remove();
     const unavailable = document.createElement("div");
     unavailable.className = "curated-thumb-unavailable text-muted";
     unavailable.setAttribute("role", "img");

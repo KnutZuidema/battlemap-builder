@@ -32,7 +32,7 @@ import {
     saveLibraryInspectorChanges,
 } from "./inspector.js";
 import { showToast } from "../shell/status.js";
-import { syncReadinessToScope } from "./readiness.js";
+import { syncReadinessToScope, auditFilterMapIds, datasetIssueLabel } from "./readiness.js";
 import { exportDataset, fetchCuratedMaps } from "../requests/library.js";
 import {
     fetchDatasetSnapshots,
@@ -133,6 +133,12 @@ export function applyLibraryFilters() {
             }
         }
 
+        // 4. Readiness audit filter (Issue #287): only the maps the report flags with its code.
+        const auditFilter = state.libraryAuditFilter;
+        if (auditFilter && !auditFilter.ids.has(map.id)) {
+            return false;
+        }
+
         return true;
     });
 
@@ -145,9 +151,12 @@ export function applyLibraryFilters() {
     }
 
     if (dom.libraryCountBadge) {
-        dom.libraryCountBadge.textContent = `${filtered.length} Map${filtered.length === 1 ? "" : "s"}`;
+        dom.libraryCountBadge.textContent = state.libraryAuditFilter
+            ? `${filtered.length} of ${state.curatedMaps.length} Map${state.curatedMaps.length === 1 ? "" : "s"}`
+            : `${filtered.length} Map${filtered.length === 1 ? "" : "s"}`;
     }
 
+    renderLibraryAuditChip();
     renderLibraryTagPills();
     renderLibraryGrid(filtered);
 }
@@ -235,9 +244,42 @@ export function clearLibraryFilters() {
         dom.librarySearchInput.value = "";
     }
     state.libraryActiveTag = null;
+    // Clearing every library filter also drops the readiness audit selection (Issue #287).
+    state.libraryAuditFilter = null;
     setLibraryFacet("all");
     fetchDatasetSnapshots();
     syncReadinessToScope({ audit: true });
+}
+
+/**
+ * Narrow the library to the maps a readiness audit flags with `code` (Issue #287).
+ *
+ * The stored report names the maps. Ids the curated scope no longer contains simply never match
+ * a card, so they are ignored without being dropped from the selection — the curated fetch may
+ * still be in flight when a cached report's row is clicked, and its maps must re-enter the
+ * filter once it lands. An empty result still becomes the active filter, so the filter-empty
+ * state can explain which issue kind hid everything and offer to clear it. Never starts a
+ * readiness request.
+ */
+export function showLibraryAuditFilter(code) {
+    // The readiness block only renders in the library view, so the grid is already the active
+    // view. Never switch (that would re-read the scope and could start an audit) and never send
+    // a readiness or describe request.
+    state.libraryAuditFilter = { code, ids: auditFilterMapIds(code) };
+    applyLibraryFilters();
+    scrollLibraryResultsIntoView();
+}
+
+/** Restore the unfiltered library scope while keeping tag, search and facet filters. */
+export function clearLibraryAuditFilter() {
+    if (!state.libraryAuditFilter) return;
+    state.libraryAuditFilter = null;
+    applyLibraryFilters();
+}
+
+function scrollLibraryResultsIntoView() {
+    const target = state.libraryFilteredMaps.length > 0 ? dom.libraryGrid : dom.libraryFilterEmpty;
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function toggleCardSelection(id) {
@@ -658,6 +700,21 @@ function renderLibraryTagPills() {
     dom.libraryTagPills.appendChild(fragment);
 }
 
+/** Paint the dismissible audit filter chip from the state the grid just rendered. */
+function renderLibraryAuditChip() {
+    const filter = state.libraryAuditFilter;
+    const chip = dom.libraryAuditFilterChip;
+    if (chip) chip.classList.toggle("hidden", !filter);
+    if (!filter) return;
+    if (dom.libraryAuditFilterLabel) {
+        dom.libraryAuditFilterLabel.textContent = datasetIssueLabel(filter.code);
+    }
+    if (dom.libraryAuditFilterCount) {
+        const visible = state.libraryFilteredMaps.length;
+        dom.libraryAuditFilterCount.textContent = `${visible} ${visible === 1 ? "map" : "maps"}`;
+    }
+}
+
 function renderLibraryGrid(maps) {
     if (!dom.libraryGrid || !dom.libraryEmpty) return;
     dom.libraryGrid.innerHTML = "";
@@ -671,6 +728,11 @@ function renderLibraryGrid(maps) {
 
     dom.libraryEmpty.classList.toggle("hidden", !showEmpty);
     if (dom.libraryFilterEmpty) dom.libraryFilterEmpty.classList.toggle("hidden", !showFilterEmpty);
+    if (dom.libraryFilterEmptyDesc) {
+        dom.libraryFilterEmptyDesc.textContent = state.libraryAuditFilter
+            ? `No maps in the current scope match the "${datasetIssueLabel(state.libraryAuditFilter.code)}" audit filter.`
+            : "No battlemaps match the current filter criteria.";
+    }
     dom.libraryGrid.classList.toggle("hidden", !showGrid);
 
     if (!showGrid) return;
@@ -1066,6 +1128,7 @@ export function setupLibraryControls() {
     dom.btnRefreshLibrary?.addEventListener("click", () => fetchLibraryMaps());
     dom.btnExportLora?.addEventListener("click", () => exportLoraDataset());
     dom.btnClearLibraryFilters?.addEventListener("click", () => clearLibraryFilters());
+    dom.btnClearLibraryAuditFilter?.addEventListener("click", () => clearLibraryAuditFilter());
     dom.btnFreezeSnapshot?.addEventListener("click", () => freezeDatasetSnapshot());
     dom.btnRefreshSnapshots?.addEventListener("click", () => fetchDatasetSnapshots());
     dom.btnToggleSnapshots?.addEventListener("click", () => toggleSnapshotsShelf());

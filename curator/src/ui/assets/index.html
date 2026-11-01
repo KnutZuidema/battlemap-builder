@@ -394,6 +394,12 @@
                         <button type="button" class="lib-facet-chip" data-facet="has-desc">Has Description</button>
                         <button type="button" class="lib-facet-chip" data-facet="missing-desc">Missing Description</button>
                     </div>
+                    <div id="library-audit-filter-chip" class="library-audit-filter-chip hidden">
+                        <span class="library-audit-filter-kind">Audit</span>
+                        <span id="library-audit-filter-label" class="library-audit-filter-label"></span>
+                        <span id="library-audit-filter-count" class="library-audit-filter-count mono"></span>
+                        <button type="button" id="btn-clear-library-audit-filter" class="library-audit-filter-remove" aria-label="Clear the readiness audit map filter">&times;</button>
+                    </div>
                     <div id="library-tag-pills" class="library-tag-pills"></div>
                 </div>
 
@@ -549,7 +555,7 @@
                             </svg>
                         </div>
                         <h3>No Maps Matching Filter</h3>
-                        <p>No battlemaps match the current filter criteria.</p>
+                        <p id="library-filter-empty-desc">No battlemaps match the current filter criteria.</p>
                         <button type="button" id="btn-clear-library-filters" class="btn btn-secondary btn-sm">
                             Clear Filters
                         </button>

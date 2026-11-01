@@ -130,3 +130,15 @@ test("an in-stream refusal and a 422 RequestError leave the panel in the same st
     assert.notEqual(refusedResponse.report, null, "the 422 refusal does not clear the readiness cache");
     assert.match(refusedResponse.issues, /m1/, "the 422 refusal lists the flagged map");
 });
+
+test("a refusal that discards the report also drops an active library audit filter", (t) => {
+    const panel = setUp(t);
+    state.libraryAuditFilter = { code: "physical_description_missing", ids: new Set(["m1"]) };
+
+    // No `readiness` in the refusal: the stored report is discarded for the active scope.
+    showFreezeRefusal({ error: "Dataset is not ready" }, null, { toast: false });
+
+    assert.equal(state.readinessReport, null);
+    assert.equal(state.libraryAuditFilter, null, "the chip and grid never sit over a Not audited panel");
+    assert.equal(panel.panelState().status, "Freeze refused");
+});

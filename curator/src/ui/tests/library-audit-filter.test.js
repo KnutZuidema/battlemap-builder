@@ -263,7 +263,7 @@ test("ids missing from the curated scope are ignored, and an empty intersection 
     assert.equal(dom.libraryAuditFilterChip.classList.contains("hidden"), false);
     assert.equal(dom.libraryAuditFilterCount.textContent, "0 maps");
 
-    // The filter-empty state's clear action still restores the scope.
+    // Dismissing the chip restores the scope (the wired empty-state clear is covered below).
     clearLibraryAuditFilter();
     assert.deepEqual(visibleIds(), ["map-a", "map-b", "map-c"]);
     assert.equal(dom.libraryFilterEmpty.classList.contains("hidden"), true);
@@ -341,6 +341,34 @@ test("the delegated Show N maps action filters the grid and sends no request", a
 async function settle() {
     for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve));
 }
+
+test("an existing selection survives a cache-hit render without auditing", async (t) => {
+    setUp(t);
+    const server = stubFetch(() => jsonResponse({}));
+    t.after(() => server.restore());
+
+    showLibraryAuditFilter(MISSING);
+    assert.deepEqual(visibleIds(), ["map-a", "map-b"]);
+
+    // The active scope now has its report stored, so the next sync renders from the cache.
+    globalThis.localStorage.setItem("curator_dataset_readiness", JSON.stringify({
+        all: { audited_at: new Date().toISOString(), report: auditedReport() },
+    }));
+
+    syncReadinessToScope({ audit: true });
+    await settle();
+
+    assert.equal(state.libraryAuditFilter.code, MISSING, "a cache-hit render keeps the selection");
+    assert.deepEqual([...state.libraryAuditFilter.ids].sort(), [...auditFilterMapIds(MISSING)].sort());
+    assert.deepEqual(visibleIds(), ["map-a", "map-b"]);
+    assert.equal(dom.libraryAuditFilterChip.classList.contains("hidden"), false);
+    assert.equal(dom.libraryCountBadge.textContent, "2 of 3 Maps");
+    assert.deepEqual(state.readinessReport, auditedReport());
+    assert.ok(
+        !server.calls.some((call) => call.path === "/api/dataset/readiness"),
+        "a cached report is rendered, never re-audited",
+    );
+});
 
 test("Clear Filters drops the audit selection and restores the grid", async (t) => {
     setUp(t);

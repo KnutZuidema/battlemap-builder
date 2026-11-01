@@ -139,7 +139,6 @@ export function initializeDom() {
     dom.libraryEmpty = document.getElementById("library-empty");
     dom.libraryFilterEmpty = document.getElementById("library-filter-empty");
     dom.libraryFilterEmptyDesc = document.getElementById("library-filter-empty-desc");
-    dom.libraryScrollContainer = document.getElementById("library-scroll-container");
     dom.libraryAuditFilterChip = document.getElementById("library-audit-filter-chip");
     dom.libraryAuditFilterLabel = document.getElementById("library-audit-filter-label");
     dom.libraryAuditFilterCount = document.getElementById("library-audit-filter-count");

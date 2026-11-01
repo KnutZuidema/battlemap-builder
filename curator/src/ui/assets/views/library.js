@@ -259,10 +259,10 @@ export function clearLibraryFilters() {
  * readiness request.
  */
 export function showLibraryAuditFilter(code) {
+    // The readiness block only renders in the library view, so the grid is already the active
+    // view. Never switch (that would re-read the scope and could start an audit) and never send
+    // a readiness or describe request.
     state.libraryAuditFilter = { code, ids: auditFilterMapIds(code) };
-    // The readiness block already lives in the library view; switching would re-read the scope
-    // and could start an audit, which selecting a report must never do.
-    if (state.currentView !== "library") switchView("library");
     applyLibraryFilters();
     scrollLibraryResultsIntoView();
 }
@@ -276,11 +276,7 @@ export function clearLibraryAuditFilter() {
 
 function scrollLibraryResultsIntoView() {
     const target = state.libraryFilteredMaps.length > 0 ? dom.libraryGrid : dom.libraryFilterEmpty;
-    if (target && typeof target.scrollIntoView === "function") {
-        target.scrollIntoView({ behavior: "smooth", block: "start" });
-        return;
-    }
-    if (dom.libraryScrollContainer) dom.libraryScrollContainer.scrollTop = 0;
+    target?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function toggleCardSelection(id) {

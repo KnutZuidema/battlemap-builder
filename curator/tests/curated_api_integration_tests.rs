@@ -2037,6 +2037,41 @@ async fn test_delete_curated_purges_the_maps_thumbnails() {
 }
 
 #[tokio::test]
+async fn test_rewriting_curated_layers_purges_the_maps_thumbnails() {
+    let (app, catalog, blobs) = setup_test_app();
+    let map = curate_map_with_grid(
+        &catalog,
+        &blobs,
+        "thumb_layer_rewrite",
+        (512, 512),
+        32,
+        None,
+    )
+    .await;
+
+    // Seed the derived Thumbnail directly (no curation precompute is in flight here).
+    let resp = get_curated_thumbnail(&app, "thumb_layer_rewrite").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let thumbs_dir = BlobKey::CuratedThumbsDir {
+        id: "thumb_layer_rewrite".into(),
+    };
+    assert_eq!(blobs.list_prefix(&thumbs_dir).await.unwrap().len(), 1);
+
+    // Rewriting the layer manifest (same Layer, revalidated and re-written) drops every derived
+    // Thumbnail, so the next request regenerates instead of serving superseded bytes.
+    let layers: Vec<Value> = map
+        .layers
+        .iter()
+        .map(|layer| serde_json::to_value(layer).expect("serialize Layer"))
+        .collect();
+    assert_eq!(
+        patch_curated(&app, "thumb_layer_rewrite", json!({ "layers": layers })).await,
+        StatusCode::OK
+    );
+    assert!(blobs.list_prefix(&thumbs_dir).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_curated_thumbnail_fails_with_502_on_an_undecodable_layer() {
     let (app, catalog, blobs) = setup_test_app();
     let map = CuratedMap::with_now(

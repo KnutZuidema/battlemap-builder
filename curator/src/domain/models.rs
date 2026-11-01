@@ -1075,9 +1075,11 @@ impl CuratedMap {
     ///
     /// The derived Thumbnail route and `LibraryService::curated_ground_image` — the source of
     /// `GET /api/image/curated/<id>` — both resolve their Layer here, so a card and the
-    /// full-resolution image of the same map cannot disagree about which Layer is the map. Other
-    /// curated-map consumers (dataset export, reference conditioning, section grids) still carry
-    /// their own copy of the fallback.
+    /// full-resolution image of the same map cannot disagree about which Layer is the map.
+    ///
+    /// Other curated-map consumers still inline their own Ground-or-first fallback, so this list is
+    /// not exhaustive: `patch_curated`, `LibraryService::ensure_curated_caption`, dataset export,
+    /// reference conditioning and section grids are unaffected by this method today.
     pub fn ground_layer(&self) -> Option<&Layer> {
         self.layers
             .iter()

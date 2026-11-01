@@ -690,18 +690,31 @@ mod tests {
 
     /// [`BlobStorage`] double over an in-memory store whose staging CLEANUP fails per mode: reads,
     /// writes, and existence checks always succeed, so only the best-effort purge misbehaves.
+    ///
+    /// Failures are scoped to the staging bundle, so a curation that also invalidates derived
+    /// Thumbnails still sees a healthy `thumbs/` tree unless the test asks otherwise.
     struct FailingCleanupBlobStorage {
         inner: InMemoryBlobStorage,
-        fail_list_prefix: bool,
-        fail_delete_blob: bool,
+        fail_staging_list_prefix: bool,
+        fail_staging_delete_blob: bool,
+        fail_thumbnail_list_prefix: bool,
     }
 
     impl FailingCleanupBlobStorage {
-        fn new(fail_list_prefix: bool, fail_delete_blob: bool) -> Self {
+        fn new(fail_staging_list_prefix: bool, fail_staging_delete_blob: bool) -> Self {
             Self {
                 inner: InMemoryBlobStorage::new(),
-                fail_list_prefix,
-                fail_delete_blob,
+                fail_staging_list_prefix,
+                fail_staging_delete_blob,
+                fail_thumbnail_list_prefix: false,
+            }
+        }
+
+        /// Fails only the derived Thumbnail directory listing, leaving staging cleanup healthy.
+        fn failing_thumbnail_listing() -> Self {
+            Self {
+                fail_thumbnail_list_prefix: true,
+                ..Self::new(false, false)
             }
         }
 
@@ -721,7 +734,7 @@ mod tests {
         }
 
         async fn delete_blob(&self, key: &BlobKey) -> Result<(), StorageError> {
-            if self.fail_delete_blob {
+            if self.fail_staging_delete_blob && matches!(key, BlobKey::StagingLayer { .. }) {
                 return Err(Self::io_error("blob delete"));
             }
             self.inner.delete_blob(key).await
@@ -736,7 +749,11 @@ mod tests {
         }
 
         async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
-            if self.fail_list_prefix {
+            let failing_mode = (self.fail_staging_list_prefix
+                && matches!(prefix, BlobKey::StagingDir { .. }))
+                || (self.fail_thumbnail_list_prefix
+                    && matches!(prefix, BlobKey::CuratedThumbsDir { .. }));
+            if failing_mode {
                 return Err(Self::io_error("prefix listing"));
             }
             self.inner.list_prefix(prefix).await
@@ -1613,6 +1630,51 @@ mod tests {
         // … and the committed manifest is untouched by the failed call.
         assert_eq!(catalog.get_curated("cand_1").await.unwrap(), committed);
         // Staging stays untouched too, so the re-curation can be retried.
+        assert!(catalog.get_candidate("cand_1").await.is_ok());
+        assert_eq!(
+            staging_paths(&blobs, "cand_1").await,
+            vec!["staging/cand_1/0.png", "staging/cand_1/1.png"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_curate_fails_and_commits_nothing_when_thumbnail_invalidation_cannot_list() {
+        // Derived Thumbnails are dropped at the curation seam, and that step is not best-effort:
+        // skipping it would leave a card showing the previous revision of this map forever.
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let blobs = FailingCleanupBlobStorage::failing_thumbnail_listing();
+        seed_staged(
+            &catalog,
+            &blobs,
+            &sample_candidate(),
+            &[(0, ground_bytes()), (1, upper_bytes())],
+        )
+        .await;
+        let blobs: Arc<dyn BlobStorage + Send + Sync> = Arc::new(blobs);
+
+        let service = CurationService::new(
+            catalog.clone(),
+            blobs.clone(),
+            Arc::new(DescriptionService::new(None)),
+        );
+        let err = service
+            .curate(
+                "cand_1",
+                vec!["dungeon".into()],
+                None,
+                Some("A detailed stone dungeon crypt".into()),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, CurationWorkflowError::Storage(_)),
+            "Expected Storage error, got {err:?}"
+        );
+        // No manifest is committed, the freshly written curated blobs are rolled back, and the
+        // staging candidate is left for a retry.
+        assert!(catalog.get_curated("cand_1").await.is_err());
+        assert!(curated_paths(&blobs, "cand_1").await.is_empty());
         assert!(catalog.get_candidate("cand_1").await.is_ok());
         assert_eq!(
             staging_paths(&blobs, "cand_1").await,

@@ -2096,9 +2096,11 @@ async fn test_re_curation_drops_the_previous_thumbnail() {
     };
     assert_eq!(first_dimensions, (300, 300));
 
-    // Re-ingestion restores the staging Candidate — its manifest, because curation's success path
-    // deletes it, plus its layer blobs — and then re-curates the already committed bundle, so the
-    // curated Layer blobs change behind the same Thumbnail key.
+    // Ongoing re-ingestion is deduplicated upstream (`IngestionService::check_deduplication`
+    // answers `AlreadyCurated` for this id), so no production path recreates this state. The test
+    // constructs it directly: the staging Candidate manifest, which curation's success path
+    // deletes, plus the re-ingested layer blobs, then a second curation of the committed bundle so
+    // its curated Layer blobs change behind the same Thumbnail key.
     let mut reingested_candidate = Candidate::with_now(
         "thumbnail_recurated",
         Source::Manual,

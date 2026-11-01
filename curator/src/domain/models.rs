@@ -1079,7 +1079,9 @@ impl CuratedMap {
     ///
     /// Other curated-map consumers still inline their own Ground-or-first fallback, so this list is
     /// not exhaustive: `patch_curated`, `LibraryService::ensure_curated_caption`, dataset export,
-    /// reference conditioning and section grids are unaffected by this method today.
+    /// reference conditioning and section grids each carry a copy. `patch_curated` nevertheless
+    /// reads the image it validates through `curated_ground_image`, so its grid-update branch
+    /// follows this method's resolution even though its filename lookup does not.
     pub fn ground_layer(&self) -> Option<&Layer> {
         self.layers
             .iter()

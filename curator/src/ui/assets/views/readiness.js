@@ -12,6 +12,8 @@ import {
     switchView,
     clearLibraryFilters,
     applyLibraryFilters,
+    showLibraryAuditFilter,
+    clearLibraryAuditFilter,
 } from "./library.js";
 import {
     openLibraryFullscreen,
@@ -126,6 +128,11 @@ function mapsWithIssue(code, report = state.readinessReport) {
     return aggregateDatasetIssues(report).find((entry) => entry.code === code)?.maps || [];
 }
 
+/** The map ids the library narrows to when its audit filter selects `code` (Issue #287). */
+export function auditFilterMapIds(code, report = state.readinessReport) {
+    return new Set(mapsWithIssue(code, report));
+}
+
 function descriptionMapIds(report = state.readinessReport) {
     return [
         ...new Set(
@@ -162,10 +169,12 @@ function readinessIssueRowHtml(entry) {
     const maps = `${entry.maps.length} ${entry.maps.length === 1 ? "map" : "maps"}`;
     const findings = entry.occurrences > entry.maps.length ? ` · ${entry.occurrences} findings` : "";
     const title = entry.maps.join(", ");
-    const button = fix
+    const fixButton = fix
         ? `<button type="button" class="btn btn-secondary btn-xs readiness-action-btn" data-fix="${escapeHtml(fix.action)}" data-issue-code="${escapeHtml(entry.code)}" data-label="${escapeHtml(fix.label)}" title="${escapeHtml(title)}"><span class="readiness-action-label">${escapeHtml(fix.label)}</span><span class="readiness-action-spinner hidden"></span></button>`
         : "";
-    return `<li class="readiness-issue-row" title="${escapeHtml(title)}"><div class="readiness-issue-text"><span class="readiness-issue-code">${escapeHtml(datasetIssueLabel(entry.code))}</span><span class="readiness-issue-count mono">${escapeHtml(maps + findings)}</span></div>${button ? `<div class="readiness-issue-actions">${button}</div>` : ""}</li>`;
+    // Every issue kind can be inspected in the library, including those without a one-click fix.
+    const showMapsButton = `<button type="button" class="btn btn-secondary btn-xs readiness-action-btn" data-show-maps="${escapeHtml(entry.code)}" title="${escapeHtml(title)}">Show ${escapeHtml(maps)}</button>`;
+    return `<li class="readiness-issue-row" title="${escapeHtml(title)}"><div class="readiness-issue-text"><span class="readiness-issue-code">${escapeHtml(datasetIssueLabel(entry.code))}</span><span class="readiness-issue-count mono">${escapeHtml(maps + findings)}</span></div><div class="readiness-issue-actions">${fixButton}${showMapsButton}</div></li>`;
 }
 
 function readinessIssuesHtml(report, refusal) {
@@ -228,7 +237,11 @@ export function syncReadinessToScope({ audit = false } = {}) {
     state.readinessReport = cached ? cached.report : null;
     state.readinessAuditedAt = cached ? cached.auditedAt : null;
     // A refusal describes the scope that produced it; switching themes drops it.
-    if (scopeChanged) state.readinessRefusal = null;
+    if (scopeChanged) {
+        state.readinessRefusal = null;
+        // The audit filter names maps from the previous scope's report, so it is now stale.
+        clearLibraryAuditFilter();
+    }
     renderReadinessPanel();
     // A newly selected scope must be audited even while another scope's audit is running: the
     // new audit queues behind the stale one and the stale response is discarded.
@@ -241,6 +254,8 @@ export function applyReadinessReport(scopeKey, report, auditedAt) {
     saveReadinessCache(scopeKey, report, auditedAt);
     if (scopeKey !== readinessScopeKey()) return;
     state.readinessScopeKey = scopeKey;
+    // A new report replaces the map set the library audit filter was derived from.
+    clearLibraryAuditFilter();
     state.readinessReport = report;
     state.readinessAuditedAt = auditedAt;
     state.readinessRefusal = null;
@@ -517,6 +532,13 @@ export function revealReadinessPanel() {
 export function setupReadinessControls() {
     dom.btnAuditReadiness?.addEventListener("click", () => auditDatasetReadiness({ force: true }));
     dom.datasetReadinessIssues?.addEventListener("click", (e) => {
+        // Inspecting the flagged maps never runs remediation: no describe, no batch.
+        const showMaps = e.target.closest("[data-show-maps]");
+        if (showMaps) {
+            e.preventDefault();
+            showLibraryAuditFilter(showMaps.dataset.showMaps);
+            return;
+        }
         const button = e.target.closest("[data-fix]");
         if (!button) return;
         e.preventDefault();

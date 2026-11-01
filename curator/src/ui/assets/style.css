@@ -3586,6 +3586,55 @@ kbd {
     font-weight: 600;
 }
 
+/* Readiness audit filter chip (#287): the library narrowed to the maps an audit flags. */
+.library-audit-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.18rem 0.3rem 0.18rem 0.6rem;
+    border: 1px solid rgba(56, 189, 248, 0.45);
+    border-radius: 6px;
+    background: rgba(56, 189, 248, 0.16);
+    color: var(--accent-cyan);
+    font-family: var(--font-sans);
+    font-size: 0.75rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.library-audit-filter-kind {
+    font-size: 0.62rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    opacity: 0.75;
+}
+
+.library-audit-filter-count {
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.library-audit-filter-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    font-size: 0.9rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.library-audit-filter-remove:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: var(--text-primary);
+}
+
 .btn-export {
     background: linear-gradient(135deg, #0ea5e9, #0284c7);
     color: #fff;

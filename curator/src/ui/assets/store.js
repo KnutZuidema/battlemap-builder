@@ -85,6 +85,9 @@ export const state = {
     currentView: "triage",
     libraryActiveTag: null,
     librarySearchQuery: "",
+    // The readiness issue the library is narrowed to (Issue #287): { code, ids: Set<string> } | null.
+    // Transient: dropped when the scope changes or a new audit report replaces the selection.
+    libraryAuditFilter: null,
     libraryDensity: (function() {
         try {
             const stored = localStorage.getItem("curator_library_density");

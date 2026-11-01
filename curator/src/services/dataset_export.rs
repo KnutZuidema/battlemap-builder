@@ -25,6 +25,7 @@ use crate::domain::{
 use crate::ports::blob_storage::{sha256_digest, BlobKey, BlobStorage};
 use crate::ports::catalog_repository::{CatalogRepository, CuratedFilter};
 use crate::ports::storage_error::StorageError;
+use crate::services::image_work;
 
 /// One planned LoRA dataset sample: a `Map Section` box, the `Physical Description` it is
 /// captioned with (resolved once through [`sample_description`]), and any defect that makes the
@@ -357,9 +358,16 @@ impl DatasetExportService {
     ) -> Result<DatasetReadiness, StorageError> {
         let curated_maps = self.list_curated(theme).await?;
         let mut reports = Vec::with_capacity(curated_maps.len());
-        for map in &curated_maps {
-            let ground_bytes = self.blobs.read_blob(&curated_ground_blob_key(map)).await;
-            reports.push(audit_map_readiness(map, ground_bytes));
+        for map in curated_maps {
+            let ground_bytes = self.blobs.read_blob(&curated_ground_blob_key(&map)).await;
+            // Decoding a Ground layer is the audit's memory peak. Run each map's decode and
+            // classification under the shared image-work permit on the blocking pool, so an audit
+            // can never add a second full-resolution decode to a running refinement (or the
+            // reverse) and exhaust the pod's memory limit.
+            let report = image_work::run(move || audit_map_readiness(&map, ground_bytes))
+                .await
+                .map_err(|err| StorageError::Io(std::io::Error::other(err.to_string())))?;
+            reports.push(report);
         }
         Ok(DatasetReadiness::from_maps(reports))
     }
@@ -413,6 +421,10 @@ impl DatasetExportService {
                         continue;
                     }
                 };
+
+                // One full-resolution decode per map, serialized with every other image pipeline;
+                // the permit drops at the end of this map's iteration.
+                let _permit = image_work::acquire().await;
 
                 let dynamic_img = match image::load_from_memory(&ground_bytes) {
                     Ok(img) => img,

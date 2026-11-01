@@ -16,6 +16,7 @@ use crate::domain::{
 use crate::ports::blob_storage::{BlobKey, BlobStorage};
 use crate::ports::catalog_repository::{CandidateFilter, CatalogRepository};
 use crate::ports::storage_error::StorageError;
+use crate::services::image_work::GroundImage;
 use crate::services::sections::ground_dimensions;
 use crate::services::thumbnails::invalidate_curated_thumbnails;
 
@@ -532,11 +533,16 @@ impl LibraryService {
         if let Some(new_grid) = grid {
             // Same resolution the readiness audit uses: sections are cropped out of the decoded
             // Ground pixels, so the grid is validated against them rather than stale metadata.
+            // The decode is gated and released before the map is persisted.
             let ground_image = match self.curated_ground_image(id).await {
-                Ok((bytes, _)) => image::load_from_memory(&bytes).ok(),
+                Ok((bytes, _)) => Some(GroundImage::decode(bytes).await),
                 Err(_) => None,
             };
-            let (ground_w, ground_h) = ground_dimensions(&map, ground_image.as_ref());
+            let (ground_w, ground_h) = ground_dimensions(
+                &map,
+                ground_image.as_ref().and_then(|image| image.image()),
+            );
+            drop(ground_image);
             grid_dimensions = Some((ground_w, ground_h));
             if !new_grid.is_curation_eligible(ground_w, ground_h) {
                 return Err(StorageError::InvalidData(

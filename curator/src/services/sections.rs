@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use image::DynamicImage;
 
 use crate::domain::{
@@ -5,13 +7,16 @@ use crate::domain::{
     LayerRole, MapSection,
 };
 use crate::services::description::DescriptionService;
+use crate::services::image_work::GroundImage;
 
 /// Shared inputs for deriving per-MapSection descriptions from a Ground layer image.
 pub struct SectionDescriptionContext<'a> {
     /// Grid configuration used to derive the overlapping 16×16 section windows.
     pub grid: &'a GridConfig,
-    /// Decoded Ground layer image; `None` when the bytes could not be read or decoded.
-    pub ground_image: Option<&'a DynamicImage>,
+    /// Decoded Ground layer, holding the process-wide image-work permit. `None` when the bytes
+    /// could not be read or decoded. Owned rather than borrowed so the decode can be dropped once
+    /// the section crops exist, before the first vision round-trip.
+    pub ground: Option<GroundImage>,
     /// Ground layer dimensions used to derive section origins.
     pub ground_dimensions: (u32, u32),
     /// Tags forwarded to vision generation for section crops.
@@ -74,7 +79,7 @@ pub async fn describe_map_sections(
 ) -> Vec<MapSection> {
     let SectionDescriptionContext {
         grid,
-        ground_image,
+        ground,
         ground_dimensions,
         tags,
         title,
@@ -87,6 +92,14 @@ pub async fn describe_map_sections(
         return synthesize_map_sections(&section_origins, Some(map_description));
     }
 
+    // Crop every Map Section up front and release the decoded Ground layer before the first vision
+    // call: each crop is a PNG of one section, while the decode is hundreds of MiB and holds the
+    // process-wide image-work permit that must not stay taken across the vision round-trips.
+    let section_pngs = match ground {
+        Some(ground) => crop_sections(ground, *grid, &section_origins).await,
+        None => HashMap::new(),
+    };
+
     // Section descriptions are best-effort: a failed vision call or an unavailable crop reuses the
     // map-level `Physical Description` (the section is a window onto the same encounter space).
     // Synthesizing a caption here instead would bake the `Trigger Phrase` and camera directives
@@ -94,13 +107,11 @@ pub async fn describe_map_sections(
     // (ADR-0002, ADR-0007).
     let fallback = || map_description.trim().to_string();
 
-    let mut section_descriptions = std::collections::HashMap::with_capacity(section_origins.len());
+    let mut section_descriptions = HashMap::with_capacity(section_origins.len());
     for &(col, row) in &section_origins {
-        let section_png = ground_image.and_then(|image| crop_section_png(image, grid, col, row));
-
-        let description = match section_png {
+        let description = match section_pngs.get(&(col, row)) {
             Some(bytes) => match description_service
-                .describe(&bytes, Some("image/png"), tags, title)
+                .describe(bytes, Some("image/png"), tags, title)
                 .await
             {
                 Ok(description) => description,
@@ -136,4 +147,33 @@ pub async fn describe_map_sections(
                 .unwrap_or_else(&fallback)
         },
     )
+}
+
+/// Crops every planned section on the blocking pool and drops the decoded Ground layer.
+///
+/// The closure owns the decode, so the image and the image-work permit are released when it
+/// returns; a panicked crop task is logged and yields no crops, which the caller already handles
+/// as an unavailable crop per section.
+async fn crop_sections(
+    mut ground: GroundImage,
+    grid: GridConfig,
+    origins: &[(u32, u32)],
+) -> HashMap<(u32, u32), Vec<u8>> {
+    let Some(image) = ground.take_image() else {
+        return HashMap::new();
+    };
+    let origins = origins.to_vec();
+    tokio::task::spawn_blocking(move || {
+        origins
+            .into_iter()
+            .filter_map(|(col, row)| {
+                crop_section_png(&image, &grid, col, row).map(|bytes| ((col, row), bytes))
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_else(|err| {
+        tracing::error!(error = %err, "Section crop task failed");
+        HashMap::new()
+    })
 }

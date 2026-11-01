@@ -22,6 +22,7 @@ use crate::domain::{
 use crate::ports::blob_storage::{BlobKey, BlobStorage};
 use crate::ports::catalog_repository::{CatalogRepository, CuratedFilter};
 use crate::ports::storage_error::StorageError;
+use crate::services::image_work;
 
 // Embedded fallback reference image bytes so resolution succeeds reliably in any environment
 const STATIC_BYTES_REF_1: &[u8] = include_bytes!("../../../data/battlemap-reference-1.jpeg");
@@ -439,12 +440,10 @@ impl ReferenceProvider {
             let section = select_center_most_section(&map);
             match self.load_ground_bytes(&map).await {
                 Ok(raw_bytes) => {
-                    match preprocess_section_reference_image(
-                        &raw_bytes,
-                        &map.grid,
-                        &section,
-                        self.target_size,
-                    ) {
+                    match self
+                        .preprocess_section_reference(raw_bytes, map.grid, section.clone())
+                        .await
+                    {
                         Ok(jpeg_bytes) => {
                             let label =
                                 format!("Perspective Reference: 2D {} Plan View", theme.as_str());
@@ -538,12 +537,10 @@ impl ReferenceProvider {
             let primary_theme = map.theme().unwrap_or(Theme::Dungeon);
             match self.load_ground_bytes(&map).await {
                 Ok(raw_bytes) => {
-                    match preprocess_section_reference_image(
-                        &raw_bytes,
-                        &map.grid,
-                        &section,
-                        self.target_size,
-                    ) {
+                    match self
+                        .preprocess_section_reference(raw_bytes, map.grid, section.clone())
+                        .await
+                    {
                         Ok(jpeg_bytes) => {
                             let label = format!(
                                 "Perspective Reference: 2D {} Plan View",
@@ -604,6 +601,25 @@ impl ReferenceProvider {
     /// Loads the raw bytes of a curated map's `Ground` layer, falling back to its first layer.
     async fn load_ground_bytes(&self, map: &CuratedMap) -> Result<Vec<u8>, StorageError> {
         self.blobs.read_blob(&curated_ground_blob_key(map)).await
+    }
+
+    /// Crops and resamples one curated Map Section reference from full-resolution Ground bytes.
+    ///
+    /// The decode is the largest allocation in reference resolution, so it runs on the blocking
+    /// pool under the shared image-work permit: a benchmark cannot stack its decode on top of a
+    /// refinement, audit or Thumbnail decode.
+    async fn preprocess_section_reference(
+        &self,
+        raw_bytes: Vec<u8>,
+        grid: GridConfig,
+        section: MapSection,
+    ) -> Result<Vec<u8>, ReferenceProviderError> {
+        let target_size = self.target_size;
+        image_work::run(move || {
+            preprocess_section_reference_image(&raw_bytes, &grid, &section, target_size)
+        })
+        .await
+        .map_err(|err| ReferenceProviderError::Io(std::io::Error::other(err.to_string())))?
     }
 
     /// Retrieves preprocessed bytes for a static reference definition with in-memory caching.

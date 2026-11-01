@@ -823,8 +823,13 @@ impl<H: RedditHarvester, C: CatalogRepository, B: BlobStorage> RedditIngestionSe
                 break;
             };
             if layer.dimensions == (0, 0) {
-                layer.dimensions = image::load_from_memory(bytes)
-                    .map(|img| (img.width(), img.height()))
+                // Header-only read: ingestion touches every Layer of a bundle, and decoding the
+                // pixels just for their size would compete with refinement/audit decodes for the
+                // pod's memory limit.
+                layer.dimensions = image::ImageReader::new(std::io::Cursor::new(bytes))
+                    .with_guessed_format()
+                    .ok()
+                    .and_then(|reader| reader.into_dimensions().ok())
                     .unwrap_or(candidate_dimensions);
             }
         }

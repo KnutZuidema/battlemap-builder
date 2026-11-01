@@ -22,6 +22,7 @@ use tracing::{Level, Span};
 /// CORS and tracing middleware, and the static UI assets fallback.
 pub fn create_router(state: AppState) -> Router {
     let api_routes = Router::new()
+        .route("/api/healthz", get(get_healthz))
         .route("/api/status", get(get_status))
         .route("/api/staging", get(get_staging))
         .route("/api/curated", get(get_curated))

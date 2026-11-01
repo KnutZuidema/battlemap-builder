@@ -48,11 +48,14 @@ pub enum ThumbnailError {
     Generation(String),
 }
 
-/// Single decode permit for the whole process.
+/// Single process-wide image decode permit, shared with the Ground-layer description pipelines.
 ///
-/// The lazy route, the curation precompute and every other [`ThumbnailService`] instance share
-/// it, so two services cannot decode a multi-megabyte Layer at the same time.
-static DECODE_LIMIT: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
+/// The lazy route, the curation precompute and every other [`ThumbnailService`] instance share it,
+/// so two services cannot decode a multi-megabyte Layer at the same time — including a Thumbnail
+/// render racing a bulk refinement or a readiness audit decode.
+fn decode_limit() -> Arc<Semaphore> {
+    crate::services::image_work::shared()
+}
 
 /// Application service generating and serving derived Thumbnails of curated Layers.
 pub struct ThumbnailService {
@@ -71,7 +74,7 @@ impl ThumbnailService {
         Self {
             catalog,
             blobs,
-            decode_limit: DECODE_LIMIT.clone(),
+            decode_limit: decode_limit(),
         }
     }
 

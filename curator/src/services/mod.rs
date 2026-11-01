@@ -5,6 +5,7 @@ pub mod catalog_migration;
 pub mod model_registry;
 pub mod dataset_export;
 pub mod ingestion;
+pub mod image_work;
 pub mod library;
 pub mod reference_provider;
 pub mod sections;

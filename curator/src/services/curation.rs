@@ -9,6 +9,7 @@ use crate::ports::blob_storage::{BlobKey, BlobStorage};
 use crate::ports::catalog_repository::CatalogRepository;
 use crate::ports::storage_error::StorageError;
 use crate::services::description::{DescriptionError, DescriptionService};
+use crate::services::image_work::GroundImage;
 use crate::services::sections::{describe_map_sections, SectionDescriptionContext};
 use crate::services::thumbnails::{invalidate_curated_thumbnails, ThumbnailService};
 
@@ -248,13 +249,14 @@ impl CurationWorkflow for CurationService {
         //    bytes already in hand (never re-read). `describe_map_sections` owns the section policy:
         //    multi-section maps get a vision description per Ground-layer crop (reusing the
         //    map-level physical description per section on failure); single-section maps reuse the
-        //    strict map-level physical description verbatim.
-        let ground_image = image::load_from_memory(ground_bytes).ok();
+        //    strict map-level physical description verbatim. The decode is gated by the shared
+        //    image-work permit and dropped once the crops exist, before any vision round-trip.
+        let ground = GroundImage::decode(ground_bytes.to_vec()).await;
         let sections = describe_map_sections(
             &self.description_service,
             SectionDescriptionContext {
                 grid: &candidate.grid,
-                ground_image: ground_image.as_ref(),
+                ground: Some(ground),
                 ground_dimensions: (ground_w, ground_h),
                 tags: &clean_tags,
                 title: candidate.title.as_deref(),

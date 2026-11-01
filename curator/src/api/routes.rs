@@ -25,6 +25,7 @@ use crate::services::CreateTrainingRunRequest;
 use crate::ports::catalog_repository::{CandidateFilter, CuratedFilter};
 use crate::ports::cost_tracker::CostStats;
 use crate::services::sections::{describe_map_sections, ground_dimensions, SectionDescriptionContext};
+use crate::services::image_work::GroundImage;
 use crate::services::{
     DatasetExportService, FreezeDatasetError, IngestionSummary, LibraryService,
     RedditIngestionService, StorageMaintenanceService,
@@ -39,6 +40,15 @@ pub struct StatusResponse {
     pub staging_count: usize,
     pub curated_count: usize,
     pub uptime_secs: u64,
+}
+
+/// GET /api/healthz - Probe target with no catalog, blob or model I/O.
+///
+/// The Kubernetes liveness and readiness probes point here rather than at `/api/status`: a probe
+/// that lists the catalog turns a slow database into a container restart, and the HTTP surface is
+/// healthy exactly when the runtime can accept and answer a request.
+pub async fn get_healthz() -> &'static str {
+    "ok"
 }
 
 /// GET /api/status - Health check and system metrics.
@@ -132,8 +142,14 @@ pub async fn patch_curated(
             .ok()
             .map(|(bytes, _)| bytes);
 
-        let ground_img = ground_bytes.as_ref().and_then(|b| image::load_from_memory(b).ok());
-        let (ground_w, ground_h) = ground_dimensions(&current_map, ground_img.as_ref());
+        // The decode holds the process-wide image-work permit until the section crops exist, so
+        // a regrid can never overlap the readiness audit or a bulk refinement decode.
+        let ground = match ground_bytes.as_deref() {
+            Some(bytes) => Some(GroundImage::decode(bytes.to_vec()).await),
+            None => None,
+        };
+        let (ground_w, ground_h) =
+            ground_dimensions(&current_map, ground.as_ref().and_then(|img| img.image()));
 
         if !new_grid.is_curation_eligible(ground_w, ground_h) {
             return Err(ApiError::bad_request(
@@ -174,7 +190,7 @@ pub async fn patch_curated(
                 &state.description_service,
                 SectionDescriptionContext {
                     grid: &new_grid,
-                    ground_image: ground_img.as_ref(),
+                    ground,
                     ground_dimensions: (ground_w, ground_h),
                     tags: effective_tags,
                     title: None,
@@ -1111,17 +1127,17 @@ pub async fn post_curated_suggest_themes(
 async fn describe_curated_sections(
     state: &AppState,
     stored: &CuratedMap,
-    bytes: &[u8],
+    bytes: Vec<u8>,
     tags: &[String],
     description: &str,
 ) -> Vec<MapSection> {
-    let ground_image = image::load_from_memory(bytes).ok();
-    let (ground_w, ground_h) = ground_dimensions(stored, ground_image.as_ref());
+    let ground = GroundImage::decode(bytes).await;
+    let (ground_w, ground_h) = ground_dimensions(stored, ground.image());
     describe_map_sections(
         &state.description_service,
         SectionDescriptionContext {
             grid: &stored.grid,
-            ground_image: ground_image.as_ref(),
+            ground: Some(ground),
             ground_dimensions: (ground_w, ground_h),
             tags,
             title: None,
@@ -1169,7 +1185,7 @@ pub async fn post_curated_refine(
 
     // 4. Map Sections follow the same policy as the `describe` apply branch.
     let sections =
-        describe_curated_sections(&state, &stored, &bytes, &merged_tags, &description).await;
+        describe_curated_sections(&state, &stored, bytes, &merged_tags, &description).await;
 
     // 5. One write keeps tags, description and sections consistent.
     let updated = library
@@ -1344,7 +1360,7 @@ pub async fn post_curated_describe(
     let mut applied = false;
     if let (true, Some(stored)) = (req.apply, curated_map.as_ref()) {
         let sections =
-            describe_curated_sections(&state, stored, &bytes, &tags, &description).await;
+            describe_curated_sections(&state, stored, bytes, &tags, &description).await;
         library
             .update_curated(
                 &id,

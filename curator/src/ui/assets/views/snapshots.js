@@ -26,6 +26,7 @@ import {
     openTrainingDrawer,
     populateTrainingSnapshotSelect,
 } from "./training.js";
+import { clearLibraryAuditFilter } from "./library.js";
 
 // ==========================================================================
 // Frozen Dataset Snapshots (Issue #216)
@@ -53,6 +54,8 @@ export function showFreezeRefusal(refusal, scopeTheme, { toast = true } = {}) {
         clearReadinessCache();
         state.readinessReport = null;
         state.readinessAuditedAt = null;
+        // The library audit filter named maps from the discarded report.
+        clearLibraryAuditFilter();
     }
     if (scopeKey !== readinessScopeKey()) {
         if (toast) showToast(`Freeze refused: ${error}`, "danger");

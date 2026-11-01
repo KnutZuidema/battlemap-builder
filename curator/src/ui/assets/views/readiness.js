@@ -330,6 +330,8 @@ export function invalidateDatasetReadiness() {
     state.readinessScopeKey = readinessScopeKey();
     state.readinessReport = null;
     state.readinessAuditedAt = null;
+    // The library audit filter named maps from the report that no longer exists.
+    clearLibraryAuditFilter();
     renderReadinessPanel();
     if (state.currentView === "library") {
         // The cache was just cleared, so this cannot short-circuit on a stale report.

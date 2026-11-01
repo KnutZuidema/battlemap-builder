@@ -349,6 +349,13 @@ update without leaving the drawer; a description that is generated but not persi
 the audit, surfaces as a danger/warning toast. Failures propagate the same way (`503` when vision is
 unconfigured, `502` on upstream failure).
 
+Every issue row also offers **Show N maps**: it narrows the library grid to exactly the report's map ids
+for that code, without a describe request or an audit. The active audit filter renders as a dismissible
+chip in the library toolbar carrying the visible map count, composes with the tag/search/facet filters,
+and makes the count badge read `N of M`. Switching theme scope, applying a new report, or **Clear
+Filters** drops it; ids no longer in the curated store are ignored, and an empty selection names the
+issue kind and offers the clear action.
+
 Legacy bundles curated before ADR-0007 carry no `sections` and no `description`: their full-grid lattice
 still exports (one 16×16 window per lattice) but their captions have no `Physical Description`, which the
 audit reports as `physical_description_missing`.

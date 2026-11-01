@@ -129,7 +129,6 @@ impl BlobStorage for FilesystemBlobStorage {
         let start = match prefix {
             BlobKey::StagingDir { .. }
             | BlobKey::CuratedDir { .. }
-            | BlobKey::ThumbsDir
             | BlobKey::CuratedThumbsDir { .. }
             | BlobKey::TelemetryDir
             | BlobKey::ArtifactsDir

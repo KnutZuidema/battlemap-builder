@@ -56,10 +56,8 @@ pub enum BlobKey {
     TrashDir { id: Option<String> },
     /// Directory prefix `curated/` (id=None) or `curated/{id}/`.
     CuratedDir { id: Option<String> },
-    /// Directory prefix `thumbs/`, the rebuildable root of every derived Thumbnail.
-    ThumbsDir,
-    /// Directory prefix `thumbs/curated/` (id=None) or `thumbs/curated/{id}/`.
-    CuratedThumbsDir { id: Option<String> },
+    /// Directory prefix `thumbs/curated/{id}/`, holding every derived Thumbnail of one map.
+    CuratedThumbsDir { id: String },
     /// Directory prefix `telemetry/`, used to enumerate every [`BlobKey::TelemetryLog`].
     TelemetryDir,
     /// Dataset snapshot ZIP archive stored at `artifacts/datasets/{id}.zip`.
@@ -131,8 +129,7 @@ impl BlobKey {
             BlobKey::StagingDir { id } => directory_prefix("staging", id.as_deref()),
             BlobKey::TrashDir { id } => directory_prefix("trash", id.as_deref()),
             BlobKey::CuratedDir { id } => directory_prefix("curated", id.as_deref()),
-            BlobKey::ThumbsDir => directory_prefix("thumbs", None),
-            BlobKey::CuratedThumbsDir { id } => directory_prefix("thumbs/curated", id.as_deref()),
+            BlobKey::CuratedThumbsDir { id } => directory_prefix("thumbs/curated", Some(id)),
             BlobKey::TelemetryDir => directory_prefix("telemetry", None),
             BlobKey::DatasetSnapshot { id } => format!("artifacts/datasets/{id}.zip"),
             BlobKey::CheckpointAdapter { run_id, step } => {
@@ -204,11 +201,9 @@ impl BlobKey {
             ["staging", id, ""] => BlobKey::StagingDir { id: Some((*id).to_string()) },
             ["curated", ""] => BlobKey::CuratedDir { id: None },
             ["curated", id, ""] => BlobKey::CuratedDir { id: Some((*id).to_string()) },
-            ["thumbs", ""] => BlobKey::ThumbsDir,
-            ["thumbs", "curated", ""] => BlobKey::CuratedThumbsDir { id: None },
-            ["thumbs", "curated", id, ""] => {
-                BlobKey::CuratedThumbsDir { id: Some((*id).to_string()) }
-            }
+            ["thumbs", "curated", id, ""] => BlobKey::CuratedThumbsDir {
+                id: (*id).to_string(),
+            },
             ["trash", ""] => BlobKey::TrashDir { id: None },
             ["trash", id, ""] => BlobKey::TrashDir { id: Some((*id).to_string()) },
             ["telemetry", ""] => BlobKey::TelemetryDir,

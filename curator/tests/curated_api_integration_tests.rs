@@ -1894,6 +1894,19 @@ async fn test_curated_bulk_refine_rejects_blank_id_and_get() {
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
+/// A solid-colour PNG, so a re-ingested fixture differs visibly from a blank original.
+fn solid_png(width: u32, height: u32, pixel: [u8; 4]) -> Vec<u8> {
+    let image = image::RgbaImage::from_pixel(width, height, image::Rgba(pixel));
+    let mut bytes = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("write PNG");
+    bytes
+}
+
 /// GETs `/api/thumb/curated/{id}` and returns the raw response.
 async fn get_curated_thumbnail(app: &axum::Router, id: &str) -> axum::response::Response {
     let req = Request::builder()
@@ -1904,26 +1917,16 @@ async fn get_curated_thumbnail(app: &axum::Router, id: &str) -> axum::response::
     app.clone().oneshot(req).await.unwrap()
 }
 
-/// Blob key of the derived Thumbnail of a map's `Ground` layer, resolved like the route resolves it.
+/// Blob key of the derived Thumbnail of a map's image Layer, resolved exactly like the route.
 fn curated_thumbnail_key(map: &CuratedMap) -> BlobKey {
-    match map
-        .layers
-        .iter()
-        .find(|layer| layer.role == LayerRole::Ground)
-        .or_else(|| map.layers.first())
-    {
-        Some(layer) => BlobKey::CuratedThumbnail {
-            id: map.id.clone(),
-            index: layer.index,
-            role: layer.role,
-            elevation: layer.elevation,
-        },
-        None => BlobKey::CuratedThumbnail {
-            id: map.id.clone(),
-            index: 0,
-            role: LayerRole::Ground,
-            elevation: Some(0),
-        },
+    let layer = map
+        .ground_layer()
+        .expect("curated map has an image layer");
+    BlobKey::CuratedThumbnail {
+        id: map.id.clone(),
+        index: layer.index,
+        role: layer.role,
+        elevation: layer.elevation,
     }
 }
 
@@ -2026,7 +2029,7 @@ async fn test_delete_curated_purges_the_maps_thumbnails() {
     assert!(!blobs.exists_blob(&key).await.unwrap());
     assert!(blobs
         .list_prefix(&BlobKey::CuratedThumbsDir {
-            id: Some("thumb_purge".into()),
+            id: "thumb_purge".into(),
         })
         .await
         .unwrap()
@@ -2070,4 +2073,71 @@ async fn test_curated_thumbnail_fails_with_502_on_an_undecodable_layer() {
     // An unknown map is a plain 404, not a generation failure.
     let resp = get_curated_thumbnail(&app, "no_such_map_thumb").await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_re_curation_drops_the_previous_thumbnail() {
+    let (app, catalog, blobs) = setup_test_app();
+    let (map, ..) =
+        curate_test_bundle(&catalog, &blobs, "thumbnail_recurated", vec!["temple".into()]).await;
+    let key = curated_thumbnail_key(&map);
+
+    let first = to_bytes(
+        get_curated_thumbnail(&app, "thumbnail_recurated")
+            .await
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    let first_dimensions = {
+        let decoded = image::load_from_memory(&first).expect("decode Thumbnail");
+        (decoded.width(), decoded.height())
+    };
+    assert_eq!(first_dimensions, (300, 300));
+
+    // Re-ingesting the same id restores its staging Layers, then the Support re-curates the
+    // already committed bundle: the curated Layer blobs change behind the same Thumbnail key.
+    let reingested = solid_png(300, 300, [200, 40, 40, 255]);
+    for index in 0..2 {
+        blobs
+            .write_blob(
+                &BlobKey::StagingLayer {
+                    id: "thumbnail_recurated".into(),
+                    index,
+                },
+                &reingested,
+            )
+            .await
+            .unwrap();
+    }
+    CurationService::new(
+        catalog.clone(),
+        blobs.clone(),
+        Arc::new(DescriptionService::new(None)),
+    )
+    .curate(
+        "thumbnail_recurated",
+        vec!["temple".into()],
+        None,
+        Some("Re-curated description".to_string()),
+    )
+    .await
+    .expect("re-curate the committed bundle");
+
+    // The Thumbnail rendered from the superseded bytes is dropped at the curation seam instead of
+    // being served until the next layer edit.
+    assert!(!blobs.exists_blob(&key).await.unwrap());
+
+    let regenerated = to_bytes(
+        get_curated_thumbnail(&app, "thumbnail_recurated")
+            .await
+            .into_body(),
+        usize::MAX,
+    )
+    .await
+    .unwrap();
+    assert_ne!(regenerated, first);
+    let decoded = image::load_from_memory(&regenerated).expect("decode regenerated Thumbnail");
+    assert_eq!((decoded.width(), decoded.height()), first_dimensions);
 }

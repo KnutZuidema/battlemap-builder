@@ -1115,25 +1115,19 @@ fn curated_thumbnail_keys_round_trip_through_storage_paths() {
     assert_eq!(ground.to_path(), "thumbs/curated/map-1/0_ground.jpg");
     assert_eq!(BlobKey::from_path(&ground.to_path()), Some(ground.clone()));
 
-    // The directory prefixes round trip too, so the tree can be enumerated and purged.
-    assert_eq!(BlobKey::ThumbsDir.to_path(), "thumbs/");
+    // The bundle's directory prefix round trips too, so its Thumbnails can be enumerated and
+    // purged.
     assert_eq!(
-        BlobKey::CuratedThumbsDir { id: None }.to_path(),
-        "thumbs/curated/"
-    );
-    assert_eq!(
-        BlobKey::CuratedThumbsDir { id: Some("map-1".into()) }.to_path(),
+        BlobKey::CuratedThumbsDir { id: "map-1".into() }.to_path(),
         "thumbs/curated/map-1/"
-    );
-    assert_eq!(BlobKey::from_path("thumbs/"), Some(BlobKey::ThumbsDir));
-    assert_eq!(
-        BlobKey::from_path("thumbs/curated/"),
-        Some(BlobKey::CuratedThumbsDir { id: None })
     );
     assert_eq!(
         BlobKey::from_path("thumbs/curated/map-1/"),
-        Some(BlobKey::CuratedThumbsDir { id: Some("map-1".into()) })
+        Some(BlobKey::CuratedThumbsDir { id: "map-1".into() })
     );
+    // No variant addresses the `thumbs/` tree as a whole.
+    assert_eq!(BlobKey::from_path("thumbs/"), None);
+    assert_eq!(BlobKey::from_path("thumbs/curated/"), None);
 
     // Extensions are part of each namespace: a PNG never parses as a Thumbnail and a JPEG never
     // parses as a curated Layer.
@@ -1142,9 +1136,7 @@ fn curated_thumbnail_keys_round_trip_through_storage_paths() {
     assert_eq!(BlobKey::from_path("thumbs/map-1/0_ground.jpg"), None);
 
     // Prefix matching scopes a bundle's thumbnails to that bundle only.
-    let bundle_thumbs = BlobKey::CuratedThumbsDir { id: Some("map-1".into()) };
-    assert!(BlobKey::ThumbsDir.is_prefix_of(&bundle_thumbs));
-    assert!(BlobKey::CuratedThumbsDir { id: None }.is_prefix_of(&bundle_thumbs));
+    let bundle_thumbs = BlobKey::CuratedThumbsDir { id: "map-1".into() };
     assert!(bundle_thumbs.is_prefix_of(&ground));
     assert!(!bundle_thumbs.is_prefix_of(&BlobKey::CuratedThumbnail {
         id: "map-10".into(),
@@ -1196,31 +1188,20 @@ async fn curated_thumbnail_blobs_enumerate_by_prefix() {
         // `.jpg` parser rather than the keys that were written.
         assert_eq!(
             storage
-                .list_prefix(&BlobKey::CuratedThumbsDir { id: Some("map-1".into()) })
+                .list_prefix(&BlobKey::CuratedThumbsDir { id: "map-1".into() })
                 .await
                 .unwrap(),
             vec![ground.clone(), upper.clone()]
         );
-        assert_eq!(
-            storage.list_prefix(&BlobKey::ThumbsDir).await.unwrap(),
-            vec![ground.clone(), upper.clone(), sibling.clone()]
-        );
-        assert_eq!(
-            storage
-                .list_prefix(&BlobKey::CuratedThumbsDir { id: None })
-                .await
-                .unwrap(),
-            vec![ground.clone(), upper.clone(), sibling.clone()]
-        );
         assert!(storage
-            .list_prefix(&BlobKey::CuratedThumbsDir { id: Some("map-3".into()) })
+            .list_prefix(&BlobKey::CuratedThumbsDir { id: "map-3".into() })
             .await
             .unwrap()
             .is_empty());
 
         // Purging the bundle's directory leaves the sibling untouched.
         for key in storage
-            .list_prefix(&BlobKey::CuratedThumbsDir { id: Some("map-1".into()) })
+            .list_prefix(&BlobKey::CuratedThumbsDir { id: "map-1".into() })
             .await
             .unwrap()
         {

@@ -10,6 +10,7 @@ use crate::ports::catalog_repository::CatalogRepository;
 use crate::ports::storage_error::StorageError;
 use crate::services::description::{DescriptionError, DescriptionService};
 use crate::services::sections::{describe_map_sections, SectionDescriptionContext};
+use crate::services::thumbnails::invalidate_curated_thumbnails;
 
 /// Errors arising during the curation and rejection workflow.
 #[derive(Debug, Error)]
@@ -331,14 +332,23 @@ impl CurationWorkflow for CurationService {
         .with_description(final_description)
         .with_sections(sections);
 
-        // 8. Commit the manifest; a failure rolls the freshly written curated blobs back and leaves
+        // 8. Drop the derived Thumbnails of a bundle this call just rewrote: they were rendered
+        //    from the superseded Layer bytes, and the manifest commit below would otherwise serve
+        //    the pre-re-curation image until the map is edited again. Thumbnails of a first
+        //    curation do not exist yet, so this is a no-op for them.
+        if let Err(err) = invalidate_curated_thumbnails(self.blobs.as_ref(), id).await {
+            self.rollback_curated(&written).await;
+            return Err(err.into());
+        }
+
+        // 9. Commit the manifest; a failure rolls the freshly written curated blobs back and leaves
         //    the staging candidate untouched so curation can be retried.
         if let Err(err) = self.catalog.save_curated(&map).await {
             self.rollback_curated(&written).await;
             return Err(err.into());
         }
 
-        // 9. Success: the staging bundle is superseded by the curated bundle.
+        // 10. Success: the staging bundle is superseded by the curated bundle.
         self.purge_staging(id).await;
         Ok(map)
     }

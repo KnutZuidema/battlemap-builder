@@ -1070,6 +1070,19 @@ impl CuratedMap {
         self.tags.iter().find_map(|t| t.parse::<Theme>().ok())
     }
 
+    /// The Layer that represents this map's image: the `Ground` role, or the first Layer of a
+    /// legacy manifest that never carried roles.
+    ///
+    /// Every consumer that renders a curated map picks its image through this method, so the card
+    /// image, the fullscreen original and the inspector can never disagree about which Layer is
+    /// the map.
+    pub fn ground_layer(&self) -> Option<&Layer> {
+        self.layers
+            .iter()
+            .find(|layer| layer.role == LayerRole::Ground)
+            .or_else(|| self.layers.first())
+    }
+
     /// Validates that the map has at least one tag label.
     pub fn validate_tags(&self) -> Result<(), String> {
         if self.tags.is_empty() || self.tags.iter().all(|t| t.trim().is_empty()) {

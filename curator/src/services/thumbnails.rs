@@ -7,18 +7,20 @@
 //! `GET /api/thumb/curated/{id}` instead of transferring the multi-megabyte Ground layer.
 //!
 //! Generation happens on first request and is bounded twice: a semaphore of one serializes the
-//! decode, and a per-key single flight makes concurrent requests for the same Thumbnail await one
-//! generation and share its bytes. Once stored, a Thumbnail is served from storage and never
-//! regenerated. Failures surface as [`ThumbnailError`] (502 at the HTTP edge); the original Layer
-//! bytes are never substituted for a Thumbnail.
+//! decode, and a per-bundle single flight makes concurrent requests for the same Thumbnail await
+//! one generation and share its bytes, while also serializing generation with the invalidation
+//! every curated-bundle write performs ([`invalidate_curated_thumbnails`]). Once stored, a
+//! Thumbnail is served from storage and never regenerated. Failures surface as
+//! [`ThumbnailError`] (502 at the HTTP edge); the original Layer bytes are never substituted for a
+//! Thumbnail.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, LazyLock, Weak};
 
 use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
 use tokio::sync::{Mutex, Semaphore};
 
-use crate::domain::{Layer, LayerRole};
+use crate::domain::Layer;
 use crate::ports::blob_storage::{BlobKey, BlobStorage};
 use crate::ports::catalog_repository::CatalogRepository;
 use crate::ports::image_processor::PADDING_COLOR_RGB;
@@ -31,48 +33,26 @@ pub const THUMBNAIL_LONG_EDGE: u32 = 768;
 pub const THUMBNAIL_JPEG_QUALITY: u8 = 82;
 
 /// Failure to serve a derived Thumbnail.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ThumbnailError {
-    /// The Curated Map, its Layer, or the Layer blob does not exist.
+    /// The Curated Map has no Layer to render.
+    #[error("{0}")]
     NotFound(String),
     /// The blob port failed while reading the source or writing the Thumbnail.
-    Storage(StorageError),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
     /// The source Layer could not be decoded, resampled, or JPEG-encoded. Served as `502`, never
     /// as a fallback to the original bytes.
+    #[error("{0}")]
     Generation(String),
 }
 
-impl From<StorageError> for ThumbnailError {
-    fn from(err: StorageError) -> Self {
-        match err {
-            StorageError::NotFound(msg) => ThumbnailError::NotFound(msg),
-            other => ThumbnailError::Storage(other),
-        }
-    }
-}
-
-impl std::fmt::Display for ThumbnailError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ThumbnailError::NotFound(msg) => write!(f, "{msg}"),
-            ThumbnailError::Storage(err) => write!(f, "{err}"),
-            ThumbnailError::Generation(msg) => write!(f, "{msg}"),
-        }
-    }
-}
-
-impl std::error::Error for ThumbnailError {}
-
 /// Application service generating and serving derived Thumbnails of curated Layers.
-#[derive(Clone)]
 pub struct ThumbnailService {
     catalog: Arc<dyn CatalogRepository + Send + Sync>,
     blobs: Arc<dyn BlobStorage + Send + Sync>,
     /// Single permit: exactly one Thumbnail is decoded at a time on this pod.
     decode_limit: Arc<Semaphore>,
-    /// Per-Thumbnail single flight, keyed by canonical path. Entries hold only a [`Weak`]
-    /// reference, so a finished flight leaves nothing behind.
-    inflight: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
 }
 
 impl ThumbnailService {
@@ -85,26 +65,16 @@ impl ThumbnailService {
             catalog,
             blobs,
             decode_limit: Arc::new(Semaphore::new(1)),
-            inflight: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Returns the Thumbnail bytes of the Ground layer of Curated Map `id`, generating and
     /// persisting it on first request.
-    ///
-    /// The Ground layer is resolved exactly like
-    /// [`crate::services::LibraryService::curated_ground_image`]: the `Ground` role, otherwise the
-    /// map's first Layer.
     pub async fn curated_thumbnail(&self, id: &str) -> Result<Vec<u8>, ThumbnailError> {
         let map = self.catalog.get_curated(id).await?;
-        let layer = map
-            .layers
-            .iter()
-            .find(|layer| layer.role == LayerRole::Ground)
-            .or_else(|| map.layers.first())
-            .ok_or_else(|| {
-                ThumbnailError::NotFound(format!("Curated map '{id}' has no layer to thumbnail"))
-            })?;
+        let layer = map.ground_layer().ok_or_else(|| {
+            ThumbnailError::NotFound(format!("Curated map '{id}' has no layer to thumbnail"))
+        })?;
         self.ensure_curated_thumbnail(id, layer).await
     }
 
@@ -127,15 +97,13 @@ impl ThumbnailService {
             elevation: layer.elevation,
         };
 
-        if let Some(bytes) = self.stored(&thumbnail).await? {
-            return Ok(bytes);
-        }
-
-        let flight = self.key_lock(&thumbnail.to_path()).await;
+        // Everything below runs under the bundle flight: a stored Thumbnail is only trusted while
+        // no invalidation of this bundle is in progress, and the source bytes are read after the
+        // flight is held so a purge that ran first is always observed. A concurrent request for
+        // this Thumbnail waits here, then finds the bytes the first one stored.
+        let flight = flight_for(&bundle_flight_key(id)).await;
         let _guard = flight.lock().await;
 
-        // A concurrent request for this key may have finished while this one waited for the
-        // flight, so the store is consulted again before paying the decode.
         if let Some(bytes) = self.stored(&thumbnail).await? {
             return Ok(bytes);
         }
@@ -162,18 +130,6 @@ impl ThumbnailService {
         }
     }
 
-    /// Acquires the single flight guarding generation of the Thumbnail at `path`.
-    async fn key_lock(&self, path: &str) -> Arc<Mutex<()>> {
-        let mut inflight = self.inflight.lock().await;
-        inflight.retain(|_, flight| flight.strong_count() > 0);
-        if let Some(flight) = inflight.get(path).and_then(Weak::upgrade) {
-            return flight;
-        }
-        let flight = Arc::new(Mutex::new(()));
-        inflight.insert(path.to_string(), Arc::downgrade(&flight));
-        flight
-    }
-
     /// Decodes `source_bytes` into a Thumbnail on the blocking pool, holding the single decode
     /// permit for the whole decode-resample-encode sequence.
     async fn render(&self, source_bytes: Vec<u8>) -> Result<Vec<u8>, ThumbnailError> {
@@ -190,6 +146,55 @@ impl ThumbnailService {
         .await
         .map_err(|err| ThumbnailError::Generation(format!("Thumbnail render task failed: {err}")))?
     }
+}
+
+/// Drops every derived Thumbnail of curated map `id`.
+///
+/// This is the one invalidation seam behind every curated-bundle write (curation, layer edits,
+/// deletion). It holds the bundle's flight across the listing and the deletes, so a generation
+/// that began before the write either stored its Thumbnail before this purge runs — and is
+/// therefore deleted — or starts afterwards and renders the new Layer bytes. Listing inside the
+/// flight is what covers a Thumbnail that did not exist yet when the invalidation began.
+pub async fn invalidate_curated_thumbnails(
+    blobs: &(dyn BlobStorage + Send + Sync),
+    id: &str,
+) -> Result<(), StorageError> {
+    let flight = flight_for(&bundle_flight_key(id)).await;
+    let _guard = flight.lock().await;
+    let dir = BlobKey::CuratedThumbsDir { id: id.to_string() };
+    for key in blobs.list_prefix(&dir).await? {
+        blobs.delete_blob(&key).await?;
+    }
+    Ok(())
+}
+
+/// Flight key guarding generation and invalidation of one bundle's derived Thumbnails.
+///
+/// Generation and invalidation both lock the bundle directory rather than an individual
+/// Thumbnail: invalidation is per bundle, and a per-Thumbnail lock could not cover a Thumbnail
+/// that an in-flight generation had not written when invalidation listed the directory.
+fn bundle_flight_key(id: &str) -> String {
+    BlobKey::CuratedThumbsDir { id: id.to_string() }.to_path()
+}
+
+/// Flight registry shared by generation and invalidation.
+///
+/// The registry is process-wide rather than per [`ThumbnailService`] because a write path
+/// invalidates through [`invalidate_curated_thumbnails`] without holding the route's service
+/// instance, and both sides must still serialize on the same bundle. Entries hold only a [`Weak`]
+/// reference, so a finished flight leaves nothing behind.
+static FLIGHTS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+async fn flight_for(bundle: &str) -> Arc<Mutex<()>> {
+    let mut flights = FLIGHTS.lock().await;
+    flights.retain(|_, flight| flight.strong_count() > 0);
+    if let Some(flight) = flights.get(bundle).and_then(Weak::upgrade) {
+        return flight;
+    }
+    let flight = Arc::new(Mutex::new(()));
+    flights.insert(bundle.to_string(), Arc::downgrade(&flight));
+    flight
 }
 
 /// Renders `source` (any `image`-decodable bytes) into the derived Thumbnail format.

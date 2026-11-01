@@ -167,18 +167,29 @@ spec:
             limits:
               cpu: 1000m
               memory: 1Gi
+          startupProbe:
+            httpGet:
+              path: /api/healthz
+              port: 3002
+            periodSeconds: 5
+            timeoutSeconds: 5
+            # Catalog migrations on first boot can take a minute; a startup probe keeps that out
+            # of the liveness failure budget.
+            failureThreshold: 24
           livenessProbe:
             httpGet:
-              path: /api/status
+              path: /api/healthz
               port: 3002
-            initialDelaySeconds: 15
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 4
           readinessProbe:
             httpGet:
-              path: /api/status
+              path: /api/healthz
               port: 3002
-            initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
       volumes:
         - name: curator-storage
           persistentVolumeClaim:

@@ -194,6 +194,8 @@ Once port-forwarding is established:
   - Hotkey triage (1–6 rating, thematic categorization, rejection logging).
   - Reddit Harvester drawer.
   - Multi-model OpenRouter Benchmark drawer.
+- **Health Probe API**: [http://localhost:3002/api/healthz](http://localhost:3002/api/healthz)
+  - Kubernetes liveness/readiness target: answers `ok` without touching the catalog, blobs or a model.
 - **Health & Status API**: [http://localhost:3002/api/status](http://localhost:3002/api/status)
   - Returns JSON status, uptime, candidate staging queue count, and total curated count.
 - **Staging Queue API**: [http://localhost:3002/api/staging](http://localhost:3002/api/staging)
@@ -443,6 +445,24 @@ If harvesting fails with a 401/403, the Reddit credentials in `curator-secrets` 
 ---
 
 ## 6. Common Issues & Resolutions
+
+### Pod Restarts (`OOMKilled`) During Bulk AI Refinement
+- **Symptom**: The pod restarts while the library view bulk-refines maps; events show liveness and
+  readiness probe failures immediately before the restart, and the container's `lastState` is
+  `terminated` with `exitCode: 137` and `reason: OOMKilled`.
+- **Cause**: A decoded multi-megapixel Ground layer (a `9000×9400` map is roughly 250 MiB) held by
+  one pipeline — a bulk refinement, the readiness audit, a Thumbnail render or a LoRA export —
+  while a second pipeline decoded another. Two full-resolution decodes plus their PNG/base64
+  buffers exceed the container's `1Gi` limit, so the kernel kills the process; the probe failures
+  are a consequence of the dead process, not their cause.
+- **Resolution**: `curator/src/services/image_work.rs` holds one process-wide permit that every
+  pipeline must take for as long as a full-resolution decode is alive, and `describe_map_sections`
+  crops every Map Section before the first vision round-trip so a refinement does not keep its
+  decode alive across the vision calls. Keep the `1Gi` limit and the single image-work permit in
+  sync: a new full-image pipeline must decode through `GroundImage::decode` or `image_work::run`.
+- **Probes**: `deployment.yaml` probes `/api/healthz`, which answers without touching the catalog,
+  blobs or a model. `/api/status` stays the UI's metrics endpoint and is deliberately not a probe
+  target — it lists the catalog and would turn a slow database into a restart.
 
 ### Pod in `ImagePullBackOff` or `ErrImagePull`
 - **Cause**: Kubernetes cannot authenticate with GHCR to pull private image `ghcr.io/knutzuidema/curator`.

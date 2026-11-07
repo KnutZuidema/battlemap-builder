@@ -11,6 +11,7 @@ process.env.MAPS_DIR = tmpMapsDir;
 
 const {
   getMapsDir,
+  getDefaultMapsDir,
   validateMapId,
   generateMapId,
   saveMap,
@@ -38,6 +39,38 @@ test.after(() => {
     fs.rmSync(tmpMapsDir, { recursive: true, force: true });
   } catch (err) {
     // Ignore cleanup error
+  }
+});
+
+test('getDefaultMapsDir: resolves XDG_DATA_HOME to an absolute path when MAPS_DIR is unset', () => {
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    // XDG_DATA_HOME is only consulted on Linux.
+    return;
+  }
+
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'map-default-dir-'));
+  const previousMapsDir = process.env.MAPS_DIR;
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  delete process.env.MAPS_DIR;
+  // A relative XDG_DATA_HOME must still yield an absolute maps directory.
+  process.env.XDG_DATA_HOME = path.relative(process.cwd(), tmpRoot) || '.';
+
+  try {
+    const dir = getDefaultMapsDir();
+    assert.ok(path.isAbsolute(dir), `expected an absolute path, got ${dir}`);
+    assert.strictEqual(dir, path.join(tmpRoot, 'battlemap-builder', 'maps'));
+  } finally {
+    if (previousMapsDir === undefined) {
+      delete process.env.MAPS_DIR;
+    } else {
+      process.env.MAPS_DIR = previousMapsDir;
+    }
+    if (previousXdgDataHome === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdgDataHome;
+    }
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
 });
 

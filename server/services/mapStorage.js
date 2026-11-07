@@ -11,13 +11,13 @@ const sharp = require('sharp');
 function getDefaultMapsDir() {
   if (process.platform === 'win32') {
     const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-    return path.join(appData, 'battlemap-builder', 'maps');
+    return path.resolve(appData, 'battlemap-builder', 'maps');
   }
   if (process.platform === 'darwin') {
-    return path.join(os.homedir(), 'Library', 'Application Support', 'battlemap-builder', 'maps');
+    return path.resolve(os.homedir(), 'Library', 'Application Support', 'battlemap-builder', 'maps');
   }
   const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
-  return path.join(dataHome, 'battlemap-builder', 'maps');
+  return path.resolve(dataHome, 'battlemap-builder', 'maps');
 }
 
 /**
@@ -401,6 +401,7 @@ async function duplicateMap(id) {
 
 module.exports = {
   getMapsDir,
+  getDefaultMapsDir,
   validateMapId,
   generateMapId,
   extractImageBuffer,

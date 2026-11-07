@@ -165,13 +165,93 @@ impl FileCostLedger {
     }
 }
 
-impl Default for FileCostLedger {
-    fn default() -> Self {
-        Self::new(
-            crate::resolve_data_dir()
-                .join("telemetry")
-                .join("cost_ledger.json"),
-        )
+/// In-process [`CostTracker`] that keeps cost telemetry entirely in memory.
+///
+/// Used by application states that must not read or write the filesystem, such as test
+/// fixtures and the recording-free `AppState` constructors. Production uses [`FileCostLedger`]
+/// anchored at the resolved data directory.
+#[derive(Debug, Clone, Default)]
+pub struct InMemoryCostTracker {
+    ledger: Arc<RwLock<PersistentLedger>>,
+    session_spend_usd: Arc<RwLock<f64>>,
+    session_generations: Arc<RwLock<u64>>,
+    session_training_spend_usd: Arc<RwLock<f64>>,
+}
+
+#[async_trait]
+impl CostTracker for InMemoryCostTracker {
+    async fn record_generation(
+        &self,
+        record: GenerationCostRecord,
+    ) -> Result<(), CostTrackerError> {
+        let mut ledger = self.ledger.write().await;
+        let mut session_spend = self.session_spend_usd.write().await;
+        let mut session_gen = self.session_generations.write().await;
+
+        ledger.total_spend_usd += record.cost_usd;
+        ledger.total_generations += 1;
+
+        let model_stats = ledger.by_model.entry(record.model.clone()).or_default();
+        model_stats.spend_usd += record.cost_usd;
+        model_stats.generation_count += 1;
+        model_stats.total_tokens += record.prompt_tokens.unwrap_or(0) as u64
+            + record.completion_tokens.unwrap_or(0) as u64;
+
+        ledger.history.push(CostRecord::Generation(record.clone()));
+
+        *session_spend += record.cost_usd;
+        *session_gen += 1;
+
+        Ok(())
+    }
+
+    async fn record_training_cost(
+        &self,
+        record: TrainingCostRecord,
+    ) -> Result<(), CostTrackerError> {
+        let mut ledger = self.ledger.write().await;
+        let mut session_spend = self.session_spend_usd.write().await;
+        let mut session_training_spend = self.session_training_spend_usd.write().await;
+
+        ledger.training_spend_usd += record.cost_usd;
+        ledger.training_runs += 1;
+        ledger.history.push(CostRecord::Training(record.clone()));
+
+        *session_spend += record.cost_usd;
+        *session_training_spend += record.cost_usd;
+
+        Ok(())
+    }
+
+    async fn get_stats(&self) -> Result<CostStats, CostTrackerError> {
+        let ledger = self.ledger.read().await;
+        let session_spend = *self.session_spend_usd.read().await;
+        let session_generations = *self.session_generations.read().await;
+
+        let generation_spend = ledger.total_spend_usd;
+        let training_spend = ledger.training_spend_usd;
+        let all_time_spend = generation_spend + training_spend;
+
+        Ok(CostStats {
+            session_spend_usd: session_spend,
+            total_spend_usd: all_time_spend,
+            total_generations: ledger.total_generations,
+            session_generations,
+            by_model: ledger.by_model.clone(),
+            history: ledger.history.clone(),
+            all_time_spend,
+            session_spend,
+            training_spend,
+            generation_spend,
+            training_runs: ledger.training_runs,
+        })
+    }
+
+    async fn reset_session(&self) -> Result<(), CostTrackerError> {
+        *self.session_spend_usd.write().await = 0.0;
+        *self.session_generations.write().await = 0;
+        *self.session_training_spend_usd.write().await = 0.0;
+        Ok(())
     }
 }
 

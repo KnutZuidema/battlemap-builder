@@ -12,22 +12,80 @@ use axum::{
     routing::{get, patch, post},
     Router,
 };
-use axum::http::{Request, Response};
+use axum::http::{Request, Response, StatusCode};
 use std::time::Duration;
 use tower_http::cors::CorsLayer;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, MakeSpan, OnResponse, TraceLayer};
 use tracing::{Level, Span};
 
+/// Ceiling for ordinary API requests.
+///
+/// A request that exceeds it is either a bug or an upstream stall; failing at the application
+/// layer with `408 Request Timeout` keeps the Tokio worker (and the probe it must answer) free
+/// instead of letting the connection hang until the client gives up.
+pub(crate) const STANDARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Ceiling for endpoints that legitimately run for minutes: dataset audits/exports/freezes,
+/// benchmarks, harvests, vision round-trips, training dispatch/publish/verify and the storage
+/// scan. The ceiling still bounds a rogue request, but it is wide enough that a healthy slow
+/// operation is never cut off mid-flight.
+pub(crate) const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 /// Builds the complete Axum application router mounting API endpoints,
 /// CORS and tracing middleware, and the static UI assets fallback.
+///
+/// API routes are grouped by how long they may legitimately run, and each group carries its own
+/// request timeout (see [`STANDARD_REQUEST_TIMEOUT`] and [`LONG_REQUEST_TIMEOUT`]). Probes are
+/// deliberately outside both layers: a probe must observe the process, never a timeout layer.
 pub fn create_router(state: AppState) -> Router {
-    let api_routes = Router::new()
-        .route("/api/healthz", get(get_healthz))
+    let probe_routes = Router::new().route("/api/healthz", get(get_healthz));
+
+    let standard_routes = Router::new()
         .route("/api/status", get(get_status))
         .route("/api/staging", get(get_staging))
         .route("/api/curated", get(get_curated))
         .route("/api/curated/{id}", patch(patch_curated).delete(delete_curated))
         .route("/api/curated/bulk-delete", post(post_curated_bulk_delete))
+        .route(
+            "/api/training/datasets/freeze/status",
+            get(get_training_dataset_freeze_status),
+        )
+        .route(
+            "/api/training/datasets/{id}",
+            get(get_training_dataset).delete(delete_training_dataset),
+        )
+        .route(
+            "/api/training/runs",
+            get(get_training_runs).post(post_training_run),
+        )
+        .route("/api/training/runs/{id}", get(get_training_run))
+        .route("/api/training/runs/{id}/cancel", post(post_training_run_cancel))
+        .route("/api/training/runs/{id}/metrics", get(get_training_run_metrics))
+        .route("/api/training/adapters", get(get_training_adapters))
+        .route("/api/training/adapters/{id}", get(get_training_adapter))
+        .route("/api/training/adapters/{id}/retire", post(post_retire_training_adapter))
+        .route("/api/image/staging/{id}", get(get_staging_image))
+        .route("/api/image/staging/{id}/{layer_index}", get(get_staging_layer_image))
+        .route("/api/image/curated/{id}", get(get_curated_image_by_id))
+        .route("/api/image/curated/{id}/{layer_index}", get(get_curated_image_or_layer))
+        .route(
+            "/api/staging/{id}/layers",
+            patch(patch_staging_layers).post(patch_staging_layers),
+        )
+        .route("/api/reject", post(post_reject))
+        .route("/api/reject/undo", post(post_undo_reject))
+        .route("/api/cost/stats", get(get_cost_stats))
+        .route("/api/cost/reset-session", post(post_reset_cost_session))
+        .route("/api/models", get(get_models))
+        .route("/api/benchmark/cancel", post(post_benchmark_cancel))
+        .route("/api/benchmarks/cancel", post(post_benchmark_cancel))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            STANDARD_REQUEST_TIMEOUT,
+        ));
+
+    let long_routes = Router::new()
         .route(
             "/api/curated/{id}/suggest-themes",
             post(post_curated_suggest_themes).get(post_curated_suggest_themes),
@@ -45,14 +103,6 @@ pub fn create_router(state: AppState) -> Router {
             get(get_training_datasets).post(post_training_dataset),
         )
         .route(
-            "/api/training/datasets/freeze/status",
-            get(get_training_dataset_freeze_status),
-        )
-        .route(
-            "/api/training/datasets/{id}",
-            get(get_training_dataset).delete(delete_training_dataset),
-        )
-        .route(
             "/api/training/datasets/{id}/archive",
             get(get_training_dataset_archive),
         )
@@ -60,31 +110,15 @@ pub fn create_router(state: AppState) -> Router {
             "/api/training/datasets/{id}/download",
             get(get_training_dataset_archive),
         )
-        .route(
-            "/api/training/runs",
-            get(get_training_runs).post(post_training_run),
-        )
-        .route("/api/training/runs/{id}", get(get_training_run))
         .route("/api/training/runs/{id}/dispatch", post(post_training_run_dispatch))
-        .route("/api/training/runs/{id}/cancel", post(post_training_run_cancel))
         .route("/api/training/runs/{id}/publish", post(post_training_run_publish))
         .route("/api/training/runs/{id}/verify", post(post_training_run_verify))
-        .route("/api/training/runs/{id}/metrics", get(get_training_run_metrics))
-        .route("/api/training/adapters", get(get_training_adapters))
-        .route("/api/training/adapters/{id}", get(get_training_adapter))
-        .route("/api/training/adapters/{id}/retire", post(post_retire_training_adapter))
-        .route("/api/image/staging/{id}", get(get_staging_image))
-        .route("/api/image/staging/{id}/{layer_index}", get(get_staging_layer_image))
-        .route("/api/image/curated/{id}", get(get_curated_image_by_id))
-        .route("/api/image/curated/{id}/{layer_index}", get(get_curated_image_or_layer))
+        // Thumbnail renders wait for the single image-work permit, which a bulk refinement may
+        // hold for the whole refinement. They are slow by design, not hung.
         .route("/api/thumb/curated/{id}", get(get_curated_thumbnail))
         .route(
             "/api/thumb/curated/{id}/{layer_index}",
             get(get_curated_thumbnail_or_layer),
-        )
-        .route(
-            "/api/staging/{id}/layers",
-            patch(patch_staging_layers).post(patch_staging_layers),
         )
         .route("/api/staging/{id}/grid", patch(patch_staging_grid))
         .route("/api/staging/{id}/split", post(post_split_staging))
@@ -98,23 +132,22 @@ pub fn create_router(state: AppState) -> Router {
             post(post_describe_candidate).get(post_describe_candidate),
         )
         .route("/api/curate", post(post_curate))
-        .route("/api/reject", post(post_reject))
-        .route("/api/reject/undo", post(post_undo_reject))
         .route("/api/harvest/reddit", post(post_harvest_reddit))
-        .route("/api/cost/stats", get(get_cost_stats))
-        .route("/api/cost/reset-session", post(post_reset_cost_session))
-        .route("/api/models", get(get_models))
         .route("/api/benchmark/run", post(post_benchmark_run))
         .route("/api/benchmarks/run", post(post_benchmark_run))
         .route("/api/benchmark/generate", post(post_benchmark_run))
         .route("/api/benchmarks/generate", post(post_benchmark_run))
-        .route("/api/benchmark/cancel", post(post_benchmark_cancel))
-        .route("/api/benchmarks/cancel", post(post_benchmark_cancel))
         .route("/api/storage/stats", get(get_storage_stats))
-        .route("/api/storage/purge-staging", post(post_purge_staging));
+        .route("/api/storage/purge-staging", post(post_purge_staging))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            LONG_REQUEST_TIMEOUT,
+        ));
 
     Router::new()
-        .merge(api_routes)
+        .merge(probe_routes)
+        .merge(standard_routes)
+        .merge(long_routes)
         .layer(CorsLayer::permissive())
         .layer(
             TraceLayer::new_for_http()
@@ -311,5 +344,37 @@ mod tests {
             events.is_empty(),
             "expected no events emitted for disabled /api/status span under INFO filter, got: {events:?}"
         );
+    }
+
+    /// The per-group request timeouts must terminate a hung handler at the application layer
+    /// with `408 Request Timeout` instead of letting the connection (and its Tokio task) hang.
+    #[tokio::test]
+    async fn request_timeout_layer_returns_408_for_a_hung_route() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let app = Router::new()
+            .route(
+                "/hang",
+                get(|| async {
+                    std::future::pending::<()>().await;
+                }),
+            )
+            .layer(TimeoutLayer::with_status_code(
+                StatusCode::REQUEST_TIMEOUT,
+                Duration::from_millis(10),
+            ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/hang")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
     }
 }

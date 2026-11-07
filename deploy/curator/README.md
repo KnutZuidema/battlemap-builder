@@ -466,6 +466,24 @@ If harvesting fails with a 401/403, the Reddit credentials in `curator-secrets` 
   blobs or a model. `/api/status` stays the UI's metrics endpoint and is deliberately not a probe
   target — it lists the catalog and would turn a slow database into a restart.
 
+### Pod Restarts (`liveness probe failed`) Under Request Load
+- **Symptom**: `Container curator failed liveness probe, will be restarted` while a LoRA export,
+  dataset freeze, benchmark, storage scan or bulk refinement is running, often right after a
+  burst of requests. In-flight work is severed and a client retry re-triggers the failure on the
+  freshly started container.
+- **Cause**: liveness is not a latency SLA. With a 5s probe timeout and a 40s failure budget, a
+  saturated event loop or node CFS throttling (the old `requests.cpu: 100m`) misses the deadline
+  and kubelet kills a healthy pod; startup then reconnects PostgreSQL, validates the catalog and
+  rebuilds caches under the same pressure.
+- **Resolution**: `readinessProbe` stays tight (5s period, 5s timeout, 3 failures) so an
+  overloaded pod sheds ingress without dying, while `livenessProbe` only restarts a wedged
+  process (15s period, 10s timeout, 8 failures = 120s) and the CPU request is `250m`. The router
+  also enforces application-layer deadlines (`curator/src/api/mod.rs`): ordinary routes time out
+  after 30s, and routes that legitimately run for minutes — dataset exports, freezes and audits,
+  benchmarks, harvests, vision round-trips, training dispatch/publish/verify, storage scans and
+  Thumbnail renders — after 15 minutes. `/api/healthz` sits outside both layers. A timed-out
+  request fails with `408` instead of pinning a Tokio worker until the client gives up.
+
 ### Pod in `ImagePullBackOff` or `ErrImagePull`
 - **Cause**: Kubernetes cannot authenticate with GHCR to pull private image `ghcr.io/knutzuidema/curator`.
 - **Resolution**: Verify that `ghcr-secret` exists in the `curator` namespace:

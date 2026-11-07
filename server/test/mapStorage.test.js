@@ -11,7 +11,6 @@ process.env.MAPS_DIR = tmpMapsDir;
 
 const {
   getMapsDir,
-  getDefaultMapsDir,
   validateMapId,
   generateMapId,
   saveMap,
@@ -42,7 +41,7 @@ test.after(() => {
   }
 });
 
-test('getDefaultMapsDir: resolves XDG_DATA_HOME to an absolute path when MAPS_DIR is unset', () => {
+test('getMapsDir: falls back to XDG_DATA_HOME when MAPS_DIR is unset', () => {
   if (process.platform === 'win32' || process.platform === 'darwin') {
     // XDG_DATA_HOME is only consulted on Linux.
     return;
@@ -56,7 +55,7 @@ test('getDefaultMapsDir: resolves XDG_DATA_HOME to an absolute path when MAPS_DI
   process.env.XDG_DATA_HOME = path.relative(process.cwd(), tmpRoot) || '.';
 
   try {
-    const dir = getDefaultMapsDir();
+    const dir = getMapsDir();
     assert.ok(path.isAbsolute(dir), `expected an absolute path, got ${dir}`);
     assert.strictEqual(dir, path.join(tmpRoot, 'battlemap-builder', 'maps'));
   } finally {

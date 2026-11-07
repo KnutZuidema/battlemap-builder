@@ -401,7 +401,6 @@ async function duplicateMap(id) {
 
 module.exports = {
   getMapsDir,
-  getDefaultMapsDir,
   validateMapId,
   generateMapId,
   extractImageBuffer,

@@ -47,10 +47,7 @@ pub struct PersistentLedger {
 #[derive(Debug, Clone)]
 pub struct FileCostLedger {
     path: PathBuf,
-    persistent: Arc<RwLock<PersistentLedger>>,
-    session_spend_usd: Arc<RwLock<f64>>,
-    session_generations: Arc<RwLock<u64>>,
-    session_training_spend_usd: Arc<RwLock<f64>>,
+    tracker: InMemoryCostTracker,
 }
 
 impl FileCostLedger {
@@ -62,10 +59,7 @@ impl FileCostLedger {
 
         Self {
             path,
-            persistent: Arc::new(RwLock::new(persistent)),
-            session_spend_usd: Arc::new(RwLock::new(0.0)),
-            session_generations: Arc::new(RwLock::new(0)),
-            session_training_spend_usd: Arc::new(RwLock::new(0.0)),
+            tracker: InMemoryCostTracker::with_persistent_ledger(persistent),
         }
     }
 
@@ -165,6 +159,77 @@ impl FileCostLedger {
     }
 }
 
+/// Mutable ledger state shared by every [`CostTracker`] implementation: the persistent
+/// (serializable) ledger plus per-session counters.
+///
+/// Adapters only add synchronization and persistence around this state, so the accounting rules
+/// live in exactly one place.
+#[derive(Debug, Clone, Default)]
+struct LedgerState {
+    persistent: PersistentLedger,
+    session_spend_usd: f64,
+    session_generations: u64,
+}
+
+impl LedgerState {
+    fn record_generation(&mut self, record: GenerationCostRecord) {
+        self.persistent.total_spend_usd += record.cost_usd;
+        self.persistent.total_generations += 1;
+
+        let model_stats = self
+            .persistent
+            .by_model
+            .entry(record.model.clone())
+            .or_default();
+        model_stats.spend_usd += record.cost_usd;
+        model_stats.generation_count += 1;
+        model_stats.total_tokens += record.prompt_tokens.unwrap_or(0) as u64
+            + record.completion_tokens.unwrap_or(0) as u64;
+
+        self.persistent
+            .history
+            .push(CostRecord::Generation(record.clone()));
+
+        self.session_spend_usd += record.cost_usd;
+        self.session_generations += 1;
+    }
+
+    fn record_training_cost(&mut self, record: TrainingCostRecord) {
+        self.persistent.training_spend_usd += record.cost_usd;
+        self.persistent.training_runs += 1;
+        self.persistent
+            .history
+            .push(CostRecord::Training(record.clone()));
+
+        self.session_spend_usd += record.cost_usd;
+    }
+
+    fn stats(&self) -> CostStats {
+        let generation_spend = self.persistent.total_spend_usd;
+        let training_spend = self.persistent.training_spend_usd;
+        let all_time_spend = generation_spend + training_spend;
+
+        CostStats {
+            session_spend_usd: self.session_spend_usd,
+            total_spend_usd: all_time_spend,
+            total_generations: self.persistent.total_generations,
+            session_generations: self.session_generations,
+            by_model: self.persistent.by_model.clone(),
+            history: self.persistent.history.clone(),
+            all_time_spend,
+            session_spend: self.session_spend_usd,
+            training_spend,
+            generation_spend,
+            training_runs: self.persistent.training_runs,
+        }
+    }
+
+    fn reset_session(&mut self) {
+        self.session_spend_usd = 0.0;
+        self.session_generations = 0;
+    }
+}
+
 /// In-process [`CostTracker`] that keeps cost telemetry entirely in memory.
 ///
 /// Used by application states that must not read or write the filesystem, such as test
@@ -172,10 +237,18 @@ impl FileCostLedger {
 /// anchored at the resolved data directory.
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryCostTracker {
-    ledger: Arc<RwLock<PersistentLedger>>,
-    session_spend_usd: Arc<RwLock<f64>>,
-    session_generations: Arc<RwLock<u64>>,
-    session_training_spend_usd: Arc<RwLock<f64>>,
+    state: Arc<RwLock<LedgerState>>,
+}
+
+impl InMemoryCostTracker {
+    fn with_persistent_ledger(persistent: PersistentLedger) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(LedgerState {
+                persistent,
+                ..LedgerState::default()
+            })),
+        }
+    }
 }
 
 #[async_trait]
@@ -184,24 +257,7 @@ impl CostTracker for InMemoryCostTracker {
         &self,
         record: GenerationCostRecord,
     ) -> Result<(), CostTrackerError> {
-        let mut ledger = self.ledger.write().await;
-        let mut session_spend = self.session_spend_usd.write().await;
-        let mut session_gen = self.session_generations.write().await;
-
-        ledger.total_spend_usd += record.cost_usd;
-        ledger.total_generations += 1;
-
-        let model_stats = ledger.by_model.entry(record.model.clone()).or_default();
-        model_stats.spend_usd += record.cost_usd;
-        model_stats.generation_count += 1;
-        model_stats.total_tokens += record.prompt_tokens.unwrap_or(0) as u64
-            + record.completion_tokens.unwrap_or(0) as u64;
-
-        ledger.history.push(CostRecord::Generation(record.clone()));
-
-        *session_spend += record.cost_usd;
-        *session_gen += 1;
-
+        self.state.write().await.record_generation(record);
         Ok(())
     }
 
@@ -209,48 +265,16 @@ impl CostTracker for InMemoryCostTracker {
         &self,
         record: TrainingCostRecord,
     ) -> Result<(), CostTrackerError> {
-        let mut ledger = self.ledger.write().await;
-        let mut session_spend = self.session_spend_usd.write().await;
-        let mut session_training_spend = self.session_training_spend_usd.write().await;
-
-        ledger.training_spend_usd += record.cost_usd;
-        ledger.training_runs += 1;
-        ledger.history.push(CostRecord::Training(record.clone()));
-
-        *session_spend += record.cost_usd;
-        *session_training_spend += record.cost_usd;
-
+        self.state.write().await.record_training_cost(record);
         Ok(())
     }
 
     async fn get_stats(&self) -> Result<CostStats, CostTrackerError> {
-        let ledger = self.ledger.read().await;
-        let session_spend = *self.session_spend_usd.read().await;
-        let session_generations = *self.session_generations.read().await;
-
-        let generation_spend = ledger.total_spend_usd;
-        let training_spend = ledger.training_spend_usd;
-        let all_time_spend = generation_spend + training_spend;
-
-        Ok(CostStats {
-            session_spend_usd: session_spend,
-            total_spend_usd: all_time_spend,
-            total_generations: ledger.total_generations,
-            session_generations,
-            by_model: ledger.by_model.clone(),
-            history: ledger.history.clone(),
-            all_time_spend,
-            session_spend,
-            training_spend,
-            generation_spend,
-            training_runs: ledger.training_runs,
-        })
+        Ok(self.state.read().await.stats())
     }
 
     async fn reset_session(&self) -> Result<(), CostTrackerError> {
-        *self.session_spend_usd.write().await = 0.0;
-        *self.session_generations.write().await = 0;
-        *self.session_training_spend_usd.write().await = 0.0;
+        self.state.write().await.reset_session();
         Ok(())
     }
 }
@@ -261,91 +285,26 @@ impl CostTracker for FileCostLedger {
         &self,
         record: GenerationCostRecord,
     ) -> Result<(), CostTrackerError> {
-        let mut persistent = self.persistent.write().await;
-        let mut session_spend = self.session_spend_usd.write().await;
-        let mut session_gen = self.session_generations.write().await;
-
-        // Update cumulative spend & generation count
-        persistent.total_spend_usd += record.cost_usd;
-        persistent.total_generations += 1;
-
-        // Update per-model metrics
-        let model_stats = persistent
-            .by_model
-            .entry(record.model.clone())
-            .or_default();
-        model_stats.spend_usd += record.cost_usd;
-        model_stats.generation_count += 1;
-        let tokens = record.prompt_tokens.unwrap_or(0) as u64
-            + record.completion_tokens.unwrap_or(0) as u64;
-        model_stats.total_tokens += tokens;
-
-        // Append to history
-        persistent.history.push(CostRecord::Generation(record.clone()));
-
-        // Update in-memory session tracking
-        *session_spend += record.cost_usd;
-        *session_gen += 1;
-
-        // Atomically persist to file
-        self.atomic_save(&persistent)?;
-
-        Ok(())
+        let mut state = self.tracker.state.write().await;
+        state.record_generation(record);
+        self.atomic_save(&state.persistent)
     }
 
     async fn record_training_cost(
         &self,
         record: TrainingCostRecord,
     ) -> Result<(), CostTrackerError> {
-        let mut persistent = self.persistent.write().await;
-        let mut session_spend = self.session_spend_usd.write().await;
-        let mut session_training_spend = self.session_training_spend_usd.write().await;
-
-        persistent.training_spend_usd += record.cost_usd;
-        persistent.training_runs += 1;
-        persistent.history.push(CostRecord::Training(record.clone()));
-
-        *session_spend += record.cost_usd;
-        *session_training_spend += record.cost_usd;
-
-        self.atomic_save(&persistent)?;
-
-        Ok(())
+        let mut state = self.tracker.state.write().await;
+        state.record_training_cost(record);
+        self.atomic_save(&state.persistent)
     }
 
     async fn get_stats(&self) -> Result<CostStats, CostTrackerError> {
-        let persistent = self.persistent.read().await;
-        let session_spend = *self.session_spend_usd.read().await;
-        let session_gen = *self.session_generations.read().await;
-
-        let generation_spend = persistent.total_spend_usd;
-        let training_spend = persistent.training_spend_usd;
-        let all_time_spend = generation_spend + training_spend;
-
-        Ok(CostStats {
-            session_spend_usd: session_spend,
-            total_spend_usd: all_time_spend,
-            total_generations: persistent.total_generations,
-            session_generations: session_gen,
-            by_model: persistent.by_model.clone(),
-            history: persistent.history.clone(),
-            all_time_spend,
-            session_spend,
-            training_spend,
-            generation_spend,
-            training_runs: persistent.training_runs,
-        })
+        Ok(self.tracker.state.read().await.stats())
     }
 
     async fn reset_session(&self) -> Result<(), CostTrackerError> {
-        let mut session_spend = self.session_spend_usd.write().await;
-        let mut session_gen = self.session_generations.write().await;
-        let mut session_training_spend = self.session_training_spend_usd.write().await;
-
-        *session_spend = 0.0;
-        *session_gen = 0;
-        *session_training_spend = 0.0;
-
+        self.tracker.state.write().await.reset_session();
         Ok(())
     }
 }

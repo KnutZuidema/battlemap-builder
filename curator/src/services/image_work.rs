@@ -76,20 +76,41 @@ impl GroundImage {
     }
 
     /// [`GroundImage::decode`] against an explicit permit pool; tests use their own.
+    ///
+    /// The permit travels into the blocking task and comes back only with the decoded pixels. If
+    /// the caller's future is dropped mid-decode (request timeout, client disconnect), the
+    /// detached blocking task keeps the permit until it finishes, so no other pipeline can start
+    /// a second full-resolution decode while the first is still allocating.
     async fn decode_with(limit: Arc<Semaphore>, bytes: Vec<u8>) -> Self {
         let permit = limit
+            .clone()
             .acquire_owned()
             .await
             .expect("image work semaphore is never closed");
-        let image = tokio::task::spawn_blocking(move || image::load_from_memory(&bytes).ok())
-            .await
-            .unwrap_or_else(|err| {
+        match tokio::task::spawn_blocking(move || {
+            let image = image::load_from_memory(&bytes).ok();
+            (permit, image)
+        })
+        .await
+        {
+            Ok((permit, image)) => Self {
+                image,
+                _permit: permit,
+            },
+            Err(err) => {
                 tracing::error!(error = %err, "Ground layer decode task failed");
-                None
-            });
-        Self {
-            image,
-            _permit: permit,
+                // The panicked task unwound and dropped its permit with its stack. Re-acquire one
+                // so a live `GroundImage` still honours "no pixels without the permit"; there are
+                // no pixels here, so this is only about keeping the type's contract uniform.
+                let permit = limit
+                    .acquire_owned()
+                    .await
+                    .expect("image work semaphore is never closed");
+                Self {
+                    image: None,
+                    _permit: permit,
+                }
+            }
         }
     }
 

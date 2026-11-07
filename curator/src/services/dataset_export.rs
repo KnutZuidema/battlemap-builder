@@ -423,34 +423,22 @@ impl DatasetExportService {
                 };
 
                 // One full-resolution decode per map, serialized with every other image pipeline.
-                // The permit is shared with the blocking tasks that own the pixels: if the
-                // request future is dropped (client disconnect, request timeout), a detached
-                // decode or crop keeps the permit until it finishes instead of releasing it
-                // while the image is still alive. The decode itself runs on the blocking pool so
-                // a large Ground layer never stalls a Tokio worker (and with it the probe).
-                let permit = Arc::new(image_work::acquire().await);
-
-                let decode_permit = Arc::clone(&permit);
-                let decoded = tokio::task::spawn_blocking(move || {
-                    let _permit = decode_permit;
-                    image::load_from_memory(&ground_bytes)
-                })
-                .await
-                .map_err(|err| {
-                    StorageError::Io(std::io::Error::other(format!(
-                        "Ground layer decode task for '{}' failed: {err}",
-                        map.id
-                    )))
-                })?;
-                let dynamic_img = match decoded {
-                    Ok(img) => img,
-                    Err(e) => {
-                        tracing::warn!("Failed to decode ground image for '{}': {e}", map.id);
+                // `GroundImage` owns the permit for as long as the pixels are alive, and the
+                // blocking tasks below share it through an `Arc` clone: if the request future is
+                // dropped (client disconnect, request timeout), a detached crop keeps the permit
+                // until it finishes instead of releasing it while the image is still alive. The
+                // decode itself runs on the blocking pool so a large Ground layer never stalls a
+                // Tokio worker (and with it the probe).
+                let ground = Arc::new(image_work::GroundImage::decode(ground_bytes).await);
+                let dynamic_img = match ground.image() {
+                    Some(image) => image,
+                    None => {
+                        tracing::warn!("Failed to decode ground image for '{}'", map.id);
                         continue;
                     }
                 };
 
-                let (samples, plan_issues) = plan_dataset_samples(map, &dynamic_img);
+                let (samples, plan_issues) = plan_dataset_samples(map, dynamic_img);
                 for issue in &plan_issues {
                     tracing::warn!(
                         "LoRA dataset issue for '{}': {} ({})",
@@ -459,10 +447,6 @@ impl DatasetExportService {
                         issue.code.as_str()
                     );
                 }
-
-                // The decoded pixels are shared with the per-section blocking tasks, so the
-                // decode stays alive for the whole map without a second copy.
-                let dynamic_img = Arc::new(dynamic_img);
 
                 for sample in samples {
                     if !on_section(completed_samples, map_idx, map, sample.col, sample.row) {
@@ -474,14 +458,18 @@ impl DatasetExportService {
 
                     // Lanczos3 resampling plus PNG encoding is CPU-bound; run it on the blocking
                     // pool so the async workers keep serving probes and other requests. The task
-                    // holds a permit clone for as long as it touches the decoded pixels.
-                    let crop_permit = Arc::clone(&permit);
-                    let img = Arc::clone(&dynamic_img);
+                    // holds an `Arc` clone of the decode, and with it the permit, for as long as
+                    // it touches the pixels.
+                    let crop_ground = Arc::clone(&ground);
                     let grid = map.grid;
                     let (col, row) = (sample.col, sample.row);
                     let image_bytes = match tokio::task::spawn_blocking(move || {
-                        let _permit = crop_permit;
-                        crop_and_resample_section(&img, &grid, col, row)
+                        let image = crop_ground.image().ok_or_else(|| {
+                            StorageError::InvalidData(
+                                "decoded Ground layer disappeared before cropping".to_string(),
+                            )
+                        })?;
+                        crop_and_resample_section(image, &grid, col, row)
                     })
                     .await
                     {

@@ -18,7 +18,7 @@ use crate::ports::model_engine::{ModelEngine, ModelEngineError};
 use crate::ports::storage_error::StorageError;
 use crate::services::library::LibraryService;
 use crate::services::reference_provider::{
-    ReferenceProvenance, ReferenceProvider, ReferenceProviderError, ReferenceResolution,
+    ReferenceProvider, ReferenceProviderError, ReferenceResolution,
 };
 
 /// Errors arising from benchmark service execution.
@@ -261,7 +261,8 @@ impl BenchmarkService {
                 .await
             {
                 info!(
-                    provenance = ?resolution.provenance,
+                    map_id = %resolution.map_id,
+                    theme = %resolution.theme,
                     "Applying visual reference conditioning to benchmark request"
                 );
                 request = request.with_image(resolution.image);
@@ -413,7 +414,8 @@ impl BenchmarkService {
                     .await
                 {
                     info!(
-                        provenance = ?resolution.provenance,
+                        map_id = %resolution.map_id,
+                        theme = %resolution.theme,
                         "Applying visual reference conditioning to benchmark request"
                     );
                     request = request.with_image(resolution.image);
@@ -520,10 +522,9 @@ impl BenchmarkService {
                     total,
                     current_spend,
                     message: if let Some(ref_res) = self.resolve_reference_for_item(item).await {
-                        let ReferenceProvenance::Curated { id, .. } = ref_res.provenance;
                         format!(
                             "Generating {} for {} (curated reference: {})",
-                            item.name, model, id
+                            item.name, model, ref_res.map_id
                         )
                     } else {
                         format!("Generating {} for {}", item.name, model)
@@ -898,7 +899,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_benchmark_service_visual_reference_static_fallback() {
+    async fn test_benchmark_service_empty_catalog_attaches_no_reference() {
         use crate::domain::SYSTEM_INSTRUCTION_GENERATE;
 
         let (engine, captured_requests) = RecordingMockEngine::new();
@@ -923,20 +924,8 @@ mod tests {
         );
         assert!(req.prompt.contains("Flat 2D stone dungeon crypt"));
         assert!(req.prompt.contains("64px = 5ft square"));
-        // Verify attached reference image from static fallback
-        assert_eq!(req.images.len(), 1);
-        let ref_img = &req.images[0];
-        assert_eq!(
-            ref_img.label,
-            "Perspective Reference: 2D Stone Dungeon Plan View"
-        );
-        assert_eq!(ref_img.mime_type, "image/jpeg");
-        assert!(!ref_img.data.is_empty());
-
-        // Verify preprocessed image is 512x512
-        let decoded = image::load_from_memory(&ref_img.data).expect("valid jpeg");
-        assert_eq!(decoded.width(), 512);
-        assert_eq!(decoded.height(), 512);
+        // An empty catalog resolves no reference; there is no static fallback imagery.
+        assert!(req.images.is_empty());
     }
 
     #[tokio::test]
@@ -990,7 +979,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let req = &requests[0];
 
-        // Verify curated map reference is attached instead of static fallback
+        // Verify the curated map reference is attached
         assert_eq!(req.images.len(), 1);
         let ref_img = &req.images[0];
         assert_eq!(
@@ -1006,12 +995,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_benchmark_service_custom_prompt_keyword_detection() {
+    async fn test_benchmark_service_custom_prompt_without_curated_maps_has_no_reference() {
         let (engine, captured_requests) = RecordingMockEngine::new();
         let (catalog, blobs) = reference_ports();
         let service = BenchmarkService::new(Arc::new(engine), catalog, blobs);
 
-        // 1. Custom prompt matching Tavern
+        // 1. Custom prompt that would match a Tavern keyword
         let tavern_item = BatchBenchmarkItem::new(
             "Cozy Tavern",
             "Flat 2D fantasy tavern interior with hearth and bar counter",
@@ -1034,14 +1023,8 @@ mod tests {
         let requests = captured_requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
 
-        // Tavern item should have resolved the tavern static reference
-        assert_eq!(requests[0].images.len(), 1);
-        assert_eq!(
-            requests[0].images[0].label,
-            "Perspective Reference: 2D Tavern & Rooms Plan View"
-        );
-
-        // Generic item without matching keywords should have no reference images attached
+        // With no curated maps there is no static fallback: neither request gets a reference.
+        assert!(requests[0].images.is_empty());
         assert!(requests[1].images.is_empty());
     }
 

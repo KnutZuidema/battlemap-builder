@@ -20,9 +20,9 @@ use curator::adapters::{
 };
 use curator::api::{create_router, AppState};
 use curator::domain::{
-    BenchmarkArchetype, LoraAdapter, ModelApiType, ModelDescriptor, ModelProvider,
-    MODEL_GEMINI_31_FLASH, MODEL_GEMINI_31_FLASH_LITE, MODEL_MUSE, MODEL_SEEDREAM_50_FLASH,
-    MODEL_WAVESPEED_KLEIN_EDIT_LORA, MODEL_WAVESPEED_KLEIN_T2I_LORA,
+    BenchmarkArchetype, CuratedMap, LayerRole, LoraAdapter, ModelApiType, ModelDescriptor,
+    ModelProvider, Theme, MODEL_GEMINI_31_FLASH, MODEL_GEMINI_31_FLASH_LITE, MODEL_MUSE,
+    MODEL_SEEDREAM_50_FLASH, MODEL_WAVESPEED_KLEIN_EDIT_LORA, MODEL_WAVESPEED_KLEIN_T2I_LORA,
 };
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::CatalogRepository;
@@ -57,6 +57,42 @@ fn in_memory_ports() -> (Arc<InMemoryCatalogRepository>, Arc<InMemoryBlobStorage
         Arc::new(InMemoryCatalogRepository::new()),
         Arc::new(InMemoryBlobStorage::new()),
     )
+}
+
+/// Seeds a 5★ curated Dungeon map whose 1024x1024 ground layer exactly fits the default
+/// 64px grid's 16x16 Grid Cell section box, so the reference provider resolves an image.
+async fn seed_curated_dungeon_map(
+    catalog: &InMemoryCatalogRepository,
+    blobs: &InMemoryBlobStorage,
+) {
+    let map = CuratedMap::new(
+        "curated-registry-dungeon",
+        Theme::Dungeon,
+        vec!["dungeon".to_string()],
+        (1024, 1024),
+        chrono::Utc::now(),
+    );
+    let img: image::ImageBuffer<image::Rgb<u8>, Vec<u8>> =
+        image::ImageBuffer::from_pixel(1024, 1024, image::Rgb([90, 110, 130]));
+    let mut png_bytes = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut png_bytes),
+        image::ImageFormat::Png,
+    )
+    .expect("curated map image encodes");
+    catalog.save_curated(&map).await.expect("curated map saves");
+    blobs
+        .write_blob(
+            &BlobKey::CuratedLayer {
+                id: map.id.clone(),
+                index: 0,
+                role: LayerRole::Ground,
+                elevation: Some(0),
+            },
+            &png_bytes,
+        )
+        .await
+        .expect("curated ground blob saves");
 }
 
 fn sample_adapter() -> LoraAdapter {
@@ -478,6 +514,9 @@ async fn test_benchmark_runner_resolves_adapter_ids_through_registry() {
 
     let (catalog, blobs) = in_memory_ports();
     seed_published_adapter(&catalog, &blobs).await;
+    // The edit engine requires a reference image and there is no static fallback, so the
+    // catalog must contain a curated map for the Stone Crypt archetype's Dungeon theme.
+    seed_curated_dungeon_map(&catalog, &blobs).await;
 
     let registry = Arc::new(ModelRegistry::new(catalog.clone(), blobs.clone()));
     let wavespeed = WaveSpeedAdapter::with_config("wsk-test", mock_server.uri(), 2)

@@ -1,15 +1,33 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const sharp = require('sharp');
 
 /**
+ * Default map storage under the platform user data directory:
+ * `$XDG_DATA_HOME` or `~/.local/share` on Linux, `~/Library/Application Support` on macOS and
+ * `%APPDATA%` on Windows, always under `battlemap-builder/maps`.
+ */
+function getDefaultMapsDir() {
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+    return path.join(appData, 'battlemap-builder', 'maps');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'battlemap-builder', 'maps');
+  }
+  const dataHome = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  return path.join(dataHome, 'battlemap-builder', 'maps');
+}
+
+/**
  * Returns the resolved directory where maps are stored.
- * Configurable via process.env.MAPS_DIR or defaulting to <projectRoot>/data/maps.
+ * Configurable via process.env.MAPS_DIR or defaulting to the platform user data directory.
  */
 function getMapsDir() {
   const dir = process.env.MAPS_DIR
     ? path.resolve(process.env.MAPS_DIR)
-    : path.resolve(__dirname, '../../data/maps');
+    : getDefaultMapsDir();
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }

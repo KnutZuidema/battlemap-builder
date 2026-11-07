@@ -12,7 +12,6 @@ const {
 } = require('./modelCatalog');
 const { providerFailure, describeFailure, noApiKeyMessage } = require('./failure');
 const openrouterProvider = require('./providers/openrouterProvider');
-const { getReferenceImagesForPrompt } = require('./referenceImages');
 
 /**
  * Orchestrates map generation and region forging across providers.
@@ -106,16 +105,13 @@ async function generateBattlemap({ prompt, width = 1024, height = 1024, model })
   const userPromptText = buildBattlemapPrompt(prompt);
   const fullPromptPayload = `${systemInstruction}\n\n[USER REQUEST]\n${userPromptText}`;
 
-  // If the model is vision-capable, attach reference image(s) for visual perspective conditioning
-  const referenceImages = entry.vision
-    ? await getReferenceImagesForPrompt(prompt, { count: 1 })
-    : [];
-
+  // Prompt-only generation: the system instruction carries every perspective directive, so the
+  // model receives no conditioning images.
   const result = await runModel(entry, {
     systemInstruction,
     userPromptText: prompt,
     fullPromptPayload,
-    images: referenceImages,
+    images: [],
     width,
     height
   });

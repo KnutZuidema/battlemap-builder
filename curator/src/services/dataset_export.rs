@@ -158,6 +158,14 @@ pub(crate) fn plan_dataset_samples(
     (samples, issues)
 }
 
+/// Maps a blocking-pool join failure to a [`StorageError`] that names the failed task.
+///
+/// Every decode/crop/audit blocking task reports a panic through this one shape, so a panicked
+/// pipeline fails the operation instead of looking like an empty result.
+fn blocking_join_error(context: impl std::fmt::Display, err: tokio::task::JoinError) -> StorageError {
+    StorageError::Io(std::io::Error::other(format!("{context} failed: {err}")))
+}
+
 /// Crops the exact `16×16` Grid Cell box of Map Section `(col, row)` and resamples it to
 /// `1024×1024` PNG bytes without letterbox padding bars.
 ///
@@ -364,9 +372,10 @@ impl DatasetExportService {
             // classification under the shared image-work permit on the blocking pool, so an audit
             // can never add a second full-resolution decode to a running refinement (or the
             // reverse) and exhaust the pod's memory limit.
+            let map_id = map.id.clone();
             let report = image_work::run(move || audit_map_readiness(&map, ground_bytes))
                 .await
-                .map_err(|err| StorageError::Io(std::io::Error::other(err.to_string())))?;
+                .map_err(|err| blocking_join_error(format!("Ground-layer audit for '{map_id}'"), err))?;
             reports.push(report);
         }
         Ok(DatasetReadiness::from_maps(reports))
@@ -423,19 +432,20 @@ impl DatasetExportService {
                 };
 
                 // One full-resolution decode per map, serialized with every other image pipeline.
-                // `GroundImage` owns the permit for as long as the pixels are alive, and the
-                // blocking tasks below share it through an `Arc` clone: if the request future is
-                // dropped (client disconnect, request timeout), a detached crop keeps the permit
-                // until it finishes instead of releasing it while the image is still alive. The
-                // decode itself runs on the blocking pool so a large Ground layer never stalls a
-                // Tokio worker (and with it the probe).
+                // `GroundImage` owns the permit for as long as the pixels are alive and
+                // `with_pixels` hands an `Arc` clone to the blocking crop: if the request future
+                // is dropped (client disconnect, request timeout), the detached crop keeps the
+                // permit until it finishes instead of releasing it while the image is still
+                // alive. The decode itself runs on the blocking pool so a large Ground layer
+                // never stalls a Tokio worker (and with it the probe).
                 let ground = Arc::new(image_work::GroundImage::decode(ground_bytes).await);
-                let dynamic_img = match ground.image() {
-                    Some(image) => image,
-                    None => {
-                        tracing::warn!("Failed to decode ground image for '{}'", map.id);
-                        continue;
-                    }
+                let Some(dynamic_img) = ground.image() else {
+                    tracing::warn!(
+                        "Failed to decode ground image for '{}': {}",
+                        map.id,
+                        ground.error().unwrap_or("decode produced no pixels")
+                    );
+                    continue;
                 };
 
                 let (samples, plan_issues) = plan_dataset_samples(map, dynamic_img);
@@ -456,22 +466,14 @@ impl DatasetExportService {
                         )));
                     }
 
-                    // Lanczos3 resampling plus PNG encoding is CPU-bound; run it on the blocking
-                    // pool so the async workers keep serving probes and other requests. The task
-                    // holds an `Arc` clone of the decode, and with it the permit, for as long as
-                    // it touches the pixels.
-                    let crop_ground = Arc::clone(&ground);
+                    // Lanczos3 resampling plus PNG encoding is CPU-bound; `with_pixels` runs it on
+                    // the blocking pool while the task holds a clone of the decode, and with it
+                    // the permit, for as long as it touches the pixels.
                     let grid = map.grid;
                     let (col, row) = (sample.col, sample.row);
-                    let image_bytes = match tokio::task::spawn_blocking(move || {
-                        let image = crop_ground.image().ok_or_else(|| {
-                            StorageError::InvalidData(
-                                "decoded Ground layer disappeared before cropping".to_string(),
-                            )
-                        })?;
-                        crop_and_resample_section(image, &grid, col, row)
-                    })
-                    .await
+                    let image_bytes = match ground
+                        .with_pixels(move |image| crop_and_resample_section(image, &grid, col, row))
+                        .await
                     {
                         Ok(Ok(bytes)) => bytes,
                         Ok(Err(e)) => {
@@ -482,10 +484,13 @@ impl DatasetExportService {
                             continue;
                         }
                         Err(err) => {
-                            return Err(StorageError::Io(std::io::Error::other(format!(
-                                "Crop/resample task for '{}' section ({col}, {row}) failed: {err}",
-                                map.id
-                            ))));
+                            return Err(blocking_join_error(
+                                format!(
+                                    "Crop/resample task for '{}' section ({col}, {row})",
+                                    map.id
+                                ),
+                                err,
+                            ));
                         }
                     };
 
@@ -582,13 +587,15 @@ impl DatasetExportService {
             // Decoding and classifying a Ground layer is the audit's memory and CPU peak. Run it
             // on the blocking pool under the shared image-work permit so the Tokio workers keep
             // answering probes while a freeze audits a large library.
+            let map_id = map.id.clone();
             let map = map.clone();
             let report = image_work::run(move || audit_map_readiness(&map, ground_bytes))
                 .await
                 .map_err(|err| {
-                    FreezeDatasetError::Storage(StorageError::Io(std::io::Error::other(format!(
-                        "Dataset audit task failed: {err}"
-                    ))))
+                    FreezeDatasetError::Storage(blocking_join_error(
+                        format!("Dataset audit for '{map_id}'"),
+                        err,
+                    ))
                 })?;
             reports.push(report);
         }

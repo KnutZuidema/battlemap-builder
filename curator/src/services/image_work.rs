@@ -59,18 +59,21 @@ where
 ///
 /// Keeping the permit inside the decode is what makes the bound airtight: a caller cannot keep the
 /// pixels without keeping the promise that no other pipeline decodes at the same time. Drop the
-/// value (or call [`GroundImage::crop_sections`], which consumes it) before any long await such as
-/// a vision round-trip.
+/// value (or run a crop through [`GroundImage::with_pixels`], which borrows the decode) before any
+/// long await such as a vision round-trip.
 pub struct GroundImage {
-    image: Option<DynamicImage>,
-    _permit: OwnedSemaphorePermit,
+    /// The decoded pixels, or the reason the decoder produced none.
+    decoded: Result<DynamicImage, String>,
+    /// Absent only when the decode task panicked; there are no pixels to protect then.
+    _permit: Option<OwnedSemaphorePermit>,
 }
 
 impl GroundImage {
     /// Decodes `bytes` on the blocking pool under the shared permit.
     ///
-    /// Unreadable bytes and a panicked decoder both yield an empty value, which keeps the existing
-    /// caller policy: an undecodable Ground layer has no pixels to crop or to plan samples from.
+    /// Unreadable bytes and a panicked decoder both yield a value without pixels, which keeps the
+    /// existing caller policy: an undecodable Ground layer has no pixels to crop or to plan
+    /// samples from. The decoder's error is kept so the caller that skips the map can log why.
     pub async fn decode(bytes: Vec<u8>) -> Self {
         Self::decode_with(shared(), bytes).await
     }
@@ -88,27 +91,23 @@ impl GroundImage {
             .await
             .expect("image work semaphore is never closed");
         match tokio::task::spawn_blocking(move || {
-            let image = image::load_from_memory(&bytes).ok();
-            (permit, image)
+            let decoded = image::load_from_memory(&bytes).map_err(|err| err.to_string());
+            (permit, decoded)
         })
         .await
         {
-            Ok((permit, image)) => Self {
-                image,
-                _permit: permit,
+            Ok((permit, decoded)) => Self {
+                decoded,
+                _permit: Some(permit),
             },
             Err(err) => {
                 tracing::error!(error = %err, "Ground layer decode task failed");
-                // The panicked task unwound and dropped its permit with its stack. Re-acquire one
-                // so a live `GroundImage` still honours "no pixels without the permit"; there are
-                // no pixels here, so this is only about keeping the type's contract uniform.
-                let permit = limit
-                    .acquire_owned()
-                    .await
-                    .expect("image work semaphore is never closed");
+                // The panicked task unwound and dropped its permit with its stack. There are no
+                // pixels to protect, so do not queue for a second permit: the caller has already
+                // failed and a bulk refinement may hold the only permit for minutes.
                 Self {
-                    image: None,
-                    _permit: permit,
+                    decoded: Err(err.to_string()),
+                    _permit: None,
                 }
             }
         }
@@ -116,7 +115,36 @@ impl GroundImage {
 
     /// The decoded pixels, or `None` when the bytes were unreadable.
     pub fn image(&self) -> Option<&DynamicImage> {
-        self.image.as_ref()
+        self.decoded.as_ref().ok()
+    }
+
+    /// The decoder error when the bytes were unreadable, or the panic when the task failed.
+    pub fn error(&self) -> Option<&str> {
+        self.decoded.as_ref().err().map(String::as_str)
+    }
+
+    /// Runs `work` against the decoded pixels on the blocking pool.
+    ///
+    /// Takes `self: &Arc<Self>` so the blocking task owns a clone of the decode, and with it the
+    /// permit: a dropped request future (request timeout, client disconnect) cannot release the
+    /// permit while the pixels are still being read.
+    ///
+    /// Panics inside `work` come back as a `JoinError`; callers report them instead of treating
+    /// them as an empty result. Callers that treat an unreadable Ground layer as recoverable check
+    /// [`GroundImage::image`] first, because `with_pixels` panics when there are no pixels.
+    pub async fn with_pixels<T, F>(self: &Arc<Self>, work: F) -> Result<T, tokio::task::JoinError>
+    where
+        F: FnOnce(&DynamicImage) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let ground = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            let image = ground
+                .image()
+                .expect("ground image verified before the blocking task");
+            work(image)
+        })
+        .await
     }
 }
 
@@ -177,6 +205,28 @@ mod tests {
         let limit = Arc::new(Semaphore::new(1));
         let decoded = GroundImage::decode_with(limit.clone(), vec![0, 1, 2, 3]).await;
         assert!(decoded.image().is_none());
+        assert!(
+            decoded.error().is_some(),
+            "callers that skip an unreadable Ground layer need the decoder's cause"
+        );
+        drop(decoded);
+        assert_eq!(limit.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn with_pixels_runs_on_the_decoded_image_and_releases_the_permit_afterwards() {
+        let limit = Arc::new(Semaphore::new(1));
+        let decoded = Arc::new(GroundImage::decode_with(limit.clone(), png(8, 8)).await);
+        let dimensions = decoded
+            .with_pixels(|image| (image.width(), image.height()))
+            .await
+            .expect("blocking task joins");
+        assert_eq!(dimensions, (8, 8));
+        assert_eq!(
+            limit.available_permits(),
+            0,
+            "the decode still holds the permit after the blocking crop"
+        );
         drop(decoded);
         assert_eq!(limit.available_permits(), 1);
     }

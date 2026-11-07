@@ -26,10 +26,17 @@ use tracing::{Level, Span};
 /// instead of letting the connection hang until the client gives up.
 const STANDARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Ceiling for endpoints that legitimately run for minutes: dataset audits/exports/freezes,
-/// benchmarks, harvests, vision round-trips, training dispatch/publish/verify and the storage
-/// scan. The ceiling still bounds a rogue request, but it is wide enough that a healthy slow
-/// operation is never cut off mid-flight.
+/// Ceiling for endpoints that legitimately run for minutes.
+///
+/// A route belongs in this group when its healthy cost can outlive [`STANDARD_REQUEST_TIMEOUT`] —
+/// concretely when it holds the image-work permit, round-trips a vision model, or runs a
+/// multi-step blob/manifest saga. That covers dataset audits, exports, freezes and snapshot
+/// archives; benchmarks and Reddit harvests; vision-backed description, suggestion and refinement
+/// routes; candidate curation and curated patch/delete sagas; the staging grid, split and regroup
+/// manifest sagas; training dispatch/publish/verify; storage scans and purges; and Thumbnail
+/// renders. A route whose cost none of that covers belongs in the standard group. The ceiling
+/// still bounds a rogue request, but it is wide enough that a healthy slow operation is never cut
+/// off mid-flight.
 const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// Builds the complete Axum application router mounting API endpoints,
@@ -365,15 +372,27 @@ mod tests {
     }
 
     /// A blob store whose reads never resolve, so any route that streams blob bytes hangs the
-    /// way a stalled storage backend does.
+    /// way a stalled storage backend does. Listings stall for `list_delay` and then succeed, which
+    /// lets a test tell the standard and long request budgets apart on a real route.
     struct HangingBlobStorage {
         inner: crate::adapters::InMemoryBlobStorage,
+        list_delay: Duration,
     }
 
     impl Default for HangingBlobStorage {
         fn default() -> Self {
             Self {
                 inner: crate::adapters::InMemoryBlobStorage::new(),
+                list_delay: Duration::ZERO,
+            }
+        }
+    }
+
+    impl HangingBlobStorage {
+        fn with_list_delay(list_delay: Duration) -> Self {
+            Self {
+                list_delay,
+                ..Self::default()
             }
         }
     }
@@ -417,18 +436,14 @@ mod tests {
             &self,
             prefix: &crate::ports::BlobKey,
         ) -> Result<Vec<crate::ports::BlobKey>, crate::ports::StorageError> {
+            tokio::time::sleep(self.list_delay).await;
             self.inner.list_prefix(prefix).await
         }
     }
 
-    /// The real route table must cut a hung standard route off at the application layer with
-    /// `408 Request Timeout`, while leaving the liveness probe outside every timeout layer so it
-    /// can still observe (and restart) a wedged process.
-    #[tokio::test]
-    async fn standard_routes_time_out_while_the_probe_is_exempt() {
-        use axum::body::Body;
-        use tower::ServiceExt;
-
+    /// Seeds one staging candidate over a store whose blob reads never resolve. Listings stall
+    /// for `list_delay`, so a slow long route stays testable.
+    async fn state_with_hanging_storage(list_delay: Duration) -> AppState {
         let catalog = Arc::new(crate::adapters::InMemoryCatalogRepository::new());
         catalog
             .save_candidate(&crate::domain::Candidate::new(
@@ -440,11 +455,97 @@ mod tests {
             ))
             .await
             .expect("seed candidate");
-        let state = AppState::new(catalog, Arc::new(HangingBlobStorage::default()));
+        AppState::new(
+            catalog,
+            Arc::new(HangingBlobStorage::with_list_delay(list_delay)),
+        )
+    }
 
-        let app = create_router_with_timeouts(state, Duration::from_millis(20), LONG_REQUEST_TIMEOUT);
+    /// Seeds one curated map whose Ground-layer blob read never resolves.
+    async fn state_with_hanging_ground_read() -> AppState {
+        let catalog = Arc::new(crate::adapters::InMemoryCatalogRepository::new());
+        catalog
+            .save_curated(&crate::domain::CuratedMap::new(
+                "hung-map",
+                crate::domain::Theme::Dungeon,
+                Vec::new(),
+                (64, 64),
+                chrono::Utc::now(),
+            ))
+            .await
+            .expect("seed curated map");
+        AppState::new(catalog, Arc::new(HangingBlobStorage::default()))
+    }
 
-        let timed_out = app
+    /// The real route table must cut a hung standard route off at the application layer with
+    /// `408 Request Timeout` while the liveness probe still answers *during* the saturation: the
+    /// #293 failure mode is a stalled endpoint that must not trigger a probe restart.
+    #[tokio::test]
+    async fn standard_routes_time_out_while_the_probe_is_exempt() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let app = create_router_with_timeouts(
+            state_with_hanging_storage(Duration::ZERO).await,
+            Duration::from_millis(20),
+            LONG_REQUEST_TIMEOUT,
+        );
+
+        let hung_app = app.clone();
+        let hung = tokio::spawn(async move {
+            hung_app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/image/staging/hung")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+
+        // The probe must answer while the hung request is still in flight, not only after the
+        // timeout layer cancelled it.
+        let probe = tokio::time::timeout(
+            Duration::from_secs(1),
+            app.oneshot(
+                Request::builder()
+                    .uri("/api/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("the liveness probe must answer while another route is saturated")
+        .unwrap();
+        assert_eq!(
+            probe.status(),
+            StatusCode::OK,
+            "the liveness probe must never sit behind a request timeout layer"
+        );
+
+        assert_eq!(
+            hung.await.expect("hung request task joins").status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "a standard route stuck in a storage call must fail with 408"
+        );
+    }
+
+    /// The standard deadline must not bound the long group: a long route whose storage calls take
+    /// longer than the standard budget still answers, while a standard route hung on the same
+    /// store fails with 408.
+    #[tokio::test]
+    async fn long_routes_are_not_under_the_standard_budget() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let app = create_router_with_timeouts(
+            state_with_hanging_storage(Duration::from_millis(50)).await,
+            Duration::from_millis(10),
+            Duration::from_secs(5),
+        );
+
+        let standard = app
             .clone()
             .oneshot(
                 Request::builder()
@@ -455,9 +556,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            timed_out.status(),
+            standard.status(),
             StatusCode::REQUEST_TIMEOUT,
-            "a standard route stuck in a storage call must fail with 408"
+            "the standard deadline must bound the standard group"
+        );
+
+        let long_route = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/storage/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            long_route.status(),
+            StatusCode::OK,
+            "a long route slower than the standard budget must still answer"
         );
 
         let probe = app
@@ -472,7 +589,65 @@ mod tests {
         assert_eq!(
             probe.status(),
             StatusCode::OK,
-            "the liveness probe must never sit behind a request timeout layer"
+            "the probe must stay outside both timeout layers"
         );
+    }
+
+    /// `get_healthz` answering on its first poll is why a timeout layer can never preempt it:
+    /// tower-http only fails a request on a later poll, once its sleep has expired. A probe that
+    /// awaited anything would be exposed to the event loop it exists to observe.
+    #[tokio::test]
+    async fn the_probe_handler_answers_on_its_first_poll() {
+        use std::future::Future;
+        use std::task::{Context, Poll};
+
+        let mut probe = Box::pin(get_healthz());
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(
+            matches!(probe.as_mut().poll(&mut cx), Poll::Ready(_)),
+            "the liveness probe must answer on its first poll"
+        );
+    }
+
+    /// A long route stuck in a storage call must fail on the long budget, not on the standard one.
+    #[tokio::test]
+    async fn long_routes_time_out_on_their_own_budget() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let app = create_router_with_timeouts(
+            state_with_hanging_ground_read().await,
+            LONG_REQUEST_TIMEOUT,
+            Duration::from_millis(20),
+        );
+
+        let timed_out = tokio::time::timeout(
+            Duration::from_secs(1),
+            app.clone().oneshot(
+                Request::builder()
+                    .uri("/api/dataset/readiness")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("a long route must be bounded by the long budget")
+        .unwrap();
+        assert_eq!(
+            timed_out.status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "a long route stuck in a storage call must fail with 408"
+        );
+
+        let probe = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(probe.status(), StatusCode::OK);
     }
 }

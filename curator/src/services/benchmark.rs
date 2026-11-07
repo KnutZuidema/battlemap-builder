@@ -520,20 +520,11 @@ impl BenchmarkService {
                     total,
                     current_spend,
                     message: if let Some(ref_res) = self.resolve_reference_for_item(item).await {
-                        match ref_res.provenance {
-                            ReferenceProvenance::Curated { id, .. } => {
-                                format!(
-                                    "Generating {} for {} (curated reference: {})",
-                                    item.name, model, id
-                                )
-                            }
-                            ReferenceProvenance::StaticFallback { name, .. } => {
-                                format!(
-                                    "Generating {} for {} (static reference: {})",
-                                    item.name, model, name
-                                )
-                            }
-                        }
+                        let ReferenceProvenance::Curated { id, .. } = ref_res.provenance;
+                        format!(
+                            "Generating {} for {} (curated reference: {})",
+                            item.name, model, id
+                        )
                     } else {
                         format!("Generating {} for {}", item.name, model)
                     },

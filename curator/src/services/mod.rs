@@ -38,7 +38,6 @@ pub use ingestion::{
 };
 pub use reference_provider::{
     detect_theme_for_prompt, preprocess_reference_image, preprocess_section_reference_image,
-    score_curated_section_for_prompt, select_center_most_section, static_reference_for_theme,
-    ReferenceProvenance, ReferenceProvider, ReferenceProviderError, ReferenceResolution,
-    StaticReferenceDef, STATIC_REFERENCES,
+    score_curated_section_for_prompt, select_center_most_section, ReferenceProvenance,
+    ReferenceProvider, ReferenceProviderError, ReferenceResolution,
 };

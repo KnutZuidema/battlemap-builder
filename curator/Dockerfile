@@ -26,9 +26,6 @@ RUN groupadd -g 1000 curator && \
 
 WORKDIR /app
 
-# Copy static reference assets needed at compile time by reference_provider.rs
-COPY data/battlemap-reference-* ./data/
-
 # Copy actual curator source code and embedded UI assets
 COPY curator/ ./curator/
 

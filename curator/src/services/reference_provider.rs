@@ -1,13 +1,10 @@
 //! Virtuous cycle reference provider: resolves visual conditioning images for battlemap generation.
 //!
-//! Prioritizes top-rated curated battlemaps from the [`CatalogRepository`] matching the prompt's
-//! theme, reading their ground layer bytes through the [`BlobStorage`] port and falling back to
-//! curated static reference images (`data/battlemap-reference-*.jpeg`) when no curated maps are
-//! available.
+//! Resolves top-rated curated battlemaps from the [`CatalogRepository`] matching the prompt's
+//! theme or keywords, reading their ground layer bytes through the [`BlobStorage`] port. When no
+//! curated map matches, resolution returns `None`: there is no static fallback imagery.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
@@ -24,17 +21,10 @@ use crate::ports::catalog_repository::{CatalogRepository, CuratedFilter};
 use crate::ports::storage_error::StorageError;
 use crate::services::image_work;
 
-// Embedded fallback reference image bytes so resolution succeeds reliably in any environment
-const STATIC_BYTES_REF_1: &[u8] = include_bytes!("../../../data/battlemap-reference-1.jpeg");
-const STATIC_BYTES_REF_2: &[u8] = include_bytes!("../../../data/battlemap-reference-2.jpg");
-const STATIC_BYTES_REF_3: &[u8] = include_bytes!("../../../data/battlemap-reference-3.png");
-const STATIC_BYTES_REF_4: &[u8] = include_bytes!("../../../data/battlemap-reference-4.jpeg");
-
 /// Provenance of a resolved reference image.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReferenceProvenance {
     Curated { id: String, theme: Theme },
-    StaticFallback { name: String, theme: Theme },
 }
 
 /// Resolution output containing the preprocessed reference image and its provenance.
@@ -58,72 +48,6 @@ pub enum ReferenceProviderError {
 
     #[error("Reference not found: {0}")]
     NotFound(String),
-}
-
-/// Definition of a static reference battlemap image.
-#[derive(Debug, Clone)]
-pub struct StaticReferenceDef {
-    pub id: &'static str,
-    pub filename: &'static str,
-    pub label: &'static str,
-    pub keywords: &'static [&'static str],
-    pub embedded_bytes: &'static [u8],
-}
-
-/// The 4 standard curated static reference definitions matching `server/services/referenceImages.js`.
-pub const STATIC_REFERENCES: &[StaticReferenceDef] = &[
-    StaticReferenceDef {
-        id: "stone-dungeon",
-        filename: "battlemap-reference-4.jpeg",
-        label: "Perspective Reference: 2D Stone Dungeon Plan View",
-        keywords: &[
-            "dungeon", "crypt", "tomb", "cave", "cavern", "cell", "prison",
-            "stone", "underground", "vault", "catacomb", "temple", "sewer",
-            "mine", "labyrinth", "shrine", "altar", "corridor",
-        ],
-        embedded_bytes: STATIC_BYTES_REF_4,
-    },
-    StaticReferenceDef {
-        id: "ruins-courtyard",
-        filename: "battlemap-reference-3.png",
-        label: "Perspective Reference: 2D Ruins & Courtyard Plan View",
-        keywords: &[
-            "ruin", "ruins", "courtyard", "river", "bridge", "stream", "outdoor",
-            "forest", "garden", "trees", "road", "path", "plaza", "swamp",
-            "camp", "nature", "water", "waterfall", "cliff",
-        ],
-        embedded_bytes: STATIC_BYTES_REF_3,
-    },
-    StaticReferenceDef {
-        id: "tavern-inn",
-        filename: "battlemap-reference-1.jpeg",
-        label: "Perspective Reference: 2D Tavern & Rooms Plan View",
-        keywords: &[
-            "tavern", "inn", "bar", "pub", "bed", "bedroom", "room", "house",
-            "timber", "wood", "furniture", "kitchen", "cabin", "cottage", "innkeeper",
-        ],
-        embedded_bytes: STATIC_BYTES_REF_1,
-    },
-    StaticReferenceDef {
-        id: "grand-hall-portal",
-        filename: "battlemap-reference-2.jpg",
-        label: "Perspective Reference: 2D Grand Hall & Portal Plan View",
-        keywords: &[
-            "portal", "hall", "great hall", "market", "shop", "chasm", "pit",
-            "arena", "keep", "fortress", "mansion", "castle", "throne",
-        ],
-        embedded_bytes: STATIC_BYTES_REF_2,
-    },
-];
-
-/// Maps a `Theme` to its matching default static reference definition.
-pub fn static_reference_for_theme(theme: &Theme) -> &'static StaticReferenceDef {
-    match theme {
-        Theme::Dungeon | Theme::Cave => &STATIC_REFERENCES[0], // stone-dungeon
-        Theme::Wilderness | Theme::Ruins => &STATIC_REFERENCES[1], // ruins-courtyard
-        Theme::Tavern | Theme::Building => &STATIC_REFERENCES[2], // tavern-inn
-        Theme::Urban | Theme::SciFi => &STATIC_REFERENCES[3], // grand-hall-portal
-    }
 }
 
 /// Preprocesses raw image bytes:
@@ -164,7 +88,7 @@ pub fn preprocess_reference_image(
 /// Preprocesses a curated ground image for a specific section:
 /// 1. Crops the exact `16 * cell_size_px` Map Section box from the image via
 ///    [`crop_section_box`]. A section that does not fit is unresolvable and returns an error
-///    (the caller falls back to the static reference) instead of a scale-changing crop.
+///    instead of a scale-changing crop.
 /// 2. Resizes to `target_size x target_size` using high-quality Lanczos3 filter.
 /// 3. Encodes to JPEG format with quality 85.
 pub fn preprocess_section_reference_image(
@@ -389,7 +313,6 @@ fn curated_ground_blob_key(map: &CuratedMap) -> BlobKey {
 pub struct ReferenceProvider {
     catalog: Arc<dyn CatalogRepository + Send + Sync>,
     blobs: Arc<dyn BlobStorage + Send + Sync>,
-    static_cache: Arc<RwLock<HashMap<String, Vec<u8>>>>,
     target_size: u32,
 }
 
@@ -402,7 +325,6 @@ impl ReferenceProvider {
         Self {
             catalog,
             blobs,
-            static_cache: Arc::new(RwLock::new(HashMap::new())),
             target_size: 512,
         }
     }
@@ -416,7 +338,7 @@ impl ReferenceProvider {
     /// Resolves reference image for a given theme:
     /// 1. Queries curated maps in the catalog for the theme.
     /// 2. If a map is found, selects the most recently curated map.
-    /// 3. Otherwise, falls back to the static reference image for the theme.
+    /// 3. Returns `None` when no curated map matches or its ground image cannot be read.
     pub async fn resolve_reference_for_theme(
         &self,
         theme: &Theme,
@@ -436,68 +358,58 @@ impl ReferenceProvider {
             .max_by(|a, b| a.curated_at.cmp(&b.curated_at));
 
         // 3. If found, load bytes and preprocess center-most section
-        if let Some(map) = top_curated {
-            let section = select_center_most_section(&map);
-            match self.load_ground_bytes(&map).await {
-                Ok(raw_bytes) => {
-                    match self
-                        .preprocess_section_reference(raw_bytes, map.grid, section.clone())
-                        .await
-                    {
-                        Ok(jpeg_bytes) => {
-                            let label =
-                                format!("Perspective Reference: 2D {} Plan View", theme.as_str());
-                            let image = ReferenceImage::jpeg(label, jpeg_bytes);
-                            info!(
-                                id = %map.id,
-                                theme = %theme,
-                                col = section.col,
-                                row = section.row,
-                                "Resolved curated map center section reference image"
-                            );
-                            return Ok(Some(ReferenceResolution {
-                                image,
-                                provenance: ReferenceProvenance::Curated {
-                                    id: map.id,
-                                    theme: *theme,
-                                },
-                            }));
-                        }
-                        Err(err) => {
-                            warn!(
-                                id = %map.id,
-                                error = %err,
-                                "Failed to preprocess curated section image; falling back to static reference"
-                            );
-                        }
-                    }
-                }
-                Err(err) => {
-                    warn!(
-                        id = %map.id,
-                        error = %err,
-                        "Failed to load curated image bytes from storage; falling back to static reference"
-                    );
-                }
+        let Some(map) = top_curated else {
+            return Ok(None);
+        };
+
+        let section = select_center_most_section(&map);
+        let raw_bytes = match self.load_ground_bytes(&map).await {
+            Ok(raw_bytes) => raw_bytes,
+            Err(err) => {
+                warn!(
+                    id = %map.id,
+                    error = %err,
+                    "Failed to load curated image bytes from storage; no reference resolved"
+                );
+                return Ok(None);
             }
-        }
+        };
 
-        // 4. Static fallback
-        let static_def = static_reference_for_theme(theme);
-        let jpeg_bytes = self.get_static_reference_bytes(static_def)?;
-        let image = ReferenceImage::jpeg(static_def.label, jpeg_bytes);
+        let jpeg_bytes = match self
+            .preprocess_section_reference(raw_bytes, map.grid, section.clone())
+            .await
+        {
+            Ok(jpeg_bytes) => jpeg_bytes,
+            Err(err) => {
+                warn!(
+                    id = %map.id,
+                    error = %err,
+                    "Failed to preprocess curated section image; no reference resolved"
+                );
+                return Ok(None);
+            }
+        };
 
+        let label = format!("Perspective Reference: 2D {} Plan View", theme.as_str());
+        let image = ReferenceImage::jpeg(label, jpeg_bytes);
+        info!(
+            id = %map.id,
+            theme = %theme,
+            col = section.col,
+            row = section.row,
+            "Resolved curated map center section reference image"
+        );
         Ok(Some(ReferenceResolution {
             image,
-            provenance: ReferenceProvenance::StaticFallback {
-                name: static_def.id.to_string(),
+            provenance: ReferenceProvenance::Curated {
+                id: map.id,
                 theme: *theme,
             },
         }))
     }
 
     /// Resolves reference image by scoring (CuratedMap, MapSection) pairs on prompt keyword overlap,
-    /// tie-breaking on curated_at (most recent first). Falls back to static reference if none match.
+    /// tie-breaking on curated_at (most recent first). Returns `None` if none match.
     pub async fn resolve_reference_for_prompt(
         &self,
         prompt: &str,
@@ -535,67 +447,53 @@ impl ReferenceProvider {
 
         if let Some((_, map, section)) = top_match {
             let primary_theme = map.theme().unwrap_or(Theme::Dungeon);
-            match self.load_ground_bytes(&map).await {
-                Ok(raw_bytes) => {
-                    match self
-                        .preprocess_section_reference(raw_bytes, map.grid, section.clone())
-                        .await
-                    {
-                        Ok(jpeg_bytes) => {
-                            let label = format!(
-                                "Perspective Reference: 2D {} Plan View",
-                                primary_theme.as_str()
-                            );
-                            let image = ReferenceImage::jpeg(label, jpeg_bytes);
-                            info!(
-                                id = %map.id,
-                                theme = %primary_theme,
-                                col = section.col,
-                                row = section.row,
-                                "Resolved curated map section reference image for prompt"
-                            );
-                            return Ok(Some(ReferenceResolution {
-                                image,
-                                provenance: ReferenceProvenance::Curated {
-                                    id: map.id,
-                                    theme: primary_theme,
-                                },
-                            }));
-                        }
-                        Err(err) => {
-                            warn!(
-                                id = %map.id,
-                                error = %err,
-                                "Failed to preprocess curated section image; falling back to static reference"
-                            );
-                        }
-                    }
-                }
+            let raw_bytes = match self.load_ground_bytes(&map).await {
+                Ok(raw_bytes) => raw_bytes,
                 Err(err) => {
                     warn!(
                         id = %map.id,
                         error = %err,
-                        "Failed to load curated image bytes from storage; falling back to static reference"
+                        "Failed to load curated image bytes from storage; no reference resolved"
                     );
+                    return Ok(None);
                 }
-            }
+            };
+
+            let jpeg_bytes = match self
+                .preprocess_section_reference(raw_bytes, map.grid, section.clone())
+                .await
+            {
+                Ok(jpeg_bytes) => jpeg_bytes,
+                Err(err) => {
+                    warn!(
+                        id = %map.id,
+                        error = %err,
+                        "Failed to preprocess curated section image; no reference resolved"
+                    );
+                    return Ok(None);
+                }
+            };
+
+            let label =
+                format!("Perspective Reference: 2D {} Plan View", primary_theme.as_str());
+            let image = ReferenceImage::jpeg(label, jpeg_bytes);
+            info!(
+                id = %map.id,
+                theme = %primary_theme,
+                col = section.col,
+                row = section.row,
+                "Resolved curated map section reference image for prompt"
+            );
+            return Ok(Some(ReferenceResolution {
+                image,
+                provenance: ReferenceProvenance::Curated {
+                    id: map.id,
+                    theme: primary_theme,
+                },
+            }));
         }
 
-        // Fall back to static reference if theme keywords detected in prompt
-        if let Some(theme) = detect_theme_for_prompt(prompt) {
-            let static_def = static_reference_for_theme(&theme);
-            let jpeg_bytes = self.get_static_reference_bytes(static_def)?;
-            let image = ReferenceImage::jpeg(static_def.label, jpeg_bytes);
-            Ok(Some(ReferenceResolution {
-                image,
-                provenance: ReferenceProvenance::StaticFallback {
-                    name: static_def.id.to_string(),
-                    theme,
-                },
-            }))
-        } else {
-            Ok(None)
-        }
+        Ok(None)
     }
 
     /// Loads the raw bytes of a curated map's `Ground` layer, falling back to its first layer.
@@ -620,52 +518,6 @@ impl ReferenceProvider {
         })
         .await
         .map_err(|err| ReferenceProviderError::Io(std::io::Error::other(err.to_string())))?
-    }
-
-    /// Retrieves preprocessed bytes for a static reference definition with in-memory caching.
-    fn get_static_reference_bytes(
-        &self,
-        def: &StaticReferenceDef,
-    ) -> Result<Vec<u8>, ReferenceProviderError> {
-        let cache_key = format!("{}-{}", def.id, self.target_size);
-
-        if let Ok(cache) = self.static_cache.read() {
-            if let Some(bytes) = cache.get(&cache_key) {
-                return Ok(bytes.clone());
-            }
-        }
-
-        let raw_bytes = self
-            .load_static_file(def.filename)
-            .unwrap_or_else(|| def.embedded_bytes.to_vec());
-
-        let processed = preprocess_reference_image(&raw_bytes, self.target_size)?;
-
-        if let Ok(mut cache) = self.static_cache.write() {
-            cache.insert(cache_key, processed.clone());
-        }
-
-        Ok(processed)
-    }
-
-    /// Attempts to read static reference file from data directory.
-    fn load_static_file(&self, filename: &str) -> Option<Vec<u8>> {
-        let candidates = [
-            PathBuf::from("data").join(filename),
-            PathBuf::from("../data").join(filename),
-            PathBuf::from("../../data").join(filename),
-            PathBuf::from("server/assets/references").join(filename),
-            PathBuf::from("../server/assets/references").join(filename),
-        ];
-
-        for path in &candidates {
-            if path.is_file() {
-                if let Ok(bytes) = std::fs::read(path) {
-                    return Some(bytes);
-                }
-            }
-        }
-        None
     }
 }
 
@@ -765,7 +617,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_static_fallback_when_storage_empty() {
+    async fn test_theme_resolution_without_curated_maps_is_none() {
         let catalog = Arc::new(InMemoryCatalogRepository::new());
         let blobs = Arc::new(InMemoryBlobStorage::new());
         let provider = ReferenceProvider::new(catalog, blobs);
@@ -773,28 +625,9 @@ mod tests {
         let resolution = provider
             .resolve_reference_for_theme(&Theme::Dungeon)
             .await
-            .expect("resolution succeeds")
-            .expect("reference exists");
+            .expect("resolution succeeds");
 
-        match resolution.provenance {
-            ReferenceProvenance::StaticFallback { name, theme } => {
-                assert_eq!(name, "stone-dungeon");
-                assert_eq!(theme, Theme::Dungeon);
-            }
-            _ => panic!("Expected StaticFallback"),
-        }
-
-        assert_eq!(resolution.image.mime_type, "image/jpeg");
-        assert_eq!(
-            resolution.image.label,
-            "Perspective Reference: 2D Stone Dungeon Plan View"
-        );
-        assert!(!resolution.image.data.is_empty());
-
-        // Verify decoded size is 512x512
-        let decoded = image::load_from_memory(&resolution.image.data).expect("valid jpeg");
-        assert_eq!(decoded.width(), 512);
-        assert_eq!(decoded.height(), 512);
+        assert!(resolution.is_none());
     }
 
     #[tokio::test]
@@ -882,7 +715,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_curated_map_unmatched_prompt_falls_back_to_static() {
+    async fn test_unmatched_prompt_without_curated_match_is_none() {
         let catalog = Arc::new(InMemoryCatalogRepository::new());
         let blobs = Arc::new(InMemoryBlobStorage::new());
         let provider = ReferenceProvider::new(catalog.clone(), blobs.clone());
@@ -898,20 +731,37 @@ mod tests {
         let img_bytes = create_test_image_bytes(1024, 1024, [100, 100, 100]);
         seed_curated_map(&catalog, &blobs, &map_dungeon, &img_bytes).await;
 
-        // Prompt is about wilderness
+        // Prompt is about wilderness: no curated map matches and no static reference exists
         let res = provider
             .resolve_reference_for_prompt("Forest river crossing with wooden bridge")
             .await
-            .unwrap()
             .unwrap();
 
-        assert_eq!(
-            res.provenance,
-            ReferenceProvenance::StaticFallback {
-                name: "ruins-courtyard".to_string(),
-                theme: Theme::Wilderness,
-            }
+        assert!(res.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_matching_prompt_with_missing_ground_blob_is_none() {
+        let catalog = Arc::new(InMemoryCatalogRepository::new());
+        let blobs = Arc::new(InMemoryBlobStorage::new());
+        let provider = ReferenceProvider::new(catalog.clone(), blobs);
+
+        // Catalog has the map, but its ground layer was never written to blob storage.
+        let map = CuratedMap::new(
+            "curated-missing-blob",
+            Theme::Dungeon,
+            vec!["dungeon".to_string()],
+            (1024, 1024),
+            Utc::now(),
         );
+        catalog.save_curated(&map).await.expect("curated map saves");
+
+        let res = provider
+            .resolve_reference_for_prompt("Stone dungeon crypt with sarcophagus")
+            .await
+            .unwrap();
+
+        assert!(res.is_none());
     }
 
     #[test]
@@ -1412,8 +1262,8 @@ mod tests {
         let cropped = crop_section_box(&img, &grid, 0, 0).expect("top-left box fits");
         assert_eq!((cropped.width(), cropped.height()), (256, 256));
 
-        // The reference provider treats an unresolvable section as unresolved (error), which
-        // callers answer with the static fallback reference.
+        // The reference provider treats an unresolvable section as unresolved (error), so no
+        // magnified or otherwise scale-changing crop is produced.
         let section = MapSection::new(0, 16, "Overflowing section");
         let raw_bytes = create_test_image_bytes(512, 300, [255, 0, 0]);
         assert!(matches!(

@@ -9,7 +9,6 @@ on:
       - 'curator/Cargo.toml'
       - 'curator/Cargo.lock'
       - 'curator/Dockerfile'
-      - 'data/battlemap-reference-*'
       - '.dockerignore'
       - '.github/workflows/curator-ci.yml'
   workflow_dispatch:
@@ -45,8 +44,7 @@ jobs:
               - 'curator/Cargo.toml'
               - 'curator/Cargo.lock'
               - 'curator/Dockerfile'
-              - 'data/battlemap-reference-*'
-              - '.dockerignore'
+                      - '.dockerignore'
               - '.github/workflows/curator-ci.yml'
             run_tests:
               - 'curator/src/**'
@@ -54,8 +52,7 @@ jobs:
               - 'curator/migrations/**'
               - 'curator/Cargo.toml'
               - 'curator/Cargo.lock'
-              - 'data/battlemap-reference-*'
-              - '.github/workflows/curator-ci.yml'
+                      - '.github/workflows/curator-ci.yml'
             run_ui:
               - 'curator/src/ui/**'
               - '.github/workflows/curator-ci.yml'

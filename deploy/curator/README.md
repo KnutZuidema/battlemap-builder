@@ -480,9 +480,10 @@ If harvesting fails with a 401/403, the Reddit credentials in `curator-secrets` 
   process (15s period, 10s timeout, 8 failures = 120s) and the CPU request is `250m`. The router
   also enforces application-layer deadlines (`curator/src/api/mod.rs`): ordinary routes time out
   after 30s, and routes that legitimately run for minutes — dataset exports, freezes and audits,
-  benchmarks, harvests, vision round-trips, training dispatch/publish/verify, storage scans and
-  Thumbnail renders — after 15 minutes. `/api/healthz` sits outside both layers. A timed-out
-  request fails with `408` instead of pinning a Tokio worker until the client gives up.
+  benchmarks, harvests, vision round-trips, curated regrid/delete sagas, training
+  dispatch/publish/verify, storage scans and Thumbnail renders — after 15 minutes. `/api/healthz`
+  sits outside both layers. A timed-out request fails with `408` instead of pinning a Tokio worker
+  until the client gives up.
 
 ### Pod in `ImagePullBackOff` or `ErrImagePull`
 - **Cause**: Kubernetes cannot authenticate with GHCR to pull private image `ghcr.io/knutzuidema/curator`.

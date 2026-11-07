@@ -24,13 +24,13 @@ use tracing::{Level, Span};
 /// A request that exceeds it is either a bug or an upstream stall; failing at the application
 /// layer with `408 Request Timeout` keeps the Tokio worker (and the probe it must answer) free
 /// instead of letting the connection hang until the client gives up.
-pub(crate) const STANDARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const STANDARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Ceiling for endpoints that legitimately run for minutes: dataset audits/exports/freezes,
 /// benchmarks, harvests, vision round-trips, training dispatch/publish/verify and the storage
 /// scan. The ceiling still bounds a rogue request, but it is wide enough that a healthy slow
 /// operation is never cut off mid-flight.
-pub(crate) const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// Builds the complete Axum application router mounting API endpoints,
 /// CORS and tracing middleware, and the static UI assets fallback.
@@ -39,14 +39,25 @@ pub(crate) const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// request timeout (see [`STANDARD_REQUEST_TIMEOUT`] and [`LONG_REQUEST_TIMEOUT`]). Probes are
 /// deliberately outside both layers: a probe must observe the process, never a timeout layer.
 pub fn create_router(state: AppState) -> Router {
+    create_router_with_timeouts(state, STANDARD_REQUEST_TIMEOUT, LONG_REQUEST_TIMEOUT)
+}
+
+/// [`create_router`] over an explicit request-timeout budget.
+///
+/// Production always passes the constants above; tests drive this entry point so they can prove
+/// the real route table's grouping under millisecond deadlines instead of waiting out the
+/// production ceilings.
+fn create_router_with_timeouts(
+    state: AppState,
+    standard_timeout: Duration,
+    long_timeout: Duration,
+) -> Router {
     let probe_routes = Router::new().route("/api/healthz", get(get_healthz));
 
     let standard_routes = Router::new()
         .route("/api/status", get(get_status))
         .route("/api/staging", get(get_staging))
         .route("/api/curated", get(get_curated))
-        .route("/api/curated/{id}", patch(patch_curated).delete(delete_curated))
-        .route("/api/curated/bulk-delete", post(post_curated_bulk_delete))
         .route(
             "/api/training/datasets/freeze/status",
             get(get_training_dataset_freeze_status),
@@ -82,10 +93,16 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/benchmarks/cancel", post(post_benchmark_cancel))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
-            STANDARD_REQUEST_TIMEOUT,
+            standard_timeout,
         ));
 
     let long_routes = Router::new()
+        // Mutating a curated map can regenerate the map description and one vision description
+        // per Map Section after waiting on the shared image-work permit, and deletes run a
+        // multi-step blob purge saga. None of that ends within the standard budget on a large
+        // bundle, so they belong to the long-running group.
+        .route("/api/curated/{id}", patch(patch_curated).delete(delete_curated))
+        .route("/api/curated/bulk-delete", post(post_curated_bulk_delete))
         .route(
             "/api/curated/{id}/suggest-themes",
             post(post_curated_suggest_themes).get(post_curated_suggest_themes),
@@ -141,7 +158,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/storage/purge-staging", post(post_purge_staging))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
-            LONG_REQUEST_TIMEOUT,
+            long_timeout,
         ));
 
     Router::new()
@@ -233,6 +250,7 @@ impl<B> OnResponse<B> for CuratorOnResponse {
 mod tests {
     use super::*;
     use axum::http::Request;
+    use crate::ports::CatalogRepository;
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::Registry;
@@ -346,35 +364,115 @@ mod tests {
         );
     }
 
-    /// The per-group request timeouts must terminate a hung handler at the application layer
-    /// with `408 Request Timeout` instead of letting the connection (and its Tokio task) hang.
+    /// A blob store whose reads never resolve, so any route that streams blob bytes hangs the
+    /// way a stalled storage backend does.
+    struct HangingBlobStorage {
+        inner: crate::adapters::InMemoryBlobStorage,
+    }
+
+    impl Default for HangingBlobStorage {
+        fn default() -> Self {
+            Self {
+                inner: crate::adapters::InMemoryBlobStorage::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::BlobStorage for HangingBlobStorage {
+        async fn read_blob(&self, _key: &crate::ports::BlobKey) -> Result<Vec<u8>, crate::ports::StorageError> {
+            std::future::pending().await
+        }
+
+        async fn write_blob(
+            &self,
+            key: &crate::ports::BlobKey,
+            bytes: &[u8],
+        ) -> Result<(), crate::ports::StorageError> {
+            self.inner.write_blob(key, bytes).await
+        }
+
+        async fn write_blob_with_sha256(
+            &self,
+            key: &crate::ports::BlobKey,
+            bytes: &[u8],
+            sha256: Option<&str>,
+        ) -> Result<(), crate::ports::StorageError> {
+            self.inner.write_blob_with_sha256(key, bytes, sha256).await
+        }
+
+        async fn delete_blob(&self, key: &crate::ports::BlobKey) -> Result<(), crate::ports::StorageError> {
+            self.inner.delete_blob(key).await
+        }
+
+        async fn exists_blob(&self, key: &crate::ports::BlobKey) -> Result<bool, crate::ports::StorageError> {
+            self.inner.exists_blob(key).await
+        }
+
+        async fn blob_size(&self, key: &crate::ports::BlobKey) -> Result<u64, crate::ports::StorageError> {
+            self.inner.blob_size(key).await
+        }
+
+        async fn list_prefix(
+            &self,
+            prefix: &crate::ports::BlobKey,
+        ) -> Result<Vec<crate::ports::BlobKey>, crate::ports::StorageError> {
+            self.inner.list_prefix(prefix).await
+        }
+    }
+
+    /// The real route table must cut a hung standard route off at the application layer with
+    /// `408 Request Timeout`, while leaving the liveness probe outside every timeout layer so it
+    /// can still observe (and restart) a wedged process.
     #[tokio::test]
-    async fn request_timeout_layer_returns_408_for_a_hung_route() {
+    async fn standard_routes_time_out_while_the_probe_is_exempt() {
         use axum::body::Body;
         use tower::ServiceExt;
 
-        let app = Router::new()
-            .route(
-                "/hang",
-                get(|| async {
-                    std::future::pending::<()>().await;
-                }),
-            )
-            .layer(TimeoutLayer::with_status_code(
-                StatusCode::REQUEST_TIMEOUT,
-                Duration::from_millis(10),
-            ));
+        let catalog = Arc::new(crate::adapters::InMemoryCatalogRepository::new());
+        catalog
+            .save_candidate(&crate::domain::Candidate::new(
+                "hung",
+                crate::domain::Source::Manual,
+                "0.png",
+                (16, 16),
+                chrono::Utc::now(),
+            ))
+            .await
+            .expect("seed candidate");
+        let state = AppState::new(catalog, Arc::new(HangingBlobStorage::default()));
 
-        let response = app
+        let app = create_router_with_timeouts(state, Duration::from_millis(20), LONG_REQUEST_TIMEOUT);
+
+        let timed_out = app
+            .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/hang")
+                    .uri("/api/image/staging/hung")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
+        assert_eq!(
+            timed_out.status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "a standard route stuck in a storage call must fail with 408"
+        );
 
-        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+        let probe = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            probe.status(),
+            StatusCode::OK,
+            "the liveness probe must never sit behind a request timeout layer"
+        );
     }
 }

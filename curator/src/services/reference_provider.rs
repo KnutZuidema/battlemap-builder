@@ -361,7 +361,12 @@ impl ReferenceProvider {
             preprocess_section_reference_image(&raw_bytes, &grid, &section, target_size)
         })
         .await
-        .map_err(|err| ReferenceProviderError::Io(std::io::Error::other(err.to_string())))?
+        .map_err(|err| {
+            ReferenceProviderError::Io(image_work::join_error(
+                "Section reference preprocessing",
+                err,
+            ))
+        })?
     }
 }
 

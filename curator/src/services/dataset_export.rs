@@ -158,14 +158,6 @@ pub(crate) fn plan_dataset_samples(
     (samples, issues)
 }
 
-/// Maps a blocking-pool join failure to a [`StorageError`] that names the failed task.
-///
-/// Every decode/crop/audit blocking task reports a panic through this one shape, so a panicked
-/// pipeline fails the operation instead of looking like an empty result.
-fn blocking_join_error(context: impl std::fmt::Display, err: tokio::task::JoinError) -> StorageError {
-    StorageError::Io(std::io::Error::other(format!("{context} failed: {err}")))
-}
-
 /// Crops the exact `16×16` Grid Cell box of Map Section `(col, row)` and resamples it to
 /// `1024×1024` PNG bytes without letterbox padding bars.
 ///
@@ -375,7 +367,12 @@ impl DatasetExportService {
             let map_id = map.id.clone();
             let report = image_work::run(move || audit_map_readiness(&map, ground_bytes))
                 .await
-                .map_err(|err| blocking_join_error(format!("Ground-layer audit for '{map_id}'"), err))?;
+                .map_err(|err| {
+                    StorageError::Io(image_work::join_error(
+                        format!("Ground-layer audit for '{map_id}'"),
+                        err,
+                    ))
+                })?;
             reports.push(report);
         }
         Ok(DatasetReadiness::from_maps(reports))
@@ -440,11 +437,14 @@ impl DatasetExportService {
                 // never stalls a Tokio worker (and with it the probe).
                 let ground = Arc::new(image_work::GroundImage::decode(ground_bytes).await);
                 let Some(dynamic_img) = ground.image() else {
-                    tracing::warn!(
-                        "Failed to decode ground image for '{}': {}",
-                        map.id,
-                        ground.error().unwrap_or("decode produced no pixels")
-                    );
+                    let cause = ground.error().unwrap_or("decode produced no pixels");
+                    if ground.panicked() {
+                        return Err(StorageError::Io(std::io::Error::other(format!(
+                            "Ground-layer decode for '{}' panicked: {cause}",
+                            map.id
+                        ))));
+                    }
+                    tracing::warn!("Failed to decode ground image for '{}': {cause}", map.id);
                     continue;
                 };
 
@@ -484,13 +484,13 @@ impl DatasetExportService {
                             continue;
                         }
                         Err(err) => {
-                            return Err(blocking_join_error(
+                            return Err(StorageError::Io(image_work::join_error(
                                 format!(
                                     "Crop/resample task for '{}' section ({col}, {row})",
                                     map.id
                                 ),
                                 err,
-                            ));
+                            )));
                         }
                     };
 
@@ -592,10 +592,10 @@ impl DatasetExportService {
             let report = image_work::run(move || audit_map_readiness(&map, ground_bytes))
                 .await
                 .map_err(|err| {
-                    FreezeDatasetError::Storage(blocking_join_error(
+                    FreezeDatasetError::Storage(StorageError::Io(image_work::join_error(
                         format!("Dataset audit for '{map_id}'"),
                         err,
-                    ))
+                    )))
                 })?;
             reports.push(report);
         }

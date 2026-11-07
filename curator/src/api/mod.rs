@@ -32,11 +32,11 @@ const STANDARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// concretely when it holds the image-work permit, round-trips a vision model, or runs a
 /// multi-step blob/manifest saga. That covers dataset audits, exports, freezes and snapshot
 /// archives; benchmarks and Reddit harvests; vision-backed description, suggestion and refinement
-/// routes; candidate curation and curated patch/delete sagas; the staging grid, split and regroup
-/// manifest sagas; training dispatch/publish/verify; storage scans and purges; and Thumbnail
-/// renders. A route whose cost none of that covers belongs in the standard group. The ceiling
-/// still bounds a rogue request, but it is wide enough that a healthy slow operation is never cut
-/// off mid-flight.
+/// routes; candidate curation and curated patch/delete sagas; candidate reject/undo layer-blob
+/// moves; the staging split and regroup manifest sagas; training dispatch/publish/verify; storage
+/// scans and purges; and Thumbnail renders. A route whose cost none of that covers belongs in the
+/// standard group. The ceiling still bounds a rogue request, but it is wide enough that a healthy
+/// slow operation is never cut off mid-flight.
 const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// Builds the complete Axum application router mounting API endpoints,
@@ -91,8 +91,9 @@ fn create_router_with_timeouts(
             "/api/staging/{id}/layers",
             patch(patch_staging_layers).post(patch_staging_layers),
         )
-        .route("/api/reject", post(post_reject))
-        .route("/api/reject/undo", post(post_undo_reject))
+        // Catalog-only read-modify-write, the same shape as the layers patch above: no image
+        // work, no blob work, no vision round-trip.
+        .route("/api/staging/{id}/grid", patch(patch_staging_grid))
         .route("/api/cost/stats", get(get_cost_stats))
         .route("/api/cost/reset-session", post(post_reset_cost_session))
         .route("/api/models", get(get_models))
@@ -144,9 +145,13 @@ fn create_router_with_timeouts(
             "/api/thumb/curated/{id}/{layer_index}",
             get(get_curated_thumbnail_or_layer),
         )
-        .route("/api/staging/{id}/grid", patch(patch_staging_grid))
         .route("/api/staging/{id}/split", post(post_split_staging))
         .route("/api/staging/{parent_id}/regroup", post(post_regroup_staging))
+        // Reject and undo copy every layer blob between `staging/` and `trash/` one at a time
+        // (`read_blob` + `write_blob` + `delete_blob` per layer), so a large bundle is a
+        // multi-step blob saga rather than a catalog write.
+        .route("/api/reject", post(post_reject))
+        .route("/api/reject/undo", post(post_undo_reject))
         .route(
             "/api/staging/{id}/suggest-themes",
             post(post_suggest_themes).get(post_suggest_themes),
@@ -256,9 +261,11 @@ impl<B> OnResponse<B> for CuratorOnResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
     use axum::http::Request;
     use crate::ports::CatalogRepository;
     use std::sync::{Arc, Mutex};
+    use tower::ServiceExt;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::Registry;
 
@@ -379,20 +386,11 @@ mod tests {
         list_delay: Duration,
     }
 
-    impl Default for HangingBlobStorage {
-        fn default() -> Self {
+    impl HangingBlobStorage {
+        fn new(list_delay: Duration) -> Self {
             Self {
                 inner: crate::adapters::InMemoryBlobStorage::new(),
-                list_delay: Duration::ZERO,
-            }
-        }
-    }
-
-    impl HangingBlobStorage {
-        fn with_list_delay(list_delay: Duration) -> Self {
-            Self {
                 list_delay,
-                ..Self::default()
             }
         }
     }
@@ -455,10 +453,7 @@ mod tests {
             ))
             .await
             .expect("seed candidate");
-        AppState::new(
-            catalog,
-            Arc::new(HangingBlobStorage::with_list_delay(list_delay)),
-        )
+        AppState::new(catalog, Arc::new(HangingBlobStorage::new(list_delay)))
     }
 
     /// Seeds one curated map whose Ground-layer blob read never resolves.
@@ -474,7 +469,7 @@ mod tests {
             ))
             .await
             .expect("seed curated map");
-        AppState::new(catalog, Arc::new(HangingBlobStorage::default()))
+        AppState::new(catalog, Arc::new(HangingBlobStorage::new(Duration::ZERO)))
     }
 
     /// The real route table must cut a hung standard route off at the application layer with
@@ -482,9 +477,6 @@ mod tests {
     /// #293 failure mode is a stalled endpoint that must not trigger a probe restart.
     #[tokio::test]
     async fn standard_routes_time_out_while_the_probe_is_exempt() {
-        use axum::body::Body;
-        use tower::ServiceExt;
-
         let app = create_router_with_timeouts(
             state_with_hanging_storage(Duration::ZERO).await,
             Duration::from_millis(20),
@@ -536,9 +528,6 @@ mod tests {
     /// store fails with 408.
     #[tokio::test]
     async fn long_routes_are_not_under_the_standard_budget() {
-        use axum::body::Body;
-        use tower::ServiceExt;
-
         let app = create_router_with_timeouts(
             state_with_hanging_storage(Duration::from_millis(50)).await,
             Duration::from_millis(10),
@@ -612,9 +601,6 @@ mod tests {
     /// A long route stuck in a storage call must fail on the long budget, not on the standard one.
     #[tokio::test]
     async fn long_routes_time_out_on_their_own_budget() {
-        use axum::body::Body;
-        use tower::ServiceExt;
-
         let app = create_router_with_timeouts(
             state_with_hanging_ground_read().await,
             LONG_REQUEST_TIMEOUT,
@@ -649,5 +635,74 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(probe.status(), StatusCode::OK);
+    }
+
+    /// A freeze cut off by its request deadline must clear the published status on drop and
+    /// release the freeze lock: `FreezeStatusGuard` must be wired through the handler, not just
+    /// reset after the `await` that a 408 never reaches.
+    #[tokio::test]
+    async fn a_timed_out_freeze_clears_the_published_status_and_releases_the_lock() {
+        let app = create_router_with_timeouts(
+            state_with_hanging_ground_read().await,
+            LONG_REQUEST_TIMEOUT,
+            Duration::from_millis(20),
+        );
+
+        let freeze = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/training/datasets")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            freeze.status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "the freeze must be cut off by the long budget"
+        );
+
+        let status = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/training/datasets/freeze/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(status.into_body(), 64 * 1024)
+            .await
+            .expect("status body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("\"in_progress\":false"),
+            "a timed-out freeze must not leave in_progress published, got: {body}"
+        );
+
+        // The freeze lock is released with the dropped future, so a retry times out again instead
+        // of reporting a freeze that no longer exists.
+        let retry = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/training/datasets")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            retry.status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "the timed-out freeze must release the freeze lock"
+        );
     }
 }

@@ -436,12 +436,16 @@ pub async fn post_training_dataset(
 
     if is_sse {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, std::convert::Infallible>>();
-        let status = FreezeStatusGuard::new(state.snapshot_freeze_status.clone());
+        let freeze_status = state.snapshot_freeze_status.clone();
         let catalog = state.catalog.clone();
         let blobs = state.blobs.clone();
 
         tokio::spawn(async move {
             let _permit = lock_permit;
+            // Declared after `_permit`, matching the non-SSE branch: on drop the published status
+            // clears before the freeze lock is released, so a client never observes
+            // `in_progress: false` while a freeze still holds the lock.
+            let status = FreezeStatusGuard::new(freeze_status);
             let export_service = DatasetExportService::new(catalog, blobs);
             let res = export_service
                 .freeze_dataset_snapshot_with_progress(theme.as_ref(), req.id, |progress| {

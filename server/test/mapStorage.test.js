@@ -41,6 +41,38 @@ test.after(() => {
   }
 });
 
+test('getMapsDir: falls back to XDG_DATA_HOME when MAPS_DIR is unset', () => {
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    // XDG_DATA_HOME is only consulted on Linux.
+    return;
+  }
+
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'map-default-dir-'));
+  const previousMapsDir = process.env.MAPS_DIR;
+  const previousXdgDataHome = process.env.XDG_DATA_HOME;
+  delete process.env.MAPS_DIR;
+  // A relative XDG_DATA_HOME must still yield an absolute maps directory.
+  process.env.XDG_DATA_HOME = path.relative(process.cwd(), tmpRoot) || '.';
+
+  try {
+    const dir = getMapsDir();
+    assert.ok(path.isAbsolute(dir), `expected an absolute path, got ${dir}`);
+    assert.strictEqual(dir, path.join(tmpRoot, 'battlemap-builder', 'maps'));
+  } finally {
+    if (previousMapsDir === undefined) {
+      delete process.env.MAPS_DIR;
+    } else {
+      process.env.MAPS_DIR = previousMapsDir;
+    }
+    if (previousXdgDataHome === undefined) {
+      delete process.env.XDG_DATA_HOME;
+    } else {
+      process.env.XDG_DATA_HOME = previousXdgDataHome;
+    }
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
 test('validateMapId: permits valid alphanumeric IDs and hyphens/underscores', () => {
   assert.strictEqual(validateMapId('dungeon-123_abc'), 'dungeon-123_abc');
   assert.strictEqual(validateMapId('MAP01'), 'MAP01');

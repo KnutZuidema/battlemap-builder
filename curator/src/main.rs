@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use curator::adapters::{
@@ -19,66 +18,6 @@ fn resolve_port() -> u16 {
         .unwrap_or(3002)
 }
 
-fn resolve_data_dir() -> PathBuf {
-    std::env::var("CURATOR_DATA_DIR")
-        .or_else(|_| std::env::var("DATA_DIR"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("data"))
-}
-
-/// Multi-location .env loader checking:
-/// 1. `CURATOR_ENV_FILE` override
-/// 2. `dotenvy::dotenv()` (current directory & parent directories)
-/// 3. `curator/.env` (relative to current directory if executed from repo root)
-/// 4. `../.env`
-pub fn load_dotenv() -> Option<PathBuf> {
-    // 1. Explicit CURATOR_ENV_FILE override
-    if let Ok(env_path) = std::env::var("CURATOR_ENV_FILE") {
-        let path = PathBuf::from(&env_path);
-        if path.is_file() && dotenvy::from_path(&path).is_ok() {
-            tracing::info!(
-                path = %path.display(),
-                "Loaded .env configuration from CURATOR_ENV_FILE"
-            );
-            return Some(path);
-        }
-    }
-
-    // 2. Default dotenvy resolution (searches current directory & parents)
-    if let Ok(path) = dotenvy::dotenv() {
-        tracing::info!(
-            path = %path.display(),
-            "Loaded .env configuration from current/parent directory"
-        );
-        return Some(path);
-    }
-
-    // 3. curator/.env (relative to current directory if executed from repo root)
-    let curator_env = Path::new("curator/.env");
-    if curator_env.is_file() && dotenvy::from_path(curator_env).is_ok() {
-        let path = curator_env.to_path_buf();
-        tracing::info!(
-            path = %path.display(),
-            "Loaded .env configuration from curator/.env"
-        );
-        return Some(path);
-    }
-
-    // 4. ../.env
-    let parent_env = Path::new("../.env");
-    if parent_env.is_file() && dotenvy::from_path(parent_env).is_ok() {
-        let path = parent_env.to_path_buf();
-        tracing::info!(
-            path = %path.display(),
-            "Loaded .env configuration from ../.env"
-        );
-        return Some(path);
-    }
-
-    tracing::warn!("No .env configuration file discovered in candidate locations");
-    None
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -88,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Load environment file from candidate paths
-    let _ = load_dotenv();
+    let _ = curator::load_dotenv();
 
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "migrate-disk-to-s3" || arg == "--migrate-disk-to-s3") {
@@ -106,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let port = resolve_port();
-    let data_dir = resolve_data_dir();
+    let data_dir = curator::resolve_data_dir();
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
     tracing::info!(
@@ -213,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_migration_cli(force: bool, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let data_dir = resolve_data_dir();
+    let data_dir = curator::resolve_data_dir();
     tracing::info!(data_dir = %data_dir.display(), force, dry_run, "Connecting to S3 storage for migration...");
 
     let s3_config = curator::adapters::S3StorageConfig::from_env()?;
@@ -253,7 +192,7 @@ async fn run_catalog_migration_cli(
     force: bool,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let data_dir = resolve_data_dir();
+    let data_dir = curator::resolve_data_dir();
     let curator::adapters::CatalogBackend::Postgres(database_url) =
         curator::adapters::CatalogBackend::from_env()
     else {
@@ -304,7 +243,6 @@ async fn run_catalog_migration_cli(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io::Write;
 
     /// Serializes tests that mutate `CURATOR_ENV_FILE`, which is process-global.
@@ -318,7 +256,7 @@ mod tests {
         let path = temp_file.path().to_path_buf();
 
         std::env::set_var("CURATOR_ENV_FILE", path.to_str().unwrap());
-        let loaded = load_dotenv();
+        let loaded = curator::load_dotenv();
         std::env::remove_var("CURATOR_ENV_FILE");
 
         assert_eq!(loaded, Some(path));
@@ -333,7 +271,7 @@ mod tests {
     fn test_load_dotenv_nonexistent_custom_env_file() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("CURATOR_ENV_FILE", "/nonexistent/path/to/custom.env");
-        let _ = load_dotenv();
+        let _ = curator::load_dotenv();
         std::env::remove_var("CURATOR_ENV_FILE");
     }
 }

@@ -59,7 +59,7 @@ Curate Decision Modal (#curate-decision-modal)
     │
     ▼
 POST /api/curate
-    ├── Success: atomic move to data/curated/<id>/, persist description & metadata, load next
+    ├── Success: atomic move to curated/<id>/ in the configured data directory, persist description & metadata, load next
     └── Error: danger toast, candidate preserved in staging
 ```
 
@@ -166,10 +166,12 @@ Upon completion, `submitDecisionCuration()` dispatches `POST /api/curate` **with
 
 ## 4. Flat Curated Storage Layout
 
-Curator organizes all curated assets in a deterministic, flat storage hierarchy under `data/curated/<candidate_id>/`:
+Curator organizes all curated assets in a deterministic, flat storage hierarchy under the resolved data
+directory (`CURATOR_DATA_DIR`, else `DATA_DIR`, else the platform user data directory — `~/.local/share/battlemap-builder`
+on Linux):
 
 ```
-data/
+<data dir>/
 ├── staging/
 │   └── <candidate_id>/
 │       ├── manifest.json
@@ -190,9 +192,9 @@ data/
 
 ### Key Storage Guarantees
 
-- **Flat `<id>/` Bundles**: Stored directly at `data/curated/<candidate_id>/manifest.json`, eliminating redundant nested theme directories (`data/curated/<theme>/<id>`) and enabling clean multi-theme labeling.
+- **Flat `<id>/` Bundles**: Stored directly at `curated/<candidate_id>/manifest.json` under the configured data directory, eliminating redundant nested theme directories (`curated/<theme>/<id>`) and enabling clean multi-theme labeling.
 - **Description Persistence**:
-  - **Manifest**: The `description` string is persisted directly in `data/curated/<id>/manifest.json`.
+  - **Manifest**: The `description` string is persisted directly in `curated/<id>/manifest.json`.
   - **Primary Layer Caption**: The primary layer (Ground role) `caption` field matches and retains the curated description.
   - **Dynamic LoRA Dataset Export**: LoRA dataset export dynamically crops and Lanczos3-resamples each 16×16 MapSection on demand from the Ground layer into `{theme}/{id}_c{col}_r{row}_lora1024.png` (exact 1024×1024, zero padding bars) and `{theme}/{id}_c{col}_r{row}_lora1024.txt` companion captions: the `Trigger Phrase` (`TRIGGER_PHRASE`) followed by that section's `Physical Description` — its own cached one, otherwise the map-level one. The Trigger Phrase is applied exactly once, at caption generation, and never stored inside a `Physical Description`.
   - **Perspective-Neutral Section Descriptions**: a Map Section's `description` is generated per crop by vision; when that call fails or the crop is unavailable, the section reuses the map-level `Physical Description` instead of a synthesized caption, so a `Physical Description` never carries camera, perspective, art-style or grid directives (ADR-0002, ADR-0007).
@@ -204,11 +206,12 @@ data/
     - **Section description match**: +1 point per matching word in `section.description`.
   - The highest scoring `(CuratedMap, MapSection)` pair is selected, and its exact `16 * cell_size_px` Grid Cell box is cropped from the Ground layer and Lanczos3-resampled.
   - Theme-only resolution selects the most recently curated map and its center-most 16×16 section.
-  - Sections are never rescaled: when the exact box does not fit the loaded image the section is **unresolvable**, the reference conditioning path falls back to the static reference, and the LoRA ZIP export logs a warning and skips that section instead of center-cropping or magnifying it.
+  - Sections are never rescaled: when the exact box does not fit the loaded image the section is **unresolvable**, reference resolution yields no reference for that prompt, and the LoRA ZIP export logs a warning and skips that section instead of center-cropping or magnifying it.
+  - Resolution returns `None` when no curated map or section matches: there is no static fallback imagery, so benchmark generation proceeds with prompt-only conditioning.
 - **Deterministic Layer Filenames**: Layers are saved with standardized names: `<index>_<role>[_<elevation>].<ext>` (e.g. `0_ground.png`, `1_upper_1.png`, `2_basement_-1.png`).
 - **Atomic Operations**: Manifests and blobs are written atomically (`atomic_write` in the filesystem catalog and blob adapters), ensuring crash-safe state updates.
 - **Theme-Free Image Routes**: Curated images are served by id (`/api/image/curated/<id>` and `/api/image/curated/<id>/<layer_index>`); theme remains a listing/export filter (`/api/curated?theme=...`), never part of a storage path.
-- **Derived Thumbnails (`GET /api/thumb/curated/<id>[/<layer_index>]`)**: library cards load a Thumbnail of the map's Ground layer (falling back to its first layer, exactly like `/api/image/curated/<id>`) instead of the full-resolution original (ADR-0013). The layer selector mirrors `/api/image/curated/<id>/<layer_index>`: `GET /api/thumb/curated/<id>/<layer_index>` serves that Layer's Thumbnail, and an unknown index answers `404` without falling back to another Layer; the library's layer scrubber uses it on hover, click and touch, while fullscreen and the inspector keep the full-resolution Layer. Thumbnails live under the rebuildable `data/thumbs/curated/<id>/` namespace with the same `<index>_<role>.jpg` names as their Layers, are generated on first request (long edge ≤ 768 px, aspect preserved, Lanczos3, alpha composited over the dark padding colour, JPEG quality 82), and are then served byte-identically from storage: one decode runs at a time across the whole process and concurrent requests for the same Thumbnail share a single generation. Curation precomputes the Thumbnail of every Layer after the manifest commits, detached from the response and skipping Layers that already have one; a precompute failure only logs a warning and the lazy route retries it. The route answers `image/jpeg` with the same `Cache-Control` as the image routes; an unrenderable Layer answers `502` and never falls back to the original bytes. Deleting a Curated Map purges its `thumbs/curated/<id>/` directory together with its Layer blobs, and a layer edit or a re-curation drops it so the next request regenerates; after an edit the client appends a per-map `?v=<timestamp>` to the card Thumbnail URL so that card refetches instead of serving the browser-cached JPEG. `GET /api/storage/stats` does not count the `thumbs/` tree.
+- **Derived Thumbnails (`GET /api/thumb/curated/<id>[/<layer_index>]`)**: library cards load a Thumbnail of the map's Ground layer (falling back to its first layer, exactly like `/api/image/curated/<id>`) instead of the full-resolution original (ADR-0013). The layer selector mirrors `/api/image/curated/<id>/<layer_index>`: `GET /api/thumb/curated/<id>/<layer_index>` serves that Layer's Thumbnail, and an unknown index answers `404` without falling back to another Layer; the library's layer scrubber uses it on hover, click and touch, while fullscreen and the inspector keep the full-resolution Layer. Thumbnails live under the rebuildable `thumbs/curated/<id>/` namespace with the same `<index>_<role>.jpg` names as their Layers, are generated on first request (long edge ≤ 768 px, aspect preserved, Lanczos3, alpha composited over the dark padding colour, JPEG quality 82), and are then served byte-identically from storage: one decode runs at a time across the whole process and concurrent requests for the same Thumbnail share a single generation. Curation precomputes the Thumbnail of every Layer after the manifest commits, detached from the response and skipping Layers that already have one; a precompute failure only logs a warning and the lazy route retries it. The route answers `image/jpeg` with the same `Cache-Control` as the image routes; an unrenderable Layer answers `502` and never falls back to the original bytes. Deleting a Curated Map purges its `thumbs/curated/<id>/` directory together with its Layer blobs, and a layer edit or a re-curation drops it so the next request regenerates; after an edit the client appends a per-map `?v=<timestamp>` to the card Thumbnail URL so that card refetches instead of serving the browser-cached JPEG. `GET /api/storage/stats` does not count the `thumbs/` tree.
 
 ---
 
@@ -219,6 +222,7 @@ data/
 | `OPENROUTER_API_KEY` | *(None)* | OpenRouter authentication key for vision models and image benchmarking |
 | `CURATOR_DESCRIPTION_MODEL` | `google/gemini-3.5-flash-lite` | Model ID for AI vision battlemap description generation (`POST /api/staging/:id/describe`) |
 | `CURATOR_VISION_MODEL` | `google/gemini-3.5-flash-lite` | Fallback vision model ID for theme suggestions and descriptions |
+| `CURATOR_DATA_DIR` / `DATA_DIR` | platform user data dir (`~/.local/share/battlemap-builder` on Linux) | Root for staging, curated, thumbs, telemetry and rejected storage |
 | `PORT` | `3002` | Curator Axum HTTP server port |
 
 ---
@@ -306,7 +310,7 @@ An empty store is **not** a ready dataset (`ready: false`): there is nothing to 
 
 | Code | Meaning | Fix |
 | :--- | :--- | :--- |
-| `ground_layer_missing` | No Ground layer image could be read from the bundle | Restore `0_ground.png` in `data/curated/<id>/` |
+| `ground_layer_missing` | No Ground layer image could be read from the bundle | Restore `0_ground.png` in the curated map bundle |
 | `ground_image_unreadable` | The Ground layer bytes do not decode as an image | Re-ingest the map; an export would skip it entirely |
 | `grid_below_minimum` | The persisted Grid Configuration yields no full 16×16 Grid Cell window | Recalibrate the grid (`PATCH /api/curated/{id}` with a `grid` that fits the Ground layer) |
 | `section_unresolvable` | A Map Section's exact `16 * cell_size_px` box does not fit the Ground layer | Regrid, or re-curate the map; the export skips that section |

@@ -47,7 +47,6 @@ training/              Python LoRA training package (see training/README.md)
 deploy/                Cluster manifests and rollout docs (see deploy/curator/README.md)
 docs/adr/              Architecture decision records
 docs/agents/           Issue-tracker and domain-doc conventions
-data/                  Reference images and curated assets
 ```
 
 ## Environment & configuration
@@ -70,9 +69,8 @@ data/                  Reference images and curated assets
 
 - `battlemapService.generateBattlemap()` runs the configured model and assembles the payload from
   `IMAGE_PROMPTS.GENERATE` with architectural 2D plan-view directives and flat poché wall cross-sections.
-- When the model is vision-capable, `battlemapService` attaches a curated 1:1 square reference from `data/` via
-  `referenceImages.js`, matched on prompt keywords (stone dungeon, tavern, ruins, grand hall), for few-shot
-  orthographic perspective conditioning.
+- Generation is prompt-only: `battlemapService` sends no conditioning images, so the architectural plan-view,
+  flat poché cross-section and gridless scale directives live entirely in `IMAGE_PROMPTS.GENERATE`.
 - The model returns raster bytes; the provider resizes them to the requested canvas size.
 - The configured model is the only map producer. A missing key or unusable model output produces an error with
   `code` + `telemetry` (prompts, per-model attempt trail, raw response, usage/cost); routes forward `400`/`502`/

@@ -1415,21 +1415,22 @@ async fn test_api_benchmark_reference_conditioning_default_true() {
     let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let body_str = String::from_utf8_lossy(&body);
 
-    // Verify SSE progress message shows static reference fallback provenance
+    // The empty catalog resolves no reference, and there is no static fallback.
     assert!(
-        body_str.contains("Generating Stone Crypt for meta/muse-image (static reference: stone-dungeon)"),
-        "Expected static reference provenance in SSE stream: {}",
+        body_str.contains("Generating Stone Crypt for meta/muse-image"),
+        "Expected generation message in SSE stream: {}",
+        body_str
+    );
+    assert!(
+        !body_str.contains("reference:"),
+        "Expected no reference provenance on an empty catalog: {}",
         body_str
     );
 
-    // Verify captured engine request contains reference image
+    // Verify captured engine request has no attached reference image
     let requests = captured.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].images.len(), 1);
-    assert_eq!(
-        requests[0].images[0].label,
-        "Perspective Reference: 2D Stone Dungeon Plan View"
-    );
+    assert!(requests[0].images.is_empty());
 }
 
 #[tokio::test]

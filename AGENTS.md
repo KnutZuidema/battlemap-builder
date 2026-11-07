@@ -65,7 +65,7 @@ To drive and test the Curator web UI in the browser tool:
    });
    ```
 
-To seed a test candidate for staging triage, place a `0.png` image (e.g. copied from `data/battlemap-reference-3.png`) and `manifest.json` under `data/staging/<id>/`.
+To seed a test candidate for staging triage, place a `0.png` image (any square test image) and a `manifest.json` under `<data dir>/staging/<id>/`, where `<data dir>` is `CURATOR_DATA_DIR` or the platform user data directory (`~/.local/share/battlemap-builder` on Linux).
 
 ## Invariants
 

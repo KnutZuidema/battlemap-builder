@@ -2,19 +2,11 @@
 //!
 //! Intended to be run as a one-time Kubernetes Job or one-off administrative task.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use curator::adapters::{S3BlobStorage, S3StorageConfig};
 use curator::services::storage_migration::{run_storage_migration, MigrationOptions};
 use tracing_subscriber::EnvFilter;
-
-fn resolve_data_dir() -> PathBuf {
-    std::env::var("CURATOR_DATA_DIR")
-        .or_else(|_| std::env::var("DATA_DIR"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("data"))
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let force = args.iter().any(|a| a == "--force" || a == "-f");
     let dry_run = args.iter().any(|a| a == "--dry-run" || a == "-n");
 
-    let data_dir = resolve_data_dir();
+    let data_dir = curator::resolve_data_dir();
     tracing::info!(data_dir = %data_dir.display(), force, dry_run, "Connecting to S3 storage...");
 
     let s3_config = S3StorageConfig::from_env()?;

@@ -90,7 +90,7 @@ impl DatasetIssueCode {
     /// Remediation instruction to resolve this defect.
     pub fn remediation(&self) -> &'static str {
         match self {
-            Self::GroundLayerMissing => "Restore 0_ground.png in data/curated/<id>/",
+            Self::GroundLayerMissing => "Restore 0_ground.png in the curated map bundle",
             Self::GroundImageUnreadable => "Re-ingest the map; an export would skip it entirely",
             Self::GridBelowMinimum => {
                 "Recalibrate the grid (PATCH /api/curated/{id} with a grid that fits the Ground layer)"

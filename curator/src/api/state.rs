@@ -5,8 +5,8 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 
 use crate::adapters::{
-    FileCostLedger, ModalTrainingRunner, NoopHarvestRunLedger, OpenRouterAdapter, RedditCrawler,
-    RoutingModelEngine, WaveSpeedAdapter,
+    InMemoryCostTracker, ModalTrainingRunner, NoopHarvestRunLedger, OpenRouterAdapter,
+    RedditCrawler, RoutingModelEngine, WaveSpeedAdapter,
 };
 use crate::api::error::ApiError;
 use crate::ports::blob_storage::BlobStorage;
@@ -81,7 +81,8 @@ impl AppState {
         catalog: Arc<dyn CatalogRepository + Send + Sync>,
         blobs: Arc<dyn BlobStorage + Send + Sync>,
     ) -> Self {
-        let cost_tracker: Arc<dyn CostTracker + Send + Sync> = Arc::new(FileCostLedger::default());
+        let cost_tracker: Arc<dyn CostTracker + Send + Sync> =
+            Arc::new(InMemoryCostTracker::default());
         let benchmark_service = Self::default_benchmark_service(
             cost_tracker.clone(),
             catalog.clone(),
@@ -124,7 +125,8 @@ impl AppState {
         catalog: Arc<dyn CatalogRepository + Send + Sync>,
         blobs: Arc<dyn BlobStorage + Send + Sync>,
     ) -> Self {
-        let cost_tracker: Arc<dyn CostTracker + Send + Sync> = Arc::new(FileCostLedger::default());
+        let cost_tracker: Arc<dyn CostTracker + Send + Sync> =
+            Arc::new(InMemoryCostTracker::default());
         let benchmark_service = Self::default_benchmark_service(
             cost_tracker.clone(),
             catalog.clone(),

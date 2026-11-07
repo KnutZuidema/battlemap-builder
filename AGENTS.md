@@ -42,6 +42,31 @@ Curator compiles share one target dir across worktrees (`~/.omp/targets/curator`
 delete that file to opt a checkout out. The shared dir accrues per-crate artifacts, so prune
 `debug/deps/{curator-,libcurator-}*` and `debug/deps/*_tests-*` when it grows.
 
+### Local Curator development & browser testing
+
+Agent sandboxes restrict local socket binding and connections to ports `3000` and `3001`. Run Curator on port `3001` with local filesystem blob storage so it does not fail on port `3002` or attempt remote Cloudflare R2 calls:
+
+```bash
+CURATOR_BLOB_BACKEND=filesystem CURATOR_PORT=3001 cargo run --manifest-path curator/Cargo.toml
+```
+
+To drive and test the Curator web UI in the browser tool:
+
+1. Launch headless Chromium with remote debugging on port `3000`:
+   ```bash
+   /usr/bin/chromium --headless=new --remote-debugging-port=3000 --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=/tmp/chromium-profile
+   ```
+2. Attach via `eval` using the CDP endpoint:
+   ```javascript
+   const tab = await browser.open({
+     name: "curator",
+     url: "http://127.0.0.1:3001/",
+     app: { cdp_url: "http://127.0.0.1:3000" },
+   });
+   ```
+
+To seed a test candidate for staging triage, place a `0.png` image (e.g. copied from `data/battlemap-reference-3.png`) and `manifest.json` under `data/staging/<id>/`.
+
 ## Invariants
 
 - **No silent fallbacks.** A failing model or provider fails the request: `{ error, code, debug }` with
@@ -83,3 +108,4 @@ Behavior still needs proof; tests alone are not enough:
 - Live-API work: exercise both generation and region forging, and prove `compositeRegion` changes 0 pixels outside
   the selection box.
 - Canvas work: drive it in a real browser — right-drag selection, handle resize, and no uncaught Konva draw errors.
+- Curator work: drive changes in a real browser tab via the CDP workflow above — check canvas render, filmstrip layer deck, and verify no uncaught console errors via `tab.errors()`.

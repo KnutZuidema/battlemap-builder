@@ -162,7 +162,10 @@ spec:
               mountPath: /data
           resources:
             requests:
-              cpu: 100m
+              # 100m left the pod starved by node CFS during contention: probe requests missed
+              # their deadline and kubelet killed a healthy container. 250m keeps the event loop
+              # schedulable while the 1000m limit still caps burst work.
+              cpu: 250m
               memory: 128Mi
             limits:
               cpu: 1000m
@@ -176,13 +179,17 @@ spec:
             # Catalog migrations on first boot can take a minute; a startup probe keeps that out
             # of the liveness failure budget.
             failureThreshold: 24
+          # Liveness only catches a wedged process: restarting a healthy pod severs in-flight
+          # exports, freezes and triage work, and the retry then hits the fresh container. The
+          # budget below is 8 x 15s = 120s of sustained unresponsiveness before a restart.
           livenessProbe:
             httpGet:
               path: /api/healthz
               port: 3002
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 4
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 8
+          # Readiness stays tight: shedding ingress is cheap and reversible, unlike a restart.
           readinessProbe:
             httpGet:
               path: /api/healthz

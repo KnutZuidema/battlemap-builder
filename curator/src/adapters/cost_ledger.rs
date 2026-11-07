@@ -1,7 +1,8 @@
 //! Filesystem-backed persistent cost ledger adapter.
 //!
 //! Stores generation telemetry, all-time spend, and per-model metrics in a persistent
-//! JSON ledger (`data/telemetry/cost_ledger.json`) while maintaining in-memory session metrics.
+//! JSON ledger under the resolved data directory (`<data dir>/telemetry/cost_ledger.json`) while
+//! maintaining in-memory session metrics.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,7 +20,7 @@ use crate::ports::cost_tracker::{
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// On-disk representation of the persistent cost ledger (`data/telemetry/cost_ledger.json`).
+/// On-disk representation of the persistent cost ledger (`<data dir>/telemetry/cost_ledger.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PersistentLedger {
     /// Cumulative dollar spend across all sessions for image generation.
@@ -53,9 +54,6 @@ pub struct FileCostLedger {
 }
 
 impl FileCostLedger {
-    /// Default ledger location matching specification: `data/telemetry/cost_ledger.json`.
-    pub const DEFAULT_PATH: &'static str = "data/telemetry/cost_ledger.json";
-
     /// Creates a new `FileCostLedger` anchored at the provided path.
     /// If an existing ledger file is found, it will be loaded; otherwise, a fresh ledger starts.
     pub fn new(path: impl Into<PathBuf>) -> Self {
@@ -169,7 +167,11 @@ impl FileCostLedger {
 
 impl Default for FileCostLedger {
     fn default() -> Self {
-        Self::new(Self::DEFAULT_PATH)
+        Self::new(
+            crate::resolve_data_dir()
+                .join("telemetry")
+                .join("cost_ledger.json"),
+        )
     }
 }
 

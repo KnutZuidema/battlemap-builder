@@ -7,12 +7,54 @@ pub mod services;
 
 use std::path::{Path, PathBuf};
 
-/// Resolves the data directory from environment variables or defaults to "data".
+/// Resolves the data directory from `CURATOR_DATA_DIR`, then `DATA_DIR`, defaulting to the
+/// platform user data directory:
+/// - Linux: `$XDG_DATA_HOME/battlemap-builder` or `~/.local/share/battlemap-builder`
+/// - macOS: `~/Library/Application Support/battlemap-builder`
+/// - Windows: `%APPDATA%\battlemap-builder`
 pub fn resolve_data_dir() -> PathBuf {
-    std::env::var("CURATOR_DATA_DIR")
-        .or_else(|_| std::env::var("DATA_DIR"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("data"))
+    if let Some(dir) =
+        std::env::var_os("CURATOR_DATA_DIR").or_else(|| std::env::var_os("DATA_DIR"))
+    {
+        return PathBuf::from(dir);
+    }
+
+    default_user_data_dir()
+}
+
+fn default_user_data_dir() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from);
+
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .or_else(|| home.map(|home| home.join("AppData").join("Roaming")));
+        return base
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("battlemap-builder");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return home
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Library")
+            .join("Application Support")
+            .join("battlemap-builder");
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| home.map(|home| home.join(".local").join("share")));
+        base.unwrap_or_else(|| PathBuf::from("."))
+            .join("battlemap-builder")
+    }
 }
 
 /// Multi-location .env loader checking:

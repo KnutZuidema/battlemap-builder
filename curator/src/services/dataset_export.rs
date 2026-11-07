@@ -422,18 +422,33 @@ impl DatasetExportService {
                     }
                 };
 
-                // One full-resolution decode per map, serialized with every other image pipeline;
-                // the permit drops at the end of this map's iteration.
-                let _permit = image_work::acquire().await;
+                // One full-resolution decode per map, serialized with every other image pipeline.
+                // The permit is shared with the blocking tasks that own the pixels: if the
+                // request future is dropped (client disconnect, request timeout), a detached
+                // decode or crop keeps the permit until it finishes instead of releasing it
+                // while the image is still alive. The decode itself runs on the blocking pool so
+                // a large Ground layer never stalls a Tokio worker (and with it the probe).
+                let permit = Arc::new(image_work::acquire().await);
 
-                let dynamic_img = match image::load_from_memory(&ground_bytes) {
+                let decode_permit = Arc::clone(&permit);
+                let decoded = tokio::task::spawn_blocking(move || {
+                    let _permit = decode_permit;
+                    image::load_from_memory(&ground_bytes)
+                })
+                .await
+                .map_err(|err| {
+                    StorageError::Io(std::io::Error::other(format!(
+                        "Ground layer decode task for '{}' failed: {err}",
+                        map.id
+                    )))
+                })?;
+                let dynamic_img = match decoded {
                     Ok(img) => img,
                     Err(e) => {
                         tracing::warn!("Failed to decode ground image for '{}': {e}", map.id);
                         continue;
                     }
                 };
-                drop(ground_bytes);
 
                 let (samples, plan_issues) = plan_dataset_samples(map, &dynamic_img);
                 for issue in &plan_issues {
@@ -445,6 +460,10 @@ impl DatasetExportService {
                     );
                 }
 
+                // The decoded pixels are shared with the per-section blocking tasks, so the
+                // decode stays alive for the whole map without a second copy.
+                let dynamic_img = Arc::new(dynamic_img);
+
                 for sample in samples {
                     if !on_section(completed_samples, map_idx, map, sample.col, sample.row) {
                         return Err(StorageError::Io(std::io::Error::new(
@@ -453,21 +472,32 @@ impl DatasetExportService {
                         )));
                     }
 
-                    let image_bytes = match crop_and_resample_section(
-                        &dynamic_img,
-                        &map.grid,
-                        sample.col,
-                        sample.row,
-                    ) {
-                        Ok(bytes) => bytes,
-                        Err(e) => {
+                    // Lanczos3 resampling plus PNG encoding is CPU-bound; run it on the blocking
+                    // pool so the async workers keep serving probes and other requests. The task
+                    // holds a permit clone for as long as it touches the decoded pixels.
+                    let crop_permit = Arc::clone(&permit);
+                    let img = Arc::clone(&dynamic_img);
+                    let grid = map.grid;
+                    let (col, row) = (sample.col, sample.row);
+                    let image_bytes = match tokio::task::spawn_blocking(move || {
+                        let _permit = crop_permit;
+                        crop_and_resample_section(&img, &grid, col, row)
+                    })
+                    .await
+                    {
+                        Ok(Ok(bytes)) => bytes,
+                        Ok(Err(e)) => {
                             tracing::warn!(
-                                "Failed to crop/resample section ({}, {}) for '{}': {e}",
-                                sample.col,
-                                sample.row,
+                                "Failed to crop/resample section ({col}, {row}) for '{}': {e}",
                                 map.id
                             );
                             continue;
+                        }
+                        Err(err) => {
+                            return Err(StorageError::Io(std::io::Error::other(format!(
+                                "Crop/resample task for '{}' section ({col}, {row}) failed: {err}",
+                                map.id
+                            ))));
                         }
                     };
 
@@ -561,7 +591,18 @@ impl DatasetExportService {
             }
 
             let ground_bytes = self.blobs.read_blob(&curated_ground_blob_key(map)).await;
-            reports.push(audit_map_readiness(map, ground_bytes));
+            // Decoding and classifying a Ground layer is the audit's memory and CPU peak. Run it
+            // on the blocking pool under the shared image-work permit so the Tokio workers keep
+            // answering probes while a freeze audits a large library.
+            let map = map.clone();
+            let report = image_work::run(move || audit_map_readiness(&map, ground_bytes))
+                .await
+                .map_err(|err| {
+                    FreezeDatasetError::Storage(StorageError::Io(std::io::Error::other(format!(
+                        "Dataset audit task failed: {err}"
+                    ))))
+                })?;
+            reports.push(report);
         }
 
         let readiness = DatasetReadiness::from_maps(reports);

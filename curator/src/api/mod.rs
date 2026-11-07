@@ -12,20 +12,103 @@ use axum::{
     routing::{get, patch, post},
     Router,
 };
-use axum::http::{Request, Response};
+use axum::http::{Request, Response, StatusCode};
 use std::time::Duration;
 use tower_http::cors::CorsLayer;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, MakeSpan, OnResponse, TraceLayer};
 use tracing::{Level, Span};
 
+/// Ceiling for ordinary API requests.
+///
+/// A request that exceeds it is either a bug or an upstream stall; failing at the application
+/// layer with `408 Request Timeout` keeps the Tokio worker (and the probe it must answer) free
+/// instead of letting the connection hang until the client gives up.
+const STANDARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Ceiling for endpoints that legitimately run for minutes.
+///
+/// A route belongs in this group when its healthy cost can outlive [`STANDARD_REQUEST_TIMEOUT`] —
+/// concretely when it holds the image-work permit, round-trips a vision model, or runs a
+/// multi-step blob/manifest saga. That covers dataset audits, exports, freezes and snapshot
+/// archives; benchmarks and Reddit harvests; vision-backed description, suggestion and refinement
+/// routes; candidate curation and curated patch/delete sagas; candidate reject/undo layer-blob
+/// moves; the staging split and regroup manifest sagas; training dispatch/publish/verify; storage
+/// scans and purges; and Thumbnail renders. A route whose cost none of that covers belongs in the
+/// standard group. The ceiling still bounds a rogue request, but it is wide enough that a healthy
+/// slow operation is never cut off mid-flight.
+const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 /// Builds the complete Axum application router mounting API endpoints,
 /// CORS and tracing middleware, and the static UI assets fallback.
+///
+/// API routes are grouped by how long they may legitimately run, and each group carries its own
+/// request timeout (see [`STANDARD_REQUEST_TIMEOUT`] and [`LONG_REQUEST_TIMEOUT`]). Probes are
+/// deliberately outside both layers: a probe must observe the process, never a timeout layer.
 pub fn create_router(state: AppState) -> Router {
-    let api_routes = Router::new()
-        .route("/api/healthz", get(get_healthz))
+    create_router_with_timeouts(state, STANDARD_REQUEST_TIMEOUT, LONG_REQUEST_TIMEOUT)
+}
+
+/// [`create_router`] over an explicit request-timeout budget.
+///
+/// Production always passes the constants above; tests drive this entry point so they can prove
+/// the real route table's grouping under millisecond deadlines instead of waiting out the
+/// production ceilings.
+fn create_router_with_timeouts(
+    state: AppState,
+    standard_timeout: Duration,
+    long_timeout: Duration,
+) -> Router {
+    let probe_routes = Router::new().route("/api/healthz", get(get_healthz));
+
+    let standard_routes = Router::new()
         .route("/api/status", get(get_status))
         .route("/api/staging", get(get_staging))
         .route("/api/curated", get(get_curated))
+        .route(
+            "/api/training/datasets/freeze/status",
+            get(get_training_dataset_freeze_status),
+        )
+        .route(
+            "/api/training/datasets/{id}",
+            get(get_training_dataset).delete(delete_training_dataset),
+        )
+        .route(
+            "/api/training/runs",
+            get(get_training_runs).post(post_training_run),
+        )
+        .route("/api/training/runs/{id}", get(get_training_run))
+        .route("/api/training/runs/{id}/cancel", post(post_training_run_cancel))
+        .route("/api/training/runs/{id}/metrics", get(get_training_run_metrics))
+        .route("/api/training/adapters", get(get_training_adapters))
+        .route("/api/training/adapters/{id}", get(get_training_adapter))
+        .route("/api/training/adapters/{id}/retire", post(post_retire_training_adapter))
+        .route("/api/image/staging/{id}", get(get_staging_image))
+        .route("/api/image/staging/{id}/{layer_index}", get(get_staging_layer_image))
+        .route("/api/image/curated/{id}", get(get_curated_image_by_id))
+        .route("/api/image/curated/{id}/{layer_index}", get(get_curated_image_or_layer))
+        .route(
+            "/api/staging/{id}/layers",
+            patch(patch_staging_layers).post(patch_staging_layers),
+        )
+        // Catalog-only read-modify-write, the same shape as the layers patch above: no image
+        // work, no blob work, no vision round-trip.
+        .route("/api/staging/{id}/grid", patch(patch_staging_grid))
+        .route("/api/cost/stats", get(get_cost_stats))
+        .route("/api/cost/reset-session", post(post_reset_cost_session))
+        .route("/api/models", get(get_models))
+        .route("/api/benchmark/cancel", post(post_benchmark_cancel))
+        .route("/api/benchmarks/cancel", post(post_benchmark_cancel))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            standard_timeout,
+        ));
+
+    let long_routes = Router::new()
+        // Mutating a curated map can regenerate the map description and one vision description
+        // per Map Section after waiting on the shared image-work permit, and deletes run a
+        // multi-step blob purge saga. None of that ends within the standard budget on a large
+        // bundle, so they belong to the long-running group.
         .route("/api/curated/{id}", patch(patch_curated).delete(delete_curated))
         .route("/api/curated/bulk-delete", post(post_curated_bulk_delete))
         .route(
@@ -45,14 +128,6 @@ pub fn create_router(state: AppState) -> Router {
             get(get_training_datasets).post(post_training_dataset),
         )
         .route(
-            "/api/training/datasets/freeze/status",
-            get(get_training_dataset_freeze_status),
-        )
-        .route(
-            "/api/training/datasets/{id}",
-            get(get_training_dataset).delete(delete_training_dataset),
-        )
-        .route(
             "/api/training/datasets/{id}/archive",
             get(get_training_dataset_archive),
         )
@@ -60,35 +135,23 @@ pub fn create_router(state: AppState) -> Router {
             "/api/training/datasets/{id}/download",
             get(get_training_dataset_archive),
         )
-        .route(
-            "/api/training/runs",
-            get(get_training_runs).post(post_training_run),
-        )
-        .route("/api/training/runs/{id}", get(get_training_run))
         .route("/api/training/runs/{id}/dispatch", post(post_training_run_dispatch))
-        .route("/api/training/runs/{id}/cancel", post(post_training_run_cancel))
         .route("/api/training/runs/{id}/publish", post(post_training_run_publish))
         .route("/api/training/runs/{id}/verify", post(post_training_run_verify))
-        .route("/api/training/runs/{id}/metrics", get(get_training_run_metrics))
-        .route("/api/training/adapters", get(get_training_adapters))
-        .route("/api/training/adapters/{id}", get(get_training_adapter))
-        .route("/api/training/adapters/{id}/retire", post(post_retire_training_adapter))
-        .route("/api/image/staging/{id}", get(get_staging_image))
-        .route("/api/image/staging/{id}/{layer_index}", get(get_staging_layer_image))
-        .route("/api/image/curated/{id}", get(get_curated_image_by_id))
-        .route("/api/image/curated/{id}/{layer_index}", get(get_curated_image_or_layer))
+        // Thumbnail renders wait for the single image-work permit, which a bulk refinement may
+        // hold for the whole refinement. They are slow by design, not hung.
         .route("/api/thumb/curated/{id}", get(get_curated_thumbnail))
         .route(
             "/api/thumb/curated/{id}/{layer_index}",
             get(get_curated_thumbnail_or_layer),
         )
-        .route(
-            "/api/staging/{id}/layers",
-            patch(patch_staging_layers).post(patch_staging_layers),
-        )
-        .route("/api/staging/{id}/grid", patch(patch_staging_grid))
         .route("/api/staging/{id}/split", post(post_split_staging))
         .route("/api/staging/{parent_id}/regroup", post(post_regroup_staging))
+        // Reject and undo copy every layer blob between `staging/` and `trash/` one at a time
+        // (`read_blob` + `write_blob` + `delete_blob` per layer), so a large bundle is a
+        // multi-step blob saga rather than a catalog write.
+        .route("/api/reject", post(post_reject))
+        .route("/api/reject/undo", post(post_undo_reject))
         .route(
             "/api/staging/{id}/suggest-themes",
             post(post_suggest_themes).get(post_suggest_themes),
@@ -98,23 +161,22 @@ pub fn create_router(state: AppState) -> Router {
             post(post_describe_candidate).get(post_describe_candidate),
         )
         .route("/api/curate", post(post_curate))
-        .route("/api/reject", post(post_reject))
-        .route("/api/reject/undo", post(post_undo_reject))
         .route("/api/harvest/reddit", post(post_harvest_reddit))
-        .route("/api/cost/stats", get(get_cost_stats))
-        .route("/api/cost/reset-session", post(post_reset_cost_session))
-        .route("/api/models", get(get_models))
         .route("/api/benchmark/run", post(post_benchmark_run))
         .route("/api/benchmarks/run", post(post_benchmark_run))
         .route("/api/benchmark/generate", post(post_benchmark_run))
         .route("/api/benchmarks/generate", post(post_benchmark_run))
-        .route("/api/benchmark/cancel", post(post_benchmark_cancel))
-        .route("/api/benchmarks/cancel", post(post_benchmark_cancel))
         .route("/api/storage/stats", get(get_storage_stats))
-        .route("/api/storage/purge-staging", post(post_purge_staging));
+        .route("/api/storage/purge-staging", post(post_purge_staging))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            long_timeout,
+        ));
 
     Router::new()
-        .merge(api_routes)
+        .merge(probe_routes)
+        .merge(standard_routes)
+        .merge(long_routes)
         .layer(CorsLayer::permissive())
         .layer(
             TraceLayer::new_for_http()
@@ -199,8 +261,11 @@ impl<B> OnResponse<B> for CuratorOnResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
     use axum::http::Request;
+    use crate::ports::CatalogRepository;
     use std::sync::{Arc, Mutex};
+    use tower::ServiceExt;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::Registry;
 
@@ -310,6 +375,334 @@ mod tests {
         assert!(
             events.is_empty(),
             "expected no events emitted for disabled /api/status span under INFO filter, got: {events:?}"
+        );
+    }
+
+    /// A blob store whose reads never resolve, so any route that streams blob bytes hangs the
+    /// way a stalled storage backend does. Listings stall for `list_delay` and then succeed, which
+    /// lets a test tell the standard and long request budgets apart on a real route.
+    struct HangingBlobStorage {
+        inner: crate::adapters::InMemoryBlobStorage,
+        list_delay: Duration,
+    }
+
+    impl HangingBlobStorage {
+        fn new(list_delay: Duration) -> Self {
+            Self {
+                inner: crate::adapters::InMemoryBlobStorage::new(),
+                list_delay,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::BlobStorage for HangingBlobStorage {
+        async fn read_blob(&self, _key: &crate::ports::BlobKey) -> Result<Vec<u8>, crate::ports::StorageError> {
+            std::future::pending().await
+        }
+
+        async fn write_blob(
+            &self,
+            key: &crate::ports::BlobKey,
+            bytes: &[u8],
+        ) -> Result<(), crate::ports::StorageError> {
+            self.inner.write_blob(key, bytes).await
+        }
+
+        async fn write_blob_with_sha256(
+            &self,
+            key: &crate::ports::BlobKey,
+            bytes: &[u8],
+            sha256: Option<&str>,
+        ) -> Result<(), crate::ports::StorageError> {
+            self.inner.write_blob_with_sha256(key, bytes, sha256).await
+        }
+
+        async fn delete_blob(&self, key: &crate::ports::BlobKey) -> Result<(), crate::ports::StorageError> {
+            self.inner.delete_blob(key).await
+        }
+
+        async fn exists_blob(&self, key: &crate::ports::BlobKey) -> Result<bool, crate::ports::StorageError> {
+            self.inner.exists_blob(key).await
+        }
+
+        async fn blob_size(&self, key: &crate::ports::BlobKey) -> Result<u64, crate::ports::StorageError> {
+            self.inner.blob_size(key).await
+        }
+
+        async fn list_prefix(
+            &self,
+            prefix: &crate::ports::BlobKey,
+        ) -> Result<Vec<crate::ports::BlobKey>, crate::ports::StorageError> {
+            tokio::time::sleep(self.list_delay).await;
+            self.inner.list_prefix(prefix).await
+        }
+    }
+
+    /// Seeds one staging candidate over a store whose blob reads never resolve. Listings stall
+    /// for `list_delay`, so a slow long route stays testable.
+    async fn state_with_hanging_storage(list_delay: Duration) -> AppState {
+        let catalog = Arc::new(crate::adapters::InMemoryCatalogRepository::new());
+        catalog
+            .save_candidate(&crate::domain::Candidate::new(
+                "hung",
+                crate::domain::Source::Manual,
+                "0.png",
+                (16, 16),
+                chrono::Utc::now(),
+            ))
+            .await
+            .expect("seed candidate");
+        AppState::new(catalog, Arc::new(HangingBlobStorage::new(list_delay)))
+    }
+
+    /// Seeds one curated map whose Ground-layer blob read never resolves.
+    async fn state_with_hanging_ground_read() -> AppState {
+        let catalog = Arc::new(crate::adapters::InMemoryCatalogRepository::new());
+        catalog
+            .save_curated(&crate::domain::CuratedMap::new(
+                "hung-map",
+                crate::domain::Theme::Dungeon,
+                Vec::new(),
+                (64, 64),
+                chrono::Utc::now(),
+            ))
+            .await
+            .expect("seed curated map");
+        AppState::new(catalog, Arc::new(HangingBlobStorage::new(Duration::ZERO)))
+    }
+
+    /// The real route table must cut a hung standard route off at the application layer with
+    /// `408 Request Timeout` while the liveness probe still answers *during* the saturation: the
+    /// #293 failure mode is a stalled endpoint that must not trigger a probe restart.
+    #[tokio::test]
+    async fn standard_routes_time_out_while_the_probe_is_exempt() {
+        let app = create_router_with_timeouts(
+            state_with_hanging_storage(Duration::ZERO).await,
+            Duration::from_millis(20),
+            LONG_REQUEST_TIMEOUT,
+        );
+
+        let hung_app = app.clone();
+        let hung = tokio::spawn(async move {
+            hung_app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/image/staging/hung")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        });
+
+        // The probe must answer while the hung request is still in flight, not only after the
+        // timeout layer cancelled it.
+        let probe = tokio::time::timeout(
+            Duration::from_secs(1),
+            app.oneshot(
+                Request::builder()
+                    .uri("/api/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("the liveness probe must answer while another route is saturated")
+        .unwrap();
+        assert_eq!(
+            probe.status(),
+            StatusCode::OK,
+            "the liveness probe must never sit behind a request timeout layer"
+        );
+
+        assert_eq!(
+            hung.await.expect("hung request task joins").status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "a standard route stuck in a storage call must fail with 408"
+        );
+    }
+
+    /// The standard deadline must not bound the long group: a long route whose storage calls take
+    /// longer than the standard budget still answers, while a standard route hung on the same
+    /// store fails with 408.
+    #[tokio::test]
+    async fn long_routes_are_not_under_the_standard_budget() {
+        let app = create_router_with_timeouts(
+            state_with_hanging_storage(Duration::from_millis(50)).await,
+            Duration::from_millis(10),
+            Duration::from_secs(5),
+        );
+
+        let standard = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/image/staging/hung")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            standard.status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "the standard deadline must bound the standard group"
+        );
+
+        let long_route = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/storage/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            long_route.status(),
+            StatusCode::OK,
+            "a long route slower than the standard budget must still answer"
+        );
+
+        let probe = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            probe.status(),
+            StatusCode::OK,
+            "the probe must stay outside both timeout layers"
+        );
+    }
+
+    /// `get_healthz` answering on its first poll is why a timeout layer can never preempt it:
+    /// tower-http only fails a request on a later poll, once its sleep has expired. A probe that
+    /// awaited anything would be exposed to the event loop it exists to observe.
+    #[tokio::test]
+    async fn the_probe_handler_answers_on_its_first_poll() {
+        use std::future::Future;
+        use std::task::{Context, Poll};
+
+        let mut probe = Box::pin(get_healthz());
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(
+            matches!(probe.as_mut().poll(&mut cx), Poll::Ready(_)),
+            "the liveness probe must answer on its first poll"
+        );
+    }
+
+    /// A long route stuck in a storage call must fail on the long budget, not on the standard one.
+    #[tokio::test]
+    async fn long_routes_time_out_on_their_own_budget() {
+        let app = create_router_with_timeouts(
+            state_with_hanging_ground_read().await,
+            LONG_REQUEST_TIMEOUT,
+            Duration::from_millis(20),
+        );
+
+        let timed_out = tokio::time::timeout(
+            Duration::from_secs(1),
+            app.clone().oneshot(
+                Request::builder()
+                    .uri("/api/dataset/readiness")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("a long route must be bounded by the long budget")
+        .unwrap();
+        assert_eq!(
+            timed_out.status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "a long route stuck in a storage call must fail with 408"
+        );
+
+        let probe = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(probe.status(), StatusCode::OK);
+    }
+
+    /// A freeze cut off by its request deadline must clear the published status on drop and
+    /// release the freeze lock: `FreezeStatusGuard` must be wired through the handler, not just
+    /// reset after the `await` that a 408 never reaches.
+    #[tokio::test]
+    async fn a_timed_out_freeze_clears_the_published_status_and_releases_the_lock() {
+        let app = create_router_with_timeouts(
+            state_with_hanging_ground_read().await,
+            LONG_REQUEST_TIMEOUT,
+            Duration::from_millis(20),
+        );
+
+        let freeze = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/training/datasets")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            freeze.status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "the freeze must be cut off by the long budget"
+        );
+
+        let status = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/training/datasets/freeze/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(status.into_body(), 64 * 1024)
+            .await
+            .expect("status body");
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("\"in_progress\":false"),
+            "a timed-out freeze must not leave in_progress published, got: {body}"
+        );
+
+        // The freeze lock is released with the dropped future, so a retry times out again instead
+        // of reporting a freeze that no longer exists.
+        let retry = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/training/datasets")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            retry.status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "the timed-out freeze must release the freeze lock"
         );
     }
 }

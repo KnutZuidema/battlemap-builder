@@ -9,6 +9,7 @@ use axum::{
     Json,
 };
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -341,6 +342,38 @@ pub async fn post_dataset_export_selected(
     Ok(response)
 }
 
+/// Publishes an in-progress freeze and clears it when dropped.
+///
+/// The non-SSE freeze handler runs inside the request deadline, so its future can be dropped
+/// mid-freeze (request timeout, client disconnect). Resetting the status after the `await` would
+/// then never run and `GET /api/training/datasets/freeze/status` would report a freeze that no
+/// longer holds `snapshot_freeze_lock` until the process restarts. Tying the reset to a drop
+/// guard keeps "`snapshot_freeze_status` is `Some` only while a freeze runs" true across
+/// cancellation.
+struct FreezeStatusGuard {
+    status: Arc<std::sync::RwLock<Option<crate::domain::FreezeProgressUpdate>>>,
+}
+
+impl FreezeStatusGuard {
+    fn new(status: Arc<std::sync::RwLock<Option<crate::domain::FreezeProgressUpdate>>>) -> Self {
+        Self { status }
+    }
+
+    fn publish(&self, progress: crate::domain::FreezeProgressUpdate) {
+        if let Ok(mut slot) = self.status.write() {
+            *slot = Some(progress);
+        }
+    }
+}
+
+impl Drop for FreezeStatusGuard {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.status.write() {
+            *slot = None;
+        }
+    }
+}
+
 /// Request payload for freezing an immutable dataset snapshot.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct FreezeDatasetRequest {
@@ -403,19 +436,21 @@ pub async fn post_training_dataset(
 
     if is_sse {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, std::convert::Infallible>>();
-        let status_ref = state.snapshot_freeze_status.clone();
+        let freeze_status = state.snapshot_freeze_status.clone();
         let catalog = state.catalog.clone();
         let blobs = state.blobs.clone();
 
         tokio::spawn(async move {
             let _permit = lock_permit;
+            // Declared after `_permit`, matching the non-SSE branch: on drop the published status
+            // clears before the freeze lock is released, so a client never observes
+            // `in_progress: false` while a freeze still holds the lock.
+            let status = FreezeStatusGuard::new(freeze_status);
             let export_service = DatasetExportService::new(catalog, blobs);
             let res = export_service
                 .freeze_dataset_snapshot_with_progress(theme.as_ref(), req.id, |progress| {
                     // Update global status first so secondary tabs/status polling stays accurate
-                    if let Ok(mut lock) = status_ref.write() {
-                        *lock = Some(progress.clone());
-                    }
+                    status.publish(progress.clone());
 
                     if tx.is_closed() {
                         return false;
@@ -480,9 +515,6 @@ pub async fn post_training_dataset(
                     let _ = tx.send(Ok(event));
                 }
             }
-            if let Ok(mut lock) = status_ref.write() {
-                *lock = None;
-            }
         });
 
         Ok(Sse::new(UnboundedReceiverStream::new(rx))
@@ -490,21 +522,17 @@ pub async fn post_training_dataset(
             .into_response())
     } else {
         let _permit = lock_permit;
-        let status_ref = state.snapshot_freeze_status.clone();
+        let status = FreezeStatusGuard::new(state.snapshot_freeze_status.clone());
         let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
         let snapshot_res = export_service
             .freeze_dataset_snapshot_with_progress(theme.as_ref(), req.id, |progress| {
-                if let Ok(mut lock) = status_ref.write() {
-                    *lock = Some(progress);
-                }
+                status.publish(progress);
                 true
             })
             .await;
 
-        if let Ok(mut lock) = status_ref.write() {
-            *lock = None;
-        }
-
+        // `status` clears the published progress on drop, including when the request future is
+        // dropped before this point (408, client disconnect).
         let snapshot = snapshot_res?;
         tracing::info!(
             id = %snapshot.id,
@@ -1860,6 +1888,30 @@ mod tests {
         assert_eq!(
             detect_image_mime(b"unknown_bytes", None),
             "image/png"
+        );
+    }
+
+    #[test]
+    fn freeze_status_guard_clears_the_published_status_on_drop() {
+        let status = Arc::new(std::sync::RwLock::new(None));
+        {
+            let guard = FreezeStatusGuard::new(status.clone());
+            guard.publish(crate::domain::FreezeProgressUpdate {
+                phase: "auditing".to_string(),
+                completed_maps: 0,
+                total_maps: 1,
+                completed_samples: 0,
+                total_samples: 0,
+                current_map: Some("cancelled-freeze".to_string()),
+                current_section: None,
+                message: "auditing".to_string(),
+                snapshot: None,
+            });
+            assert!(status.read().unwrap().is_some());
+        }
+        assert!(
+            status.read().unwrap().is_none(),
+            "a cancelled freeze must not leave the status reporting in_progress"
         );
     }
 }

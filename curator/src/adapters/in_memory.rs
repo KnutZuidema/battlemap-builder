@@ -133,7 +133,7 @@ impl BlobStorage for InMemoryBlobStorage {
             .filter(|(key, _)| prefix.is_prefix_of(key))
             .map(|(key, blob)| BlobEntry::new(key.clone(), blob.bytes.len() as u64))
             .collect();
-        entries.sort_by(|a, b| a.key.to_path().cmp(&b.key.to_path()));
+        entries.sort_by_key(|entry| entry.key.to_path());
         Ok(entries)
     }
 }

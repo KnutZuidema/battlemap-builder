@@ -14,8 +14,8 @@
  *
  * The state elements are owned by this view: `#storage-stats-loading` and `#storage-stats-error`
  * (with its `#btn-retry-storage-stats` action) are looked up in the markup and, when the modal does
- * not carry them, created on demand — so the state contract lives next to the code that paints it
- * rather than in the page.
+ * not carry them, created inside the storage modal — so the state contract lives next to the code
+ * that paints it rather than in the page.
  */
 
 import { state } from "../store.js";
@@ -69,11 +69,17 @@ function ensureStylesheet() {
     head.appendChild(link);
 }
 
-/**
- * The element for `id`, created inside the storage modal when the markup does not carry it.
- *
- * The modal body is the host, so a created indicator sits where the figures it replaces are.
- */
+/** Where a created indicator belongs: the storage modal's body, or the modal itself. */
+function storageStateHost() {
+    const modal = document.getElementById("storage-modal");
+    if (modal && typeof modal.querySelector === "function") {
+        const body = modal.querySelector(".storage-modal-body");
+        if (body) return body;
+    }
+    return modal || document.body || null;
+}
+
+/** The element for `id`, created inside the storage modal when the markup does not carry it. */
 function stateElement(id, { tag = "div", className = "" } = {}) {
     const existing = document.getElementById(id);
     if (existing) return existing;
@@ -81,7 +87,7 @@ function stateElement(id, { tag = "div", className = "" } = {}) {
     const created = document.createElement(tag);
     created.id = id;
     created.className = className;
-    const host = document.getElementById("storage-modal") || document.body;
+    const host = storageStateHost();
     if (!host) return null;
     if (typeof host.prepend === "function") host.prepend(created);
     else host.appendChild(created);
@@ -99,16 +105,19 @@ function renderLoading(visible) {
 /**
  * The retry action the error state offers, bound to a fresh read exactly once.
  *
- * The listener is attached here rather than only in `setupStorageControls`, because a markup that
- * does not carry the control gets it created on first error — and a control that is created must
- * still work.
+ * It is created detached rather than appended to the modal, because the error state is the only
+ * place it belongs: a control created eagerly would render inside a healthy drawer.
  */
 function retryControl() {
-    const retry = stateElement(RETRY_ID, { tag: "button", className: "btn btn-secondary btn-sm" });
-    if (!retry) return null;
-    if (!retry.__storageRetryBound) {
+    let retry = document.getElementById(RETRY_ID);
+    if (!retry) {
+        retry = document.createElement("button");
+        retry.id = RETRY_ID;
         retry.type = "button";
+        retry.className = "btn btn-secondary btn-sm";
         retry.textContent = "Retry";
+    }
+    if (!retry.__storageRetryBound) {
         retry.addEventListener("click", () => fetchStorageStats());
         retry.__storageRetryBound = true;
     }
@@ -322,8 +331,6 @@ export function setupStorageControls() {
     document.getElementById("btn-dismiss-storage-modal")?.addEventListener("click", () => closeStorageModal());
     document.getElementById("btn-refresh-storage")?.addEventListener("click", () => fetchStorageStats());
     document.getElementById("btn-drawer-open-storage")?.addEventListener("click", () => openStorageModal());
-    // The retry action lives in the error state, so it is bound wherever that state is painted.
-    retryControl();
 
     document.getElementById("btn-open-purge-confirm")?.addEventListener("click", () => openPurgeModal());
     document.getElementById("btn-close-purge-modal")?.addEventListener("click", () => closePurgeModal());

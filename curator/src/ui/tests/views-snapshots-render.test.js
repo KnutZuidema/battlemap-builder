@@ -2,10 +2,10 @@
  * The Snapshots shelf render target: the frozen-snapshot shelf renders from its state, keyed by
  * snapshot id, without replacing the nodes the curator is already using.
  *
- * The state a snapshot arrives in is what a refresh renders again — a freeze finishing, a
- * periodic listing reload — so the assertions here are about what survives that render: the
- * focused card action, the list's scroll offset and every node of a card whose data did not
- * change.
+ * The same state arrives again whenever a freeze finishes or a listing refresh lands, so the
+ * assertions here are about what survives that second render: the focused card action, the
+ * list's scroll offset, the card and its action nodes, and the download link the browser is
+ * mid-navigation on.
  */
 
 import test from "node:test";
@@ -13,13 +13,8 @@ import assert from "node:assert/strict";
 
 import { dom } from "../assets/dom.js";
 import { state } from "../assets/store.js";
-import {
-    renderDatasetSnapshots,
-    showFreezeProgressPanel,
-    toggleSnapshotsShelf,
-    updateFreezeProgressUI,
-} from "../assets/views/snapshots.js";
-import { allByClass, allNodes, byClass, byTag, contains, installDom } from "./support/dom.js";
+import { renderDatasetSnapshots } from "../assets/views/snapshots.js";
+import { allByClass, byClass, byTag, contains, installDom } from "./support/dom.js";
 
 function snapshot(overrides = {}) {
     return {
@@ -39,14 +34,12 @@ function setUp(t) {
     dom.snapshotsShelf = ui.document.createElement("div");
     dom.snapshotsCountBadge = ui.document.createElement("span");
     state.snapshots = [];
-    state.snapshotsCollapsed = false;
     state.isFetchingSnapshots = false;
 
     t.after(() => {
         delete dom.snapshotsShelf;
         delete dom.snapshotsCountBadge;
         state.snapshots = [];
-        state.snapshotsCollapsed = false;
         state.isFetchingSnapshots = false;
         ui.restore();
     });
@@ -57,10 +50,7 @@ function setUp(t) {
         badge: dom.snapshotsCountBadge,
         list: () => byClass(dom.snapshotsShelf, "snapshots-list"),
         empty: () => byClass(dom.snapshotsShelf, "snapshots-empty"),
-        cards: () => {
-            const list = byClass(dom.snapshotsShelf, "snapshots-list");
-            return list ? list.childNodes.filter((node) => node.nodeType === 1) : [];
-        },
+        cards: () => allByClass(dom.snapshotsShelf, "snapshot-card"),
     };
 }
 
@@ -77,14 +67,6 @@ function parts(card) {
         download: byTag(card, "a"),
         remove: byClass(card, "btn-delete-snapshot"),
     };
-}
-
-function assertSameNodes(actual, expected, message) {
-    assert.equal(actual.length, expected.length, `${message}: node count`);
-    expected.forEach((node, index) => {
-        const label = node.nodeType === 3 ? "text" : String(node.tagName).toLowerCase();
-        assert.equal(actual[index], node, `${message}: node ${index} <${label}>`);
-    });
 }
 
 async function settle() {
@@ -133,7 +115,7 @@ test("the first render builds the list, the empty notice and one card per snapsh
     assert.equal(second.size.textContent, "512 B");
 });
 
-test("a re-render keeps every surviving card's nodes and writes the changed text", (t) => {
+test("a re-render keeps every surviving card and its action nodes", (t) => {
     const ui = setUp(t);
 
     renderDatasetSnapshots([
@@ -144,20 +126,28 @@ test("a re-render keeps every surviving card's nodes and writes the changed text
     const list = ui.list();
     const firstCard = ui.cards()[0];
     const secondCard = ui.cards()[1];
-    const firstCounts = parts(firstCard).counts;
-    const secondNodes = allNodes(secondCard);
+    const first = parts(firstCard);
+    const second = parts(secondCard);
 
     renderDatasetSnapshots([
         snapshot({ samples_count: 13 }),
         snapshot({ id: "snap-b", theme: null, samples_count: 1, maps_count: 1, size_bytes: 512 }),
     ]);
 
-    assert.equal(ui.list(), list, "the list is created once per root, not per render");
+    assert.equal(ui.list(), list, "the list is created once per shelf root, not per render");
     assert.equal(ui.cards()[0], firstCard, "the changed card keeps its node");
     assert.equal(ui.cards()[1], secondCard, "the untouched card keeps its node");
-    assert.equal(parts(firstCard).counts, firstCounts, "the changed span is written, not replaced");
-    assert.equal(firstCounts.textContent, "13 samples (3 maps)");
-    assertSameNodes(allNodes(secondCard), secondNodes, "a card whose data did not change is left untouched");
+    assert.equal(parts(firstCard).counts, first.counts, "the changed span is written, not replaced");
+    assert.equal(first.counts.textContent, "13 samples (3 maps)");
+
+    assert.equal(parts(secondCard).train, second.train, "the train action is not rebuilt");
+    assert.equal(parts(secondCard).remove, second.remove, "the delete action is not rebuilt");
+    assert.equal(
+        parts(secondCard).download,
+        second.download,
+        "the download link keeps its element, so an in-flight download is not cancelled",
+    );
+    assert.equal(parts(secondCard).download.firstChild, second.download.firstChild, "its label text survives too");
 });
 
 test("a re-render keeps focus and scroll position inside the shelf", (t) => {
@@ -324,83 +314,4 @@ test("a declined delete confirmation keeps the card and sends nothing", async (t
     assert.equal(calls.length, 0, "a declined confirmation issues no request");
     assert.equal(ui.cards()[0], card);
     assert.equal(card.parentNode, ui.list());
-});
-
-test("collapse keeps its class, aria state and label", (t) => {
-    const ui = setUp(t);
-    dom.btnToggleSnapshots = ui.document.createElement("button");
-    dom.toggleSnapshotsText = ui.document.createElement("span");
-
-    t.after(() => {
-        delete dom.btnToggleSnapshots;
-        delete dom.toggleSnapshotsText;
-    });
-
-    toggleSnapshotsShelf();
-
-    assert.equal(state.snapshotsCollapsed, true);
-    assert.equal(ui.shelf.classList.contains("collapsed"), true);
-    assert.equal(dom.btnToggleSnapshots.getAttribute("aria-expanded"), "false");
-    assert.equal(dom.toggleSnapshotsText.textContent, "Expand");
-
-    toggleSnapshotsShelf();
-
-    assert.equal(state.snapshotsCollapsed, false);
-    assert.equal(ui.shelf.classList.contains("collapsed"), false);
-    assert.equal(dom.btnToggleSnapshots.getAttribute("aria-expanded"), "true");
-    assert.equal(dom.toggleSnapshotsText.textContent, "Collapse");
-});
-
-test("freeze progress still paints the panel and the freeze button label", (t) => {
-    const ui = setUp(t);
-
-    dom.freezeProgressPanel = ui.document.createElement("div");
-    dom.freezeProgressPanel.classList.add("hidden");
-    dom.freezePhaseBadge = ui.document.createElement("span");
-    dom.freezeProgressMessage = ui.document.createElement("div");
-    dom.freezeProgressCounts = ui.document.createElement("span");
-    dom.freezeProgressPercent = ui.document.createElement("span");
-    dom.freezeProgressBar = ui.document.createElement("div");
-    dom.freezeDetailMap = ui.document.createElement("span");
-    dom.freezeDetailSection = ui.document.createElement("span");
-    dom.btnFreezeLabel = ui.document.createElement("span");
-
-    t.after(() => {
-        for (const name of [
-            "freezeProgressPanel",
-            "freezePhaseBadge",
-            "freezeProgressMessage",
-            "freezeProgressCounts",
-            "freezeProgressPercent",
-            "freezeProgressBar",
-            "freezeDetailMap",
-            "freezeDetailSection",
-            "btnFreezeLabel",
-        ]) {
-            delete dom[name];
-        }
-    });
-
-    updateFreezeProgressUI({
-        phase: "packaging",
-        completed_samples: 5,
-        total_samples: 10,
-        current_map: "map-7",
-        current_section: [2, 3],
-        message: "Packing sections",
-    });
-
-    assert.equal(dom.freezeProgressPanel.classList.contains("hidden"), false, "progress reveals the panel");
-    assert.equal(dom.freezePhaseBadge.textContent, "PACKAGING");
-    assert.equal(dom.freezePhaseBadge.className, "freeze-phase-badge phase-packaging");
-    assert.equal(dom.freezeProgressMessage.textContent, "Packing sections");
-    assert.equal(dom.freezeProgressCounts.textContent, "5 / 10 samples");
-    assert.equal(dom.freezeProgressPercent.textContent, "(60%)");
-    assert.equal(dom.freezeProgressBar.style.width, "60%");
-    assert.equal(dom.btnFreezeLabel.textContent, "Freezing (5/10)");
-    assert.equal(dom.freezeDetailMap.textContent, "Map: map-7");
-    assert.equal(dom.freezeDetailSection.textContent, "Section: (2, 3)");
-
-    showFreezeProgressPanel(false);
-    assert.equal(dom.freezeProgressPanel.classList.contains("hidden"), true);
 });

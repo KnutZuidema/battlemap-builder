@@ -80,6 +80,8 @@ mod tests {
         for asset in [
             "index.html",
             "style.css",
+            // The Storage drawer's loading/error state rules (#292), attached by `views/storage.js`.
+            "storage-states.css",
             "app.js",
             "dom.js",
             "store.js",

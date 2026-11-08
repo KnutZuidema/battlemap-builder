@@ -9,7 +9,7 @@ use crate::domain::{
     Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, RejectionReason, RejectionRecord, Theme,
     TrainingMetricSnapshot, TrainingRun,
 };
-use crate::ports::blob_storage::{BlobKey, BlobStat, BlobStorage};
+use crate::ports::blob_storage::{BlobEntry, BlobKey, BlobStat, BlobStorage};
 use crate::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
 use crate::ports::storage_error::StorageError;
 
@@ -117,6 +117,24 @@ impl BlobStorage for InMemoryBlobStorage {
             .collect();
         keys.sort_by_key(|key| key.to_path());
         Ok(keys)
+    }
+
+    /// The map already holds every payload, so a sized listing costs one pass and no extra reads.
+    async fn list_prefix_with_sizes(
+        &self,
+        prefix: &BlobKey,
+    ) -> Result<Vec<BlobEntry>, StorageError> {
+        let blobs = self
+            .blobs
+            .read()
+            .expect("in-memory blob store lock poisoned");
+        let mut entries: Vec<BlobEntry> = blobs
+            .iter()
+            .filter(|(key, _)| prefix.is_prefix_of(key))
+            .map(|(key, blob)| BlobEntry::new(key.clone(), blob.bytes.len() as u64))
+            .collect();
+        entries.sort_by(|a, b| a.key.to_path().cmp(&b.key.to_path()));
+        Ok(entries)
     }
 }
 

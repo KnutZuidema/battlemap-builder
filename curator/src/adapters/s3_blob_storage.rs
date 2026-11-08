@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::ports::blob_storage::{sha256_digest, BlobKey, BlobStat, BlobStorage};
+use crate::ports::blob_storage::{sha256_digest, BlobEntry, BlobKey, BlobStat, BlobStorage};
 use crate::ports::storage_error::StorageError;
 
 /// Chunk size and threshold for S3 multipart uploads (5 MiB, the S3 minimum part size).
@@ -125,6 +125,14 @@ impl BlobBackend {
     }
 }
 
+/// Byte size `ListObjectsV2` reported for one listed object, clamped to a non-negative `u64`.
+///
+/// `Size` is part of the very same listing response that carries the key, so accounting a prefix
+/// never needs a per-object `head_object` (issue #292).
+fn listed_size(obj: &aws_sdk_s3::types::Object) -> u64 {
+    obj.size().map(|size| size.max(0) as u64).unwrap_or(0)
+}
+
 /// [`BlobStorage`] implementation backed by an S3-compatible service (Cloudflare R2, MinIO, AWS S3).
 #[derive(Clone)]
 pub struct S3BlobStorage {
@@ -213,6 +221,57 @@ impl S3BlobStorage {
             return StorageError::NotFound(format!("Blob '{path}' not found"));
         }
         StorageError::Io(std::io::Error::other(err))
+    }
+
+    /// Enumerates every blob below `prefix` with the size `ListObjectsV2` reported for it.
+    ///
+    /// One paginated listing call per page of up to 1000 objects — never one request per object.
+    /// Entries are ordered by canonical path and de-duplicated, so callers get a stable, unique
+    /// snapshot of the prefix.
+    async fn list_entries(&self, prefix: &BlobKey) -> Result<Vec<BlobEntry>, StorageError> {
+        let prefix_str = prefix.to_path();
+        let mut continuation_token: Option<String> = None;
+        let mut entries = Vec::new();
+
+        loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&prefix_str);
+
+            if let Some(token) = continuation_token {
+                req = req.continuation_token(token);
+            }
+
+            let res = req
+                .send()
+                .await
+                .map_err(|err| StorageError::Io(std::io::Error::other(err)))?;
+
+            for obj in res.contents() {
+                if let Some(key_str) = obj.key() {
+                    if let Some(key) = BlobKey::from_path(key_str) {
+                        if prefix.is_prefix_of(&key) {
+                            entries.push(BlobEntry::new(key, listed_size(obj)));
+                        }
+                    }
+                }
+            }
+
+            if res.is_truncated().unwrap_or(false) {
+                continuation_token = res.next_continuation_token().map(|s| s.to_string());
+                if continuation_token.is_none() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        entries.sort_by(|a, b| a.key.to_path().cmp(&b.key.to_path()));
+        entries.dedup_by(|a, b| a.key == b.key);
+        Ok(entries)
     }
 }
 
@@ -402,49 +461,21 @@ impl BlobStorage for S3BlobStorage {
     }
 
     async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
-        let prefix_str = prefix.to_path();
-        let mut continuation_token: Option<String> = None;
-        let mut matched_keys = Vec::new();
+        Ok(self
+            .list_entries(prefix)
+            .await?
+            .into_iter()
+            .map(|entry| entry.key)
+            .collect())
+    }
 
-        loop {
-            let mut req = self
-                .client
-                .list_objects_v2()
-                .bucket(&self.bucket)
-                .prefix(&prefix_str);
-
-            if let Some(token) = continuation_token {
-                req = req.continuation_token(token);
-            }
-
-            let res = req
-                .send()
-                .await
-                .map_err(|err| StorageError::Io(std::io::Error::other(err)))?;
-
-            for obj in res.contents() {
-                if let Some(key_str) = obj.key() {
-                    if let Some(key) = BlobKey::from_path(key_str) {
-                        if prefix.is_prefix_of(&key) {
-                            matched_keys.push(key);
-                        }
-                    }
-                }
-            }
-
-            if res.is_truncated().unwrap_or(false) {
-                continuation_token = res.next_continuation_token().map(|s| s.to_string());
-                if continuation_token.is_none() {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-
-        matched_keys.sort_by_key(|k| k.to_path());
-        matched_keys.dedup();
-        Ok(matched_keys)
+    /// Reads every size out of the listing response itself, so accounting a prefix costs one
+    /// paginated `ListObjectsV2` instead of one `head_object` per object (issue #292).
+    async fn list_prefix_with_sizes(
+        &self,
+        prefix: &BlobKey,
+    ) -> Result<Vec<BlobEntry>, StorageError> {
+        self.list_entries(prefix).await
     }
 }
 
@@ -470,5 +501,19 @@ mod tests {
             client_conf.response_checksum_validation(),
             Some(&ResponseChecksumValidation::WhenRequired)
         );
+    }
+
+    /// A listed object without a recorded size is counted as zero bytes rather than failing the
+    /// listing: `Size` is optional in the response model.
+    #[test]
+    fn test_listed_size_is_zero_when_the_listing_omits_it() {
+        let object = aws_sdk_s3::types::Object::builder().key("staging/c/0.png").build();
+        assert_eq!(listed_size(&object), 0);
+
+        let sized = aws_sdk_s3::types::Object::builder()
+            .key("staging/c/0.png")
+            .size(4096)
+            .build();
+        assert_eq!(listed_size(&sized), 4096);
     }
 }

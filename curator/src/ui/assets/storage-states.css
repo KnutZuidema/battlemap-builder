@@ -1,0 +1,61 @@
+/* ==========================================================================
+   Storage footprint read states (issue #292)
+
+   The Storage drawer has three mutually exclusive states — loading, measured
+   figures, and an error with a retry — so an unreadable footprint is never
+   rendered as a measured `0 B`. Kept beside `style.css` rather than inside it
+   so the state contract lives next to the view that owns it.
+   ========================================================================== */
+
+.storage-state {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.85rem 1rem;
+    border-radius: 8px;
+    font-size: 0.85rem;
+}
+
+.storage-state-loading {
+    background: rgba(56, 189, 248, 0.08);
+    border: 1px solid rgba(56, 189, 248, 0.28);
+    color: var(--text-secondary);
+}
+
+.storage-state-spinner {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    border-width: 2px;
+}
+
+.storage-state-text {
+    color: var(--text-secondary);
+}
+
+.storage-state-error {
+    background: rgba(244, 63, 94, 0.08);
+    border: 1px solid rgba(244, 63, 94, 0.32);
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.storage-state-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 12rem;
+    flex: 1;
+}
+
+.storage-state-title {
+    font-weight: 700;
+    color: #fca5a5;
+}
+
+.storage-state-detail {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    word-break: break-word;
+}

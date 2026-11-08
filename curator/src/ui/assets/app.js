@@ -25,7 +25,10 @@ function init() {
     fetchStatus();
     fetchCostStats();
     fetchStagingQueue();
-    fetchStorageStats();
+    // Prefetch only: the drawer is closed, so a failure must not paint its error panel. The read
+    // is deduplicated through the request tracker, so opening the drawer while this is still in
+    // flight joins it instead of starting a second scan of the bucket.
+    fetchStorageStats({ quiet: true });
     fetchTrainingRuns();
     syncReadinessToScope();
 }

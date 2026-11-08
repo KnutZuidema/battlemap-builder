@@ -74,7 +74,6 @@ export async function fetchDatasetSnapshots() {
         const snapshots = await requestDatasetSnapshots();
         state.snapshots = snapshots;
         renderDatasetSnapshots(snapshots);
-        populateTrainingSnapshotSelect(snapshots);
         checkActiveFreezeStatus();
     } catch (_) {
         // The request module reported it; the shelf keeps the snapshots it already has.
@@ -223,17 +222,21 @@ function updateSnapshotCard(record, snapshot) {
  * the freeze-progress refresh that triggered it.
  */
 export function renderDatasetSnapshots(snapshots) {
-    const list = Array.isArray(snapshots) ? snapshots : [];
-    const total = list.length;
+    const items = Array.isArray(snapshots) ? snapshots : [];
+    const total = items.length;
+
     if (dom.snapshotsCountBadge) {
         dom.snapshotsCountBadge.textContent = `${total} Snapshot${total === 1 ? "" : "s"}`;
     }
+    // The training drawer's snapshot picker is shell chrome outside this subtree, so it follows
+    // the listing whether or not the shelf itself is mounted.
+    populateTrainingSnapshotSelect(items);
 
     const root = dom.snapshotsShelf;
     if (!root) return;
     attachShelf(root);
 
-    const wanted = new Set(list.map((snapshot) => snapshot.id));
+    const wanted = new Set(items.map((snapshot) => snapshot.id));
     for (const [id, record] of shelf.cards) {
         if (wanted.has(id)) continue;
         record.card.remove();
@@ -241,7 +244,7 @@ export function renderDatasetSnapshots(snapshots) {
     }
 
     let index = 0;
-    for (const snapshot of list) {
+    for (const snapshot of items) {
         let record = shelf.cards.get(snapshot.id);
         if (!record) {
             record = createSnapshotCard(snapshot);
@@ -255,7 +258,6 @@ export function renderDatasetSnapshots(snapshots) {
     }
 
     shelf.empty.classList.toggle("hidden", total > 0);
-    populateTrainingSnapshotSelect(list);
 }
 
 export function toggleSnapshotsShelf() {

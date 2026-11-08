@@ -1,5 +1,21 @@
 /**
  * Storage footprint monitor and the staging purge confirmation modals.
+ *
+ * The stats render has three mutually exclusive states instead of an only-on-success update:
+ *
+ * - `loading` — the read is in flight and the drawer says so instead of showing figures;
+ * - `ready` — the measured figures;
+ * - `error` — an explicit, retryable failure message.
+ *
+ * #292 is why: the request swallowed its own failure in `catch (_) {}`, so the drawer kept
+ * rendering the `index.html` fallbacks — `0 B`, `0 files`, `0 B (0)` — next to a
+ * `Load storage stats failed` toast. Reporting an unreadable footprint as an empty one is worse
+ * than reporting nothing at all.
+ *
+ * The state elements are owned by this view: `#storage-stats-loading` and `#storage-stats-error`
+ * (with its `#btn-retry-storage-stats` action) are looked up in the markup and, when the modal does
+ * not carry them, created inside the storage modal — so the state contract lives next to the code
+ * that paints it rather than in the page.
  */
 
 import { state } from "../store.js";
@@ -9,13 +25,171 @@ import { stopStageMotion } from "../stage/canvas.js";
 import { fetchStagingQueue } from "./triage.js";
 import { fetchStorageStats as requestStorageStats, purgeStaging as requestPurgeStaging } from "../requests/storage.js";
 
+/** Text the loading indicator carries while a footprint read is in flight. */
+const LOADING_TEXT = "Reading storage footprint…";
+
+/** Stylesheet carrying the loading and error rules; attached on first use. */
+const STYLESHEET_HREF = "/storage-states.css";
+
+const LOADING_ID = "storage-stats-loading";
+const ERROR_ID = "storage-stats-error";
+const RETRY_ID = "btn-retry-storage-stats";
+
+/**
+ * Every figure the drawer and its widget display, so an in-flight or failed read can clear them
+ * all rather than leave a number on screen claiming a measurement that was never made.
+ */
+const FIGURE_IDS = [
+    "storage-staging-bytes",
+    "storage-staging-files",
+    "storage-breakdown-reddit",
+    "storage-breakdown-generated",
+    "storage-breakdown-root",
+    "storage-curated-bytes",
+    "storage-curated-files",
+    "storage-rejected-bytes",
+    "storage-rejected-records",
+    "storage-telemetry-bytes",
+    "storage-telemetry-files",
+    "storage-total-bytes",
+    "storage-total-files",
+    "drawer-storage-staging",
+    "drawer-storage-curated",
+];
+
+/** Attach the state stylesheet once, so the indicators are styled wherever they are painted. */
+function ensureStylesheet() {
+    const head = document.head;
+    if (!head || typeof head.appendChild !== "function") return;
+    const selector = `link[href="${STYLESHEET_HREF}"]`;
+    if (typeof document.querySelector === "function" && document.querySelector(selector)) return;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = STYLESHEET_HREF;
+    head.appendChild(link);
+}
+
+/** Where a created indicator belongs: the storage modal's body, or the modal itself. */
+function storageStateHost() {
+    const modal = document.getElementById("storage-modal");
+    if (modal && typeof modal.querySelector === "function") {
+        const body = modal.querySelector(".storage-modal-body");
+        if (body) return body;
+    }
+    return modal || document.body || null;
+}
+
+/** The element for `id`, created inside the storage modal when the markup does not carry it. */
+function stateElement(id, { tag = "div", className = "" } = {}) {
+    const existing = document.getElementById(id);
+    if (existing) return existing;
+
+    const created = document.createElement(tag);
+    created.id = id;
+    created.className = className;
+    const host = storageStateHost();
+    if (!host) return null;
+    if (typeof host.prepend === "function") host.prepend(created);
+    else host.appendChild(created);
+    return created;
+}
+
+/** Show or clear the loading indicator; it carries its own label and no child markup. */
+function renderLoading(visible) {
+    const el = stateElement(LOADING_ID, { className: "storage-state storage-state-loading hidden" });
+    if (!el) return;
+    el.textContent = visible ? LOADING_TEXT : "";
+    el.classList.toggle("hidden", !visible);
+}
+
+/**
+ * The retry action the error state offers, bound to a fresh read exactly once.
+ *
+ * It is created detached rather than appended to the modal, because the error state is the only
+ * place it belongs: a control created eagerly would render inside a healthy drawer.
+ */
+function retryControl() {
+    let retry = document.getElementById(RETRY_ID);
+    if (!retry) {
+        retry = document.createElement("button");
+        retry.id = RETRY_ID;
+        retry.type = "button";
+        retry.className = "btn btn-secondary btn-sm";
+        retry.textContent = "Retry";
+    }
+    if (!retry.__storageRetryBound) {
+        retry.addEventListener("click", () => fetchStorageStats());
+        retry.__storageRetryBound = true;
+    }
+    return retry;
+}
+
+/**
+ * Show or clear the error state: the failure message plus the retry action.
+ *
+ * `message == null` clears the state entirely, which is what a new read does before it starts.
+ */
+function renderError(message) {
+    const el = stateElement(ERROR_ID, { className: "storage-state storage-state-error hidden" });
+    if (!el) return;
+    if (message == null) {
+        el.textContent = "";
+        el.classList.add("hidden");
+        return;
+    }
+    el.textContent = `Load storage stats failed: ${message}`;
+    const retry = retryControl();
+    if (retry && retry.parentElement !== el) el.appendChild(retry);
+    el.classList.remove("hidden");
+}
+
+/** Blank every figure and the theme list, so nothing on screen claims an unread footprint. */
+function clearStorageFigures() {
+    for (const id of FIGURE_IDS) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = "";
+    }
+    const themesListEl = document.getElementById("storage-themes-list");
+    if (themesListEl) themesListEl.innerHTML = "";
+    const reclaimFilesEl = document.getElementById("purge-reclaim-files");
+    if (reclaimFilesEl) reclaimFilesEl.textContent = "Reclaim size unavailable until the footprint loads";
+}
+
+/**
+ * Read the footprint and render it.
+ *
+ * The request joins any scan already in flight (`requests/storage.js`), so the boot prefetch, a
+ * drawer open, a refresh and a retry never overlap.
+ */
 export async function fetchStorageStats() {
+    ensureStylesheet();
+    state.storageStatsPhase = "loading";
+    state.storageStatsError = null;
+    renderError(null);
+    renderLoading(true);
+    clearStorageFigures();
+
     try {
         const data = await requestStorageStats();
         state.storageStats = data;
+        state.storageStatsPhase = "ready";
+        renderLoading(false);
         renderStorageStats(data);
-    } catch (_) {
-        // The request module reported it; the drawer keeps the last known footprint.
+        return data;
+    } catch (error) {
+        if (error && error.name === "AbortError") {
+            // Cancelled, not failed: restore the state the last settled read left behind.
+            state.storageStatsPhase = state.storageStats ? "ready" : "idle";
+            renderLoading(false);
+            if (state.storageStats) renderStorageStats(state.storageStats);
+            return null;
+        }
+        state.storageStatsPhase = "error";
+        state.storageStatsError = error && error.message ? error.message : String(error);
+        renderLoading(false);
+        renderError(state.storageStatsError);
+        // The request module already raised the status pill and toasted the failure.
+        return null;
     }
 }
 
@@ -106,7 +280,14 @@ function openPurgeModal() {
     modal?.classList.remove("hidden");
     const reclaimBytesEl = document.getElementById("purge-reclaim-bytes");
     const reclaimFilesEl = document.getElementById("purge-reclaim-files");
-    const currentStaging = state.storageStats?.staging || { bytes: 0, file_count: 0 };
+    const currentStaging = state.storageStats?.staging || null;
+    if (!currentStaging) {
+        // Nothing was read, so there is no reclaim figure to quote: `0 B` would be a guess about
+        // bytes that are about to be deleted for good.
+        if (reclaimBytesEl) reclaimBytesEl.textContent = "—";
+        if (reclaimFilesEl) reclaimFilesEl.textContent = "Reclaim size unavailable until the footprint loads";
+        return;
+    }
     if (reclaimBytesEl) reclaimBytesEl.textContent = formatBytes(currentStaging.bytes);
     if (reclaimFilesEl) reclaimFilesEl.textContent = `${currentStaging.file_count.toLocaleString()} candidate files will be permanently deleted`;
 }

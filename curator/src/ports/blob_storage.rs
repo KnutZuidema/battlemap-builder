@@ -363,6 +363,27 @@ impl BlobStat {
     }
 }
 
+/// One entry of a prefix listing: the blob's key plus the byte size the listing itself reported.
+///
+/// The size is authoritative and travels with the key in the very same response —
+/// `ListObjectsV2`'s `Contents[].Size` on S3, a directory entry's metadata on a filesystem — so
+/// size accounting costs one listing instead of one request per object (see
+/// [`BlobStorage::list_prefix_with_sizes`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobEntry {
+    /// Address of the listed blob.
+    pub key: BlobKey,
+    /// Byte size the listing reported for it.
+    pub size: u64,
+}
+
+impl BlobEntry {
+    /// Pairs a listed key with the size its listing reported.
+    pub fn new(key: BlobKey, size: u64) -> Self {
+        Self { key, size }
+    }
+}
+
 /// Port defining raw blob I/O under the canonical paths of [`BlobKey`].
 ///
 /// Contract: reading a missing blob fails with [`StorageError::NotFound`], while deleting a
@@ -395,8 +416,9 @@ pub trait BlobStorage: Send + Sync {
     /// Byte length of the blob stored at `key`, failing with [`StorageError::NotFound`] when
     /// nothing is stored there.
     ///
-    /// Size accounting ([`crate::services::StorageMaintenanceService`]) reads this instead of
-    /// [`BlobStorage::read_blob`], so aggregating a directory never pulls its payloads into memory.
+    /// This is a single-object query: on S3 it is one signed `head_object`, i.e. one round trip
+    /// per call. Aggregating a directory therefore reads sizes from
+    /// [`BlobStorage::list_prefix_with_sizes`] and never calls this per blob.
     async fn blob_size(&self, key: &BlobKey) -> Result<u64, StorageError>;
 
     /// Query byte length and SHA-256 digest of the blob stored at `key` without downloading its
@@ -408,6 +430,34 @@ pub trait BlobStorage: Send + Sync {
 
     /// List the blobs below the `prefix` directory key, ordered by canonical path.
     async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError>;
+
+    /// List the blobs below the `prefix` directory key together with their byte sizes, ordered by
+    /// canonical path.
+    ///
+    /// This is the accounting read. Every adapter that can read a size out of its own listing —
+    /// S3's `ListObjectsV2` `Contents[].Size`, a filesystem `DirEntry`'s metadata — MUST override
+    /// it, because the default below pays one [`BlobStorage::blob_size`] per key: on S3 that is
+    /// one `head_object` over the WAN per blob, the O(N) waterfall issue #292 removed from
+    /// `GET /api/storage/stats` (931 sequential HEADs, ~94s, and a liveness-probe kill).
+    ///
+    /// The default keeps adapters that can only enumerate keys correct: it walks
+    /// [`BlobStorage::list_prefix`] and skips any key whose size read reports
+    /// [`StorageError::NotFound`], since a listing is a snapshot and a key that disappears between
+    /// the listing and its size read is simply no longer part of the footprint.
+    async fn list_prefix_with_sizes(
+        &self,
+        prefix: &BlobKey,
+    ) -> Result<Vec<BlobEntry>, StorageError> {
+        let mut entries = Vec::new();
+        for key in self.list_prefix(prefix).await? {
+            match self.blob_size(&key).await {
+                Ok(size) => entries.push(BlobEntry::new(key, size)),
+                Err(StorageError::NotFound(_)) => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(entries)
+    }
 }
 
 #[async_trait]
@@ -447,5 +497,12 @@ impl<T: ?Sized + BlobStorage> BlobStorage for std::sync::Arc<T> {
 
     async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
         (**self).list_prefix(prefix).await
+    }
+
+    async fn list_prefix_with_sizes(
+        &self,
+        prefix: &BlobKey,
+    ) -> Result<Vec<BlobEntry>, StorageError> {
+        (**self).list_prefix_with_sizes(prefix).await
     }
 }

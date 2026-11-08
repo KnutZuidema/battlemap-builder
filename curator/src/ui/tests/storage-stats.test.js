@@ -7,6 +7,11 @@
  *   request, so a drawer open during the boot scan does not issue a second full pass.
  * - The drawer never presents its markup fallbacks as a measurement: it shows a loading
  *   indicator while reading, and an error with a retry on failure instead of `0 B`.
+ *
+ * The loading indicator and the error panel are painted only while the drawer is open — the boot
+ * prefetch runs with it closed, so a failure there belongs on the status pill and not on a drawer
+ * nobody opened. A test that asserts those indicators therefore opens the drawer first, exactly
+ * as `openStorageModal` does, by setting `state.storageModalOpen`.
  */
 
 import test from "node:test";
@@ -48,18 +53,29 @@ function deferred() {
 
 function setUp(t) {
     const ui = installRequestDom();
-    // Reset the phase and figures the view keeps between reads.
+    // Reset the phase, the drawer and the figures the view keeps between reads.
     state.storageStats = null;
     state.storageStatsPhase = "idle";
     state.storageStatsError = null;
+    state.storageModalOpen = false;
     t.after(() => {
         clearRequestFailure();
         ui.restore();
         state.storageStats = null;
         state.storageStatsPhase = "idle";
         state.storageStatsError = null;
+        state.storageModalOpen = false;
     });
     return ui;
+}
+
+/**
+ * Open the Storage drawer the way `openStorageModal` does — only the flag, since the DOM side is
+ * what `fakes.js` stands in for. The indicators are gated on it, so a test asserting them must
+ * have it set, and a test asserting a quiet boot must leave it clear.
+ */
+function openDrawer() {
+    state.storageModalOpen = true;
 }
 
 /** Let every settled promise chain drain. */
@@ -104,8 +120,10 @@ test("the boot prefetch and a drawer open share one scan", async (t) => {
     const server = stubFetch(() => pending.promise);
     t.after(() => server.restore());
 
-    // `app.js` prefetches quietly; opening the drawer then reads again. Both are one request.
-    const boot = fetchStorageStats({ quiet: true });
+    // `app.js` prefetches with the drawer closed; opening the drawer then reads again. Both are
+    // one request.
+    const boot = fetchStorageStats();
+    openDrawer();
     const drawerOpen = fetchStorageStats();
     await settle();
     assert.equal(server.calls.length, 1, "the drawer open joins the boot prefetch");
@@ -115,7 +133,7 @@ test("the boot prefetch and a drawer open share one scan", async (t) => {
     assert.deepEqual(await drawerOpen, STATS);
     await settle();
     // The joined read renders once, for both callers.
-    assert.equal(globalThis.document.getElementById("storage-staging-bytes").textContent, "1 KB");
+    assert.equal(globalThis.document.getElementById("storage-staging-bytes").textContent, "1.0 KB");
     assert.equal(state.storageStatsPhase, "ready");
 });
 
@@ -125,6 +143,7 @@ test("the drawer shows a loading indicator and then the measured figures", async
     const server = stubFetch(() => pending.promise);
     t.after(() => server.restore());
 
+    openDrawer();
     const read = fetchStorageStats();
     await settle();
 
@@ -142,12 +161,15 @@ test("the drawer shows a loading indicator and then the measured figures", async
 
     assert.equal(loading.classList.contains("hidden"), true, "the indicator clears on success");
     assert.equal(content.classList.contains("hidden"), false, "the measured cards are shown");
-    assert.equal(globalThis.document.getElementById("storage-staging-bytes").textContent, "1 KB");
+    assert.equal(globalThis.document.getElementById("storage-staging-bytes").textContent, "1.0 KB");
     assert.equal(globalThis.document.getElementById("storage-staging-files").textContent, "3 files");
-    assert.equal(globalThis.document.getElementById("storage-curated-bytes").textContent, "2 KB");
+    assert.equal(globalThis.document.getElementById("storage-curated-bytes").textContent, "2.0 KB");
     assert.equal(globalThis.document.getElementById("storage-rejected-records").textContent, "5 records");
     assert.equal(globalThis.document.getElementById("storage-total-files").textContent, "(11 items)");
-    assert.equal(globalThis.document.getElementById("drawer-storage-staging").textContent, "1 KB (3 files)");
+    assert.equal(
+        globalThis.document.getElementById("drawer-storage-staging").textContent,
+        "1.0 KB (3 files)",
+    );
     assert.equal(globalThis.document.getElementById("btn-refresh-storage").disabled, false);
     assert.equal(state.storageStatsPhase, "ready");
     assert.equal(ui.toastContainer.children.length, 0, "a successful read reports nothing");
@@ -160,6 +182,7 @@ test("a failed read shows an error with a retry instead of a zero footprint", as
     });
     t.after(() => server.restore());
 
+    openDrawer();
     await fetchStorageStats();
     await settle();
 
@@ -198,6 +221,7 @@ test("a retry after a failure renders the footprint", async (t) => {
     });
     t.after(() => server.restore());
 
+    openDrawer();
     await fetchStorageStats();
     await settle();
     assert.equal(state.storageStatsPhase, "error");
@@ -212,7 +236,7 @@ test("a retry after a failure renders the footprint", async (t) => {
         true,
         "the error panel clears once the retry answers",
     );
-    assert.equal(globalThis.document.getElementById("storage-staging-bytes").textContent, "1 KB");
+    assert.equal(globalThis.document.getElementById("storage-staging-bytes").textContent, "1.0 KB");
     assert.equal(globalThis.document.getElementById("storage-stats-content").classList.contains("hidden"), false);
 });
 
@@ -224,7 +248,7 @@ test("a quiet boot prefetch records the failure without painting the closed draw
     t.after(() => server.restore());
 
     // The drawer is closed at boot, so its error panel is not what an operator is looking at.
-    await fetchStorageStats({ quiet: true });
+    await fetchStorageStats();
     await settle();
 
     assert.equal(state.storageStatsPhase, "error", "the phase still records the failure");

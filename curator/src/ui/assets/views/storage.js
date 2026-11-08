@@ -1,7 +1,7 @@
 /**
  * Storage footprint monitor and the staging purge confirmation modals.
  *
- * The stats render goes through three explicit phases instead of only-on-success:
+ * The stats render has three explicit phases instead of an only-on-success update:
  *
  * - `loading` — the modal shows a loading indicator, because a scan over a deployed bucket is a
  *   real wait and the markup's fallback numbers are not a footprint.
@@ -47,11 +47,12 @@ function renderStorageStatsState() {
         const detail = state.storageStatsError ? `: ${state.storageStatsError}` : "";
         errorTextEl.textContent = `Storage footprint is unavailable${detail}`;
     }
-    // The grids carry the last known numbers rather than placeholder zeros, so they are hidden
-    // entirely while there is nothing trustworthy to show.
+    // The cards carry real measurements or nothing: a failed first read hides them instead of
+    // letting them show the markup's placeholder zeros.
     if (statsEl) {
-        statsEl.classList.toggle("hidden", phase === "idle" || (phase === "error" && !state.storageStats) || phase === "loading");
-        statsEl.classList.toggle("is-stale", phase === "error" && Boolean(state.storageStats));
+        const showFigures = phase === "ready";
+        statsEl.classList.toggle("hidden", !showFigures);
+        statsEl.classList.toggle("is-stale", false);
     }
     const refreshBtn = document.getElementById("btn-refresh-storage");
     if (refreshBtn) refreshBtn.disabled = phase === "loading";
@@ -60,10 +61,10 @@ function renderStorageStatsState() {
 /**
  * Read the footprint and render it.
  *
- * `hasData` distinguishes the states a caller cares about: the boot prefetch wants a quiet
- * failure (the drawer is not open yet), while an explicit open or refresh must say that it
- * failed. Either way the phase is recorded, so the modal never shows placeholder zeros as if
- * they were a measurement.
+ * `quiet` is for the boot prefetch: the drawer is not open yet, so a failure raises the pill and
+ * toasts once through the request module without also painting the modal's error panel. An
+ * explicit open or refresh passes `quiet: false` and names the state it shows. Either way the
+ * phase is recorded, so the modal never presents placeholder zeros as a measurement.
  */
 export async function fetchStorageStats({ quiet = false } = {}) {
     setStorageStatsPhase("loading");
@@ -76,14 +77,15 @@ export async function fetchStorageStats({ quiet = false } = {}) {
     } catch (error) {
         if (error && error.name === "AbortError") {
             // Cancelled, not failed: leave the last phase and figures alone.
+            setStorageStatsPhase(state.storageStats ? "ready" : "idle");
             return null;
         }
-        setStorageStatsPhase("error", { error: error && error.message ? error.message : String(error) });
-        if (!quiet) {
-            // The request module already raised the pill and toasted; the modal names the state
-            // it now shows instead of leaving the fallback numbers to speak for themselves.
-            renderStorageStatsFallback();
-        }
+        setStorageStatsPhase("error", {
+            error: error && error.message ? error.message : String(error),
+        });
+        // The request module already raised the pill and toasted; the modal clears the placeholder
+        // figures so nothing on screen claims a footprint that was never read.
+        renderStorageStatsFallback();
         return null;
     }
 }
@@ -117,28 +119,22 @@ function renderStorageStatsFallback() {
     }
     const themesListEl = document.getElementById("storage-themes-list");
     if (themesListEl) themesListEl.innerHTML = "";
-    for (const [id, text] of [
-        ["drawer-storage-staging", "—"],
-        ["drawer-storage-curated", "—"],
-    ]) {
+    for (const id of ["drawer-storage-staging", "drawer-storage-curated"]) {
         const el = document.getElementById(id);
-        if (el) el.textContent = text;
+        if (el) el.textContent = "—";
     }
     // A failed read says nothing about the staging footprint, so the purge confirmation must not
     // promise a reclaim figure it does not have.
-    for (const [id, text] of [
-        ["purge-reclaim-bytes", "—"],
-        ["purge-reclaim-files", "Reclaim size unavailable until the footprint loads"],
-    ]) {
-        const el = document.getElementById(id);
-        if (el) el.textContent = text;
-    }
+    const reclaimBytesEl = document.getElementById("purge-reclaim-bytes");
+    if (reclaimBytesEl) reclaimBytesEl.textContent = "—";
+    const reclaimFilesEl = document.getElementById("purge-reclaim-files");
+    if (reclaimFilesEl) reclaimFilesEl.textContent = "Reclaim size unavailable until the footprint loads";
 }
 
 /**
  * Every figure the modal and the drawer widget display, for one successful read.
  *
- * The modal grids are rendered here rather than left at their markup defaults, so the numbers on
+ * The cards are rendered here rather than left at their markup defaults, so the numbers on
  * screen always come from a server answer.
  */
 function renderStorageStats(stats) {
@@ -211,8 +207,8 @@ function openStorageModal() {
     state.storageModalOpen = true;
     const modal = document.getElementById("storage-modal");
     modal?.classList.remove("hidden");
-    // Opening the drawer is an explicit read: it must show the loading indicator and, if it
-    // fails, say so. The request joins any in-flight scan instead of starting a second one.
+    // Opening the drawer is an explicit read: it shows the loading indicator and, if it fails,
+    // says so. The request joins any in-flight scan instead of starting a second one.
     fetchStorageStats();
 }
 

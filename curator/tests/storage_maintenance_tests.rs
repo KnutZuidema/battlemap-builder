@@ -59,6 +59,21 @@ fn curated_map(id: &str) -> CuratedMap {
         ])
 }
 
+/// What a `curated/{id}/` listing reports for one bundle: the reference the in-memory theme
+/// breakdown is compared against.
+async fn per_map_stats(blobs: &InMemoryBlobStorage, id: &str) -> (u64, usize) {
+    let entries = blobs
+        .list_prefix_with_sizes(&BlobKey::CuratedDir {
+            id: Some(id.to_string()),
+        })
+        .await
+        .expect("list one map bundle");
+    (
+        entries.iter().map(|entry| entry.size).sum::<u64>(),
+        entries.len(),
+    )
+}
+
 #[tokio::test]
 async fn test_storage_stats_sums_blob_sizes_across_staging_and_curated() {
     let (service, catalog, blobs) = in_memory_service();
@@ -422,36 +437,30 @@ async fn test_both_adapters_report_listing_sizes_matching_blob_size() {
         BlobKey::StagingDir { id: None },
         BlobKey::CuratedDir { id: None },
     ] {
-        let expected: Vec<u64> = {
-            let mut listed = Vec::new();
-            for key in filesystem.list_prefix(&prefix).await.expect("fs list") {
-                listed.push(filesystem.blob_size(&key).await.expect("fs size"));
-            }
-            listed
-        };
-
-        for (label, entries) in [
-            (
-                "filesystem",
-                filesystem
-                    .list_prefix_with_sizes(&prefix)
-                    .await
-                    .expect("fs sized list"),
-            ),
-            (
-                "in-memory",
-                in_memory
-                    .list_prefix_with_sizes(&prefix)
-                    .await
-                    .expect("mem sized list"),
-            ),
-        ] {
-            let sizes: Vec<u64> = entries.iter().map(|entry| entry.size).collect();
-            assert_eq!(
-                sizes, expected,
-                "{label} listing sizes must match its own blob_size reads"
-            );
+        let mut expected: Vec<u64> = Vec::new();
+        for key in filesystem.list_prefix(&prefix).await.expect("fs list") {
+            expected.push(filesystem.blob_size(&key).await.expect("fs size"));
         }
+
+        let fs_entries = filesystem
+            .list_prefix_with_sizes(&prefix)
+            .await
+            .expect("fs sized list");
+        let mem_entries = in_memory
+            .list_prefix_with_sizes(&prefix)
+            .await
+            .expect("mem sized list");
+
+        let fs_sizes: Vec<u64> = fs_entries.iter().map(|entry| entry.size).collect();
+        let mem_sizes: Vec<u64> = mem_entries.iter().map(|entry| entry.size).collect();
+        assert_eq!(
+            fs_sizes, expected,
+            "the filesystem listing sizes must match its own blob_size reads"
+        );
+        assert_eq!(
+            mem_sizes, expected,
+            "the in-memory listing sizes must match the filesystem's"
+        );
     }
 }
 
@@ -546,6 +555,9 @@ async fn test_storage_stats_ignores_hidden_telemetry_temp_files() {
 /// A key that vanishes between the listing and its size read must not fail the whole aggregation:
 /// the sized listing skips it, so `GET /api/storage/stats` never turns an ordinary rename race
 /// into a 404.
+///
+/// The double below forwards the sizing listing to the port's default (it implements only
+/// `list_prefix`), which is the path a key-only adapter takes.
 #[tokio::test]
 async fn test_storage_stats_skips_a_key_that_vanishes_mid_scan() {
     let inner = Arc::new(InMemoryBlobStorage::new());
@@ -636,7 +648,7 @@ async fn test_storage_stats_rejected_counts_records_not_files() {
 /// [`BlobStorage`] double forwarding to an in-memory store while counting the calls that made
 /// `GET /api/storage/stats` expensive: the sized listings and the per-blob size reads.
 ///
-/// A per-blob size read is one signed `head_object` over the WAN on S3 (#292), so the count of
+/// A per-blob size read is one signed `head_object` over the WAN on S3 (#292), so the number of
 /// those calls is the number that must not grow with the blob count.
 struct CountingBlobStorage {
     inner: Arc<InMemoryBlobStorage>,
@@ -729,27 +741,26 @@ async fn test_storage_stats_costs_three_listings_and_one_size_read_for_any_blob_
     let blobs = Arc::new(CountingBlobStorage::new());
 
     // 40 staging layers, 6 curated bundles with 4 layers each (24 blobs), 2 telemetry ledgers.
-    for index in 0..40 {
+    for index in 0..40usize {
+        let candidate_id = format!("cand_{}", index % 8);
         blobs
-            .write_blob(&staging_layer(&format!("cand_{}", index % 8), index), &[1u8; 64])
+            .write_blob(&staging_layer(&candidate_id, index), &[1u8; 64])
             .await
             .expect("write staging blob");
     }
-    for map_index in 0..6 {
-        let id = format!("map_{map_index}");
-        catalog
-            .save_curated(&CuratedMap::with_now(
-                &id,
-                Theme::Dungeon,
-                vec!["dungeon".into()],
-                (2048, 2048),
-            ))
-            .await
-            .expect("save curated map");
-        for layer_index in 0..4 {
+    for map_index in 0..6usize {
+        let map_id = format!("map_{map_index}");
+        let map = CuratedMap::with_now(
+            map_id.as_str(),
+            Theme::Dungeon,
+            vec!["dungeon".into()],
+            (2048, 2048),
+        );
+        catalog.save_curated(&map).await.expect("save curated map");
+        for layer_index in 0..4usize {
             blobs
                 .write_blob(
-                    &curated_layer(&id, layer_index, LayerRole::Ground, Some(0)),
+                    &curated_layer(map_id.as_str(), layer_index, LayerRole::Ground, Some(0)),
                     &[2u8; 128],
                 )
                 .await
@@ -821,10 +832,11 @@ async fn test_curated_theme_breakdown_equals_a_per_map_listing_without_querying_
     }
 
     for (index, size) in [(0usize, 1000usize), (1, 500)] {
+        let payload = vec![1u8; size];
         blobs
             .write_blob(
                 &curated_layer(&multi.id, index, LayerRole::Ground, Some(0)),
-                &vec![1u8; size],
+                &payload,
             )
             .await
             .expect("write multi-theme layer");
@@ -848,23 +860,15 @@ async fn test_curated_theme_breakdown_equals_a_per_map_listing_without_querying_
     let stats = service.storage_stats().await.expect("stats succeed");
 
     // The control: what the service used to compute for each map, by listing its own bundle.
-    let per_map = |id: &str| async {
-        let entries = blobs
-            .list_prefix_with_sizes(&BlobKey::CuratedDir {
-                id: Some(id.to_string()),
-            })
-            .await
-            .expect("list one map");
-        (
-            entries.iter().map(|entry| entry.size).sum::<u64>(),
-            entries.len(),
-        )
-    };
-    assert_eq!(per_map("multi_theme").await, (1500, 2));
-    assert_eq!(per_map("single_theme").await, (700, 1));
+    assert_eq!(per_map_stats(&blobs, "multi_theme").await, (1500, 2));
+    assert_eq!(per_map_stats(&blobs, "single_theme").await, (700, 1));
 
     let dungeon = stats.curated_by_theme.get(&Theme::Dungeon).expect("dungeon");
-    assert_eq!((dungeon.bytes, dungeon.file_count, dungeon.map_count), (1500, 2, 1));
+    assert_eq!(
+        (dungeon.bytes, dungeon.file_count, dungeon.map_count),
+        (1500, 2, 1),
+        "a map tagged with the same theme twice is counted once"
+    );
 
     // Tagged `cave` as well, so the same bundle contributes to both themes.
     let cave = stats.curated_by_theme.get(&Theme::Cave).expect("cave");
@@ -873,11 +877,14 @@ async fn test_curated_theme_breakdown_equals_a_per_map_listing_without_querying_
     let tavern = stats.curated_by_theme.get(&Theme::Tavern).expect("tavern");
     assert_eq!((tavern.bytes, tavern.file_count, tavern.map_count), (700, 1, 1));
 
-    // The repeated `dungeon` tag counts the map once, and the orphan bundle inflates no theme
-    // even though it is part of the overall curated footprint.
+    // The orphan bundle inflates no theme even though it is part of the overall curated footprint.
     assert_eq!(stats.curated.bytes, 1500 + 700 + 333);
     assert_eq!(stats.curated.file_count, 4);
-    let themed_bytes: u64 = stats.curated_by_theme.values().map(|entry| entry.bytes).sum();
+    let themed_bytes: u64 = stats
+        .curated_by_theme
+        .values()
+        .map(|entry| entry.bytes)
+        .sum();
     assert_eq!(
         themed_bytes,
         1500 + 1500 + 700,

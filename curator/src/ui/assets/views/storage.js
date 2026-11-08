@@ -3,14 +3,18 @@
  *
  * The stats render has three explicit phases instead of an only-on-success update:
  *
- * - `loading` — the modal shows a loading indicator, because a scan over a deployed bucket is a
+ * - `loading` — the drawer shows a loading indicator, because a scan over a deployed bucket is a
  *   real wait and the markup's fallback numbers are not a footprint.
  * - `ready` — the figures, from the last successful read.
  * - `error` — an explicit failure message with a retry action.
  *
- * Issue #292 is why: the request swallowed its own failure, so the modal kept rendering the
+ * Issue #292 is why: the request swallowed its own failure, so the drawer kept rendering the
  * `index.html` fallbacks — `0 B`, `0 files`, `0 B (0)` — next to a `Load storage stats failed`
  * toast. Misreporting an unreadable footprint as an empty one is worse than reporting nothing.
+ *
+ * The phase is recorded whether or not the drawer is open, but the drawer's own indicators are
+ * painted only while it is: the boot prefetch runs with it closed, and a failure there belongs on
+ * the status pill the request module already paints.
  */
 
 import { state } from "../store.js";
@@ -28,32 +32,28 @@ function setStorageStatsPhase(phase, { error = null } = {}) {
 }
 
 /**
- * Render the modal's loading/error state.
+ * Paint the drawer's loading/error indicators from the recorded phase.
  *
- * The figures keep whatever the last successful read produced; the indicators only add the
- * "this is not the current footprint" or "there is no footprint to show" message, so a stale
- * drawer is labelled stale instead of silently reading as current.
+ * The cards are shown only for `ready`, so a failed or in-flight read never leaves the markup's
+ * placeholder figures on screen claiming a measurement. The counterparts are gated on the drawer
+ * being open, so a boot failure does not repaint a drawer nobody opened — opening it re-renders
+ * and then reports the recorded failure.
  */
 function renderStorageStatsState() {
     const phase = state.storageStatsPhase;
+    const drawerOpen = Boolean(state.storageModalOpen);
     const loadingEl = document.getElementById("storage-stats-loading");
     const errorEl = document.getElementById("storage-stats-error");
     const errorTextEl = document.getElementById("storage-stats-error-text");
     const statsEl = document.getElementById("storage-stats-content");
 
-    if (loadingEl) loadingEl.classList.toggle("hidden", phase !== "loading");
-    if (errorEl) errorEl.classList.toggle("hidden", phase !== "error");
+    if (loadingEl) loadingEl.classList.toggle("hidden", !(drawerOpen && phase === "loading"));
+    if (errorEl) errorEl.classList.toggle("hidden", !(drawerOpen && phase === "error"));
     if (errorTextEl && phase === "error") {
         const detail = state.storageStatsError ? `: ${state.storageStatsError}` : "";
         errorTextEl.textContent = `Storage footprint is unavailable${detail}`;
     }
-    // The cards carry real measurements or nothing: a failed first read hides them instead of
-    // letting them show the markup's placeholder zeros.
-    if (statsEl) {
-        const showFigures = phase === "ready";
-        statsEl.classList.toggle("hidden", !showFigures);
-        statsEl.classList.toggle("is-stale", false);
-    }
+    if (statsEl) statsEl.classList.toggle("hidden", phase !== "ready");
     const refreshBtn = document.getElementById("btn-refresh-storage");
     if (refreshBtn) refreshBtn.disabled = phase === "loading";
 }
@@ -61,12 +61,11 @@ function renderStorageStatsState() {
 /**
  * Read the footprint and render it.
  *
- * `quiet` is for the boot prefetch: the drawer is not open yet, so a failure raises the pill and
- * toasts once through the request module without also painting the modal's error panel. An
- * explicit open or refresh passes `quiet: false` and names the state it shows. Either way the
- * phase is recorded, so the modal never presents placeholder zeros as a measurement.
+ * The request joins any scan already in flight (`requests/storage.js`), so the boot prefetch, a
+ * drawer open and a refresh never overlap. The phase is always recorded; the drawer's indicators
+ * are painted only while it is open (see [`renderStorageStatsState`]).
  */
-export async function fetchStorageStats({ quiet = false } = {}) {
+export async function fetchStorageStats() {
     setStorageStatsPhase("loading");
     try {
         const data = await requestStorageStats();
@@ -76,16 +75,17 @@ export async function fetchStorageStats({ quiet = false } = {}) {
         return data;
     } catch (error) {
         if (error && error.name === "AbortError") {
-            // Cancelled, not failed: leave the last phase and figures alone.
+            // Cancelled, not failed: restore the phase the last settled read left behind.
             setStorageStatsPhase(state.storageStats ? "ready" : "idle");
             return null;
         }
         setStorageStatsPhase("error", {
             error: error && error.message ? error.message : String(error),
         });
-        // The request module already raised the pill and toasted; the modal clears the placeholder
-        // figures so nothing on screen claims a footprint that was never read.
+        // The request module already raised the pill and toasted; clearing the markup's placeholder
+        // figures keeps anything on screen from claiming a footprint that was never read.
         renderStorageStatsFallback();
+        if (state.storageStatsModalOpen) renderStorageStatsFallback();
         return null;
     }
 }
@@ -132,10 +132,10 @@ function renderStorageStatsFallback() {
 }
 
 /**
- * Every figure the modal and the drawer widget display, for one successful read.
+ * Every figure the drawer and its widget display, for one successful read.
  *
- * The cards are rendered here rather than left at their markup defaults, so the numbers on
- * screen always come from a server answer.
+ * The figures are rendered here rather than left at their markup defaults, so what is on screen
+ * always comes from a server answer.
  */
 function renderStorageStats(stats) {
     if (!stats) return;
@@ -207,8 +207,9 @@ function openStorageModal() {
     state.storageModalOpen = true;
     const modal = document.getElementById("storage-modal");
     modal?.classList.remove("hidden");
-    // Opening the drawer is an explicit read: it shows the loading indicator and, if it fails,
-    // says so. The request joins any in-flight scan instead of starting a second one.
+    // Paint whatever the last read left behind — the loading indicator, the recorded error, or the
+    // figures — before the explicit read below joins or starts a scan.
+    renderStorageStatsState();
     fetchStorageStats();
 }
 

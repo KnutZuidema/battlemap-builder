@@ -173,10 +173,7 @@ impl StorageMaintenanceService {
 
 /// Sums a sizing listing into the byte size and file count of the directory it came from.
 fn directory_stats_of(entries: &[BlobEntry]) -> DirectoryStats {
-    let mut bytes = 0u64;
-    for entry in entries {
-        bytes += entry.size;
-    }
+    let bytes: u64 = entries.iter().map(|entry| entry.size).sum();
     DirectoryStats::new(bytes, entries.len())
 }
 

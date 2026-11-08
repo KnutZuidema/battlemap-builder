@@ -16,24 +16,7 @@ import { fetchStorageStats } from "./views/storage.js";
 import { fetchTrainingRuns } from "./views/training.js";
 import { fetchStagingQueue } from "./views/triage.js";
 
-/**
- * Attach the Storage drawer's state styles (issue #292).
- *
- * The drawer renders a loading indicator and an error panel with a retry, and both are new DOM in
- * `index.html`. Their rules live in their own sheet so the read-state contract sits next to the
- * view that owns it, and they are attached here rather than from the document head so the feature
- * owns its own stylesheet. The sheet is tiny and the drawer is closed at boot, so nothing flashes.
- * `init` runs once per page load, so this appends exactly one `link` and needs no de-dupe guard.
- */
-function loadStorageStateStyles() {
-    const link = document.createElement("link");
-    link.rel = "stylesheet";
-    link.href = "/storage-states.css";
-    document.head.appendChild(link);
-}
-
 function init() {
-    loadStorageStateStyles();
     initializeDom();
     setupCanvas();
     getTriageViewport().subscribe(updateHud);

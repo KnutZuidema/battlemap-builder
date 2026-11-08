@@ -82,42 +82,23 @@ export async function fetchStorageStats() {
         setStorageStatsPhase("error", {
             error: error && error.message ? error.message : String(error),
         });
-        // The request module already raised the pill and toasted; clearing the markup's placeholder
-        // figures keeps anything on screen from claiming a footprint that was never read.
+        // The request module already raised the pill and toasted; clearing the figures rendered
+        // outside the cards keeps anything on screen from claiming a footprint that was never read.
         renderStorageStatsFallback();
         return null;
     }
 }
 
 /**
- * Clear the placeholder figures the markup ships with, so a failed read never renders as a
- * measured `0 B` footprint.
+ * Clear the figures rendered *outside* `#storage-stats-content`, so a failed read never leaves a
+ * stale or placeholder number on screen claiming a measurement.
+ *
+ * The drawer's own cards, breakdowns and theme list need no clearing: they all live inside
+ * `#storage-stats-content`, which `renderStorageStatsState` hides for any phase but `ready`, and
+ * the markup ships `—` for each of them. Only the benchmark drawer's widget pills and the purge
+ * confirmation sit outside that container, so they are the only ones re-painted here.
  */
 function renderStorageStatsFallback() {
-    for (const id of [
-        "storage-staging-bytes",
-        "storage-curated-bytes",
-        "storage-rejected-bytes",
-        "storage-telemetry-bytes",
-        "storage-total-bytes",
-    ]) {
-        const el = document.getElementById(id);
-        if (el) el.textContent = "—";
-    }
-    for (const id of ["storage-staging-files", "storage-curated-files", "storage-telemetry-files"]) {
-        const el = document.getElementById(id);
-        if (el) el.textContent = "—";
-    }
-    const recordsEl = document.getElementById("storage-rejected-records");
-    if (recordsEl) recordsEl.textContent = "—";
-    const totalFilesEl = document.getElementById("storage-total-files");
-    if (totalFilesEl) totalFilesEl.textContent = "(unavailable)";
-    for (const id of ["storage-breakdown-reddit", "storage-breakdown-generated", "storage-breakdown-root"]) {
-        const el = document.getElementById(id);
-        if (el) el.textContent = "—";
-    }
-    const themesListEl = document.getElementById("storage-themes-list");
-    if (themesListEl) themesListEl.innerHTML = "";
     for (const id of ["drawer-storage-staging", "drawer-storage-curated"]) {
         const el = document.getElementById(id);
         if (el) el.textContent = "—";

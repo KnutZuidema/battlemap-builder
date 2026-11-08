@@ -8,27 +8,21 @@
 //!
 //! The replacement joins the single `curated/` listing against `catalog.list_curated()` in
 //! memory. These tests record every listing prefix the service asks the blob port for, so a
-//! regression to per-map queries fails here regardless of how the adapter is implemented.
+//! regression to per-map queries fails here regardless of which port method the service calls:
+//! the double implements the port as it stands today, so it is a faithful key-only adapter.
 
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
 use curator::adapters::{InMemoryBlobStorage, InMemoryCatalogRepository};
-use curator::domain::{
-    CuratedMap, DirectoryStats, GridConfig, Layer, LayerRole, RejectionReason, Theme,
-};
+use curator::domain::{CuratedMap, DirectoryStats, GridConfig, Layer, LayerRole, Theme};
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
-use curator::ports::catalog_repository::CatalogRepository;
+use curator::ports::catalog_repository::{CatalogRepository, CuratedFilter};
 use curator::ports::storage_error::StorageError;
 use curator::services::StorageMaintenanceService;
 
 /// A blob port double that forwards to the in-memory store while recording what was asked.
-///
-/// It implements only the port as it exists today, so it stays a faithful stand-in for a
-/// key-only adapter: the sized listing keeps its trait default (list, then size each key).
-/// That is exactly what makes this test port-shape independent — the assertion is about which
-/// *prefixes* the service enumerates, not about which method it calls.
 #[derive(Default)]
 struct RecordingBlobs {
     inner: InMemoryBlobStorage,
@@ -41,7 +35,7 @@ impl RecordingBlobs {
         Self::default()
     }
 
-    /// Every `list_prefix` prefix the service asked for, in call order.
+    /// Every listing prefix the service asked for, in call order.
     fn listed_prefixes(&self) -> Vec<String> {
         self.listed.lock().expect("listing log lock").clone()
     }
@@ -110,8 +104,13 @@ fn curated_layer(id: &str, index: usize, role: LayerRole, elevation: Option<i8>)
     }
 }
 
+async fn write_sized(blobs: &Arc<RecordingBlobs>, key: BlobKey, size: usize) {
+    let bytes = vec![7u8; size];
+    blobs.write_blob(&key, &bytes).await.expect("write blob");
+}
+
 /// Two staging layers, two curated maps (one tagged with two themes) and one orphan bundle no
-/// catalog row describes, plus one telemetry ledger and a rejection log.
+/// catalog row describes, plus two telemetry ledgers and a rejection log.
 ///
 /// `(staging_bytes, curated_bytes, telemetry_bytes, rejected_bytes)` = (768, 3712, 340, 2).
 async fn seed(
@@ -119,16 +118,15 @@ async fn seed(
     blobs: &Arc<RecordingBlobs>,
 ) -> Vec<CuratedMap> {
     for (id, size) in [("cand_a", 512usize), ("cand_b", 256)] {
-        blobs
-            .write_blob(
-                &BlobKey::StagingLayer {
-                    id: id.to_string(),
-                    index: 0,
-                },
-                &vec![7u8; size],
-            )
-            .await
-            .expect("write staging layer");
+        write_sized(
+            blobs,
+            BlobKey::StagingLayer {
+                id: id.to_string(),
+                index: 0,
+            },
+            size,
+        )
+        .await;
     }
 
     // A single-theme bundle with two layers: 3072 bytes over 2 files.
@@ -147,20 +145,18 @@ async fn seed(
         .save_curated(&dungeon_map)
         .await
         .expect("save dungeon map");
-    blobs
-        .write_blob(
-            &curated_layer(&dungeon_map.id, 0, LayerRole::Ground, Some(0)),
-            &[1u8; 1024],
-        )
-        .await
-        .expect("write dungeon ground");
-    blobs
-        .write_blob(
-            &curated_layer(&dungeon_map.id, 1, LayerRole::UpperFloor, Some(1)),
-            &[2u8; 2048],
-        )
-        .await
-        .expect("write dungeon upper floor");
+    write_sized(
+        blobs,
+        curated_layer(&dungeon_map.id, 0, LayerRole::Ground, Some(0)),
+        1024,
+    )
+    .await;
+    write_sized(
+        blobs,
+        curated_layer(&dungeon_map.id, 1, LayerRole::UpperFloor, Some(1)),
+        2048,
+    )
+    .await;
 
     // A bundle tagged with two canonical themes: 512 bytes over 1 file, counted for both.
     let multitheme_map = CuratedMap::with_now(
@@ -173,33 +169,33 @@ async fn seed(
         .save_curated(&multitheme_map)
         .await
         .expect("save multitheme map");
-    blobs
-        .write_blob(
-            &curated_layer(&multitheme_map.id, 0, LayerRole::Ground, Some(0)),
-            &[3u8; 512],
-        )
-        .await
-        .expect("write multitheme ground");
+    write_sized(
+        blobs,
+        curated_layer(&multitheme_map.id, 0, LayerRole::Ground, Some(0)),
+        512,
+    )
+    .await;
 
     // Orphaned bundle bytes: curated storage with no catalog row, so no theme owns them.
-    blobs
-        .write_blob(
-            &curated_layer("orphan_bundle", 0, LayerRole::Roof, None),
-            &[4u8; 128],
-        )
-        .await
-        .expect("write orphan layer");
+    write_sized(
+        blobs,
+        curated_layer("orphan_bundle", 0, LayerRole::Roof, None),
+        128,
+    )
+    .await;
 
-    for (name, size) in [("cost_ledger.json", 300usize), ("generation_audit.json", 40)] {
-        blobs
-            .write_blob(
-                &BlobKey::TelemetryLog {
-                    name: name.to_string(),
-                },
-                &vec![1u8; size],
-            )
-            .await
-            .expect("write telemetry ledger");
+    for (name, size) in [
+        ("cost_ledger.json", 300usize),
+        ("generation_audit.json", 40),
+    ] {
+        write_sized(
+            blobs,
+            BlobKey::TelemetryLog {
+                name: name.to_string(),
+            },
+            size,
+        )
+        .await;
     }
     blobs
         .write_blob(&BlobKey::RejectionLog, b"[]")
@@ -222,13 +218,14 @@ async fn test_storage_stats_costs_one_curated_listing_and_no_per_map_listings() 
 
     // The acceptance criterion: `staging/`, `curated/` and `telemetry/` — three listings, of
     // which the curated one is shared by the per-theme breakdown.
-    let curated_listings: Vec<&String> = listed
+    let curated_listings: Vec<String> = listed
         .iter()
         .filter(|prefix| prefix.starts_with("curated/"))
+        .cloned()
         .collect();
     assert_eq!(
         curated_listings,
-        vec!["curated/"],
+        vec!["curated/".to_string()],
         "the curated footprint must cost exactly one whole-tree listing, got {listed:?}"
     );
     for map in &maps {
@@ -240,14 +237,13 @@ async fn test_storage_stats_costs_one_curated_listing_and_no_per_map_listings() 
     }
     for prefix in ["staging/", "telemetry/"] {
         assert_eq!(
-            listed.iter().filter(|listed| listed.as_str() == prefix).count(),
+            listed.iter().filter(|listed| *listed == prefix).count(),
             1,
             "'{prefix}' is enumerated once, got {listed:?}"
         );
     }
 
-    // The rejection log is one known key, so it costs one size query and nothing else about it
-    // is enumerated.
+    // The rejection log is one known key, so it costs one size query and is never enumerated.
     let sized = blobs.sized_keys();
     assert_eq!(
         sized
@@ -320,10 +316,9 @@ async fn test_curated_by_theme_is_derived_from_the_single_listing_joined_with_th
     );
 }
 
-/// Purging staging takes reclaimed bytes from the same sized enumeration instead of a size query
-/// per blob, and still reports the same totals.
+/// Purging staging reports the same reclaimed totals and leaves curated data alone.
 #[tokio::test]
-async fn test_purge_staging_reclaims_the_listed_sizes_and_keeps_curated_data() {
+async fn test_purge_staging_reclaims_the_staged_sizes_and_keeps_curated_data() {
     let (service, catalog, blobs) = storage_service();
     let maps = seed(&catalog, &blobs).await;
 
@@ -340,31 +335,31 @@ async fn test_purge_staging_reclaims_the_listed_sizes_and_keeps_curated_data() {
     assert_eq!(stats_after.telemetry, stats_before.telemetry);
     assert_eq!(stats_after.rejected, stats_before.rejected);
 
-    // Curated bundles and the rejection/telemetry records survive untouched.
+    // Curated bundles and the telemetry/rejection records survive untouched.
     for map in &maps {
+        let expected = if map.id == "map_multitheme" { 512 } else { 1024 };
         assert_eq!(
             blobs
                 .read_blob(&curated_layer(&map.id, 0, LayerRole::Ground, Some(0)))
                 .await
                 .expect("curated ground layer survives the purge")
                 .len(),
-            if map.id == "map_multitheme" { 512 } else { 1024 }
+            expected
         );
     }
     assert_eq!(
         catalog
-            .rejection_records()
+            .list_curated(&CuratedFilter::default())
             .await
-            .expect("read rejection log")
+            .expect("list curated")
             .len(),
-        0
+        2
     );
-    assert!(matches!(
-        catalog
-            .list_curated(&Default::default())
+    assert_eq!(
+        blobs
+            .read_blob(&BlobKey::RejectionLog)
             .await
-            .expect("list curated"),
-        ref maps if maps.len() == 2
-    ));
-    let _ = RejectionReason::Unspecified;
+            .expect("rejection log survives the purge"),
+        b"[]".to_vec()
+    );
 }

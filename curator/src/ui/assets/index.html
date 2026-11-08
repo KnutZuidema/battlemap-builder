@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dungeon Forge — Battlemap Curator</title>
     <link rel="stylesheet" href="/style.css">
+    <!-- Storage drawer loading/error state rules (#292), beside the main sheet. -->
+    <link rel="stylesheet" href="/storage-states.css">
 </head>
 <body>
     <div id="app">
@@ -1185,14 +1187,14 @@
         <div id="help-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="help-modal-title">
             <div class="modal-card help-modal-card">
                 <div class="modal-header">
-                    <h3 id="help-modal-title">Curator Hotkey Controls & Triage Guide</h3>
+                    <h3 id="help-modal-title">Curator Hotkey Controls &amp; Triage Guide</h3>
                     <button type="button" id="btn-close-help-modal" class="btn-close" aria-label="Close modal">×</button>
                 </div>
                 <div class="modal-body help-body">
                     <div class="help-section">
                         <h4>Rapid Triage Actions</h4>
                         <div class="help-grid">
-                            <div class="help-row"><kbd>Enter</kbd><span>Approve & Curate active map</span></div>
+                            <div class="help-row"><kbd>Enter</kbd><span>Approve &amp; Curate active map</span></div>
                             <div class="help-row"><kbd>L</kbd> / <kbd>T</kbd><span>Switch to Dataset Library / Staging Triage</span></div>
                             <div class="help-row"><kbd>Esc</kbd><span>Reject Candidate</span></div>
                             <div class="help-row"><kbd>Z</kbd><span>Undo candidate rejection</span></div>
@@ -1200,14 +1202,14 @@
                             <div class="help-row"><kbd>K</kbd> or <kbd>←</kbd><span>Return to previous candidate</span></div>
                             <div class="help-row"><kbd>B</kbd><span>Open AI Benchmark Suite drawer</span></div>
                             <div class="help-row"><kbd>H</kbd><span>Open Reddit Harvest drawer</span></div>
-                            <div class="help-row"><kbd>R</kbd><span>Open LoRA Training Runs & Adapters drawer</span></div>
+                            <div class="help-row"><kbd>R</kbd><span>Open LoRA Training Runs &amp; Adapters drawer</span></div>
                         </div>
                     </div>
 
                     <div class="help-section">
                         <h4>Multi-Layer Canvas Deck Controls</h4>
                         <div class="help-grid">
-                            <div class="help-row"><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd><span>Flip to next / previous layer (preserves exact canvas pan & zoom)</span></div>
+                            <div class="help-row"><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd><span>Flip to next / previous layer (preserves exact canvas pan &amp; zoom)</span></div>
                             <div class="help-row"><kbd>↑</kbd> / <kbd>↓</kbd><span>Cycle previous / next layer within active candidate</span></div>
                             <div class="help-row"><kbd>3</kbd><span>Trigger Layer Role mode (then <kbd>1-6</kbd> for Ground, Upper, Basement, Roof, Variant, Exclude)</span></div>
                             <div class="help-row"><kbd>Alt+↑</kbd> / <kbd>Alt+↓</kbd><span>Increment / decrement floor elevation for active layer</span></div>

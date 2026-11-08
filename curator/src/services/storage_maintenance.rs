@@ -60,11 +60,18 @@ impl StorageMaintenanceService {
     /// listings plus the rejection log's size. Nothing here scales with the blob count (see the
     /// module docs).
     pub async fn storage_stats(&self) -> Result<StorageStats, StorageError> {
+        // The filter is bound to a `let` rather than written inline: `tokio::join!` holds each
+        // future across the whole wait, and the future returned by `list_curated` borrows the
+        // filter, so a `&CuratedFilter::default()` temporary created in the macro's argument
+        // position would be dropped at the end of this statement while still borrowed (E0716).
+        // The `BlobKey` literals below need no such binding: they are constants that the compiler
+        // promotes to `'static`.
+        let curated_filter = CuratedFilter::default();
         let (staging, curated_listing, curated_maps, telemetry, rejected_bytes) = tokio::join!(
             self.directory_stats(&BlobKey::StagingDir { id: None }),
             self.blobs
                 .list_prefix_with_sizes(&BlobKey::CuratedDir { id: None }),
-            self.catalog.list_curated(&CuratedFilter::default()),
+            self.catalog.list_curated(&curated_filter),
             self.directory_stats(&BlobKey::TelemetryDir),
             self.rejection_log_size(),
         );

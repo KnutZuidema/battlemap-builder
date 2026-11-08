@@ -1,3 +1,4 @@
+
 //! Filesystem-backed [`BlobStorage`] implementation resolving every [`BlobKey`] below one root.
 
 use std::path::{Path, PathBuf};
@@ -5,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 
-use crate::ports::blob_storage::{BlobKey, BlobStat, BlobStorage};
+use crate::ports::blob_storage::{BlobEntry, BlobKey, BlobStat, BlobStorage};
 use crate::ports::storage_error::StorageError;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -56,6 +57,75 @@ impl FilesystemBlobStorage {
             return Err(StorageError::Io(err));
         }
         Ok(())
+    }
+
+    /// Walks every file below `prefix`, pairing its key with the size its own directory entry
+    /// reported.
+    ///
+    /// The size comes from `DirEntry::metadata()`, i.e. from the very walk that discovers the
+    /// file — never from a second `stat` per blob — and an entry that disappears mid-walk (a
+    /// concurrent writer renaming its atomic-write temp file away) is simply skipped, since a
+    /// directory listing is a snapshot.
+    async fn walk_entries(&self, prefix: &BlobKey) -> Result<Vec<BlobEntry>, StorageError> {
+        let start = match prefix {
+            BlobKey::StagingDir { .. }
+            | BlobKey::CuratedDir { .. }
+            | BlobKey::CuratedThumbsDir { .. }
+            | BlobKey::TelemetryDir
+            | BlobKey::ArtifactsDir
+            | BlobKey::DatasetSnapshotsDir
+            | BlobKey::RunsDir
+            | BlobKey::RunCheckpointsDir { .. }
+            | BlobKey::CheckpointDir { .. }
+            | BlobKey::PublishedAdaptersDir => self.root_dir.join(prefix.to_path()),
+            _ => self.root_dir.clone(),
+        };
+
+        let mut entries = Vec::new();
+        let mut stack = vec![start];
+        while let Some(current) = stack.pop() {
+            let dir_entries = match std::fs::read_dir(&current) {
+                Ok(dir_entries) => dir_entries,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(StorageError::Io(err)),
+            };
+            for entry in dir_entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err) => return Err(StorageError::Io(err)),
+                };
+                // `metadata()` on a `DirEntry` does not traverse a symlink and reports the entry's
+                // own size, so a file replaced between `read_dir` and here is the only case that
+                // can fail — and that race means the file is no longer part of the snapshot.
+                let metadata = match entry.metadata() {
+                    Ok(metadata) => metadata,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err) => return Err(StorageError::Io(err)),
+                };
+                let path = entry.path();
+                if metadata.is_dir() {
+                    stack.push(path);
+                } else if metadata.is_file() {
+                    let Some(relative) = path
+                        .strip_prefix(&self.root_dir)
+                        .ok()
+                        .and_then(|relative| relative.to_str())
+                    else {
+                        continue;
+                    };
+                    let relative = relative.replace(std::path::MAIN_SEPARATOR, "/");
+                    if let Some(key) = BlobKey::from_path(&relative) {
+                        if prefix.is_prefix_of(&key) {
+                            entries.push(BlobEntry::new(key, metadata.len()));
+                        }
+                    }
+                }
+            }
+        }
+
+        entries.sort_by_key(|entry| entry.key.to_path());
+        Ok(entries)
     }
 }
 
@@ -126,54 +196,20 @@ impl BlobStorage for FilesystemBlobStorage {
     }
 
     async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
-        let start = match prefix {
-            BlobKey::StagingDir { .. }
-            | BlobKey::CuratedDir { .. }
-            | BlobKey::CuratedThumbsDir { .. }
-            | BlobKey::TelemetryDir
-            | BlobKey::ArtifactsDir
-            | BlobKey::DatasetSnapshotsDir
-            | BlobKey::RunsDir
-            | BlobKey::RunCheckpointsDir { .. }
-            | BlobKey::CheckpointDir { .. }
-            | BlobKey::PublishedAdaptersDir => self.root_dir.join(prefix.to_path()),
-            _ => self.root_dir.clone(),
-        };
-
-        let mut files = Vec::new();
-        let mut stack = vec![start];
-        while let Some(current) = stack.pop() {
-            let entries = match std::fs::read_dir(&current) {
-                Ok(entries) => entries,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(StorageError::Io(err)),
-            };
-            for entry in entries {
-                let entry = entry?;
-                let file_type = entry.file_type()?;
-                let path = entry.path();
-                if file_type.is_dir() {
-                    stack.push(path);
-                } else if file_type.is_file() {
-                    if let Ok(relative) = path.strip_prefix(&self.root_dir) {
-                        if let Some(relative) = relative.to_str() {
-                            files.push(relative.replace(std::path::MAIN_SEPARATOR, "/"));
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut keys: Vec<BlobKey> = files
-            .iter()
-            .filter_map(|relative| key_from_relative_path(relative))
-            .filter(|key| prefix.is_prefix_of(key))
-            .collect();
-        keys.sort_by_key(|key| key.to_path());
-        Ok(keys)
+        Ok(self
+            .walk_entries(prefix)
+            .await?
+            .into_iter()
+            .map(|entry| entry.key)
+            .collect())
     }
-}
 
-fn key_from_relative_path(relative: &str) -> Option<BlobKey> {
-BlobKey::from_path(relative)
+    /// Sizes come from the directory walk itself (`DirEntry::metadata()`), so aggregating a
+    /// directory never re-opens a file or issues a second `stat` per blob.
+    async fn list_prefix_with_sizes(
+        &self,
+        prefix: &BlobKey,
+    ) -> Result<Vec<BlobEntry>, StorageError> {
+        self.walk_entries(prefix).await
+    }
 }

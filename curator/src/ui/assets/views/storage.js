@@ -1,5 +1,17 @@
 /**
  * Storage footprint monitor and the staging purge confirmation modals.
+ *
+ * The stats render has three explicit phases instead of an only-on-success update:
+ *
+ * - `loading` — the drawer shows a loading indicator, because a scan over a deployed bucket is a
+ *   real wait and the markup's fallback numbers are not a footprint.
+ * - `ready` — the measured figures.
+ * - `error` — an explicit, retryable failure message.
+ *
+ * #292 is why: the request swallowed its own failure in `catch (_) {}`, so the drawer kept
+ * rendering the `index.html` fallbacks — `0 B`, `0 files`, `0 B (0)` — next to a
+ * `Load storage stats failed` toast. Reporting an unreadable footprint as an empty one is worse
+ * than reporting nothing at all.
  */
 
 import { state } from "../store.js";
@@ -9,13 +21,116 @@ import { stopStageMotion } from "../stage/canvas.js";
 import { fetchStagingQueue } from "./triage.js";
 import { fetchStorageStats as requestStorageStats, purgeStaging as requestPurgeStaging } from "../requests/storage.js";
 
+/** Text the loading indicator carries while a footprint read is in flight. */
+const LOADING_TEXT = "Reading storage footprint…";
+
+/** Element ids of the two non-figure states the drawer can be in. */
+const LOADING_ID = "storage-stats-loading";
+const ERROR_ID = "storage-stats-error";
+const RETRY_ID = "btn-retry-storage-stats";
+
+/**
+ * Show or clear the loading indicator.
+ *
+ * The element carries its own label and is never given children, so writing `textContent` here
+ * cannot destroy markup: the spinner is drawn by `.storage-state-loading::before` in
+ * `storage-states.css`.
+ */
+function renderLoading(visible) {
+    const el = document.getElementById(LOADING_ID);
+    if (!el) return;
+    el.textContent = visible ? LOADING_TEXT : "";
+    el.classList.toggle("hidden", !visible);
+}
+
+/**
+ * Show or clear the error state, naming the failure and offering a retry.
+ *
+ * The retry control is moved back into the panel after the message replaces the panel's contents,
+ * so the listener `setupStorageControls` registered on it stays attached: it is the same element,
+ * only re-parented.
+ */
+function renderError(message) {
+    const el = document.getElementById(ERROR_ID);
+    if (!el) return;
+    if (message == null) {
+        el.textContent = "";
+        el.classList.add("hidden");
+        return;
+    }
+    const retry = document.getElementById(RETRY_ID);
+    el.textContent = `Load storage stats failed: ${message}`;
+    if (retry && retry.parentElement !== el) el.appendChild(retry);
+    el.classList.remove("hidden");
+}
+
+/**
+ * Clear every figure, so a failed or in-flight read never leaves a number on screen claiming a
+ * measurement that was never made.
+ */
+function clearStorageFigures() {
+    for (const id of [
+        "storage-staging-bytes",
+        "storage-staging-files",
+        "storage-breakdown-reddit",
+        "storage-breakdown-generated",
+        "storage-breakdown-root",
+        "storage-curated-bytes",
+        "storage-curated-files",
+        "storage-rejected-bytes",
+        "storage-rejected-records",
+        "storage-telemetry-bytes",
+        "storage-telemetry-files",
+        "storage-total-bytes",
+        "storage-total-files",
+        "drawer-storage-staging",
+        "drawer-storage-curated",
+    ]) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = "";
+    }
+    const themesListEl = document.getElementById("storage-themes-list");
+    if (themesListEl) themesListEl.innerHTML = "";
+    const reclaimFilesEl = document.getElementById("purge-reclaim-files");
+    if (reclaimFilesEl) reclaimFilesEl.textContent = "Reclaim size unavailable until the footprint loads";
+}
+
+/**
+ * Read the footprint and render it.
+ *
+ * The request joins any scan already in flight (`requests/storage.js`), so the boot prefetch, a
+ * drawer open, a refresh and a retry never overlap. The three states are mutually exclusive: a
+ * read in flight or a failure hides every figure rather than showing the markup's `0 B`.
+ */
 export async function fetchStorageStats() {
+    state.storageStatsPhase = "loading";
+    state.storageStatsError = null;
+    renderError(null);
+    renderLoading(true);
+    clearStorageFigures();
+
     try {
         const data = await requestStorageStats();
         state.storageStats = data;
+        state.storageStatsPhase = "ready";
+        renderLoading(false);
         renderStorageStats(data);
-    } catch (_) {
-        // The request module reported it; the drawer keeps the last known footprint.
+        return data;
+    } catch (error) {
+        if (error && error.name === "AbortError") {
+            // Cancelled, not failed: restore the phase the last settled read left behind.
+            state.storageStatsPhase = state.storageStats ? "ready" : "idle";
+            renderLoading(false);
+            if (state.storageStats) renderStorageStats(state.storageStats);
+            return null;
+        }
+        state.storageStatsPhase = "error";
+        state.storageStatsError = error && error.message ? error.message : String(error);
+        renderLoading(false);
+        clearStorageFigures();
+        renderError(state.storageStatsError);
+        // The request module already raised the status pill and toasted the failure.
+        return null;
     }
 }
 
@@ -106,7 +221,14 @@ function openPurgeModal() {
     modal?.classList.remove("hidden");
     const reclaimBytesEl = document.getElementById("purge-reclaim-bytes");
     const reclaimFilesEl = document.getElementById("purge-reclaim-files");
-    const currentStaging = state.storageStats?.staging || { bytes: 0, file_count: 0 };
+    const currentStaging = state.storageStats?.staging || null;
+    if (!currentStaging) {
+        // Nothing was read, so there is no reclaim figure to quote: `0 B` would be a guess about
+        // bytes that are about to be deleted for good.
+        if (reclaimBytesEl) reclaimBytesEl.textContent = "—";
+        if (reclaimFilesEl) reclaimFilesEl.textContent = "Reclaim size unavailable until the footprint loads";
+        return;
+    }
     if (reclaimBytesEl) reclaimBytesEl.textContent = formatBytes(currentStaging.bytes);
     if (reclaimFilesEl) reclaimFilesEl.textContent = `${currentStaging.file_count.toLocaleString()} candidate files will be permanently deleted`;
 }
@@ -149,6 +271,7 @@ export function setupStorageControls() {
     document.getElementById("btn-close-storage-modal")?.addEventListener("click", () => closeStorageModal());
     document.getElementById("btn-dismiss-storage-modal")?.addEventListener("click", () => closeStorageModal());
     document.getElementById("btn-refresh-storage")?.addEventListener("click", () => fetchStorageStats());
+    document.getElementById(RETRY_ID)?.addEventListener("click", () => fetchStorageStats());
     document.getElementById("btn-drawer-open-storage")?.addEventListener("click", () => openStorageModal());
 
     document.getElementById("btn-open-purge-confirm")?.addEventListener("click", () => openPurgeModal());

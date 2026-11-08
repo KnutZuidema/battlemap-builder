@@ -189,18 +189,16 @@ test("a failed read shows an error with a retry instead of a zero footprint", as
     const error = globalThis.document.getElementById("storage-stats-error");
     const content = globalThis.document.getElementById("storage-stats-content");
     assert.equal(error.classList.contains("hidden"), false, "the error panel is shown");
-    assert.equal(content.classList.contains("hidden"), true, "no cards are rendered from placeholders");
+    assert.equal(content.classList.contains("hidden"), true, "the cards are hidden with no footprint");
     assert.match(
         globalThis.document.getElementById("storage-stats-error-text").textContent,
         /Storage footprint is unavailable.*Failed to fetch/,
     );
     assert.ok(globalThis.document.getElementById("btn-retry-storage"), "a retry action is offered");
 
-    // The markup placeholders are replaced, so nothing claims a measured `0 B`.
-    assert.equal(globalThis.document.getElementById("storage-staging-bytes").textContent, "—");
-    assert.equal(globalThis.document.getElementById("storage-staging-files").textContent, "—");
-    assert.equal(globalThis.document.getElementById("storage-breakdown-root").textContent, "—");
-    assert.equal(globalThis.document.getElementById("storage-total-files").textContent, "(unavailable)");
+    // The cards -- the figures, the breakdowns and the theme list -- all live inside
+    // `#storage-stats-content`, which is hidden above; the markup ships `—` for each. Only the
+    // figures rendered *outside* that container are re-painted here.
     assert.equal(globalThis.document.getElementById("drawer-storage-staging").textContent, "—");
     // The purge confirmation must not promise a reclaim figure it does not have.
     assert.equal(globalThis.document.getElementById("purge-reclaim-bytes").textContent, "—");

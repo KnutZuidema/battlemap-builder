@@ -80,6 +80,8 @@ mod tests {
         for asset in [
             "index.html",
             "style.css",
+            // The Storage drawer's loading/error state rules (#292), attached by `app.js`.
+            "storage-states.css",
             "app.js",
             "dom.js",
             "store.js",
@@ -112,6 +114,32 @@ mod tests {
         }
     }
 
+    /// Every ES module the browser imports must be embedded under the path the import graph
+    /// names, so a request-module rename cannot leave a 404 in the middle of the page's module
+    /// graph. `requests/storage.js` is the module issue #292 turned into the deduplicated read.
+    #[test]
+    fn test_request_modules_are_embedded() {
+        for asset in [
+            "requests/ai.js",
+            "requests/benchmark.js",
+            "requests/curation.js",
+            "requests/failures.js",
+            "requests/harvest.js",
+            "requests/http.js",
+            "requests/library.js",
+            "requests/readiness.js",
+            "requests/snapshots.js",
+            "requests/staging.js",
+            "requests/status.js",
+            "requests/storage.js",
+            "requests/stream.js",
+            "requests/tracker.js",
+            "requests/training.js",
+        ] {
+            assert!(Assets::get(asset).is_some(), "{asset} must be embedded");
+        }
+    }
+
     #[tokio::test]
     async fn test_static_handler_index() {
         let uri = "/".parse::<Uri>().unwrap();
@@ -130,6 +158,23 @@ mod tests {
     #[tokio::test]
     async fn test_static_handler_css() {
         let uri = "/style.css".parse::<Uri>().unwrap();
+        let resp = static_handler(uri).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "text/css"
+        );
+    }
+
+    /// The companion Storage state sheet is served with a CSS content type, exactly like the main
+    /// stylesheet it sits beside.
+    #[tokio::test]
+    async fn test_static_handler_storage_states_css() {
+        let uri = "/storage-states.css".parse::<Uri>().unwrap();
         let resp = static_handler(uri).await.into_response();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(

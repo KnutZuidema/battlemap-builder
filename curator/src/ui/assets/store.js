@@ -47,6 +47,11 @@ export const state = {
     purgeModalOpen: false,
     isPurging: false,
     storageStats: null,
+    // Phase of the last storage stats read, so the drawer can show a loading indicator or an
+    // error with a retry instead of presenting its placeholder zeros as a measurement (#292):
+    // 'idle' | 'loading' | 'ready' | 'error'. `storageStatsError` is the message shown on failure.
+    storageStatsPhase: "idle",
+    storageStatsError: null,
     // LoRA Training Dataset Readiness audit (Issues #184, #245): cached in localStorage per
     // theme scope and rendered inside the Frozen Dataset Snapshots drawer.
     readinessScopeKey: null,

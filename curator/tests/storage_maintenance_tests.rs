@@ -1,7 +1,8 @@
-//! Integration tests for `StorageMaintenanceService` and `BlobStorage::blob_size`: byte
-//! accounting across the staging and curated areas, staging reclamation, and the size contract of
-//! both blob adapters.
+//! Integration tests for `StorageMaintenanceService` and `BlobStorage`: byte accounting across the
+//! staging and curated areas, staging reclamation, the size contract of both blob adapters, and the
+//! request-count contract that keeps `GET /api/storage/stats` independent of the blob count.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,7 +12,7 @@ use curator::domain::{
     Candidate, CuratedMap, DirectoryStats, GridConfig, Layer, LayerRole, RejectionReason, Source,
     Theme,
 };
-use curator::ports::blob_storage::{BlobKey, BlobStorage};
+use curator::ports::blob_storage::{BlobEntry, BlobKey, BlobStat, BlobStorage};
 use curator::ports::catalog_repository::{CandidateFilter, CatalogRepository};
 use curator::ports::storage_error::StorageError;
 use curator::services::StorageMaintenanceService;
@@ -40,6 +41,13 @@ fn curated_layer(id: &str, index: usize, role: LayerRole, elevation: Option<i8>)
     }
 }
 
+fn staging_layer(id: &str, index: usize) -> BlobKey {
+    BlobKey::StagingLayer {
+        id: id.to_string(),
+        index,
+    }
+}
+
 /// A curated map tagged `dungeon` + `crypt`, whose bundle holds a Ground and an Upper Floor layer.
 fn curated_map(id: &str) -> CuratedMap {
     CuratedMap::with_now(id, Theme::Dungeon, vec!["crypt".into()], (2048, 2048))
@@ -56,23 +64,11 @@ async fn test_storage_stats_sums_blob_sizes_across_staging_and_curated() {
     let (service, catalog, blobs) = in_memory_service();
 
     blobs
-        .write_blob(
-            &BlobKey::StagingLayer {
-                id: "cand_a".to_string(),
-                index: 0,
-            },
-            &[7u8; 512],
-        )
+        .write_blob(&staging_layer("cand_a", 0), &[7u8; 512])
         .await
         .expect("write staging blob");
     blobs
-        .write_blob(
-            &BlobKey::StagingLayer {
-                id: "cand_b".to_string(),
-                index: 0,
-            },
-            &[9u8; 256],
-        )
+        .write_blob(&staging_layer("cand_b", 0), &[9u8; 256])
         .await
         .expect("write staging blob");
 
@@ -154,23 +150,11 @@ async fn test_storage_stats_reports_rejection_log_and_telemetry_footprints() {
     let (service, catalog, blobs) = in_memory_service();
 
     blobs
-        .write_blob(
-            &BlobKey::StagingLayer {
-                id: "cand_a".to_string(),
-                index: 0,
-            },
-            &[7u8; 512],
-        )
+        .write_blob(&staging_layer("cand_a", 0), &[7u8; 512])
         .await
         .expect("write staging blob");
     blobs
-        .write_blob(
-            &BlobKey::StagingLayer {
-                id: "cand_b".to_string(),
-                index: 0,
-            },
-            &[8u8; 128],
-        )
+        .write_blob(&staging_layer("cand_b", 0), &[8u8; 128])
         .await
         .expect("write staging blob");
     let rejections = br#"{"id":"rejected_one","reason":"irrelevant"}"#;
@@ -237,34 +221,16 @@ async fn test_purge_staging_removes_staging_and_preserves_curated_and_rejections
     let (service, catalog, blobs) = in_memory_service();
 
     blobs
-        .write_blob(
-            &BlobKey::StagingLayer {
-                id: "cand_a".to_string(),
-                index: 0,
-            },
-            &[5u8; 400],
-        )
+        .write_blob(&staging_layer("cand_a", 0), &[5u8; 400])
         .await
         .expect("write staging blob");
     blobs
-        .write_blob(
-            &BlobKey::StagingLayer {
-                id: "cand_a".to_string(),
-                index: 1,
-            },
-            &[6u8; 100],
-        )
+        .write_blob(&staging_layer("cand_a", 1), &[6u8; 100])
         .await
         .expect("write staging blob");
     // Staging bytes left behind by a bundle no catalog row describes are reclaimed too.
     blobs
-        .write_blob(
-            &BlobKey::StagingLayer {
-                id: "orphan".to_string(),
-                index: 0,
-            },
-            &[6u8; 24],
-        )
+        .write_blob(&staging_layer("orphan", 0), &[6u8; 24])
         .await
         .expect("write orphan staging blob");
 
@@ -381,10 +347,7 @@ async fn test_purge_staging_removes_staging_and_preserves_curated_and_rejections
 #[tokio::test]
 async fn test_in_memory_blob_size_reports_length_and_not_found() {
     let blobs = InMemoryBlobStorage::new();
-    let key = BlobKey::StagingLayer {
-        id: "cand".to_string(),
-        index: 0,
-    };
+    let key = staging_layer("cand", 0);
 
     assert!(matches!(
         blobs.blob_size(&key).await,
@@ -397,10 +360,7 @@ async fn test_in_memory_blob_size_reports_length_and_not_found() {
         .expect("write blob");
     assert_eq!(blobs.blob_size(&key).await.expect("size of present blob"), 42);
 
-    let absent = BlobKey::StagingLayer {
-        id: "cand".to_string(),
-        index: 1,
-    };
+    let absent = staging_layer("cand", 1);
     assert!(matches!(
         blobs.blob_size(&absent).await,
         Err(StorageError::NotFound(_))
@@ -436,6 +396,63 @@ async fn test_filesystem_blob_size_reports_length_and_not_found() {
         blobs.blob_size(&absent).await,
         Err(StorageError::NotFound(_))
     ));
+}
+
+/// Both real adapters report the same sizes through `list_prefix_with_sizes` that they report
+/// through `blob_size`, so accounting can rely on the listing for either backend.
+#[tokio::test]
+async fn test_both_adapters_report_listing_sizes_matching_blob_size() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let filesystem = FilesystemBlobStorage::new(dir.path());
+    let in_memory = InMemoryBlobStorage::new();
+
+    let keys = [
+        (staging_layer("cand", 0), 300usize),
+        (staging_layer("cand", 1), 120),
+        (curated_layer("m1", 0, LayerRole::Ground, Some(0)), 2048),
+    ];
+
+    for (key, size) in &keys {
+        let payload = vec![0u8; *size];
+        filesystem.write_blob(key, &payload).await.expect("fs write");
+        in_memory.write_blob(key, &payload).await.expect("mem write");
+    }
+
+    for prefix in [
+        BlobKey::StagingDir { id: None },
+        BlobKey::CuratedDir { id: None },
+    ] {
+        let expected: Vec<u64> = {
+            let mut listed = Vec::new();
+            for key in filesystem.list_prefix(&prefix).await.expect("fs list") {
+                listed.push(filesystem.blob_size(&key).await.expect("fs size"));
+            }
+            listed
+        };
+
+        for (label, entries) in [
+            (
+                "filesystem",
+                filesystem
+                    .list_prefix_with_sizes(&prefix)
+                    .await
+                    .expect("fs sized list"),
+            ),
+            (
+                "in-memory",
+                in_memory
+                    .list_prefix_with_sizes(&prefix)
+                    .await
+                    .expect("mem sized list"),
+            ),
+        ] {
+            let sizes: Vec<u64> = entries.iter().map(|entry| entry.size).collect();
+            assert_eq!(
+                sizes, expected,
+                "{label} listing sizes must match its own blob_size reads"
+            );
+        }
+    }
 }
 
 /// [`BlobStorage`] double forwarding to an in-memory store, except that one key's size read fails
@@ -527,7 +544,7 @@ async fn test_storage_stats_ignores_hidden_telemetry_temp_files() {
 }
 
 /// A key that vanishes between the listing and its size read must not fail the whole aggregation:
-/// `directory_stats` skips it, so `GET /api/storage/stats` never turns an ordinary rename race
+/// the sized listing skips it, so `GET /api/storage/stats` never turns an ordinary rename race
 /// into a 404.
 #[tokio::test]
 async fn test_storage_stats_skips_a_key_that_vanishes_mid_scan() {
@@ -614,4 +631,262 @@ async fn test_storage_stats_rejected_counts_records_not_files() {
     assert_eq!(empty.rejected, DirectoryStats::default());
     assert_eq!(empty.total_bytes, 0);
     assert_eq!(empty.total_files, 0);
+}
+
+/// [`BlobStorage`] double forwarding to an in-memory store while counting the calls that made
+/// `GET /api/storage/stats` expensive: the sized listings and the per-blob size reads.
+///
+/// A per-blob size read is one signed `head_object` over the WAN on S3 (#292), so the count of
+/// those calls is the number that must not grow with the blob count.
+struct CountingBlobStorage {
+    inner: Arc<InMemoryBlobStorage>,
+    sized_listings: AtomicUsize,
+    listings: AtomicUsize,
+    size_reads: AtomicUsize,
+}
+
+impl CountingBlobStorage {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(InMemoryBlobStorage::new()),
+            sized_listings: AtomicUsize::new(0),
+            listings: AtomicUsize::new(0),
+            size_reads: AtomicUsize::new(0),
+        }
+    }
+
+    fn sized_listings(&self) -> usize {
+        self.sized_listings.load(Ordering::SeqCst)
+    }
+
+    fn listings(&self) -> usize {
+        self.listings.load(Ordering::SeqCst)
+    }
+
+    fn size_reads(&self) -> usize {
+        self.size_reads.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl BlobStorage for CountingBlobStorage {
+    async fn read_blob(&self, key: &BlobKey) -> Result<Vec<u8>, StorageError> {
+        self.inner.read_blob(key).await
+    }
+
+    async fn write_blob(&self, key: &BlobKey, bytes: &[u8]) -> Result<(), StorageError> {
+        self.inner.write_blob(key, bytes).await
+    }
+
+    async fn write_blob_with_sha256(
+        &self,
+        key: &BlobKey,
+        bytes: &[u8],
+        sha256: Option<&str>,
+    ) -> Result<(), StorageError> {
+        self.inner.write_blob_with_sha256(key, bytes, sha256).await
+    }
+
+    async fn delete_blob(&self, key: &BlobKey) -> Result<(), StorageError> {
+        self.inner.delete_blob(key).await
+    }
+
+    async fn exists_blob(&self, key: &BlobKey) -> Result<bool, StorageError> {
+        self.inner.exists_blob(key).await
+    }
+
+    async fn blob_size(&self, key: &BlobKey) -> Result<u64, StorageError> {
+        self.size_reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.blob_size(key).await
+    }
+
+    async fn stat_blob(&self, key: &BlobKey) -> Result<BlobStat, StorageError> {
+        self.size_reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.stat_blob(key).await
+    }
+
+    async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {
+        self.listings.fetch_add(1, Ordering::SeqCst);
+        self.inner.list_prefix(prefix).await
+    }
+
+    async fn list_prefix_with_sizes(
+        &self,
+        prefix: &BlobKey,
+    ) -> Result<Vec<BlobEntry>, StorageError> {
+        self.sized_listings.fetch_add(1, Ordering::SeqCst);
+        self.inner.list_prefix_with_sizes(prefix).await
+    }
+}
+
+/// The request-count contract from issue #292: `storage_stats` costs one sized listing per prefix
+/// (staging, curated, telemetry) plus the rejection log's single size read — three listings and one
+/// size read — no matter how many blobs they cover. On S3 that is 4 calls instead of the 931
+/// sequential `head_object`s that took ~94s and starved the liveness probe.
+#[tokio::test]
+async fn test_storage_stats_costs_three_listings_and_one_size_read_for_any_blob_count() {
+    let catalog = Arc::new(InMemoryCatalogRepository::new());
+    let blobs = Arc::new(CountingBlobStorage::new());
+
+    // 40 staging layers, 6 curated bundles with 4 layers each (24 blobs), 2 telemetry ledgers.
+    for index in 0..40 {
+        blobs
+            .write_blob(&staging_layer(&format!("cand_{}", index % 8), index), &[1u8; 64])
+            .await
+            .expect("write staging blob");
+    }
+    for map_index in 0..6 {
+        let id = format!("map_{map_index}");
+        catalog
+            .save_curated(&CuratedMap::with_now(
+                &id,
+                Theme::Dungeon,
+                vec!["dungeon".into()],
+                (2048, 2048),
+            ))
+            .await
+            .expect("save curated map");
+        for layer_index in 0..4 {
+            blobs
+                .write_blob(
+                    &curated_layer(&id, layer_index, LayerRole::Ground, Some(0)),
+                    &[2u8; 128],
+                )
+                .await
+                .expect("write curated layer");
+        }
+    }
+    for name in ["cost_ledger.json", "generation_audit.json"] {
+        blobs
+            .write_blob(&BlobKey::TelemetryLog { name: name.to_string() }, &[3u8; 16])
+            .await
+            .expect("write telemetry ledger");
+    }
+    blobs
+        .write_blob(&BlobKey::RejectionLog, b"[]")
+        .await
+        .expect("write rejection log");
+
+    let service = StorageMaintenanceService::new(catalog, blobs.clone());
+    let stats = service.storage_stats().await.expect("stats succeed");
+
+    // Every blob is accounted for...
+    assert_eq!(stats.staging.file_count, 40);
+    assert_eq!(stats.curated.file_count, 24);
+    assert_eq!(stats.telemetry.file_count, 2);
+    assert_eq!(stats.total_bytes, 40 * 64 + 24 * 128 + 2 * 16 + 2);
+
+    // ...from three sized listings and exactly one single-object size read (the rejection log).
+    assert_eq!(
+        blobs.sized_listings(),
+        3,
+        "staging, curated and telemetry each cost one sized listing"
+    );
+    assert_eq!(
+        blobs.size_reads(),
+        1,
+        "only the rejection log is a single-object size read; nothing scales with the blob count"
+    );
+    assert_eq!(
+        blobs.listings(),
+        0,
+        "no key-only listing may be used for accounting"
+    );
+}
+
+/// The per-theme breakdown is computed in memory from the one `curated/` listing, so it must still
+/// report exactly what a `curated/{id}/` listing per map would have reported: each theme's bytes
+/// and file count are the sum of its maps' bundle footprints, orphans stay out of every theme, and
+/// a map tagged with the same theme twice is counted once.
+#[tokio::test]
+async fn test_curated_theme_breakdown_equals_a_per_map_listing_without_querying_each_map() {
+    let catalog = Arc::new(InMemoryCatalogRepository::new());
+    let blobs = Arc::new(InMemoryBlobStorage::new());
+
+    // A two-theme map with a repeated tag, a single-theme map, and an orphan bundle.
+    let multi = CuratedMap::with_now(
+        "multi_theme",
+        Theme::Dungeon,
+        vec!["dungeon".into(), "cave".into(), "dungeon".into()],
+        (2048, 2048),
+    );
+    let single = CuratedMap::with_now(
+        "single_theme",
+        Theme::Tavern,
+        vec!["tavern".into()],
+        (1024, 1024),
+    );
+    for map in [&multi, &single] {
+        catalog.save_curated(map).await.expect("save curated map");
+    }
+
+    for (index, size) in [(0usize, 1000usize), (1, 500)] {
+        blobs
+            .write_blob(
+                &curated_layer(&multi.id, index, LayerRole::Ground, Some(0)),
+                &vec![1u8; size],
+            )
+            .await
+            .expect("write multi-theme layer");
+    }
+    blobs
+        .write_blob(
+            &curated_layer(&single.id, 0, LayerRole::Ground, Some(0)),
+            &[2u8; 700],
+        )
+        .await
+        .expect("write single-theme layer");
+    blobs
+        .write_blob(
+            &curated_layer("orphan_bundle", 0, LayerRole::Roof, None),
+            &[3u8; 333],
+        )
+        .await
+        .expect("write orphan layer");
+
+    let service = StorageMaintenanceService::new(catalog, blobs.clone());
+    let stats = service.storage_stats().await.expect("stats succeed");
+
+    // The control: what the service used to compute for each map, by listing its own bundle.
+    let per_map = |id: &str| async {
+        let entries = blobs
+            .list_prefix_with_sizes(&BlobKey::CuratedDir {
+                id: Some(id.to_string()),
+            })
+            .await
+            .expect("list one map");
+        (
+            entries.iter().map(|entry| entry.size).sum::<u64>(),
+            entries.len(),
+        )
+    };
+    assert_eq!(per_map("multi_theme").await, (1500, 2));
+    assert_eq!(per_map("single_theme").await, (700, 1));
+
+    let dungeon = stats.curated_by_theme.get(&Theme::Dungeon).expect("dungeon");
+    assert_eq!((dungeon.bytes, dungeon.file_count, dungeon.map_count), (1500, 2, 1));
+
+    // Tagged `cave` as well, so the same bundle contributes to both themes.
+    let cave = stats.curated_by_theme.get(&Theme::Cave).expect("cave");
+    assert_eq!((cave.bytes, cave.file_count, cave.map_count), (1500, 2, 1));
+
+    let tavern = stats.curated_by_theme.get(&Theme::Tavern).expect("tavern");
+    assert_eq!((tavern.bytes, tavern.file_count, tavern.map_count), (700, 1, 1));
+
+    // The repeated `dungeon` tag counts the map once, and the orphan bundle inflates no theme
+    // even though it is part of the overall curated footprint.
+    assert_eq!(stats.curated.bytes, 1500 + 700 + 333);
+    assert_eq!(stats.curated.file_count, 4);
+    let themed_bytes: u64 = stats.curated_by_theme.values().map(|entry| entry.bytes).sum();
+    assert_eq!(
+        themed_bytes,
+        1500 + 1500 + 700,
+        "each multi-theme bundle is attributed to each of its themes"
+    );
+
+    // Every canonical theme is present, including the ones with nothing curated.
+    assert_eq!(stats.curated_by_theme.len(), Theme::ALL.len());
+    for theme in Theme::ALL {
+        assert!(stats.curated_by_theme.contains_key(theme));
+    }
 }

@@ -12,10 +12,10 @@
  * `Load storage stats failed` toast. Reporting an unreadable footprint as an empty one is worse
  * than reporting nothing at all.
  *
- * The two state elements are owned by this view: `#storage-stats-loading` and
- * `#storage-stats-error` (with its `#btn-retry-storage-stats` action) are looked up in the markup
- * and, when the modal does not carry them, created on demand — so the state contract lives next to
- * the code that paints it rather than in the page.
+ * The state elements are owned by this view: `#storage-stats-loading` and `#storage-stats-error`
+ * (with its `#btn-retry-storage-stats` action) are looked up in the markup and, when the modal does
+ * not carry them, created on demand — so the state contract lives next to the code that paints it
+ * rather than in the page.
  */
 
 import { state } from "../store.js";
@@ -27,6 +27,9 @@ import { fetchStorageStats as requestStorageStats, purgeStaging as requestPurgeS
 
 /** Text the loading indicator carries while a footprint read is in flight. */
 const LOADING_TEXT = "Reading storage footprint…";
+
+/** Stylesheet carrying the loading and error rules; attached on first use. */
+const STYLESHEET_HREF = "/storage-states.css";
 
 const LOADING_ID = "storage-stats-loading";
 const ERROR_ID = "storage-stats-error";
@@ -54,10 +57,22 @@ const FIGURE_IDS = [
     "drawer-storage-curated",
 ];
 
+/** Attach the state stylesheet once, so the indicators are styled wherever they are painted. */
+function ensureStylesheet() {
+    const head = document.head;
+    if (!head || typeof head.appendChild !== "function") return;
+    const selector = `link[href="${STYLESHEET_HREF}"]`;
+    if (typeof document.querySelector === "function" && document.querySelector(selector)) return;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = STYLESHEET_HREF;
+    head.appendChild(link);
+}
+
 /**
  * The element for `id`, created inside the storage modal when the markup does not carry it.
  *
- * The modal body is the host, so a created indicator sits directly above the figures it replaces.
+ * The modal body is the host, so a created indicator sits where the figures it replaces are.
  */
 function stateElement(id, { tag = "div", className = "" } = {}) {
     const existing = document.getElementById(id);
@@ -73,7 +88,7 @@ function stateElement(id, { tag = "div", className = "" } = {}) {
     return created;
 }
 
-/** Show or clear the loading indicator; it carries its own label and no children. */
+/** Show or clear the loading indicator; it carries its own label and no child markup. */
 function renderLoading(visible) {
     const el = stateElement(LOADING_ID, { className: "storage-state storage-state-loading hidden" });
     if (!el) return;
@@ -85,7 +100,7 @@ function renderLoading(visible) {
  * The retry action the error state offers, bound to a fresh read exactly once.
  *
  * The listener is attached here rather than only in `setupStorageControls`, because a markup that
- * does not carry the control gets it created at error time — and a control that is created must
+ * does not carry the control gets it created on first error — and a control that is created must
  * still work.
  */
 function retryControl() {
@@ -138,6 +153,7 @@ function clearStorageFigures() {
  * drawer open, a refresh and a retry never overlap.
  */
 export async function fetchStorageStats() {
+    ensureStylesheet();
     state.storageStatsPhase = "loading";
     state.storageStatsError = null;
     renderError(null);

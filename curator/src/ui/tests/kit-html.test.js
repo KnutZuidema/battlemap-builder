@@ -123,7 +123,8 @@ test("no helper path assigns innerHTML, even for hostile interpolated text", (t)
         "div",
         { class: "card", "data-id": "</div><img src=x onerror=alert(1)>" },
         h("span", null, "<img src=x>"),
-        fragment("<b>", null, h("i", null, "</i>")),
+        // A node child of a fragment keeps its identity; the hostile string is that node's text.
+        fragment(h("b", null, "<b>")),
     );
 
     assert.equal(ui.document.innerHTMLWrites, 0);

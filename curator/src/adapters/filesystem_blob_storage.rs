@@ -119,7 +119,7 @@ impl FilesystemBlobStorage {
             }
         }
 
-        entries.sort_by(|a, b| a.key.to_path().cmp(&b.key.to_path()));
+        entries.sort_by_key(|entry| entry.key.to_path());
         Ok(entries)
     }
 }

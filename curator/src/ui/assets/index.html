@@ -1,17 +1,1886 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dungeon Forge — Battlemap Curator</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Top HUD Navigation & Control Bar -->
+        <header class="hud-header">
+            <!-- Brand & Connection Status -->
+            <div class="hud-section hud-brand">
+                <div class="brand">
+                    <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="12 2 2 7 12 12 22 7 12 2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <polyline points="2 17 12 22 22 17" stroke-linecap="round" stroke-linejoin="round"/>
+                        <polyline points="2 12 12 17 22 12" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span class="brand-title">DUNGEON FORGE</span>
+                    <span class="badge badge-curator">Curator</span>
+                </div>
+                <nav class="nav-switcher" aria-label="Main Navigation View">
+                    <button type="button" id="tab-nav-triage" class="nav-switcher-btn active" title="Staging Triage (Hotkey: T)">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <polyline points="9 11 12 14 22 4"/>
+                        </svg>
+                        <span>Staging Triage</span>
+                    </button>
+                    <button type="button" id="tab-nav-library" class="nav-switcher-btn" title="Dataset Library (Hotkey: L)">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                        </svg>
+                        <span>Dataset Library</span>
+                    </button>
+                    <button type="button" id="tab-nav-training" class="nav-switcher-btn" title="Training Runs & LoRA Adapters (Hotkey: R)">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                        </svg>
+                        <span>Training Runs</span>
+                    </button>
+                </nav>
+                <div id="status-indicator" class="status-pill status-connecting" title="Curator API Status">
+                    <span class="status-dot"></span>
+                    <span id="status-text" class="status-text">Connecting...</span>
+                </div>
+                <button type="button" id="btn-open-drawer" class="btn btn-tool btn-harvest" title="Harvest battlemaps from Reddit (Hotkey: H)">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="7 10 12 15 17 10"/>
+                        <line x1="12" y1="15" x2="12" y2="3"/>
+                    </svg>
+                    <span>Harvest</span>
+                    <kbd>H</kbd>
+                </button>
+                <button type="button" id="btn-open-benchmark-drawer" class="btn btn-tool btn-benchmark" title="AI Benchmark Suite & Drawer (Hotkey: B)">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                    </svg>
+                    <span>Benchmark</span>
+                    <kbd>B</kbd>
+                </button>
+                <button type="button" id="btn-open-training-drawer" class="btn btn-tool btn-training" title="LoRA Training Runs & Adapters (Hotkey: R)">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                    </svg>
+                    <span>Training</span>
+                    <kbd>R</kbd>
+                </button>
+                <button type="button" id="btn-open-storage-modal" class="btn btn-tool btn-storage" title="Storage Footprint & Purge Monitor">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                    </svg>
+                    <span>Storage</span>
+                </button>
+            </div>
+
+            <!-- Topbar Cost Monitor HUD -->
+            <div class="hud-section hud-cost-section">
+                <div id="cost-monitor-hud" class="cost-monitor-pill" title="Real-time Inference Spend & Map Stats">
+                    <span class="cost-monitor-icon">$</span>
+                    <span id="cost-monitor-text" class="cost-monitor-text mono">Session: $0.00 · Total: $0.00 (0 maps generated)</span>
+                </div>
+            </div>
+
+            <!-- Candidate Metadata & Queue Counter -->
+            <div class="hud-section hud-candidate-meta">
+                <div id="candidate-meta-box" class="candidate-meta-box hidden">
+                    <span id="queue-counter" class="meta-tag queue-counter" title="Queue Position">0 / 0</span>
+                    <span id="candidate-id" class="meta-tag candidate-id mono" title="Candidate ID">—</span>
+                    <span id="candidate-dimensions" class="meta-tag candidate-dim mono" title="Dimensions">—</span>
+                    <span id="candidate-source" class="meta-tag candidate-source badge-source" title="Source">—</span>
+                </div>
+            </div>
+
+
+            <!-- Viewport Tools & Triage Action Controls -->
+            <div class="hud-section hud-actions">
+                <div class="tool-group">
+                    <button type="button" id="btn-grid-toggle" class="btn btn-tool active" title="Toggle 64px VTT Grid (Hotkey: G)">
+                        <kbd>G</kbd>
+                        <span class="btn-label">Grid</span>
+                    </button>
+                    <button type="button" id="btn-grid-adjust" class="btn btn-tool" title="Adjust Grid Scale & Alignment (Hotkey: Shift+G)">
+                        <kbd>⇧G</kbd>
+                        <span class="btn-label">Adjust</span>
+                    </button>
+                    <button type="button" id="btn-fit-screen" class="btn btn-tool" title="Fit to Screen (Hotkey: F)">
+                        <kbd>F</kbd>
+                        <span class="btn-label">Fit</span>
+                    </button>
+                    <div class="zoom-controls">
+                        <button type="button" id="btn-zoom-out" class="btn btn-icon" title="Zoom Out (Hotkey: [ or -)">−</button>
+                        <span id="zoom-level" class="zoom-level mono" title="Zoom Scale">100%</span>
+                        <button type="button" id="btn-zoom-in" class="btn btn-icon" title="Zoom In (Hotkey: ] or +)">+</button>
+                    </div>
+                </div>
+                    <button type="button" id="btn-split-bundle-hud" class="btn btn-tool btn-split-bundle hidden" title="Split multi-layer bundle into standalone maps (Hotkey: U)">
+                        <kbd>U</kbd>
+                        <span class="btn-label" id="btn-split-hud-text">Split</span>
+                    </button>
+
+                <div class="action-divider"></div>
+
+                <div class="nav-group">
+                    <button type="button" id="btn-prev" class="btn btn-secondary" title="Previous Candidate (Hotkey: K or Left)">
+                        <kbd>K</kbd>
+                        <span class="btn-label">Prev</span>
+                    </button>
+                    <button type="button" id="btn-next" class="btn btn-secondary" title="Next Candidate (Hotkey: J or Right)">
+                        <span class="btn-label">Next</span>
+                        <kbd>J</kbd>
+                    </button>
+                </div>
+
+                <div class="action-divider"></div>
+
+                <div class="triage-group">
+                    <button type="button" id="btn-undo-reject" class="btn btn-secondary btn-undo-reject" title="Undo Candidate Rejection (Hotkey: Z)" disabled>
+                        <kbd>Z</kbd>
+                        <span class="btn-label">Undo</span>
+                    </button>
+                    <button type="button" id="btn-reject" class="btn btn-danger" title="Reject Candidate (Hotkey: Esc)">
+                        <kbd>Esc</kbd>
+                        <span class="btn-label">Reject</span>
+                    </button>
+                    <button type="button" id="btn-curate" class="btn btn-success" title="Curate Candidate (Hotkey: Enter)">
+                        <kbd>Enter</kbd>
+                        <span class="btn-label">Curate</span>
+                    </button>
+                </div>
+
+                <button type="button" id="btn-help" class="btn btn-ghost btn-help" title="Hotkey Guide (Hotkey: ?)">
+                    <kbd>?</kbd>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Triage Viewport with Canvas 2D -->
+        <main id="triage-viewport" class="triage-viewport">
+            <div class="canvas-container" id="canvas-container">
+                <canvas id="triage-canvas"></canvas>
+            </div>
+
+            <!-- Floating Glassmorphic Grid Calibration Panel -->
+            <div id="grid-adjust-panel" class="grid-adjust-panel hidden" role="dialog" aria-label="Grid Calibration Panel">
+                <div class="grid-panel-header">
+                    <div class="grid-panel-title">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <line x1="3" y1="9" x2="21" y2="9"/>
+                            <line x1="3" y1="15" x2="21" y2="15"/>
+                            <line x1="9" y1="3" x2="9" y2="21"/>
+                            <line x1="15" y1="3" x2="15" y2="21"/>
+                        </svg>
+                        <span>Grid Calibration</span>
+                    </div>
+                    <button type="button" id="btn-close-grid-panel" class="btn-panel-close" title="Close Panel (Esc)" aria-label="Close">✕</button>
+                </div>
+
+                <!-- Size Section -->
+                <div class="grid-panel-section">
+                    <div class="grid-panel-row">
+                        <label for="grid-size-input" class="grid-panel-label">Square Size</label>
+                        <div class="grid-size-controls">
+                            <button type="button" id="btn-grid-size-dec" class="btn btn-icon btn-sm" title="Decrease Size (−1px)">−</button>
+                            <input type="number" id="grid-size-input" class="grid-size-input mono" min="16" max="300" step="1" value="64">
+                            <span class="grid-unit mono">px</span>
+                            <button type="button" id="btn-grid-size-inc" class="btn btn-icon btn-sm" title="Increase Size (+1px)">+</button>
+                        </div>
+                    </div>
+                    <input type="range" id="grid-size-slider" class="grid-slider" min="16" max="256" step="1" value="64">
+
+                    <!-- Presets -->
+                    <div class="grid-presets">
+                        <span class="presets-label">Presets:</span>
+                        <div class="preset-chips">
+                            <button type="button" class="preset-chip" data-size="32">32px</button>
+                            <button type="button" class="preset-chip" data-size="50">50px</button>
+                            <button type="button" class="preset-chip active" data-size="64">64px</button>
+                            <button type="button" class="preset-chip" data-size="70">70px</button>
+                            <button type="button" class="preset-chip" data-size="100">100px</button>
+                            <button type="button" class="preset-chip" data-size="128">128px</button>
+                            <button type="button" class="preset-chip" data-size="140">140px</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Position Offset Section -->
+                <div class="grid-panel-section">
+                    <div class="grid-panel-row">
+                        <span class="grid-panel-label">Grid Offset</span>
+                        <div class="grid-offset-readout mono">
+                            <span>X: <span id="grid-offset-x-val">0</span>px</span>
+                            <span>Y: <span id="grid-offset-y-val">0</span>px</span>
+                        </div>
+                    </div>
+
+                    <div class="grid-alignment-controls">
+                        <div class="grid-nudge-pad">
+                            <button type="button" id="btn-grid-nudge-up" class="btn btn-icon btn-sm nudge-btn" title="Nudge Up (Shift+↑)">▲</button>
+                            <div class="nudge-mid-row">
+                                <button type="button" id="btn-grid-nudge-left" class="btn btn-icon btn-sm nudge-btn" title="Nudge Left (Shift+←)">◀</button>
+                                <button type="button" id="btn-grid-align-drag" class="btn btn-tool btn-sm btn-align-mode" title="Toggle Drag-to-Align mode on canvas">
+                                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="5 9 2 12 5 15"/>
+                                        <polyline points="9 5 12 2 15 5"/>
+                                        <polyline points="15 19 12 22 9 19"/>
+                                        <polyline points="19 9 22 12 19 15"/>
+                                        <line x1="2" y1="12" x2="22" y2="12"/>
+                                        <line x1="12" y1="2" x2="12" y2="22"/>
+                                    </svg>
+                                    <span>Align</span>
+                                </button>
+                                <button type="button" id="btn-grid-nudge-right" class="btn btn-icon btn-sm nudge-btn" title="Nudge Right (Shift+→)">▶</button>
+                            </div>
+                            <button type="button" id="btn-grid-nudge-down" class="btn btn-icon btn-sm nudge-btn" title="Nudge Down (Shift+↓)">▼</button>
+                        </div>
+
+                        <div class="grid-drag-hint">
+                            <span>Tip: Hold <kbd>Shift</kbd> + drag on map to align grid</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Lattice & Sections Section -->
+                <div class="grid-panel-section grid-lattice-section">
+                    <div class="grid-panel-row">
+                        <span class="grid-panel-label">Full Grid Lattice</span>
+                        <span id="grid-lattice-cells" class="grid-lattice-val mono">0 × 0 cells</span>
+                    </div>
+                    <div class="grid-panel-row">
+                        <span class="grid-panel-label">16×16 Sections</span>
+                        <span id="grid-lattice-sections" class="grid-lattice-sections-val mono badge-sections">0 × 0 sections</span>
+                    </div>
+                </div>
+
+                <!-- Actions Footer -->
+                <div class="grid-panel-footer">
+                    <button type="button" id="btn-grid-reset" class="btn btn-secondary btn-sm" title="Reset to 64px, (0, 0)">Reset</button>
+                    <button type="button" id="btn-grid-done" class="btn btn-primary btn-sm">Done</button>
+                </div>
+            </div>
+
+            <!-- Synced Layer Filmstrip Deck (Canvas 2D Triage) -->
+            <div id="layer-deck" class="layer-deck hidden" aria-label="Layer Filmstrip Deck">
+                <div class="layer-deck-header">
+                    <div class="layer-deck-title-group">
+                        <svg class="layer-deck-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+                            <polyline points="2 17 12 22 22 17"/>
+                            <polyline points="2 12 12 17 22 12"/>
+                        </svg>
+                        <span class="layer-deck-title">Layers</span>
+                        <span id="layer-deck-count" class="layer-deck-count mono">1 / 1</span>
+                        <span id="layer-deck-bundle-tag" class="badge badge-bundle">Multi-Layer Bundle</span>
+                    </div>
+
+                    <div class="layer-deck-tools">
+                        <button type="button" id="btn-split-bundle" class="btn btn-tool btn-split-bundle" title="Split multi-layer bundle into standalone maps (Hotkey: U)">
+                            <kbd>U</kbd>
+                            <span id="btn-split-label">Split Bundle</span>
+                        </button>
+                    </div>
+
+                    <div class="layer-deck-center">
+                        <!-- Layer Role Selector HUD (Hotkey: 3, then 1-6) -->
+                        <div id="role-selector" class="role-selector" role="radiogroup" aria-label="Layer Role Selection" title="Layer Role (Press 3, then 1-6)">
+                            <button type="button" class="role-badge" data-role="ground" data-key="1" title="Ground (Elevation 0) [Hotkey: 3, then 1]">
+                                <kbd>1</kbd><span>Ground (0)</span>
+                            </button>
+                            <button type="button" class="role-badge" data-role="upper_floor" data-key="2" title="Upper Floor (+1, +2...) [Hotkey: 3, then 2]">
+                                <kbd>2</kbd><span>Upper Floor</span>
+                            </button>
+                            <button type="button" class="role-badge" data-role="basement" data-key="3" title="Basement (-1, -2...) [Hotkey: 3, then 3]">
+                                <kbd>3</kbd><span>Basement</span>
+                            </button>
+                            <button type="button" class="role-badge" data-role="roof" data-key="4" title="Roof [Hotkey: 3, then 4]">
+                                <kbd>4</kbd><span>Roof</span>
+                            </button>
+                            <button type="button" class="role-badge" data-role="variant" data-key="5" title="Variant [Hotkey: 3, then 5]">
+                                <kbd>5</kbd><span>Variant</span>
+                            </button>
+                            <button type="button" class="role-badge" data-role="exclude" data-key="6" title="Exclude [Hotkey: 3, then 6]">
+                                <kbd>6</kbd><span>Exclude</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Filmstrip Cards Container -->
+                <div id="layer-filmstrip" class="layer-filmstrip" role="tablist" aria-label="Map Layers Filmstrip">
+                    <!-- Populated dynamically by app.js -->
+                </div>
+            </div>
+            <!-- Floating Viewport Status HUD -->
+            <div id="viewport-hud" class="viewport-hud">
+                <span id="hud-pan-zoom" class="hud-item mono">Zoom: 100%</span>
+                <span class="hud-divider">|</span>
+                <span id="hud-grid-status" class="hud-item">Grid: 64px (5ft) [ON]</span>
+                <span class="hud-divider">|</span>
+                <span id="hud-lattice-status" class="hud-item mono" title="Full-grid lattice & sections readout">0 × 0 cells</span>
+                <span class="hud-divider">|</span>
+                <span id="hud-resolution" class="hud-item mono">2048 × 2048</span>
+                <span class="hud-divider">|</span>
+                <span id="hud-prefetch-status" class="hud-item text-muted">Prefetch: 0 ready</span>
+            </div>
+
+            <!-- Empty State Display -->
+            <div id="empty-state" class="empty-state hidden">
+                <div class="empty-card">
+                    <div class="empty-icon">
+                        <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                            <circle cx="8.5" cy="8.5" r="1.5"/>
+                            <polyline points="21 15 16 10 5 21"/>
+                        </svg>
+                    </div>
+                    <h2>Staging Queue Empty</h2>
+                    <p>No uncurated battlemaps pending in staging. Ingest images to <code>staging/</code> in the configured data directory or trigger a harvester batch to begin triage.</p>
+                    <div class="empty-actions">
+                        <button type="button" id="btn-refresh-staging" class="btn btn-primary">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="23 4 23 10 17 10"/>
+                                <polyline points="1 20 1 14 7 14"/>
+                                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                            </svg>
+                            <span>Refresh Queue</span>
+                        </button>
+                        <button type="button" id="btn-empty-harvest" class="btn btn-secondary">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            <span>Harvest from Reddit</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Loading Spinner Overlay -->
+            <div id="loading-overlay" class="loading-overlay hidden">
+                <div class="spinner"></div>
+                <span id="loading-text" class="loading-text">Loading battlemap candidate...</span>
+            </div>
+        </main>
+
+        <!-- Curated Dataset Library View -->
+        <section id="library-viewport" class="library-viewport hidden" aria-label="Dataset Library View">
+            <!-- Library Top Toolbar -->
+            <div class="library-toolbar">
+                <div class="library-toolbar-left">
+                    <div class="library-title-group">
+                        <svg class="library-title-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                        </svg>
+                        <h2 class="library-title">Dataset Library</h2>
+                        <span id="library-count-badge" class="library-count-badge mono">0 Maps</span>
+                    </div>
+
+                    <!-- Dynamic Library Filter Toolbar -->
+                    <input type="text" id="library-search-input" class="search-input" placeholder="Search by tag, theme, or ID..." />
+                    <div id="library-facet-filters" class="library-facet-filters" role="group" aria-label="Library Facet Filters">
+                        <button type="button" class="lib-facet-chip active" data-facet="all">All</button>
+                        <button type="button" class="lib-facet-chip" data-facet="bundles">Multi-Layer Bundles</button>
+                        <button type="button" class="lib-facet-chip" data-facet="single">Single Layer Only</button>
+                        <button type="button" class="lib-facet-chip" data-facet="has-desc">Has Description</button>
+                        <button type="button" class="lib-facet-chip" data-facet="missing-desc">Missing Description</button>
+                    </div>
+                    <div id="library-audit-filter-chip" class="library-audit-filter-chip hidden">
+                        <span class="library-audit-filter-kind">Audit</span>
+                        <span id="library-audit-filter-label" class="library-audit-filter-label"></span>
+                        <span id="library-audit-filter-count" class="library-audit-filter-count mono"></span>
+                        <button type="button" id="btn-clear-library-audit-filter" class="library-audit-filter-remove" aria-label="Clear the readiness audit map filter">&times;</button>
+                    </div>
+                    <div id="library-tag-pills" class="library-tag-pills"></div>
+                </div>
+
+                <div class="library-toolbar-right">
+                    <div class="library-sort-group">
+                        <label for="library-sort-select" class="library-toolbar-label">Sort:</label>
+                        <select id="library-sort-select" class="library-select" aria-label="Sort dataset library">
+                            <option value="date-desc" selected>Newest Curated</option>
+                            <option value="date-asc">Oldest Curated</option>
+                            <option value="layers-desc">Layer Count (Bundles First)</option>
+                            <option value="dimensions-desc">Dimensions (Largest First)</option>
+                            <option value="id-asc">Map ID (A-Z)</option>
+                        </select>
+                    </div>
+                    <div id="library-density-group" class="density-btn-group" role="group" aria-label="Grid Density">
+                        <button type="button" class="btn-density" data-density="compact" title="Compact density (Hotkey: 1)">Compact <kbd>1</kbd></button>
+                        <button type="button" class="btn-density active" data-density="comfortable" title="Comfortable density (Hotkey: 2)">Comfortable <kbd>2</kbd></button>
+                        <button type="button" class="btn-density" data-density="large" title="Large density (Hotkey: 3)">Large <kbd>3</kbd></button>
+                    </div>
+                    <button type="button" id="btn-export-lora" class="btn btn-primary btn-export" title="Export 1024x1024 LoRA dataset (.zip) for training">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        <span id="btn-export-label">Export LoRA Dataset</span>
+                    </button>
+                    <button type="button" id="btn-freeze-snapshot" class="btn btn-secondary btn-freeze" title="Freeze an immutable Dataset Snapshot for the active theme scope">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M4.93 19.07l14.14-14.14"/>
+                        </svg>
+                        <span id="btn-freeze-label">Freeze Snapshot</span>
+                    </button>
+                    <button type="button" id="btn-refresh-library" class="btn btn-secondary btn-icon-only" title="Refresh Library">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="23 4 23 10 17 10"/>
+                            <polyline points="1 20 1 14 7 14"/>
+                            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Library Cards Scroll Container -->
+            <div class="library-scroll-container">
+                <!-- Frozen Dataset Snapshots Panel -->
+                <div id="dataset-snapshots-panel" class="dataset-snapshots-panel">
+                    <div class="snapshots-panel-header">
+                        <div class="snapshots-panel-title-group">
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M4.93 19.07l14.14-14.14"/>
+                            </svg>
+                            <h3 class="snapshots-panel-title">Frozen Dataset Snapshots</h3>
+                            <span id="snapshots-count-badge" class="snapshots-count-badge mono">0</span>
+                        </div>
+                        <div class="snapshots-panel-actions">
+                            <button type="button" id="btn-open-training-from-library" class="btn btn-secondary btn-xs btn-training-runs" title="Open LoRA Training Runs & Adapters">
+                                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                                </svg>
+                                <span>Training Runs</span>
+                            </button>
+                            <button type="button" id="btn-refresh-snapshots" class="btn btn-secondary btn-xs btn-icon-only" title="Refresh Snapshots">
+                                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="23 4 23 10 17 10"/>
+                                    <polyline points="1 20 1 14 7 14"/>
+                                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                                </svg>
+                            </button>
+                            <button type="button" id="btn-toggle-snapshots" class="btn btn-secondary btn-xs" aria-expanded="true" title="Toggle Snapshots">
+                                <span id="toggle-snapshots-text">Collapse</span>
+                            </button>
+                        </div>
+                    </div>
+                    <!-- Dataset Readiness: the stored audit for the active theme scope, summarized
+                         by issue kind so a refusal and a revisit read the same block. -->
+                    <div id="dataset-readiness-panel" class="readiness-panel" role="region" aria-label="Dataset Readiness">
+                        <div class="readiness-panel-head">
+                            <span id="dataset-readiness-icon" class="readiness-icon">◍</span>
+                            <div class="readiness-panel-title-group">
+                                <h4 class="readiness-panel-title">Dataset Readiness</h4>
+                                <span id="dataset-readiness-status" class="readiness-status mono">Not audited</span>
+                            </div>
+                            <button type="button" id="btn-audit-readiness" class="btn btn-secondary btn-xs readiness-audit-btn" title="Audit curated maps in the active theme scope against the LoRA Training Dataset contract (16×16 Map Sections, Trigger Phrase captions)">
+                                <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M9 11l3 3L22 4"/>
+                                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                                </svg>
+                                <span id="btn-audit-readiness-label">Audit</span>
+                            </button>
+                        </div>
+                        <div id="dataset-readiness-summary" class="readiness-summary"></div>
+                        <div id="dataset-readiness-issues" class="readiness-issues"></div>
+                    </div>
+
+                    <!-- Freeze Progress Tracker -->
+                    <div id="freeze-progress-panel" class="freeze-progress-panel hidden" role="region" aria-label="Dataset Freeze Progress">
+                        <div class="freeze-progress-header">
+                            <div class="freeze-progress-status-line">
+                                <div class="freeze-spinner-pulse" aria-hidden="true"></div>
+                                <span id="freeze-phase-badge" class="freeze-phase-badge phase-starting">STARTING</span>
+                                <span id="freeze-progress-message" class="freeze-progress-message">Auditing dataset readiness...</span>
+                            </div>
+                            <div class="freeze-progress-stats mono">
+                                <span id="freeze-progress-counts">0 / 0</span>
+                                <span id="freeze-progress-percent" class="freeze-progress-percent">(0%)</span>
+                            </div>
+                        </div>
+                        <div class="freeze-progress-track">
+                            <div id="freeze-progress-bar" class="freeze-progress-bar" style="width: 0%;"></div>
+                        </div>
+                        <div class="freeze-progress-subline">
+                            <span id="freeze-detail-map" class="freeze-detail-item mono"></span>
+                            <span id="freeze-detail-section" class="freeze-detail-item mono"></span>
+                        </div>
+                    </div>
+                    <div id="snapshots-shelf" class="snapshots-shelf">
+                        <div id="snapshots-list" class="snapshots-list"></div>
+                        <div id="snapshots-empty" class="snapshots-empty hidden">
+                            <p>No frozen snapshots for this theme scope yet. Click <strong>Freeze Snapshot</strong> to create one.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="library-grid" class="curated-grid" role="feed" aria-busy="false">
+                    <!-- Populated dynamically by app.js -->
+                </div>
+
+                <!-- Empty Library State -->
+                <div id="library-empty" class="empty-state hidden">
+                    <div class="empty-card">
+                        <div class="empty-icon">
+                            <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                            </svg>
+                        </div>
+                        <h3>No Curated Maps Found</h3>
+                        <p id="library-empty-desc">No battlemaps have been approved yet.</p>
+                        <button type="button" id="btn-switch-to-triage" class="btn btn-primary">
+                            <span>Go to Staging Triage</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Note when active filter matches no maps -->
+                <div id="library-filter-empty" class="library-filter-empty hidden">
+                    <div class="empty-card library-filter-card">
+                        <div class="empty-icon">
+                            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <circle cx="11" cy="11" r="8"/>
+                                <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                            </svg>
+                        </div>
+                        <h3>No Maps Matching Filter</h3>
+                        <p id="library-filter-empty-desc">No battlemaps match the current filter criteria.</p>
+                        <button type="button" id="btn-clear-library-filters" class="btn btn-secondary btn-sm">
+                            Clear Filters
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Fullscreen Stage Overlay with Reused 2D Canvas & HUD Controls -->
+            <div id="library-fullscreen-overlay" class="fullscreen-overlay hidden" role="dialog" aria-modal="true" aria-label="Fullscreen Map Stage Overlay">
+                <div class="fullscreen-canvas-container" id="library-fullscreen-canvas-container">
+                    <canvas id="library-fullscreen-canvas" tabindex="0"></canvas>
+                </div>
+
+                <!-- Floating HUD overlay bar (glassmorphic) -->
+                <div id="library-fullscreen-hud" class="fullscreen-hud-bar" role="toolbar" aria-label="Fullscreen Controls">
+                    <!-- Map ID badge + dimensions + Counter badge (e.g. Map 3 of 12) -->
+                    <div class="hud-group hud-group-meta">
+                        <span id="fs-map-id-badge" class="hud-badge hud-badge-id mono" title="Curated Map ID">map-id</span>
+                        <span id="fs-map-dimensions" class="hud-badge hud-badge-dim mono" title="Map Dimensions">2048 × 2048</span>
+                        <span id="fs-grid-status-badge" class="hud-badge hud-badge-grid mono" title="Full-Grid Lattice & Sections">0 × 0 cells</span>
+                        <span id="fs-map-counter" class="hud-badge hud-badge-counter mono" title="Curated Gallery Counter">Map 1 of 1</span>
+                    </div>
+
+                    <div class="hud-divider"></div>
+
+                    <!-- View & Inspection Controls -->
+                    <div class="hud-group hud-group-view">
+                        <!-- Grid toggle button (hotkey G) -->
+                        <button type="button" id="btn-fs-grid-toggle" class="btn-hud active" title="Toggle 64px VTT Grid Overlay (Hotkey: G)" aria-label="Toggle VTT Grid">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                                <line x1="3" y1="9" x2="21" y2="9"/>
+                                <line x1="3" y1="15" x2="21" y2="15"/>
+                                <line x1="9" y1="3" x2="9" y2="21"/>
+                                <line x1="15" y1="3" x2="15" y2="21"/>
+                            </svg>
+                            <span>Grid</span>
+                            <kbd>G</kbd>
+                        </button>
+
+                        <!-- Grid adjust toggle button (hotkey Shift+G) -->
+                        <button type="button" id="btn-fs-grid-adjust" class="btn-hud" title="Adjust Grid Calibration (Hotkey: Shift+G)" aria-label="Adjust Grid Calibration">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="3"/>
+                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                            </svg>
+                            <span>Calibrate</span>
+                            <kbd>⇧G</kbd>
+                        </button>
+
+                        <!-- Fit-to-screen button (hotkey F) -->
+                        <button type="button" id="btn-fs-fit" class="btn-hud" title="Fit to Screen (Hotkey: F or 0)" aria-label="Fit to Screen">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="15 3 21 3 21 9"/>
+                                <polyline points="9 21 3 21 3 15"/>
+                                <line x1="21" y1="3" x2="14" y2="10"/>
+                                <line x1="3" y1="21" x2="10" y2="14"/>
+                            </svg>
+                            <span>Fit</span>
+                            <kbd>F</kbd>
+                        </button>
+
+                        <!-- Zoom in/out buttons and zoom percentage readout ([ / ] or - / +) -->
+                        <div class="hud-zoom-controls">
+                            <button type="button" id="btn-fs-zoom-out" class="btn-hud btn-hud-icon" title="Zoom Out (Hotkey: [ or -)" aria-label="Zoom Out">
+                                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="5" y1="12" x2="19" y2="12"/>
+                                </svg>
+                            </button>
+                            <span id="fs-zoom-readout" class="hud-zoom-readout mono" title="Current Zoom Percentage (Hotkey: 1 for 100%, 0 for fit)">100%</span>
+                            <button type="button" id="btn-fs-zoom-in" class="btn-hud btn-hud-icon" title="Zoom In (Hotkey: ] or +)" aria-label="Zoom In">
+                                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="12" y1="5" x2="12" y2="19"/>
+                                    <line x1="5" y1="12" x2="19" y2="12"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="hud-divider"></div>
+
+                    <!-- Gallery Navigation & Close Controls -->
+                    <div class="hud-group hud-group-nav">
+                        <!-- Prev / Next map buttons (hotkeys K / J or Left / Right) -->
+                        <button type="button" id="btn-fs-prev-map" class="btn-hud" title="Previous Curated Map (Hotkey: K or Left)" aria-label="Previous Map">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="15 18 9 12 15 6"/>
+                            </svg>
+                            <kbd>K</kbd>
+                        </button>
+                        <button type="button" id="btn-fs-next-map" class="btn-hud" title="Next Curated Map (Hotkey: J or Right)" aria-label="Next Map">
+                            <kbd>J</kbd>
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="9 18 15 12 9 6"/>
+                            </svg>
+                        </button>
+
+                        <!-- Close button (hotkey Esc) -->
+                        <button type="button" id="btn-fs-close" class="btn-hud btn-hud-close" title="Exit Fullscreen Stage (Hotkey: Esc)" aria-label="Close Fullscreen Stage">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="18" y1="6" x2="6" y2="18"/>
+                                <line x1="6" y1="6" x2="18" y2="18"/>
+                            </svg>
+                            <span>Close</span>
+                            <kbd>Esc</kbd>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Floating Grid Calibration Panel inside Fullscreen -->
+                <div id="library-fullscreen-grid-panel" class="grid-adjust-panel fullscreen-grid-panel hidden" role="dialog" aria-label="Fullscreen Grid Calibration Panel">
+                    <div class="grid-panel-header">
+                        <div class="grid-panel-title">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                                <line x1="3" y1="9" x2="21" y2="9"/>
+                                <line x1="3" y1="15" x2="21" y2="15"/>
+                                <line x1="9" y1="3" x2="9" y2="21"/>
+                                <line x1="15" y1="3" x2="15" y2="21"/>
+                            </svg>
+                            <span>Grid Calibration</span>
+                        </div>
+                        <button type="button" id="btn-fs-close-grid-panel" class="btn-panel-close" title="Close Panel (Esc)" aria-label="Close">✕</button>
+                    </div>
+
+                    <div class="grid-panel-section">
+                        <div class="grid-panel-row">
+                            <label for="fs-grid-size-input" class="grid-panel-label">Square Size</label>
+                            <div class="grid-size-controls">
+                                <button type="button" id="btn-fs-grid-size-dec" class="btn btn-icon btn-sm" title="Decrease Size (−1px)">−</button>
+                                <input type="number" id="fs-grid-size-input" class="grid-size-input mono" min="16" max="300" step="1" value="64">
+                                <span class="grid-unit mono">px</span>
+                                <button type="button" id="btn-fs-grid-size-inc" class="btn btn-icon btn-sm" title="Increase Size (+1px)">+</button>
+                            </div>
+                        </div>
+                        <input type="range" id="fs-grid-size-slider" class="grid-slider" min="16" max="256" step="1" value="64">
+
+                        <div class="grid-presets">
+                            <span class="presets-label">Presets:</span>
+                            <div class="preset-chips" id="fs-grid-preset-chips">
+                                <button type="button" class="preset-chip" data-size="32">32px</button>
+                                <button type="button" class="preset-chip" data-size="50">50px</button>
+                                <button type="button" class="preset-chip active" data-size="64">64px</button>
+                                <button type="button" class="preset-chip" data-size="70">70px</button>
+                                <button type="button" class="preset-chip" data-size="100">100px</button>
+                                <button type="button" class="preset-chip" data-size="128">128px</button>
+                                <button type="button" class="preset-chip" data-size="140">140px</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid-panel-section">
+                        <div class="grid-panel-row">
+                            <span class="grid-panel-label">Grid Offset</span>
+                            <div class="grid-offset-readout mono">
+                                <span>X: <span id="fs-grid-offset-x-val">0</span>px</span>
+                                <span>Y: <span id="fs-grid-offset-y-val">0</span>px</span>
+                            </div>
+                        </div>
+
+                        <div class="grid-alignment-controls">
+                            <div class="grid-nudge-pad">
+                                <button type="button" id="btn-fs-grid-nudge-up" class="btn btn-icon btn-sm nudge-btn" title="Nudge Up (Shift+↑)">▲</button>
+                                <div class="nudge-mid-row">
+                                    <button type="button" id="btn-fs-grid-nudge-left" class="btn btn-icon btn-sm nudge-btn" title="Nudge Left (Shift+←)">◀</button>
+                                    <button type="button" id="btn-fs-grid-align-drag" class="btn btn-tool btn-sm btn-align-mode" title="Toggle Drag-to-Align mode on canvas">
+                                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="5 9 2 12 5 15"/>
+                                            <polyline points="9 5 12 2 15 5"/>
+                                            <polyline points="15 19 12 22 9 19"/>
+                                            <polyline points="19 9 22 12 19 15"/>
+                                            <line x1="2" y1="12" x2="22" y2="12"/>
+                                            <line x1="12" y1="2" x2="12" y2="22"/>
+                                        </svg>
+                                        <span>Align</span>
+                                    </button>
+                                    <button type="button" id="btn-fs-grid-nudge-right" class="btn btn-icon btn-sm nudge-btn" title="Nudge Right (Shift+→)">▶</button>
+                                </div>
+                                <button type="button" id="btn-fs-grid-nudge-down" class="btn btn-icon btn-sm nudge-btn" title="Nudge Down (Shift+↓)">▼</button>
+                            </div>
+
+                            <div class="grid-drag-hint">
+                                <span>Tip: Hold <kbd>Shift</kbd> + drag on map to align grid</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Lattice & Sections Section -->
+                    <div class="grid-panel-section grid-lattice-section">
+                        <div class="grid-panel-row">
+                            <span class="grid-panel-label">Full Grid Lattice</span>
+                            <span id="fs-grid-lattice-cells" class="grid-lattice-val mono">0 × 0 cells</span>
+                        </div>
+                        <div class="grid-panel-row">
+                            <span class="grid-panel-label">16×16 Sections</span>
+                            <span id="fs-grid-lattice-sections" class="grid-lattice-sections-val mono badge-sections">0 × 0 sections</span>
+                        </div>
+                    </div>
+
+                    <div class="grid-panel-footer">
+                        <button type="button" id="btn-fs-grid-reset" class="btn btn-secondary btn-sm" title="Reset to 64px, (0, 0)">Reset</button>
+                        <button type="button" id="btn-fs-grid-done" class="btn btn-primary btn-sm">Done</button>
+                    </div>
+                </div>
+
+                <!-- Bottom layer deck filmstrip #library-fullscreen-layer-deck -->
+                <div id="library-fullscreen-layer-deck" class="fullscreen-layer-deck hidden" aria-label="Map Layer Deck">
+                    <div class="fs-layer-deck-header">
+                        <div class="fs-layer-deck-title">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+                                <polyline points="2 17 12 22 22 17"/>
+                                <polyline points="2 12 12 17 22 12"/>
+                            </svg>
+                            <span>Bundle Layers</span>
+                            <span id="fs-layer-deck-count" class="mono text-muted">(1 / 1)</span>
+                        </div>
+                        <div class="fs-layer-deck-hint">
+                            <span>Press <kbd>1</kbd>–<kbd>6</kbd> to switch layer</span>
+                        </div>
+                    </div>
+                    <div id="fs-layer-filmstrip-strip" class="fs-layer-filmstrip-strip" role="tablist" aria-label="Bundle Layers Filmstrip">
+                        <!-- Populated dynamically by app.js -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Slide-Over Inspector Drawer & Curated Map Metadata Editing (Issue #135, Issue #136) -->
+            <aside id="library-inspector-drawer" class="library-drawer hidden" role="dialog" aria-modal="true" aria-label="Map Inspector & Refinement">
+                <!-- Drawer Header -->
+                <div class="library-drawer-header">
+                    <div class="drawer-header-left">
+                        <svg class="drawer-header-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                        </svg>
+                        <h3 class="drawer-title">Map Inspector &amp; Refinement</h3>
+                        <span id="inspector-map-id-badge" class="badge badge-map-id mono" title="Active Curated Map ID">—</span>
+                        <span id="inspector-unsaved-badge" class="badge badge-warning hidden">Unsaved</span>
+                    </div>
+                    <div class="drawer-header-right">
+                        <button type="button" id="btn-close-inspector" class="btn-drawer-close" title="Close Drawer (Esc)" aria-label="Close Inspector">
+                            <span aria-hidden="true">×</span>
+                            <kbd>Esc</kbd>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Scrollable Drawer Body -->
+                <div class="library-drawer-body">
+                    <!-- Section: Layer Bundle Visualizer -->
+                    <section class="drawer-section layer-bundle-section" aria-labelledby="heading-layer-bundle">
+                        <div class="drawer-section-header">
+                            <div class="drawer-section-title-group">
+                                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polygon points="12 2 2 7 12 12 22 7 12 2"/>
+                                    <polyline points="2 17 12 22 22 17"/>
+                                    <polyline points="2 12 12 17 22 12"/>
+                                </svg>
+                                <h4 id="heading-layer-bundle" class="drawer-section-title">Layer Bundle Visualizer</h4>
+                                <span id="inspector-layer-count-badge" class="badge badge-count mono">1 Layer</span>
+                            </div>
+                            <span class="drawer-section-hint">Assign floor roles &amp; elevations</span>
+                        </div>
+                        <div id="inspector-layers-list" class="inspector-layers-list" role="list">
+                            <!-- Populated dynamically by app.js -->
+                        </div>
+                    </section>
+
+                    <!-- Section: Themes & Tags Editor -->
+                    <section class="drawer-section themes-tags-section" aria-labelledby="heading-themes-tags">
+                        <div class="drawer-section-header">
+                            <div class="drawer-section-title-group">
+                                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
+                                    <line x1="7" y1="7" x2="7.01" y2="7"/>
+                                </svg>
+                                <h4 id="heading-themes-tags" class="drawer-section-title">Themes &amp; Tags Editor</h4>
+                            </div>
+                        </div>
+
+                        <!-- Themes Group -->
+                        <div class="form-group">
+                            <label class="form-label" for="inspector-theme-input">Themes</label>
+                            <div id="inspector-themes-container" class="chip-input-container">
+                                <div id="inspector-theme-chips" class="chip-list"></div>
+                                <div class="autocomplete-wrapper">
+                                    <input type="text" id="inspector-theme-input" class="chip-text-input" placeholder="Add theme..." autocomplete="off" list="canonical-themes-datalist" />
+                                    <datalist id="canonical-themes-datalist">
+                                        <option value="dungeon"></option>
+                                        <option value="cave"></option>
+                                        <option value="tavern"></option>
+                                        <option value="wilderness"></option>
+                                        <option value="ruins"></option>
+                                        <option value="urban"></option>
+                                        <option value="scifi"></option>
+                                        <option value="building"></option>
+                                    </datalist>
+                                    <button type="button" id="btn-add-theme" class="btn btn-xs btn-chip-add" title="Add Theme">+</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Tags Group -->
+                        <div class="form-group">
+                            <label class="form-label" for="inspector-tag-input">Tags</label>
+                            <div id="inspector-tags-container" class="chip-input-container">
+                                <div id="inspector-tag-chips" class="chip-list"></div>
+                                <div class="chip-input-wrapper">
+                                    <input type="text" id="inspector-tag-input" class="chip-text-input" placeholder="Add tag (Press Enter)..." />
+                                    <button type="button" id="btn-add-tag" class="btn btn-xs btn-chip-add" title="Add Tag">+</button>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Section: Physical Prompt Description Editor -->
+                    <section class="drawer-section description-section" aria-labelledby="heading-description">
+                        <div class="drawer-section-header">
+                            <div class="drawer-section-title-group">
+                                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                                    <polyline points="14 2 14 8 20 8"/>
+                                    <line x1="16" y1="13" x2="8" y2="13"/>
+                                    <line x1="16" y1="17" x2="8" y2="17"/>
+                                    <polyline points="10 9 9 9 8 9"/>
+                                </svg>
+                                <h4 id="heading-description" class="drawer-section-title">DungeonForge Physical Description</h4>
+                            </div>
+                            <span id="inspector-desc-counter" class="desc-counter mono">0 words · 0 chars</span>
+                        </div>
+                        <div class="description-editor-container">
+                            <textarea id="inspector-description-input" class="inspector-textarea" rows="4" placeholder="Dense 40–90 word physical description of architecture, layout, lighting, materials, and features..."></textarea>
+                            <span class="desc-target-hint">Target length: 40–90 words for optimal DungeonForge LoRA conditioning.</span>
+                        </div>
+                    </section>
+
+                    <!-- Section: AI Refinement Actions (Issue #136) -->
+                    <section class="drawer-section ai-refinement-section" aria-labelledby="heading-ai-refinements">
+                        <div class="drawer-section-header">
+                            <div class="drawer-section-title-group">
+                                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+                                </svg>
+                                <h4 id="heading-ai-refinements" class="drawer-section-title">AI Vision Refinements</h4>
+                                <span class="badge badge-ai">Vision</span>
+                            </div>
+                        </div>
+
+                        <div class="ai-actions-grid">
+                            <button type="button" id="btn-inspector-suggest-themes" class="btn btn-secondary btn-ai-action" title="Vision-assisted themes and tags suggestions">
+                                <svg class="ai-btn-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
+                                </svg>
+                                <span class="btn-text">Suggest Themes &amp; Tags</span>
+                                <span class="ai-spinner hidden"></span>
+                            </button>
+
+                            <button type="button" id="btn-inspector-describe" class="btn btn-secondary btn-ai-action" title="Generate dense 40-90 word physical description">
+                                <svg class="ai-btn-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                                </svg>
+                                <span class="btn-text">Generate Description</span>
+                                <span class="ai-spinner hidden"></span>
+                            </button>
+
+                            <button type="button" id="btn-inspector-run-all" class="btn btn-primary btn-ai-combo" title="Sequentially suggest themes &amp; tags then generate description">
+                                <svg class="ai-btn-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                                </svg>
+                                <span class="btn-text">Run All AI Refinements</span>
+                                <span class="ai-spinner hidden"></span>
+                            </button>
+                        </div>
+
+                        <!-- AI Suggestions Pill Container -->
+                        <div id="inspector-ai-suggestions-box" class="ai-suggestions-box hidden">
+                            <div class="ai-suggestions-header">
+                                <span class="ai-suggestions-title">AI Suggested Themes &amp; Tags:</span>
+                                <button type="button" id="btn-accept-all-suggestions" class="btn-link btn-xs" title="Add all suggested themes &amp; tags">+ Add All</button>
+                            </div>
+                            <div id="inspector-ai-suggestions-pills" class="ai-suggestions-pills"></div>
+                        </div>
+                    </section>
+                </div>
+
+                <!-- Drawer Footer -->
+                <div class="library-drawer-footer">
+                    <div class="drawer-footer-left">
+                        <button type="button" id="btn-inspector-fullscreen" class="btn btn-secondary btn-sm btn-inspect-fullscreen" title="Open Map in Fullscreen Stage (Hotkey: F)">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="15 3 21 3 21 9"/>
+                                <polyline points="9 21 3 21 3 15"/>
+                                <line x1="21" y1="3" x2="14" y2="10"/>
+                                <line x1="3" y1="21" x2="10" y2="14"/>
+                            </svg>
+                            <span>Inspect Fullscreen</span>
+                        </button>
+                        <button type="button" id="btn-inspector-delete" class="btn btn-danger btn-sm btn-inspect-delete" title="Delete &amp; Reject Map (Hotkey: Delete)">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"/>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                <line x1="10" y1="11" x2="10" y2="17"/>
+                                <line x1="14" y1="11" x2="14" y2="17"/>
+                            </svg>
+                            <span>Delete &amp; Reject</span>
+                        </button>
+                    </div>
+                    <div class="drawer-footer-right">
+                        <button type="button" id="btn-inspector-discard" class="btn btn-secondary btn-sm" title="Discard unsaved edits">
+                            <span>Discard Changes</span>
+                        </button>
+                        <button type="button" id="btn-inspector-save" class="btn btn-success btn-sm btn-save-changes" title="Save changes (Ctrl+S / Cmd+S)">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                                <polyline points="17 21 17 13 7 13 7 21"/>
+                                <polyline points="7 3 7 8 15 8"/>
+                            </svg>
+                            <span>Save Changes</span>
+                            <kbd>Ctrl+S</kbd>
+                        </button>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Delete & Reject Curated Map Modal (Issue #137) -->
+            <div id="delete-curated-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="delete-curated-title">
+                <div class="modal-card delete-curated-card">
+                    <div class="modal-header">
+                        <div class="delete-header-title">
+                            <span class="delete-warning-icon">⚠️</span>
+                            <h3 id="delete-curated-title">Delete &amp; Reject Curated Map</h3>
+                        </div>
+                        <button type="button" id="btn-close-delete-modal" class="btn-close" aria-label="Close modal">×</button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="delete-modal-warning">
+                            Permanently delete this curated battlemap bundle from disk? This map and its companion metadata will be permanently removed and logged to <code class="mono">rejections.jsonl</code>.
+                        </p>
+                        <div class="delete-target-preview" id="delete-target-preview">
+                            <span class="delete-target-id mono" id="delete-target-id"></span>
+                        </div>
+                        <div class="form-group">
+                            <label for="delete-reason-select" class="form-label">Rejection Reason (Optional):</label>
+                            <select id="delete-reason-select" class="form-select">
+                                <option value="unspecified" selected>Unspecified</option>
+                                <option value="grid_burned_in">Grid Burned In</option>
+                                <option value="isometric_tilt">Isometric Tilt</option>
+                                <option value="blurry_low_res">Blurry / Low Resolution</option>
+                                <option value="bad_geometry">Bad Geometry / Poché Failures</option>
+                                <option value="irrelevant">Irrelevant / Not a Battlemap</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="delete-notes-group">
+                            <label for="delete-notes-input" class="form-label">Rejection Notes (Optional):</label>
+                            <textarea id="delete-notes-input" class="form-textarea" rows="3" placeholder="Optional notes for rejection log (e.g. visible 5ft grid, angled walls, artifacts)..."></textarea>
+                        </div>
+                        <p class="delete-modal-danger-hint">
+                            This action is immediate and cannot be undone.
+                        </p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" id="btn-cancel-delete" class="btn btn-secondary">
+                            <kbd>Esc</kbd>
+                            <span>Cancel</span>
+                        </button>
+                        <button type="button" id="btn-confirm-delete" class="btn btn-danger btn-affirmative">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"/>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                <line x1="10" y1="11" x2="10" y2="17"/>
+                                <line x1="14" y1="11" x2="14" y2="17"/>
+                            </svg>
+                            <span id="btn-confirm-delete-text">Delete &amp; Reject</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Floating Bottom Action Bar for Multi-Select (Issue #137) -->
+            <div id="library-bulk-bar" class="library-bulk-bar hidden" role="toolbar" aria-label="Bulk Selection Actions">
+                <div class="bulk-bar-content">
+                    <div class="bulk-bar-selection">
+                        <span id="bulk-selected-count" class="bulk-selected-badge mono">0 Selected</span>
+                    </div>
+                    <div class="bulk-bar-actions">
+                        <button type="button" id="btn-bulk-delete" class="btn btn-danger btn-sm btn-bulk" title="Delete &amp; Reject Selected Maps">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"/>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                <line x1="10" y1="11" x2="10" y2="17"/>
+                                <line x1="14" y1="11" x2="14" y2="17"/>
+                            </svg>
+                            <span>Delete &amp; Reject Selected</span>
+                        </button>
+                        <button type="button" id="btn-bulk-tag" class="btn btn-secondary btn-sm btn-bulk" title="Add Tag to Selected Maps">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/>
+                                <line x1="7" y1="7" x2="7.01" y2="7"/>
+                            </svg>
+                            <span>Add Tag to Selected</span>
+                        </button>
+                        <button type="button" id="btn-bulk-refine" class="btn btn-secondary btn-sm btn-bulk" title="Generate and apply AI themes, tags and description for selected maps">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/>
+                                <path d="M18 15l.9 2.1 2.1.9-2.1.9L18 21l-.9-2.1-2.1-.9 2.1-.9z"/>
+                            </svg>
+                            <span id="btn-bulk-refine-label">AI Refine Selected</span>
+                        </button>
+                        <button type="button" id="btn-bulk-export" class="btn btn-primary btn-sm btn-bulk" title="Export Selected Maps as ZIP">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            <span>Export Selected (ZIP)</span>
+                        </button>
+                        <button type="button" id="btn-bulk-deselect" class="btn btn-ghost btn-sm btn-bulk" title="Deselect All (Esc)">
+                            <span>Deselect All</span>
+                            <kbd>Esc</kbd>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+
+        <!-- Curate Decision Modal (Vision Suggestions & Custom Tags) -->
+        <div id="curate-decision-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="decision-modal-title">
+            <div class="modal-card decision-modal-card">
+                <div class="modal-header">
+                    <div class="decision-header-info">
+                        <h3 id="decision-modal-title">Curate Battlemap</h3>
+                        <span id="decision-progress-badge" class="decision-progress-badge">Suggestion 1 of 4</span>
+                        <span id="decision-offline-badge" class="decision-offline-badge hidden">AI suggestions offline</span>
+                    </div>
+                    <button type="button" id="btn-close-decision-modal" class="btn-close" aria-label="Close modal">×</button>
+                </div>
+                <div class="modal-body decision-modal-body">
+                    <!-- Step 1: Suggestion Cards Review -->
+                    <div id="decision-card-step" class="decision-step">
+                        <div class="decision-card-container">
+                            <div class="decision-card" id="decision-focal-card">
+                                <span class="decision-card-badge">Suggested Theme / Tag</span>
+                                <div id="decision-card-tag" class="decision-card-tag">Dungeon</div>
+                                <span class="decision-card-subhint">Accept or skip this AI vision tag</span>
+                            </div>
+                        </div>
+                        <div class="decision-card-actions">
+                            <button type="button" id="btn-decision-reject" class="btn decision-btn-reject" title="Skip Tag (Left Arrow)">
+                                <span class="decision-btn-icon">✕</span>
+                                <span class="decision-btn-label">No</span>
+                                <kbd>←</kbd>
+                            </button>
+                            <button type="button" id="btn-decision-undo" class="btn btn-secondary decision-btn-undo" title="Step Back (Backspace or Up Arrow)">
+                                <kbd>Backspace</kbd> / <kbd>↑</kbd>
+                                <span>Undo</span>
+                            </button>
+                            <button type="button" id="btn-decision-accept" class="btn decision-btn-accept" title="Accept Tag (Right Arrow)">
+                                <span class="decision-btn-icon">✓</span>
+                                <span class="decision-btn-label">Yes</span>
+                                <kbd>→</kbd>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Step 2: Custom Tag Input -->
+                    <div id="decision-custom-step" class="decision-step hidden">
+                        <div class="decision-custom-header">
+                            <h4>Add Custom Themes / Tags</h4>
+                            <div id="decision-offline-note" class="decision-offline-note hidden">
+                                <span class="status-dot status-offline"></span>
+                                <span>AI suggestions offline</span>
+                            </div>
+                        </div>
+                        <div class="decision-input-group">
+                            <input type="text" id="decision-tag-input" class="text-input" placeholder="Type a theme and press Enter..." autocomplete="off">
+                            <button type="button" id="btn-add-custom-tag" class="btn btn-secondary">Add</button>
+                        </div>
+                        <div id="decision-autocomplete-list" class="decision-autocomplete-list"></div>
+                        <p class="decision-helper-note">Press Enter to add tag. Press Enter with empty text to finish.</p>
+                        <div id="decision-validation-error" class="decision-validation-error hidden">At least one theme label required</div>
+
+                        <!-- Step 2b: Map Description Preview & Editing -->
+                        <div class="decision-description-section">
+                            <div class="decision-description-header">
+                                <div class="decision-description-title-group">
+                                    <label for="decision-description-input" class="decision-description-label">Map Description (Gemini 3.5 Flash Lite)</label>
+                                    <span id="decision-description-status" class="decision-description-indicator status-dot status-ready" title="AI Vision Ready"></span>
+                                </div>
+                                <button type="button" id="btn-regenerate-description" class="btn btn-secondary btn-sm" title="Re-query vision endpoint with accepted tags">
+                                    <span class="btn-icon">↻</span>
+                                    <span>Regenerate</span>
+                                </button>
+                            </div>
+                            <div id="decision-description-loading" class="decision-description-loading hidden">
+                                <div class="description-skeleton-line skeleton"></div>
+                                <div class="description-skeleton-line skeleton"></div>
+                                <div class="description-skeleton-line skeleton short"></div>
+                            </div>
+                            <textarea id="decision-description-input" class="text-input decision-description-textarea" rows="3" placeholder="AI vision map description will appear here..." autocomplete="off"></textarea>
+                        </div>
+                    </div>
+
+                    <!-- Active Accepted Tags Strip (bottom of both steps) -->
+                    <div class="decision-accepted-container">
+                        <div class="decision-accepted-label">
+                            <span>Accepted Themes &amp; Tags</span>
+                        </div>
+                        <div id="decision-accepted-tags" class="decision-accepted-tags"></div>
+                    </div>
+                </div>
+                <div class="modal-footer decision-modal-footer">
+                    <button type="button" id="btn-cancel-decision" class="btn btn-secondary">
+                        <kbd>Esc</kbd>
+                        <span>Cancel</span>
+                    </button>
+                    <button type="button" id="btn-finish-decision" class="btn btn-primary">
+                        <span>Finish &amp; Curate</span>
+                        <kbd>↵</kbd>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Hotkey Guide Modal -->
+        <div id="help-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="help-modal-title">
+            <div class="modal-card help-modal-card">
+                <div class="modal-header">
+                    <h3 id="help-modal-title">Curator Hotkey Controls & Triage Guide</h3>
+                    <button type="button" id="btn-close-help-modal" class="btn-close" aria-label="Close modal">×</button>
+                </div>
+                <div class="modal-body help-body">
+                    <div class="help-section">
+                        <h4>Rapid Triage Actions</h4>
+                        <div class="help-grid">
+                            <div class="help-row"><kbd>Enter</kbd><span>Approve & Curate active map</span></div>
+                            <div class="help-row"><kbd>L</kbd> / <kbd>T</kbd><span>Switch to Dataset Library / Staging Triage</span></div>
+                            <div class="help-row"><kbd>Esc</kbd><span>Reject Candidate</span></div>
+                            <div class="help-row"><kbd>Z</kbd><span>Undo candidate rejection</span></div>
+                            <div class="help-row"><kbd>J</kbd> or <kbd>→</kbd><span>Advance to next candidate (without curating)</span></div>
+                            <div class="help-row"><kbd>K</kbd> or <kbd>←</kbd><span>Return to previous candidate</span></div>
+                            <div class="help-row"><kbd>B</kbd><span>Open AI Benchmark Suite drawer</span></div>
+                            <div class="help-row"><kbd>H</kbd><span>Open Reddit Harvest drawer</span></div>
+                            <div class="help-row"><kbd>R</kbd><span>Open LoRA Training Runs & Adapters drawer</span></div>
+                        </div>
+                    </div>
+
+                    <div class="help-section">
+                        <h4>Multi-Layer Canvas Deck Controls</h4>
+                        <div class="help-grid">
+                            <div class="help-row"><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd><span>Flip to next / previous layer (preserves exact canvas pan & zoom)</span></div>
+                            <div class="help-row"><kbd>↑</kbd> / <kbd>↓</kbd><span>Cycle previous / next layer within active candidate</span></div>
+                            <div class="help-row"><kbd>3</kbd><span>Trigger Layer Role mode (then <kbd>1-6</kbd> for Ground, Upper, Basement, Roof, Variant, Exclude)</span></div>
+                            <div class="help-row"><kbd>Alt+↑</kbd> / <kbd>Alt+↓</kbd><span>Increment / decrement floor elevation for active layer</span></div>
+                            <div class="help-row"><kbd>Space</kbd><span>Quick-toggle active layer between Exclude and assigned role</span></div>
+                            <div class="help-row"><kbd>U</kbd><span>Split multi-layer bundle into standalone maps (or Undo / Regroup)</span></div>
+                        </div>
+                    </div>
+
+                    <div class="help-section">
+                        <h4>Canvas 2D Viewport Controls</h4>
+                        <div class="help-grid">
+                            <div class="help-row"><kbd>G</kbd><span>Toggle crisp 64px (5ft VTT scale) grid overlay</span></div>
+                            <div class="help-row"><kbd>Shift+G</kbd><span>Open Grid Calibration panel</span></div>
+                            <div class="help-row"><kbd>Shift+Drag</kbd><span>Drag to align grid overlay to map features</span></div>
+                            <div class="help-row"><kbd>Shift+Arrow Keys</kbd><span>Nudge grid offset (1px; Alt for 5px)</span></div>
+                            <div class="help-row"><kbd>Shift+[ / ]</kbd><span>Increase / decrease grid square size</span></div>
+                            <div class="help-row"><kbd>F</kbd><span>Fit map to screen / center viewport</span></div>
+                            <div class="help-row"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>Pan map viewport (Up, Left, Down, Right)</span></div>
+                            <div class="help-row"><kbd>]</kbd> / <kbd>[</kbd><span>Zoom in / zoom out</span></div>
+                            <div class="help-row"><kbd>Wheel</kbd><span>Smooth zoom centered on mouse pointer (10% to 500%)</span></div>
+                            <div class="help-row"><kbd>Drag</kbd><span>Pan map viewport (Left Click or Middle Click)</span></div>
+                            <div class="help-row"><kbd>?</kbd><span>Toggle this hotkey reference guide</span></div>
+                            <div class="help-row"><kbd>Esc</kbd><span>Close active modal dialog or cancel labeling mode</span></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" id="btn-dismiss-help" class="btn btn-primary">
+                        <span>Close Guide</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Ingestion Drawer (Reddit Harvesting Controls) -->
+        <div id="ingestion-drawer" class="drawer-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+            <div class="drawer-panel" id="drawer-panel">
+                <div class="drawer-header">
+                    <div class="drawer-title-group">
+                        <svg class="drawer-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        <h3 id="drawer-title">Reddit Ingestion</h3>
+                    </div>
+                    <button type="button" id="btn-close-drawer" class="btn-close" aria-label="Close drawer">×</button>
+                </div>
+
+                <div class="drawer-body">
+                    <p class="drawer-description">
+                        Harvest community battlemaps from <code>r/battlemaps</code> directly into your staging triage queue.
+                    </p>
+
+                    <!-- Sort Order Selector -->
+                    <div class="form-group">
+                        <label class="control-label">Sort Order</label>
+                        <div id="harvest-sort-group" class="drawer-btn-group" role="radiogroup" aria-label="Sort Order">
+                            <button type="button" class="btn-toggle active" data-sort="hot">
+                                <span>Hot</span>
+                            </button>
+                            <button type="button" class="btn-toggle" data-sort="top">
+                                <span>Top</span>
+                            </button>
+                            <button type="button" class="btn-toggle" data-sort="new">
+                                <span>New</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Time Interval Filter -->
+                    <div class="form-group" id="harvest-time-section">
+                        <label class="control-label" id="harvest-time-label">Time Filter</label>
+                        <div id="harvest-time-group" class="drawer-btn-group" role="radiogroup" aria-label="Time Filter">
+                            <button type="button" class="btn-toggle" data-time="month">
+                                <span>Month</span>
+                            </button>
+                            <button type="button" class="btn-toggle" data-time="year">
+                                <span>Year</span>
+                            </button>
+                            <button type="button" class="btn-toggle active" data-time="all">
+                                <span>All Time</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Max Count Slider (10 to 100 with live number display) -->
+                    <div class="form-group slider-group">
+                        <div class="slider-header">
+                            <label for="harvest-limit" class="control-label">Max Harvest Count</label>
+                            <span id="harvest-limit-value" class="slider-value mono">25</span>
+                        </div>
+                        <input type="range" id="harvest-limit" min="10" max="100" value="25" step="5" class="slider-input">
+                        <div class="slider-ticks">
+                            <span>10</span>
+                            <span>25</span>
+                            <span>50</span>
+                            <span>75</span>
+                            <span>100</span>
+                        </div>
+                    </div>
+
+                    <!-- Gridless Only Toggle -->
+                    <div class="form-group toggle-group">
+                        <div class="toggle-info">
+                            <span class="control-label">Gridless Only</span>
+                            <span class="toggle-hint">Skip battlemaps with burned-in square or hex grids</span>
+                        </div>
+                        <label class="switch" for="harvest-gridless-only">
+                            <input type="checkbox" id="harvest-gridless-only">
+                            <span class="slider-switch"></span>
+                        </label>
+                    </div>
+
+                    <!-- Trigger Button -->
+                    <div class="drawer-action-group">
+                        <button type="button" id="btn-start-harvest" class="btn btn-primary btn-block btn-harvest-action">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="23 4 23 10 17 10"/>
+                                <polyline points="1 20 1 14 7 14"/>
+                                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                            </svg>
+                            <span>Harvest from Reddit</span>
+                        </button>
+                    </div>
+
+                    <!-- Live Progress Display -->
+                    <div id="harvest-progress-container" class="harvest-progress-container hidden">
+                        <div class="progress-bar-track">
+                            <div id="harvest-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
+                        </div>
+                        <div id="harvest-progress-text" class="harvest-progress-text mono">Ready to harvest...</div>
+                    </div>
+                </div>
+
+                <div class="drawer-footer">
+                    <button type="button" id="btn-cancel-drawer" class="btn btn-secondary">
+                        <kbd>Esc</kbd>
+                        <span>Close</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Benchmark Drawer (Multi-Model AI Generation & Benchmarking) -->
+        <div id="benchmark-drawer" class="drawer-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="benchmark-drawer-title">
+            <div class="drawer-panel benchmark-drawer-panel" id="benchmark-drawer-panel">
+                <div class="drawer-header">
+                    <div class="drawer-title-group">
+                        <svg class="drawer-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                        </svg>
+                        <h3 id="benchmark-drawer-title">AI Benchmark Suite</h3>
+                    </div>
+                    <button type="button" id="btn-close-benchmark-drawer" class="btn-close" aria-label="Close benchmark drawer">×</button>
+                </div>
+
+                <div class="drawer-body">
+                    <p class="drawer-description">
+                        Run multi-model generation benchmarks across standard archetypes. Outputs persist as regular <code>staging/{id}/</code> candidates with complete cost telemetry.
+                    </p>
+
+                    <!-- Models Section -->
+                    <div class="form-group">
+                        <div class="section-label-row">
+                            <label class="control-label">Target Models</label>
+                            <div class="quick-select-actions">
+                                <button type="button" id="btn-models-select-all" class="btn-link">All</button>
+                                <span class="action-divider-dot">·</span>
+                                <button type="button" id="btn-models-select-none" class="btn-link">None</button>
+                            </div>
+                        </div>
+                        <div class="checklist-container" id="benchmark-models-list">
+                            <div class="check-item-desc mono">Loading model registry…</div>
+                        </div>
+                    </div>
+
+                    <!-- Prompts Section -->
+                    <div class="form-group">
+                        <div class="section-label-row">
+                            <label class="control-label">Benchmark Archetypes</label>
+                            <div class="quick-select-actions">
+                                <button type="button" id="btn-prompts-select-all" class="btn-link">All</button>
+                                <span class="action-divider-dot">·</span>
+                                <button type="button" id="btn-prompts-select-none" class="btn-link">None</button>
+                            </div>
+                        </div>
+                        <div class="checklist-container" id="benchmark-archetypes-list">
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-archetype" value="stone-crypt" checked>
+                                <div class="check-item-info">
+                                    <span class="check-item-name">Stone Crypt</span>
+                                    <span class="check-item-desc">Flat 2D stone dungeon crypt, central sarcophagus, poché masonry</span>
+                                </div>
+                            </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-archetype" value="riverside-ambush" checked>
+                                <div class="check-item-info">
+                                    <span class="check-item-name">Riverside Ambush</span>
+                                    <span class="check-item-desc">Flat 2D forest river crossing, wooden footbridge, rocky banks</span>
+                                </div>
+                            </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-archetype" value="tavern-common-room" checked>
+                                <div class="check-item-info">
+                                    <span class="check-item-name">Tavern Common Room</span>
+                                    <span class="check-item-desc">Flat 2D fantasy tavern interior, wooden tables, hearth fireplace</span>
+                                </div>
+                            </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-archetype" value="underdark-cavern" checked>
+                                <div class="check-item-info">
+                                    <span class="check-item-name">Underdark Cavern</span>
+                                    <span class="check-item-desc">Flat 2D subterranean cavern, bioluminescent mushrooms, stream</span>
+                                </div>
+                            </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-archetype" value="desert-ruins" checked>
+                                <div class="check-item-info">
+                                    <span class="check-item-name">Desert Ruins</span>
+                                    <span class="check-item-desc">Flat 2D ancient sandstone temple ruins, crumbling pillars, sand drifts</span>
+                                </div>
+                            </label>
+                            <label class="check-item-card">
+                                <input type="checkbox" name="benchmark-archetype" value="sewers-sluice" checked>
+                                <div class="check-item-info">
+                                    <span class="check-item-name">Sewers & Sluice</span>
+                                    <span class="check-item-desc">Flat 2D underground masonry sewer junction, iron grating, green water</span>
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Custom Prompt Input Option -->
+                    <div class="custom-prompt-section">
+                        <label class="custom-prompt-toggle-label" for="benchmark-enable-custom">
+                            <input type="checkbox" id="benchmark-enable-custom">
+                            <span class="toggle-text">Include Custom Prompt</span>
+                        </label>
+                        <div id="custom-prompt-fields" class="custom-prompt-fields hidden">
+                            <div class="form-group">
+                                <label for="benchmark-custom-name">Prompt Name</label>
+                                <input type="text" id="benchmark-custom-name" class="text-input" placeholder="e.g. Haunted Library" value="Custom Scenario">
+                            </div>
+                            <div class="form-group">
+                                <label for="benchmark-custom-prompt">Prompt Directives</label>
+                                <textarea id="benchmark-custom-prompt" class="text-input textarea-input" rows="2" placeholder="Flat 2D battlemap directives, gridless..."></textarea>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Virtuous Cycle Reference Conditioning Option -->
+                    <div class="benchmark-option-group" style="margin-top: 1rem;">
+                        <label class="custom-prompt-toggle-label" for="benchmark-enable-reference">
+                            <input type="checkbox" id="benchmark-enable-reference" checked>
+                            <span class="toggle-text">Virtuous Cycle Reference Conditioning (5★ Curated Maps)</span>
+                        </label>
+                        <div id="benchmark-reference-warning" class="calc-note hidden" role="alert"></div>
+                    </div>
+
+                    <!-- Custom LoRA Adapter Configuration Option -->
+                    <div class="custom-prompt-section lora-override-section" style="margin-top: 1rem;">
+                        <label class="custom-prompt-toggle-label" for="benchmark-enable-custom-lora">
+                            <input type="checkbox" id="benchmark-enable-custom-lora">
+                            <span class="toggle-text">Custom LoRA Adapter (FLUX 3 Klein)</span>
+                        </label>
+                        <div id="benchmark-custom-lora-fields" class="custom-prompt-fields hidden">
+                            <div class="form-group">
+                                <label for="benchmark-custom-lora-path">LoRA Weights URL or Path</label>
+                                <input type="text" id="benchmark-custom-lora-path" class="text-input" placeholder="https://pub-xxx.r2.dev/artifacts/adapter.safetensors">
+                            </div>
+                            <div class="form-group">
+                                <label for="benchmark-custom-lora-scale">LoRA Scale (Default: 0.75)</label>
+                                <input type="number" id="benchmark-custom-lora-scale" class="text-input" min="0" max="4" step="0.05" value="0.75">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Dynamic Pre-Flight Cost Calculator Card -->
+                    <div class="calculator-card" id="preflight-calculator-card">
+                        <div class="calculator-header">
+                            <span class="calc-label">Pre-Flight Cost Projection</span>
+                            <span id="calc-badge-cost" class="calc-badge mono">$0.80</span>
+                        </div>
+                        <div class="calculator-body">
+                            <div id="calc-formula-display" class="calc-formula mono">
+                                4 models × 6 prompts = 24 images (~$0.80)
+                            </div>
+                            <div id="calc-warning-note" class="calc-note hidden">
+                                ⚠️ Exceeds $2.00 safety guardrail threshold — confirmation required
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Run Benchmark Action Button -->
+                    <div class="drawer-action-group">
+                        <button type="button" id="btn-start-benchmark" class="btn btn-primary btn-block btn-run-benchmark">
+                            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                            </svg>
+                            <span id="btn-start-benchmark-text">Run Benchmark ($0.80)</span>
+                        </button>
+                    </div>
+
+                    <!-- Live Progress & Cancellation Display -->
+                    <div id="benchmark-progress-container" class="benchmark-progress-container hidden">
+                        <div class="progress-bar-track">
+                            <div id="benchmark-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
+                        </div>
+                        <div class="progress-status-row">
+                            <span id="benchmark-progress-text" class="benchmark-progress-text mono">Initializing batch...</span>
+                            <button type="button" id="btn-cancel-benchmark-run" class="btn btn-sm btn-danger btn-cancel-run" title="Abort benchmark execution">
+                                <span>Cancel</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Drawer Storage Footprint Widget -->
+                    <div class="drawer-storage-widget" id="drawer-storage-widget">
+                        <div class="drawer-storage-header">
+                            <span class="drawer-storage-title">Disk Storage Footprint</span>
+                            <button type="button" id="btn-drawer-open-storage" class="btn-link" title="Open Storage Footprint & Purge Monitor">Details & Purge →</button>
+                        </div>
+                        <div class="drawer-storage-metric-row">
+                            <div class="drawer-storage-pill">
+                                <span class="pill-label">Staging:</span>
+                                <span id="drawer-storage-staging" class="pill-val mono">—</span>
+                            </div>
+                            <div class="drawer-storage-pill">
+                                <span class="pill-label">Curated:</span>
+                                <span id="drawer-storage-curated" class="pill-val mono">—</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="drawer-footer">
+                    <button type="button" id="btn-cancel-benchmark-drawer" class="btn btn-secondary">
+                        <kbd>Esc</kbd>
+                        <span>Close</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Training Runs & LoRA Adapter Studio Drawer (Issue #209, ADR-0009, ADR-0010) -->
+        <div id="training-drawer" class="drawer-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="training-drawer-title">
+            <div class="drawer-panel training-drawer-panel" id="training-drawer-panel">
+                <div class="drawer-header">
+                    <div class="drawer-title-group">
+                        <svg class="drawer-icon training-drawer-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                        </svg>
+                        <div class="training-title-wrap">
+                            <h3 id="training-drawer-title">Training Runs &amp; LoRA Studio</h3>
+                            <span class="training-subtitle">FLUX 3 Image Klein Fine-Tuning</span>
+                        </div>
+                    </div>
+                    <div class="training-header-actions">
+                        <span id="training-runs-active-badge" class="badge badge-status-running hidden">0 Active</span>
+                        <button type="button" id="btn-close-training-drawer" class="btn-close" aria-label="Close training drawer">×</button>
+                    </div>
+                </div>
+
+                <!-- Sub-nav Tabs: Runs vs Adapters -->
+                <div class="training-drawer-tabs" role="tablist">
+                    <button type="button" id="tab-training-runs" class="training-tab-btn active" role="tab" aria-selected="true">
+                        <span>Training Runs</span>
+                        <span id="training-runs-count-tab" class="tab-badge">0</span>
+                    </button>
+                    <button type="button" id="tab-training-adapters" class="training-tab-btn" role="tab" aria-selected="false">
+                        <span>LoRA Adapters</span>
+                        <span id="training-adapters-count-tab" class="tab-badge">0</span>
+                    </button>
+                </div>
+
+                <div class="drawer-body training-drawer-body">
+                    <!-- Tab 1: Training Runs View -->
+                    <div id="training-view-runs" class="training-view-pane">
+                        <!-- Launch Run Card -->
+                        <div class="training-launch-card" id="training-launch-card">
+                            <div class="launch-card-header">
+                                <div class="launch-card-title-group">
+                                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polygon points="5 3 19 12 5 21 5 3"/>
+                                    </svg>
+                                    <span class="launch-card-title">Start Fine-Tuning Run</span>
+                                </div>
+                                <button type="button" id="btn-toggle-launch-form" class="btn btn-secondary btn-xs">
+                                    <span id="btn-toggle-launch-text">Collapse</span>
+                                </button>
+                            </div>
+
+                            <div id="training-launch-form" class="launch-form-body">
+                                <div class="form-group">
+                                    <label for="training-snapshot-select" class="form-label">
+                                        Dataset Scope &amp; Snapshot
+                                    </label>
+                                    <select id="training-snapshot-select" class="form-select mono">
+                                        <option value="__freeze_current__">⚡ Freeze Current Scope Now</option>
+                                    </select>
+                                    <div class="form-hint" id="training-scope-hint">
+                                        Target: Current active theme scope.
+                                    </div>
+                                </div>
+
+                                <div class="form-group">
+                                    <label class="form-label">Training Recipe Policy</label>
+                                    <div class="training-policy-selector" role="radiogroup" aria-label="Training Recipe Policy">
+                                        <label class="policy-option active" id="policy-opt-calibration">
+                                            <input type="radio" name="training-policy" value="calibration" checked>
+                                            <div class="policy-details">
+                                                <div class="policy-head">
+                                                    <span class="policy-name">Calibration</span>
+                                                    <span class="policy-badge">1,500 Steps</span>
+                                                </div>
+                                                <span class="policy-desc">Quick convergence test (~15 min, $1.25 est.)</span>
+                                            </div>
+                                        </label>
+                                        <label class="policy-option" id="policy-opt-full">
+                                            <input type="radio" name="training-policy" value="full">
+                                            <div class="policy-details">
+                                                <div class="policy-head">
+                                                    <span class="policy-name">Full Fine-Tuning</span>
+                                                    <span class="policy-badge">4,000 Steps</span>
+                                                </div>
+                                                <span class="policy-desc">Production battlemap style LoRA (~40 min, $3.35 est.)</span>
+                                            </div>
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <!-- Readiness Gate Status Readout -->
+                                <div class="readiness-gate-row">
+                                    <div class="readiness-indicator-wrap">
+                                        <span class="gate-label">Readiness Gate:</span>
+                                        <span id="training-readiness-indicator" class="gate-status mono">Auditing...</span>
+                                    </div>
+                                    <button type="button" id="btn-check-training-readiness" class="btn btn-secondary btn-xs" title="Audit active dataset scope">
+                                        Re-audit Scope
+                                    </button>
+                                </div>
+
+                                <!-- Launch Action & Error Banner -->
+                                <div id="training-launch-error" class="training-error-banner hidden" role="alert"></div>
+
+                                <button type="button" id="btn-start-training-run" class="btn btn-primary btn-block btn-start-run">
+                                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polygon points="5 3 19 12 5 21 5 3"/>
+                                    </svg>
+                                    <span id="btn-start-run-text">Launch Training Run</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Runs Section Toolbar -->
+                        <div class="training-section-header">
+                            <div class="section-title-group">
+                                <span class="section-title">Run History</span>
+                                <span id="training-runs-total-badge" class="badge badge-count mono">0</span>
+                            </div>
+                            <div class="section-actions">
+                                <select id="training-runs-filter" class="form-select-sm" aria-label="Filter training runs">
+                                    <option value="all" selected>All Runs</option>
+                                    <option value="active">Active (Queued / Running)</option>
+                                    <option value="succeeded">Succeeded</option>
+                                    <option value="failed">Failed</option>
+                                    <option value="cancelled">Cancelled</option>
+                                </select>
+                                <button type="button" id="btn-refresh-training-runs" class="btn btn-secondary btn-xs btn-icon-only" title="Refresh runs">
+                                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="23 4 23 10 17 10"/>
+                                        <polyline points="1 20 1 14 7 14"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Runs Cards List -->
+                        <div id="training-runs-list" class="training-cards-list"></div>
+                        <div id="training-runs-empty" class="training-empty-state hidden">
+                            <p>No training runs found. Click <strong>Launch Training Run</strong> above to begin fine-tuning.</p>
+                        </div>
+                    </div>
+
+                    <!-- Tab 2: LoRA Adapters Catalog View -->
+                    <div id="training-view-adapters" class="training-view-pane hidden">
+                        <div class="training-section-header">
+                            <div class="section-title-group">
+                                <span class="section-title">Published Adapters</span>
+                                <span id="adapters-count-badge" class="badge badge-lora">0 Adapters</span>
+                            </div>
+                            <div class="section-actions">
+                                <select id="training-adapters-filter" class="form-select-sm" aria-label="Filter LoRA adapters">
+                                    <option value="all" selected>All Adapters</option>
+                                    <option value="usable">Active Only</option>
+                                    <option value="retired">Retired Only</option>
+                                </select>
+                                <button type="button" id="btn-refresh-training-adapters" class="btn btn-secondary btn-xs btn-icon-only" title="Refresh adapters">
+                                    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="23 4 23 10 17 10"/>
+                                        <polyline points="1 20 1 14 7 14"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Adapters Cards List -->
+                        <div id="training-adapters-list" class="training-cards-list"></div>
+                        <div id="training-adapters-empty" class="training-empty-state hidden">
+                            <p>No LoRA adapters published yet. Checkpoints from succeeded training runs can be published into the catalog.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="drawer-footer">
+                    <button type="button" id="btn-cancel-training-drawer" class="btn btn-secondary">
+                        <kbd>Esc</kbd>
+                        <span>Close</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Budget Safety Guard Modal -->
+        <div id="budget-guard-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="budget-guard-title">
+            <div class="modal-card budget-guard-card">
+                <div class="modal-header">
+                    <div class="guard-header-title">
+                        <span class="guard-warning-icon">⚠️</span>
+                        <h3 id="budget-guard-title">Budget Safety Guard</h3>
+                    </div>
+                    <button type="button" id="btn-close-budget-guard" class="btn-close" aria-label="Close modal">×</button>
+                </div>
+                <div class="modal-body">
+                    <p class="modal-description">
+                        The projected inference cost for this benchmark batch exceeds the safety guardrail limit of <strong>$2.00</strong>.
+                    </p>
+                    <div class="budget-guard-cost-box">
+                        <div class="guard-cost-label">Estimated Maximum Batch Spend</div>
+                        <div id="budget-guard-cost-amount" class="guard-cost-amount mono">$0.00</div>
+                        <div id="budget-guard-breakdown" class="guard-cost-sub mono">0 models × 0 prompts = 0 images</div>
+                    </div>
+                    <p class="guard-confirmation-hint">
+                        Please confirm to initiate OpenRouter API model generation and record charges to the telemetry ledger.
+                    </p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" id="btn-dismiss-budget-guard" class="btn btn-secondary">
+                        <kbd>Esc</kbd>
+                        <span>Cancel</span>
+                    </button>
+                    <button type="button" id="btn-confirm-budget-guard" class="btn btn-danger btn-affirmative">
+                        <span id="btn-confirm-budget-guard-text">Confirm & Run ($0.00)</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Floating Benchmark Progress Window -->
+        <div id="benchmark-progress-window" class="benchmark-progress-window hidden" role="region" aria-label="AI Benchmark Progress">
+            <div class="benchmark-window-header">
+                <div class="benchmark-window-title-group">
+                    <svg class="benchmark-window-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                    </svg>
+                    <span class="benchmark-window-title">AI Benchmark Runner</span>
+                    <span id="benchmark-window-status" class="benchmark-window-badge status-running">Running</span>
+                </div>
+                <div class="benchmark-window-header-actions">
+                    <button type="button" id="btn-benchmark-window-minimize" class="benchmark-window-action-btn" title="Minimize to pill" aria-label="Minimize">
+                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="5" y1="12" x2="19" y2="12"/>
+                        </svg>
+                    </button>
+                    <button type="button" id="btn-benchmark-window-close" class="benchmark-window-action-btn" title="Close window" aria-label="Close" disabled>
+                        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"/>
+                            <line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <div class="benchmark-window-body">
+                <!-- Overall progress section -->
+                <div class="benchmark-window-progress-section">
+                    <div class="benchmark-window-progress-meta">
+                        <span id="benchmark-window-current-step" class="benchmark-window-current-step">Initializing batch...</span>
+                        <span id="benchmark-window-progress-stats" class="benchmark-window-progress-stats mono">0/0 (0%)</span>
+                    </div>
+                    <div class="progress-bar-track benchmark-window-progress-track">
+                        <div id="benchmark-window-progress-bar" class="progress-bar-fill benchmark-window-progress-fill" style="width: 0%"></div>
+                    </div>
+                </div>
+
+                <!-- Live preview strip / grid -->
+                <div class="benchmark-window-section">
+                    <div class="benchmark-window-section-header">
+                        <span class="benchmark-window-section-label">Live Previews</span>
+                        <span id="benchmark-window-preview-count" class="benchmark-window-section-sub mono">0 generated</span>
+                    </div>
+                    <div id="benchmark-window-previews" class="benchmark-window-previews">
+                        <div class="benchmark-previews-empty" id="benchmark-previews-empty">Waiting for first image completion...</div>
+                    </div>
+                </div>
+
+                <!-- Live Logs section -->
+                <div id="benchmark-window-logs-container" class="benchmark-window-logs-container">
+                    <div class="benchmark-window-section-header">
+                        <span class="benchmark-window-section-label">Execution Log</span>
+                        <button type="button" id="btn-benchmark-clear-logs" class="benchmark-window-clear-btn" title="Clear logs">Clear</button>
+                    </div>
+                    <div id="benchmark-window-logs" class="benchmark-window-logs mono"></div>
+                </div>
+            </div>
+
+            <div class="benchmark-window-footer">
+                <div class="benchmark-window-cost-box">
+                    <span class="cost-label">Batch Spend:</span>
+                    <span id="benchmark-window-cost" class="cost-val mono">$0.0000</span>
+                </div>
+                <div class="benchmark-window-footer-controls">
+                    <button type="button" id="btn-benchmark-window-cancel" class="btn btn-sm btn-danger btn-cancel-run">
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="6" x2="6" y2="18"/>
+                            <line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                        <span>Cancel Batch</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Minimized Floating Pill -->
+        <div id="benchmark-window-pill" class="benchmark-window-pill hidden" role="button" tabindex="0" title="Click to expand benchmark runner">
+            <span class="benchmark-pill-spinner"></span>
+            <svg class="benchmark-pill-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+            </svg>
+            <span class="benchmark-pill-title">Benchmark</span>
+            <span id="benchmark-pill-count" class="benchmark-pill-count mono">0/0</span>
+            <span id="benchmark-pill-cost" class="benchmark-pill-cost mono">$0.00</span>
+        </div>
+
+        <!-- Storage Quota & Footprint Modal -->
+        <div id="storage-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="storage-modal-title">
+            <div class="modal-card storage-modal-card">
+                <div class="modal-header">
+                    <div class="storage-header-title">
+                        <svg class="storage-modal-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                            <ellipse cx="12" cy="5" rx="9" ry="3"/>
+                            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+                            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+                        </svg>
+                        <h3 id="storage-modal-title">Storage Footprint & Quota Monitor</h3>
+                    </div>
+                    <button type="button" id="btn-close-storage-modal" class="btn-close" aria-label="Close modal">×</button>
+                </div>
                 <div class="modal-body storage-modal-body">
                     <p class="modal-description">
                         Real-time disk storage allocation across staging triage, curated theme collections, rejection catalogs, and inference telemetry.
                     </p>
 
-                    <!-- Loading indicator: a stats scan over a deployed bucket is a real wait, and
-                         the cards below must never read as a measured zero footprint meanwhile. -->
+                    <!-- Loading indicator: a stats read over a deployed bucket is a real wait, and the
+                         cards below must never read as a measured zero footprint meanwhile (#292). -->
                     <div id="storage-stats-loading" class="storage-state storage-state-loading hidden" role="status" aria-live="polite">
                         <div class="storage-state-spinner spinner"></div>
                         <span class="storage-state-text">Reading storage footprint…</span>
                     </div>
 
-                    <!-- Error state: an unreadable footprint is named and retryable, never rendered
-                         as 0 B (issue #292). -->
+                    <!-- Error state: an unreadable footprint is named and retryable, never rendered as
+                         `0 B` (issue #292). -->
                     <div id="storage-stats-error" class="storage-state storage-state-error hidden" role="alert">
                         <div class="storage-state-body">
                             <span class="storage-state-title">Could not load storage footprint</span>
@@ -100,3 +1969,67 @@
                     </div>
                     </div>
                 </div>
+                <div class="modal-footer">
+                    <button type="button" id="btn-refresh-storage" class="btn btn-secondary">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="23 4 23 10 17 10"/>
+                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                        </svg>
+                        <span>Refresh</span>
+                    </button>
+                    <button type="button" id="btn-dismiss-storage-modal" class="btn btn-primary">
+                        <span>Close</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Purge Staging Confirmation Modal -->
+        <div id="purge-confirm-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="purge-confirm-title">
+            <div class="modal-card purge-confirm-card">
+                <div class="modal-header">
+                    <div class="guard-header-title">
+                        <span class="guard-warning-icon">⚠️</span>
+                        <h3 id="purge-confirm-title">Purge Staging Queue</h3>
+                    </div>
+                    <button type="button" id="btn-close-purge-modal" class="btn-close" aria-label="Close modal">×</button>
+                </div>
+                <div class="modal-body">
+                    <p class="modal-description">
+                        Are you sure you want to clean up all unreviewed battlemap files in staging?
+                    </p>
+                    <div class="purge-warning-box">
+                        <div class="purge-reclaim-highlight">
+                            <div class="purge-reclaim-label">Space to Reclaim:</div>
+                            <div class="purge-reclaim-amount mono" id="purge-reclaim-bytes">—</div>
+                            <div class="purge-reclaim-sub mono" id="purge-reclaim-files">Reclaim size unavailable until the footprint loads</div>
+                        </div>
+                        <ul class="purge-preservation-list">
+                            <li>✅ <strong>Curated maps & LoRA companions</strong> will remain untouched.</li>
+                            <li>✅ <strong>Rejection catalog (`rejections.json`)</strong> will remain untouched.</li>
+                            <li>✅ <strong>Generation cost telemetry & ledger</strong> will remain untouched.</li>
+                        </ul>
+                    </div>
+                    <p class="guard-confirmation-hint">
+                        This operation immediately prunes staging files and resets the triage queue. This action cannot be undone.
+                    </p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" id="btn-cancel-purge" class="btn btn-secondary">
+                        <kbd>Esc</kbd>
+                        <span>Cancel</span>
+                    </button>
+                    <button type="button" id="btn-confirm-purge" class="btn btn-danger btn-affirmative">
+                        <span id="btn-confirm-purge-text">Confirm & Purge Staging</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toast Notifications Container -->
+        <div id="toast-container" class="toast-container" aria-live="polite"></div>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+</body>
+</html>

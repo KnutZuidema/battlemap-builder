@@ -109,10 +109,26 @@ async fn write_sized(blobs: &Arc<RecordingBlobs>, key: BlobKey, size: usize) {
     blobs.write_blob(&key, &bytes).await.expect("write blob");
 }
 
+/// Sizes the fixtures are built from, so the assertions read as arithmetic rather than magic
+/// numbers. Six curated blobs in three `curated/{id}/` bundles.
+const STAGING_BYTES: u64 = 512 + 256;
+const STAGING_FILES: usize = 2;
+/// `map_dungeon` (a Dungeon bundle) holds two layers totalling 3072 bytes.
+const DUNGEON_MAP_BYTES: u64 = 1024 + 2048;
+/// `map_multitheme` is tagged `cave` *and* `dungeon`, so both themes count its 512 bytes.
+const MULTITHEME_MAP_BYTES: u64 = 512;
+/// `curated/orphan_bundle/` has no catalog row, so no theme owns these bytes.
+const ORPHAN_BYTES: u64 = 128;
+const CURATED_BYTES: u64 = DUNGEON_MAP_BYTES + MULTITHEME_MAP_BYTES + ORPHAN_BYTES;
+const CURATED_FILES: usize = 4;
+const TELEMETRY_BYTES: u64 = 300 + 40;
+const TELEMETRY_FILES: usize = 2;
+/// The rejection log's blob size; its `file_count` is the number of rejection *records*, and
+/// this fixture logs none.
+const REJECTION_LOG_BYTES: u64 = 2;
+
 /// Two staging layers, two curated maps (one tagged with two themes) and one orphan bundle no
 /// catalog row describes, plus two telemetry ledgers and a rejection log.
-///
-/// `(staging_bytes, curated_bytes, telemetry_bytes, rejected_bytes)` = (768, 3712, 340, 2).
 async fn seed(
     catalog: &Arc<InMemoryCatalogRepository>,
     blobs: &Arc<RecordingBlobs>,
@@ -129,7 +145,7 @@ async fn seed(
         .await;
     }
 
-    // A single-theme bundle with two layers: 3072 bytes over 2 files.
+    // A single-theme bundle with two layers.
     let dungeon_map = CuratedMap::with_now(
         "map_dungeon",
         Theme::Dungeon,
@@ -158,7 +174,7 @@ async fn seed(
     )
     .await;
 
-    // A bundle tagged with two canonical themes: 512 bytes over 1 file, counted for both.
+    // A bundle tagged with two canonical themes, so it contributes to both themes.
     let multitheme_map = CuratedMap::with_now(
         "map_multitheme",
         Theme::Cave,
@@ -255,12 +271,21 @@ async fn test_storage_stats_costs_one_curated_listing_and_no_per_map_listings() 
     );
 
     // The single listing still accounts for every curated byte, orphan bundles included.
-    assert_eq!(stats.curated, DirectoryStats::new(1024 + 2048 + 512 + 128, 4));
-    assert_eq!(stats.staging, DirectoryStats::new(768, 2));
-    assert_eq!(stats.telemetry, DirectoryStats::new(340, 2));
-    assert_eq!(stats.rejected, DirectoryStats::new(2, 0));
-    assert_eq!(stats.total_bytes, 768 + 3712 + 2 + 340);
-    assert_eq!(stats.total_files, 2 + 4 + 0 + 2);
+    assert_eq!(stats.curated, DirectoryStats::new(CURATED_BYTES, CURATED_FILES));
+    assert_eq!(stats.staging, DirectoryStats::new(STAGING_BYTES, STAGING_FILES));
+    assert_eq!(
+        stats.telemetry,
+        DirectoryStats::new(TELEMETRY_BYTES, TELEMETRY_FILES)
+    );
+    assert_eq!(stats.rejected, DirectoryStats::new(REJECTION_LOG_BYTES, 0));
+    assert_eq!(
+        stats.total_bytes,
+        STAGING_BYTES + CURATED_BYTES + REJECTION_LOG_BYTES + TELEMETRY_BYTES
+    );
+    assert_eq!(
+        stats.total_files,
+        STAGING_FILES + CURATED_FILES + 0 + TELEMETRY_FILES
+    );
 }
 
 /// The in-memory join must attribute bytes exactly as a per-map `curated/{id}/` listing did:
@@ -273,23 +298,30 @@ async fn test_curated_by_theme_is_derived_from_the_single_listing_joined_with_th
 
     let stats = service.storage_stats().await.expect("stats succeed");
 
+    // Dungeon owns its own bundle plus the multitheme bundle it is also tagged with.
     let dungeon = stats
         .curated_by_theme
         .get(&Theme::Dungeon)
         .expect("dungeon theme present");
     assert_eq!(
         *dungeon,
-        curator::domain::ThemeStorageStats::new(Theme::Dungeon, 1024 + 2048 + 512, 3, 2),
+        curator::domain::ThemeStorageStats::new(
+            Theme::Dungeon,
+            DUNGEON_MAP_BYTES + MULTITHEME_MAP_BYTES,
+            3,
+            2,
+        ),
         "the dungeon theme sums both of its maps' layers"
     );
 
+    // Cave owns only the multitheme bundle.
     let cave = stats
         .curated_by_theme
         .get(&Theme::Cave)
         .expect("cave theme present");
     assert_eq!(
         *cave,
-        curator::domain::ThemeStorageStats::new(Theme::Cave, 512, 1, 1),
+        curator::domain::ThemeStorageStats::new(Theme::Cave, MULTITHEME_MAP_BYTES, 1, 1),
         "a bundle tagged with two themes counts for each of them"
     );
 
@@ -303,16 +335,18 @@ async fn test_curated_by_theme_is_derived_from_the_single_listing_joined_with_th
         curator::domain::ThemeStorageStats::new(Theme::Tavern, 0, 0, 0)
     );
 
-    // Orphaned bundle bytes are curated storage but belong to no theme.
+    // The per-theme breakdown counts every curated byte at least once, and the multitheme bundle
+    // exactly twice — once per theme. Only the orphan bundle's bytes belong to no theme, so the
+    // theme totals are the curated total minus the orphans, plus that one duplicate.
     let themed_bytes: u64 = stats
         .curated_by_theme
         .values()
         .map(|theme_stats| theme_stats.bytes)
         .sum();
     assert_eq!(
-        themed_bytes + 128,
-        stats.curated.bytes,
-        "only the orphan bundle's 128 bytes fall outside the per-theme breakdown"
+        themed_bytes,
+        CURATED_BYTES - ORPHAN_BYTES + MULTITHEME_MAP_BYTES,
+        "the orphan bundle is the only curated bytes no theme owns"
     );
 }
 
@@ -325,8 +359,8 @@ async fn test_purge_staging_reclaims_the_staged_sizes_and_keeps_curated_data() {
     let stats_before = service.storage_stats().await.expect("stats before purge");
     let purged = service.purge_staging().await.expect("purge succeeds");
 
-    assert_eq!(purged.purged_files, 2);
-    assert_eq!(purged.reclaimed_bytes, stats_before.staging.bytes);
+    assert_eq!(purged.purged_files, STAGING_FILES);
+    assert_eq!(purged.reclaimed_bytes, STAGING_BYTES);
     assert_eq!(purged.remaining_staging_files, 0);
 
     let stats_after = service.storage_stats().await.expect("stats after purge");
@@ -337,7 +371,11 @@ async fn test_purge_staging_reclaims_the_staged_sizes_and_keeps_curated_data() {
 
     // Curated bundles and the telemetry/rejection records survive untouched.
     for map in &maps {
-        let expected = if map.id == "map_multitheme" { 512 } else { 1024 };
+        let expected = if map.id == "map_multitheme" {
+            MULTITHEME_MAP_BYTES as usize
+        } else {
+            1024
+        };
         assert_eq!(
             blobs
                 .read_blob(&curated_layer(&map.id, 0, LayerRole::Ground, Some(0)))
@@ -353,7 +391,7 @@ async fn test_purge_staging_reclaims_the_staged_sizes_and_keeps_curated_data() {
             .await
             .expect("list curated")
             .len(),
-        2
+        maps.len()
     );
     assert_eq!(
         blobs

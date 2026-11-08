@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 
 import { fetchStorageStats as fetchStorageStatsRequest } from "../assets/requests/storage.js";
 import { has } from "../assets/requests/tracker.js";
-import { fetchStorageStats, setupStorageControls } from "../assets/views/storage.js";
+import { fetchStorageStats } from "../assets/views/storage.js";
 import { state } from "../assets/store.js";
 import { clearRequestFailure } from "../assets/requests/failures.js";
 import { installRequestDom, jsonResponse, stubFetch } from "./support/fakes.js";
@@ -96,6 +96,27 @@ test("a refresh after the read settled issues a fresh request", async (t) => {
     await fetchStorageStatsRequest();
 
     assert.equal(server.calls.length, 2, "an explicit refresh re-reads the footprint");
+});
+
+test("the boot prefetch and a drawer open share one scan", async (t) => {
+    setUp(t);
+    const pending = deferred();
+    const server = stubFetch(() => pending.promise);
+    t.after(() => server.restore());
+
+    // `app.js` prefetches quietly; opening the drawer then reads again. Both are one request.
+    const boot = fetchStorageStats({ quiet: true });
+    const drawerOpen = fetchStorageStats();
+    await settle();
+    assert.equal(server.calls.length, 1, "the drawer open joins the boot prefetch");
+
+    pending.resolve(jsonResponse(STATS));
+    assert.deepEqual(await boot, STATS);
+    assert.deepEqual(await drawerOpen, STATS);
+    await settle();
+    // The joined read renders once, for both callers.
+    assert.equal(globalThis.document.getElementById("storage-staging-bytes").textContent, "1 KB");
+    assert.equal(state.storageStatsPhase, "ready");
 });
 
 test("the drawer shows a loading indicator and then the measured figures", async (t) => {
@@ -195,19 +216,21 @@ test("a retry after a failure renders the footprint", async (t) => {
     assert.equal(globalThis.document.getElementById("storage-stats-content").classList.contains("hidden"), false);
 });
 
-test("the retry control starts a new read once the previous one failed", async (t) => {
+test("a quiet boot prefetch records the failure without painting the closed drawer", async (t) => {
     setUp(t);
-    const server = stubFetch(async () => jsonResponse(STATS));
+    const server = stubFetch(async () => {
+        throw new TypeError("Failed to fetch");
+    });
     t.after(() => server.restore());
 
-    // `setupStorageControls` binds the retry button the error panel offers.
-    setupStorageControls();
-    assert.equal(server.calls.length, 0, "binding controls reads nothing");
-
-    // The fake DOM records no listeners, so the click path is asserted through the same function
-    // the listener calls.
-    await fetchStorageStats();
+    // The drawer is closed at boot, so its error panel is not what an operator is looking at.
+    await fetchStorageStats({ quiet: true });
     await settle();
-    assert.equal(server.calls.length, 1);
-    assert.equal(state.storageStatsPhase, "ready");
+
+    assert.equal(state.storageStatsPhase, "error", "the phase still records the failure");
+    assert.equal(
+        globalThis.document.getElementById("storage-stats-error").classList.contains("hidden"),
+        true,
+        "the closed drawer is not repainted with an error",
+    );
 });

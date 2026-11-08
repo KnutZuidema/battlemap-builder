@@ -1,17 +1,21 @@
 /**
  * Storage footprint monitor and the staging purge confirmation modals.
  *
- * The stats render has three explicit phases instead of an only-on-success update:
+ * The stats render has three mutually exclusive states instead of an only-on-success update:
  *
- * - `loading` — the drawer shows a loading indicator, because a scan over a deployed bucket is a
- *   real wait and the markup's fallback numbers are not a footprint.
- * - `ready` — the measured figures.
+ * - `loading` — the read is in flight and the drawer says so instead of showing figures;
+ * - `ready` — the measured figures;
  * - `error` — an explicit, retryable failure message.
  *
  * #292 is why: the request swallowed its own failure in `catch (_) {}`, so the drawer kept
  * rendering the `index.html` fallbacks — `0 B`, `0 files`, `0 B (0)` — next to a
  * `Load storage stats failed` toast. Reporting an unreadable footprint as an empty one is worse
  * than reporting nothing at all.
+ *
+ * The two state elements are owned by this view: `#storage-stats-loading` and
+ * `#storage-stats-error` (with its `#btn-retry-storage-stats` action) are looked up in the markup
+ * and, when the modal does not carry them, created on demand — so the state contract lives next to
+ * the code that paints it rather than in the page.
  */
 
 import { state } from "../store.js";
@@ -24,68 +28,100 @@ import { fetchStorageStats as requestStorageStats, purgeStaging as requestPurgeS
 /** Text the loading indicator carries while a footprint read is in flight. */
 const LOADING_TEXT = "Reading storage footprint…";
 
-/** Element ids of the two non-figure states the drawer can be in. */
 const LOADING_ID = "storage-stats-loading";
 const ERROR_ID = "storage-stats-error";
 const RETRY_ID = "btn-retry-storage-stats";
 
 /**
- * Show or clear the loading indicator.
- *
- * The element carries its own label and is never given children, so writing `textContent` here
- * cannot destroy markup: the spinner is drawn by `.storage-state-loading::before` in
- * `storage-states.css`.
+ * Every figure the drawer and its widget display, so an in-flight or failed read can clear them
+ * all rather than leave a number on screen claiming a measurement that was never made.
  */
+const FIGURE_IDS = [
+    "storage-staging-bytes",
+    "storage-staging-files",
+    "storage-breakdown-reddit",
+    "storage-breakdown-generated",
+    "storage-breakdown-root",
+    "storage-curated-bytes",
+    "storage-curated-files",
+    "storage-rejected-bytes",
+    "storage-rejected-records",
+    "storage-telemetry-bytes",
+    "storage-telemetry-files",
+    "storage-total-bytes",
+    "storage-total-files",
+    "drawer-storage-staging",
+    "drawer-storage-curated",
+];
+
+/**
+ * The element for `id`, created inside the storage modal when the markup does not carry it.
+ *
+ * The modal body is the host, so a created indicator sits directly above the figures it replaces.
+ */
+function stateElement(id, { tag = "div", className = "" } = {}) {
+    const existing = document.getElementById(id);
+    if (existing) return existing;
+
+    const created = document.createElement(tag);
+    created.id = id;
+    created.className = className;
+    const host = document.getElementById("storage-modal") || document.body;
+    if (!host) return null;
+    if (typeof host.prepend === "function") host.prepend(created);
+    else host.appendChild(created);
+    return created;
+}
+
+/** Show or clear the loading indicator; it carries its own label and no children. */
 function renderLoading(visible) {
-    const el = document.getElementById(LOADING_ID);
+    const el = stateElement(LOADING_ID, { className: "storage-state storage-state-loading hidden" });
     if (!el) return;
     el.textContent = visible ? LOADING_TEXT : "";
     el.classList.toggle("hidden", !visible);
 }
 
 /**
- * Show or clear the error state, naming the failure and offering a retry.
+ * The retry action the error state offers, bound to a fresh read exactly once.
  *
- * The retry control is moved back into the panel after the message replaces the panel's contents,
- * so the listener `setupStorageControls` registered on it stays attached: it is the same element,
- * only re-parented.
+ * The listener is attached here rather than only in `setupStorageControls`, because a markup that
+ * does not carry the control gets it created at error time — and a control that is created must
+ * still work.
+ */
+function retryControl() {
+    const retry = stateElement(RETRY_ID, { tag: "button", className: "btn btn-secondary btn-sm" });
+    if (!retry) return null;
+    if (!retry.__storageRetryBound) {
+        retry.type = "button";
+        retry.textContent = "Retry";
+        retry.addEventListener("click", () => fetchStorageStats());
+        retry.__storageRetryBound = true;
+    }
+    return retry;
+}
+
+/**
+ * Show or clear the error state: the failure message plus the retry action.
+ *
+ * `message == null` clears the state entirely, which is what a new read does before it starts.
  */
 function renderError(message) {
-    const el = document.getElementById(ERROR_ID);
+    const el = stateElement(ERROR_ID, { className: "storage-state storage-state-error hidden" });
     if (!el) return;
     if (message == null) {
         el.textContent = "";
         el.classList.add("hidden");
         return;
     }
-    const retry = document.getElementById(RETRY_ID);
     el.textContent = `Load storage stats failed: ${message}`;
+    const retry = retryControl();
     if (retry && retry.parentElement !== el) el.appendChild(retry);
     el.classList.remove("hidden");
 }
 
-/**
- * Clear every figure, so a failed or in-flight read never leaves a number on screen claiming a
- * measurement that was never made.
- */
+/** Blank every figure and the theme list, so nothing on screen claims an unread footprint. */
 function clearStorageFigures() {
-    for (const id of [
-        "storage-staging-bytes",
-        "storage-staging-files",
-        "storage-breakdown-reddit",
-        "storage-breakdown-generated",
-        "storage-breakdown-root",
-        "storage-curated-bytes",
-        "storage-curated-files",
-        "storage-rejected-bytes",
-        "storage-rejected-records",
-        "storage-telemetry-bytes",
-        "storage-telemetry-files",
-        "storage-total-bytes",
-        "storage-total-files",
-        "drawer-storage-staging",
-        "drawer-storage-curated",
-    ]) {
+    for (const id of FIGURE_IDS) {
         const el = document.getElementById(id);
         if (el) el.textContent = "";
     }
@@ -99,8 +135,7 @@ function clearStorageFigures() {
  * Read the footprint and render it.
  *
  * The request joins any scan already in flight (`requests/storage.js`), so the boot prefetch, a
- * drawer open, a refresh and a retry never overlap. The three states are mutually exclusive: a
- * read in flight or a failure hides every figure rather than showing the markup's `0 B`.
+ * drawer open, a refresh and a retry never overlap.
  */
 export async function fetchStorageStats() {
     state.storageStatsPhase = "loading";
@@ -118,7 +153,7 @@ export async function fetchStorageStats() {
         return data;
     } catch (error) {
         if (error && error.name === "AbortError") {
-            // Cancelled, not failed: restore the phase the last settled read left behind.
+            // Cancelled, not failed: restore the state the last settled read left behind.
             state.storageStatsPhase = state.storageStats ? "ready" : "idle";
             renderLoading(false);
             if (state.storageStats) renderStorageStats(state.storageStats);
@@ -127,7 +162,6 @@ export async function fetchStorageStats() {
         state.storageStatsPhase = "error";
         state.storageStatsError = error && error.message ? error.message : String(error);
         renderLoading(false);
-        clearStorageFigures();
         renderError(state.storageStatsError);
         // The request module already raised the status pill and toasted the failure.
         return null;
@@ -271,8 +305,9 @@ export function setupStorageControls() {
     document.getElementById("btn-close-storage-modal")?.addEventListener("click", () => closeStorageModal());
     document.getElementById("btn-dismiss-storage-modal")?.addEventListener("click", () => closeStorageModal());
     document.getElementById("btn-refresh-storage")?.addEventListener("click", () => fetchStorageStats());
-    document.getElementById(RETRY_ID)?.addEventListener("click", () => fetchStorageStats());
     document.getElementById("btn-drawer-open-storage")?.addEventListener("click", () => openStorageModal());
+    // The retry action lives in the error state, so it is bound wherever that state is painted.
+    retryControl();
 
     document.getElementById("btn-open-purge-confirm")?.addEventListener("click", () => openPurgeModal());
     document.getElementById("btn-close-purge-modal")?.addEventListener("click", () => closePurgeModal());

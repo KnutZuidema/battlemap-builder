@@ -6,8 +6,8 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use crate::domain::{
-    Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, RejectionReason, RejectionRecord, Theme,
-    TrainingMetricSnapshot, TrainingRun,
+    Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, MapReadinessRecord, RejectionReason,
+    RejectionRecord, Theme, TrainingMetricSnapshot, TrainingRun,
 };
 use crate::ports::blob_storage::{BlobKey, BlobStat, BlobStorage};
 use crate::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
@@ -127,6 +127,7 @@ impl BlobStorage for InMemoryBlobStorage {
 pub struct InMemoryCatalogRepository {
     candidates: RwLock<HashMap<String, Candidate>>,
     curated: RwLock<HashMap<String, CuratedMap>>,
+    map_readiness: RwLock<HashMap<String, MapReadinessRecord>>,
     rejections: RwLock<Vec<RejectionRecord>>,
     snapshots: RwLock<HashMap<String, DatasetSnapshot>>,
     referenced_snapshots: RwLock<HashSet<String>>,
@@ -267,6 +268,46 @@ impl CatalogRepository for InMemoryCatalogRepository {
 
     async fn delete_curated(&self, id: &str) -> Result<(), StorageError> {
         self.curated
+            .write()
+            .expect("in-memory catalog lock poisoned")
+            .remove(id);
+        // The audit describes this map, so it goes with it; a re-curated map starts unaudited.
+        self.map_readiness
+            .write()
+            .expect("in-memory catalog lock poisoned")
+            .remove(id);
+        Ok(())
+    }
+
+    async fn get_map_readiness(&self, id: &str) -> Result<MapReadinessRecord, StorageError> {
+        self.map_readiness
+            .read()
+            .expect("in-memory catalog lock poisoned")
+            .get(id)
+            .cloned()
+            .ok_or_else(|| StorageError::NotFound(format!("Readiness audit for '{id}' not found")))
+    }
+
+    async fn save_map_readiness(&self, record: &MapReadinessRecord) -> Result<(), StorageError> {
+        self.map_readiness
+            .write()
+            .expect("in-memory catalog lock poisoned")
+            .insert(record.map_id.clone(), record.clone());
+        Ok(())
+    }
+
+    async fn list_map_readiness(&self) -> Result<Vec<MapReadinessRecord>, StorageError> {
+        let stored = self
+            .map_readiness
+            .read()
+            .expect("in-memory catalog lock poisoned");
+        let mut records: Vec<MapReadinessRecord> = stored.values().cloned().collect();
+        records.sort_by(|a, b| a.map_id.cmp(&b.map_id));
+        Ok(records)
+    }
+
+    async fn delete_map_readiness(&self, id: &str) -> Result<(), StorageError> {
+        self.map_readiness
             .write()
             .expect("in-memory catalog lock poisoned")
             .remove(id);

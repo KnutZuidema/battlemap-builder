@@ -11,6 +11,7 @@
 
 use std::sync::LazyLock;
 
+use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -143,6 +144,22 @@ impl MapDatasetReadiness {
     }
 }
 
+/// Persisted readiness audit of one curated map.
+///
+/// The audit reads the map's Ground layer and manifest, so it is reused while
+/// [`MapReadinessRecord::fingerprint`] still matches the map and re-run once the map changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapReadinessRecord {
+    /// Curated map id this audit describes.
+    pub map_id: String,
+    /// Fingerprint of the audited curated map; a changed map invalidates the record.
+    pub fingerprint: String,
+    /// When this audit was produced.
+    pub audited_at: DateTime<Utc>,
+    /// The audit itself.
+    pub report: MapDatasetReadiness,
+}
+
 /// A baseline `Training Dataset` audit over the curated store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatasetReadiness {
@@ -153,6 +170,9 @@ pub struct DatasetReadiness {
     pub maps_ready: usize,
     pub sections_total: usize,
     pub sections_ready: usize,
+    /// Time of the newest per-map audit this report was assembled from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audited_at: Option<DateTime<Utc>>,
 }
 
 impl DatasetReadiness {
@@ -169,6 +189,7 @@ impl DatasetReadiness {
             maps_ready,
             sections_total,
             sections_ready,
+            audited_at: None,
         }
     }
 

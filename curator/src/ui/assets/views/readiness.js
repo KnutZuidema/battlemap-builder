@@ -295,11 +295,12 @@ async function auditDatasetReadiness({ force = false } = {}) {
     if (dom.btnAuditReadiness) dom.btnAuditReadiness.disabled = true;
     const run = (async () => {
         try {
-            const report = await requestDatasetReadiness();
+            const report = await requestDatasetReadiness({ refresh: force });
             // A write or a scope switch while the GET ran makes this report stale: never cache
             // it, and never let it overwrite the panel that now describes something else.
             if (epoch !== state.readinessEpoch || scopeKey !== readinessScopeKey()) return null;
-            applyReadinessReport(scopeKey, report, new Date().toISOString());
+            // The server stamps the newest per-map audit it assembled the report from.
+            applyReadinessReport(scopeKey, report, report.audited_at || new Date().toISOString());
             return report;
         } catch (_) {
             // The request module reported it; the panel keeps its last audited report.
@@ -536,7 +537,11 @@ export function revealReadinessPanel() {
 }
 
 export function setupReadinessControls() {
-    dom.btnAuditReadiness?.addEventListener("click", () => auditDatasetReadiness({ force: true }));
+    dom.btnAuditReadiness?.addEventListener("click", () =>
+        // "Audit" reuses the stored per-map audits and only audits maps that are new or changed;
+        // once a report is on screen the button reads "Re-audit" and forces a full re-audit.
+        auditDatasetReadiness({ force: Boolean(state.readinessReport) })
+    );
     dom.datasetReadinessIssues?.addEventListener("click", (e) => {
         // Inspecting the flagged maps never runs remediation: no describe, no batch.
         const showMaps = e.target.closest("[data-show-maps]");

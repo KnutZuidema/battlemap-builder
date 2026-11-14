@@ -9,8 +9,8 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::domain::{
-    BenchmarkMetadata, Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, RejectionReason,
-    RejectionRecord, Theme, TrainingMetricSnapshot, TrainingRun,
+    BenchmarkMetadata, Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, MapReadinessRecord,
+    RejectionReason, RejectionRecord, Theme, TrainingMetricSnapshot, TrainingRun,
 };
 use crate::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
 use crate::ports::storage_error::StorageError;
@@ -55,6 +55,16 @@ impl FilesystemCatalogRepository {
 
     fn curated_manifest(&self, id: &str) -> PathBuf {
         self.curated_dir().join(id).join("manifest.json")
+    }
+
+    /// Directory holding the persisted per-map readiness audits: `root_dir/readiness`.
+    fn readiness_dir(&self) -> PathBuf {
+        self.root_dir.join("readiness")
+    }
+
+    /// Path of one map's readiness audit: `root_dir/readiness/{id}.json`.
+    fn readiness_file(&self, id: &str) -> PathBuf {
+        self.readiness_dir().join(format!("{id}.json"))
     }
 
     fn trash_candidate_manifest(&self, id: &str) -> PathBuf {
@@ -409,7 +419,49 @@ impl CatalogRepository for FilesystemCatalogRepository {
     }
 
     async fn delete_curated(&self, id: &str) -> Result<(), StorageError> {
+        // The audit describes this map, so it goes with it; a re-curated map starts unaudited.
+        Self::delete_manifest(&self.readiness_file(id))?;
         Self::delete_manifest(&self.curated_manifest(id))
+    }
+
+    async fn get_map_readiness(&self, id: &str) -> Result<MapReadinessRecord, StorageError> {
+        Self::read_json(
+            &self.readiness_file(id),
+            &format!("Readiness audit for '{id}'"),
+        )
+    }
+
+    async fn save_map_readiness(&self, record: &MapReadinessRecord) -> Result<(), StorageError> {
+        Self::write_json(&self.readiness_file(&record.map_id), record)
+    }
+
+    async fn list_map_readiness(&self) -> Result<Vec<MapReadinessRecord>, StorageError> {
+        let entries = match std::fs::read_dir(self.readiness_dir()) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(StorageError::Io(err)),
+        };
+        let mut records = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_file()
+                || entry.path().extension().and_then(|ext| ext.to_str()) != Some("json")
+            {
+                continue;
+            }
+            // The audit cache is derived: an unreadable record is skipped so the next audit
+            // re-runs that map instead of failing every readiness read.
+            match Self::read_json::<MapReadinessRecord>(&entry.path(), "Readiness audit") {
+                Ok(record) => records.push(record),
+                Err(_) => continue,
+            }
+        }
+        records.sort_by(|a, b| a.map_id.cmp(&b.map_id));
+        Ok(records)
+    }
+
+    async fn delete_map_readiness(&self, id: &str) -> Result<(), StorageError> {
+        Self::delete_manifest(&self.readiness_file(id))
     }
 
     async fn rejection_records(&self) -> Result<Vec<RejectionRecord>, StorageError> {

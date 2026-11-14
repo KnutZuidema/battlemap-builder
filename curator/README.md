@@ -286,14 +286,26 @@ via `DecompressionStream`); nothing is uploaded and no network access is used.
 ## 8. Training Dataset Readiness Audit (`GET /api/dataset/readiness`)
 
 `lora-dataset.zip` only ships samples a `Training Run` can consume, so the curated store is audited
-against that contract before a dataset leaves the machine. The audit decodes each curated map's Ground
+against that contract before a dataset leaves the machine. The audit decodes a curated map's Ground
 layer, plans its samples through the exact same policy the ZIP export uses, and reports every defect
 with the operator-facing detail needed to fix it.
 
+Audits are **persisted per curated map** (ADR-0014), so a map is decoded once, not once per request or
+per freeze:
+
 ```
-GET /api/dataset/readiness            # whole curated store
-GET /api/dataset/readiness?theme=cave # one theme, i.e. exactly the ZIP folder scope
+GET /api/dataset/readiness              # whole curated store, reusing stored audits
+GET /api/dataset/readiness?theme=cave   # one theme, i.e. exactly the ZIP folder scope
+GET /api/dataset/readiness?refresh=true # force a full re-audit of the scope
 ```
+
+The record lives beside the catalog data (`readiness/<id>.json`, or the `map_readiness` table) and is
+keyed by a fingerprint of the curated map (dimensions, grid, sections, description, tags, layers). An
+unchanged map answers from the record; editing a map changes the fingerprint and re-audits it on the
+next read; deleting the map deletes the record. Snapshot freezes reuse the same records, so freezing
+only audits maps curated since the last audit. The response carries `audited_at`, the newest per-map
+audit it was assembled from. A Ground-layer read/decode failure is reported but not stored, so a
+transient storage outage is retried by the next audit instead of pinning the map as unready.
 
 ```json
 {

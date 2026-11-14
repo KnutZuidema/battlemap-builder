@@ -547,6 +547,30 @@ mod tests {
             self.inner.delete_curated(id).await
         }
 
+        async fn get_map_readiness(
+            &self,
+            id: &str,
+        ) -> Result<crate::domain::MapReadinessRecord, StorageError> {
+            self.inner.get_map_readiness(id).await
+        }
+
+        async fn save_map_readiness(
+            &self,
+            record: &crate::domain::MapReadinessRecord,
+        ) -> Result<(), StorageError> {
+            self.inner.save_map_readiness(record).await
+        }
+
+        async fn list_map_readiness(
+            &self,
+        ) -> Result<Vec<crate::domain::MapReadinessRecord>, StorageError> {
+            self.inner.list_map_readiness().await
+        }
+
+        async fn delete_map_readiness(&self, id: &str) -> Result<(), StorageError> {
+            self.inner.delete_map_readiness(id).await
+        }
+
         async fn rejection_records(&self) -> Result<Vec<RejectionRecord>, StorageError> {
             self.inner.rejection_records().await
         }

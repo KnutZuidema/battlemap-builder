@@ -262,7 +262,7 @@ async fn test_audit_dataset_readiness_reports_every_section_issue_code() {
     catalog.save_curated(&missing).await.expect("save curated map");
 
     let report = service
-        .audit_dataset_readiness(None)
+        .audit_dataset_readiness(None, false)
         .await
         .expect("audit succeeds");
 
@@ -334,7 +334,7 @@ async fn test_audit_dataset_readiness_reports_every_section_issue_code() {
     );
 
     let cave_only = service
-        .audit_dataset_readiness(Some(&Theme::Cave))
+        .audit_dataset_readiness(Some(&Theme::Cave), false)
         .await
         .expect("filtered audit succeeds");
     assert_eq!(cave_only.maps_total, 1);
@@ -346,7 +346,7 @@ async fn test_audit_dataset_readiness_of_empty_store_is_not_a_ready_dataset() {
     let (service, _catalog, _blobs) = in_memory_service();
 
     let report = service
-        .audit_dataset_readiness(None)
+        .audit_dataset_readiness(None, false)
         .await
         .expect("audit succeeds");
 

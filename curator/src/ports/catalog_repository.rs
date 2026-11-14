@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 
 use crate::domain::{
-    Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, RejectionReason, RejectionRecord, Source,
-    Theme, TrainingMetricSnapshot, TrainingRun,
+    Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, MapReadinessRecord, RejectionReason,
+    RejectionRecord, Source, Theme, TrainingMetricSnapshot, TrainingRun,
 };
 use crate::ports::storage_error::StorageError;
 
@@ -66,6 +66,21 @@ pub trait CatalogRepository: Send + Sync {
 
     /// Delete the curated map with `id`. Succeeds when it does not exist.
     async fn delete_curated(&self, id: &str) -> Result<(), StorageError>;
+
+    /// Load the stored readiness audit of curated map `id`.
+    ///
+    /// Fails with [`StorageError::NotFound`] when the map has never been audited (or its record
+    /// was deleted with the map).
+    async fn get_map_readiness(&self, id: &str) -> Result<MapReadinessRecord, StorageError>;
+
+    /// Insert or overwrite the readiness audit of one curated map.
+    async fn save_map_readiness(&self, record: &MapReadinessRecord) -> Result<(), StorageError>;
+
+    /// List every stored readiness audit, ordered by map id.
+    async fn list_map_readiness(&self) -> Result<Vec<MapReadinessRecord>, StorageError>;
+
+    /// Delete the stored readiness audit of curated map `id`. Succeeds when it does not exist.
+    async fn delete_map_readiness(&self, id: &str) -> Result<(), StorageError>;
 
     /// List every record in the rejection log, in append order.
     ///
@@ -179,6 +194,22 @@ impl<T: ?Sized + CatalogRepository> CatalogRepository for std::sync::Arc<T> {
 
     async fn delete_curated(&self, id: &str) -> Result<(), StorageError> {
         (**self).delete_curated(id).await
+    }
+
+    async fn get_map_readiness(&self, id: &str) -> Result<MapReadinessRecord, StorageError> {
+        (**self).get_map_readiness(id).await
+    }
+
+    async fn save_map_readiness(&self, record: &MapReadinessRecord) -> Result<(), StorageError> {
+        (**self).save_map_readiness(record).await
+    }
+
+    async fn list_map_readiness(&self) -> Result<Vec<MapReadinessRecord>, StorageError> {
+        (**self).list_map_readiness().await
+    }
+
+    async fn delete_map_readiness(&self, id: &str) -> Result<(), StorageError> {
+        (**self).delete_map_readiness(id).await
     }
 
     async fn rejection_records(&self) -> Result<Vec<RejectionRecord>, StorageError> {

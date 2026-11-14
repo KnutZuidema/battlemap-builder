@@ -9,18 +9,19 @@
 //! legacy monolithic storage repository, which resolved Ground layer bytes
 //! from the filesystem instead of the blob port. Both callers therefore ship identical archives.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
+use sha2::{Digest, Sha256};
 
 use crate::domain::{
     crop_section_box, is_perspective_neutral, sample_description, section_box_bounds,
     synthesize_map_sections, BlockingIssue, CaptionGenerator, CuratedMap, DatasetIssue,
     DatasetIssueCode, DatasetReadiness, DatasetSnapshot, FreezeProgressUpdate, GridConfig, LayerRole,
-    MapDatasetReadiness, MapSection, Theme, UploadProgress, TRIGGER_PHRASE,
+    MapDatasetReadiness, MapReadinessRecord, MapSection, Theme, UploadProgress, TRIGGER_PHRASE,
 };
 use crate::ports::blob_storage::{sha256_digest, BlobKey, BlobStorage, BlobWriteProgress};
 use crate::ports::catalog_repository::{CatalogRepository, CuratedFilter};
@@ -69,6 +70,32 @@ pub(crate) fn describe_for_issue(text: &str) -> String {
     }
     let head: String = trimmed.chars().take(MAX_CHARS).collect();
     format!("{head}…")
+}
+
+/// Fingerprint of everything the readiness audit reads from a curated map.
+///
+/// Any change to dimensions, grid, sections, description, tags or layers yields a new fingerprint,
+/// so a persisted audit can never describe a map that has since changed.
+pub fn curated_map_fingerprint(map: &CuratedMap) -> String {
+    let encoded = serde_json::to_vec(map).expect("a curated map always serializes");
+    let mut hasher = Sha256::new();
+    hasher.update(encoded);
+    hex::encode(hasher.finalize())
+}
+
+/// Aggregates per-map audit records into one report, carrying the newest audit time.
+fn readiness_from_records(records: Vec<MapReadinessRecord>) -> DatasetReadiness {
+    let audited_at = records.iter().map(|record| record.audited_at).max();
+    let mut readiness =
+        DatasetReadiness::from_maps(records.into_iter().map(|record| record.report).collect());
+    readiness.audited_at = audited_at;
+    readiness
+}
+
+/// Cancellation shape shared with the upload path: callers map `Interrupted` to their own
+/// cancellation error instead of reporting a storage failure.
+fn cancelled_storage_error() -> StorageError {
+    StorageError::Io(std::io::Error::from(std::io::ErrorKind::Interrupted))
 }
 
 /// Renders a byte count for progress banners, e.g. `412.3 MiB`.
@@ -367,20 +394,74 @@ impl DatasetExportService {
 
     /// Audits the curated store against the LoRA dataset export contract, mirroring exactly what
     /// the dataset ZIP ships per Map Section.
+    ///
+    /// Stored per-map audits that still match their map are reused; only new or changed maps are
+    /// audited (and persisted). `refresh` re-audits every map in scope.
     pub async fn audit_dataset_readiness(
         &self,
         theme: Option<&Theme>,
+        refresh: bool,
     ) -> Result<DatasetReadiness, StorageError> {
         let curated_maps = self.list_curated(theme).await?;
-        let mut reports = Vec::with_capacity(curated_maps.len());
-        for map in curated_maps {
-            let ground_bytes = self.blobs.read_blob(&curated_ground_blob_key(&map)).await;
+        let mut accept_all = |_: &CuratedMap, _: bool| true;
+        let records = self
+            .ensure_map_readiness(&curated_maps, refresh, &mut accept_all)
+            .await?;
+        Ok(readiness_from_records(records))
+    }
+
+    /// Returns one readiness record per map in `maps`, auditing (and persisting) only the maps whose
+    /// stored record is missing or stale.
+    ///
+    /// `on_map` runs before each map with `reused = true` when its stored audit is current; returning
+    /// `false` aborts with an `Interrupted` I/O error, the cancellation shape the freeze and upload
+    /// paths already map to their own `Cancelled`.
+    pub async fn ensure_map_readiness(
+        &self,
+        maps: &[CuratedMap],
+        refresh: bool,
+        on_map: &mut (dyn FnMut(&CuratedMap, bool) -> bool + Send),
+    ) -> Result<Vec<MapReadinessRecord>, StorageError> {
+        let stored: HashMap<String, MapReadinessRecord> = self
+            .catalog
+            .list_map_readiness()
+            .await?
+            .into_iter()
+            .map(|record| (record.map_id.clone(), record))
+            .collect();
+
+        let mut records = Vec::with_capacity(maps.len());
+        for map in maps {
+            let fingerprint = curated_map_fingerprint(map);
+            let cached = if refresh {
+                None
+            } else {
+                stored
+                    .get(&map.id)
+                    .filter(|record| record.fingerprint == fingerprint)
+                    .cloned()
+            };
+
+            if let Some(record) = cached {
+                if !on_map(map, true) {
+                    return Err(cancelled_storage_error());
+                }
+                records.push(record);
+                continue;
+            }
+
+            if !on_map(map, false) {
+                return Err(cancelled_storage_error());
+            }
+
+            let ground_bytes = self.blobs.read_blob(&curated_ground_blob_key(map)).await;
             // Decoding a Ground layer is the audit's memory peak. Run each map's decode and
             // classification under the shared image-work permit on the blocking pool, so an audit
             // can never add a second full-resolution decode to a running refinement (or the
             // reverse) and exhaust the pod's memory limit.
             let map_id = map.id.clone();
-            let report = image_work::run(move || audit_map_readiness(&map, ground_bytes))
+            let map_for_audit = map.clone();
+            let report = image_work::run(move || audit_map_readiness(&map_for_audit, ground_bytes))
                 .await
                 .map_err(|err| {
                     StorageError::Io(image_work::join_error(
@@ -388,9 +469,27 @@ impl DatasetExportService {
                         err,
                     ))
                 })?;
-            reports.push(report);
+            // A Ground layer that could not be read or decoded is a storage symptom, not a verdict
+            // about the map: those reports are returned but not persisted, so a transient blob
+            // failure is retried by the next audit instead of pinning the map as unready.
+            let storage_failure = report.issues.iter().any(|issue| {
+                matches!(
+                    issue.code,
+                    DatasetIssueCode::GroundLayerMissing | DatasetIssueCode::GroundImageUnreadable
+                )
+            });
+            let record = MapReadinessRecord {
+                map_id: map.id.clone(),
+                fingerprint,
+                audited_at: chrono::Utc::now(),
+                report,
+            };
+            if !storage_failure {
+                self.catalog.save_map_readiness(&record).await?;
+            }
+            records.push(record);
         }
-        Ok(DatasetReadiness::from_maps(reports))
+        Ok(records)
     }
 
     async fn list_curated(&self, theme: Option<&Theme>) -> Result<Vec<CuratedMap>, StorageError> {
@@ -579,45 +678,49 @@ impl DatasetExportService {
             return Err(FreezeDatasetError::Cancelled);
         }
 
-        // 1. Audit readiness with progress reported per map
+        // 1. Reuse the stored per-map audits; only new or changed maps are audited and persisted.
         let curated_maps = self.list_curated(theme).await?;
         let total_maps = curated_maps.len();
-        let mut reports = Vec::with_capacity(total_maps);
+        let mut audited = 0usize;
+        let records = self
+            .ensure_map_readiness(&curated_maps, false, &mut |map, reused| {
+                let idx = audited;
+                audited += 1;
+                let message = if reused {
+                    format!(
+                        "Using stored readiness audit for '{}' ({}/{total_maps})",
+                        map.id,
+                        idx + 1
+                    )
+                } else {
+                    format!(
+                        "Auditing readiness: map {} of {total_maps} ('{}')",
+                        idx + 1,
+                        map.id
+                    )
+                };
+                on_progress(FreezeProgressUpdate {
+                    phase: "auditing".to_string(),
+                    completed_maps: idx,
+                    total_maps,
+                    completed_samples: 0,
+                    total_samples: 0,
+                    current_map: Some(map.id.clone()),
+                    current_section: None,
+                    upload: None,
+                    message,
+                    snapshot: None,
+                })
+            })
+            .await
+            .map_err(|err| match err {
+                StorageError::Io(io) if io.kind() == std::io::ErrorKind::Interrupted => {
+                    FreezeDatasetError::Cancelled
+                }
+                other => FreezeDatasetError::Storage(other),
+            })?;
 
-        for (idx, map) in curated_maps.iter().enumerate() {
-            if !on_progress(FreezeProgressUpdate {
-                phase: "auditing".to_string(),
-                completed_maps: idx,
-                total_maps,
-                completed_samples: 0,
-                total_samples: 0,
-                current_map: Some(map.id.clone()),
-                current_section: None,
-                upload: None,
-                message: format!("Auditing readiness: map {} of {} ('{}')", idx + 1, total_maps, map.id),
-                snapshot: None,
-            }) {
-                return Err(FreezeDatasetError::Cancelled);
-            }
-
-            let ground_bytes = self.blobs.read_blob(&curated_ground_blob_key(map)).await;
-            // Decoding and classifying a Ground layer is the audit's memory and CPU peak. Run it
-            // on the blocking pool under the shared image-work permit so the Tokio workers keep
-            // answering probes while a freeze audits a large library.
-            let map_id = map.id.clone();
-            let map = map.clone();
-            let report = image_work::run(move || audit_map_readiness(&map, ground_bytes))
-                .await
-                .map_err(|err| {
-                    FreezeDatasetError::Storage(StorageError::Io(image_work::join_error(
-                        format!("Dataset audit for '{map_id}'"),
-                        err,
-                    )))
-                })?;
-            reports.push(report);
-        }
-
-        let readiness = DatasetReadiness::from_maps(reports);
+        let readiness = readiness_from_records(records);
         if !readiness.ready {
             let blocking_issues = readiness.blocking_issues();
             let summary = if readiness.maps_total == 0 {

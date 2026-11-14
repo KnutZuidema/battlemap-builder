@@ -91,6 +91,16 @@ pub struct ThemeQuery {
     pub theme: Option<String>,
 }
 
+/// Query for `GET /api/dataset/readiness`: a theme scope plus an optional forced re-audit.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ReadinessQuery {
+    #[serde(default)]
+    pub theme: Option<String>,
+    /// Re-audit every map in scope instead of reusing stored audits.
+    #[serde(default)]
+    pub refresh: bool,
+}
+
 fn parse_optional_theme(theme_str: Option<&str>) -> Result<Option<Theme>, ApiError> {
     match theme_str {
         Some(t) if !t.trim().is_empty() && !t.trim().eq_ignore_ascii_case("all") => {
@@ -292,13 +302,18 @@ pub async fn get_dataset_export(
 }
 
 /// GET /api/dataset/readiness - Audit the curated store against the LoRA dataset contract.
+///
+/// Reuses the persisted per-map audits and only audits maps that are new or changed; `refresh=true`
+/// forces a full re-audit of the scope.
 pub async fn get_dataset_readiness(
     State(state): State<AppState>,
-    Query(query): Query<ThemeQuery>,
+    Query(query): Query<ReadinessQuery>,
 ) -> Result<Json<DatasetReadiness>, ApiError> {
     let theme = parse_optional_theme(query.theme.as_deref())?;
     let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
-    let report = export_service.audit_dataset_readiness(theme.as_ref()).await?;
+    let report = export_service
+        .audit_dataset_readiness(theme.as_ref(), query.refresh)
+        .await?;
 
     tracing::info!(
         ready = report.ready,

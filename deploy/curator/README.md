@@ -322,6 +322,7 @@ All persistent state is stored under `/data` on the Hetzner CSI block volume.
 | `/data/staging/<id>/` | One uniform bundle per uncurated candidate: `manifest.json` plus layer images (`0.png`, `1.png`, …). Harvested Reddit, benchmark-generated, and manually added candidates all use this layout; the source lives on the manifest, not in a path prefix. |
 | `/data/curated/<id>/` | One flat bundle per curated battlemap: `manifest.json` plus deterministically named layers (`0_ground.png`, `1_upper_1.png`, …). Theme membership is derived from the manifest's tags, so no per-theme directories exist. |
 | `/data/rejected/rejections.json` | JSON audit trail of discarded candidates with reasons. |
+| `/data/readiness/<id>.json` | Persisted dataset readiness audit of one curated map, keyed by a fingerprint of the map (ADR-0014). Derived: safe to delete, rebuilt on the next audit. |
 | `/data/telemetry/cost_ledger.json` | Persistent ledger recording token usage, model generation costs, and API spend. |
 
 

@@ -9,8 +9,8 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 
 use crate::domain::{
-    Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, RedditHarvestQuery, RejectionReason,
-    RejectionRecord, Theme, TrainingMetricSnapshot, TrainingRun,
+    Candidate, CuratedMap, DatasetSnapshot, LoraAdapter, MapReadinessRecord, RedditHarvestQuery,
+    RejectionReason, RejectionRecord, Theme, TrainingMetricSnapshot, TrainingRun,
 };
 use crate::ports::catalog_repository::{CandidateFilter, CatalogRepository, CuratedFilter};
 use crate::ports::harvest_run_ledger::{HarvestRunLedger, HarvestRunOutcome};
@@ -643,7 +643,70 @@ impl CatalogRepository for PostgresCatalogRepository {
     }
 
     async fn delete_curated(&self, id: &str) -> Result<(), StorageError> {
+        // The audit describes this map, so it goes with it; a re-curated map starts unaudited.
+        sqlx::query("DELETE FROM map_readiness WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
         sqlx::query("DELETE FROM curated_maps WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+        Ok(())
+    }
+
+    async fn get_map_readiness(&self, id: &str) -> Result<MapReadinessRecord, StorageError> {
+        let row = sqlx::query("SELECT data FROM map_readiness WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+
+        let row = row.ok_or_else(|| {
+            StorageError::NotFound(format!("Readiness audit for '{id}' not found"))
+        })?;
+        let data: serde_json::Value = row.try_get("data").map_err(map_sqlx_err)?;
+        serde_json::from_value(data).map_err(decode_error)
+    }
+
+    async fn save_map_readiness(&self, record: &MapReadinessRecord) -> Result<(), StorageError> {
+        let data = serde_json::to_value(record)?;
+        sqlx::query(
+            "INSERT INTO map_readiness (id, fingerprint, audited_at, data)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (id) DO UPDATE SET
+                 fingerprint = EXCLUDED.fingerprint,
+                 audited_at = EXCLUDED.audited_at,
+                 data = EXCLUDED.data",
+        )
+        .bind(&record.map_id)
+        .bind(&record.fingerprint)
+        .bind(record.audited_at)
+        .bind(data)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_err)?;
+        Ok(())
+    }
+
+    async fn list_map_readiness(&self) -> Result<Vec<MapReadinessRecord>, StorageError> {
+        let rows = sqlx::query("SELECT data FROM map_readiness ORDER BY id ASC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(map_sqlx_err)?;
+
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            let data: serde_json::Value = row.try_get("data").map_err(map_sqlx_err)?;
+            records.push(serde_json::from_value(data).map_err(decode_error)?);
+        }
+        Ok(records)
+    }
+
+    async fn delete_map_readiness(&self, id: &str) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM map_readiness WHERE id = $1")
             .bind(id)
             .execute(&self.pool)
             .await

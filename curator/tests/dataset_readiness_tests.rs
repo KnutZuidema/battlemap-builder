@@ -134,7 +134,7 @@ async fn test_clean_multisection_dataset_is_ready_and_captions_apply_the_trigger
     .await;
     let export = DatasetExportService::new(catalog.clone(), blobs.clone());
 
-    let report = export.audit_dataset_readiness(None).await.unwrap();
+    let report = export.audit_dataset_readiness(None, false).await.unwrap();
     assert!(report.ready, "{:?}", report.maps);
     assert_eq!(report.maps_total, 1);
     assert_eq!(report.maps_ready, 1);
@@ -182,7 +182,7 @@ async fn test_legacy_bundle_without_sections_reuses_the_neutral_map_description(
     seed_curated_ports(&catalog, &blobs, &legacy, &create_test_png(1024, 1024)).await;
     let export = DatasetExportService::new(catalog.clone(), blobs.clone());
 
-    let report = export.audit_dataset_readiness(None).await.unwrap();
+    let report = export.audit_dataset_readiness(None, false).await.unwrap();
     assert!(report.ready, "{:?}", report.maps);
     assert_eq!(report.sections_total, 1);
     assert_eq!(report.sections_ready, 1);
@@ -213,7 +213,7 @@ async fn test_caption_contaminated_section_description_is_flagged_not_neutral() 
     seed_curated_ports(&catalog, &blobs, &map, &create_test_png(1024, 1024)).await;
     let export = DatasetExportService::new(catalog.clone(), blobs.clone());
 
-    let report = export.audit_dataset_readiness(None).await.unwrap();
+    let report = export.audit_dataset_readiness(None, false).await.unwrap();
     assert!(!report.ready);
     assert_eq!(report.maps_ready, 0);
     assert_eq!(report.sections_total, 1);
@@ -255,7 +255,7 @@ async fn test_section_without_any_physical_description_is_flagged() {
     seed_curated_ports(&catalog, &blobs, &map, &create_test_png(1024, 1024)).await;
     let export = DatasetExportService::new(catalog.clone(), blobs.clone());
 
-    let report = export.audit_dataset_readiness(None).await.unwrap();
+    let report = export.audit_dataset_readiness(None, false).await.unwrap();
     assert!(!report.ready);
     assert_eq!(report.sections_ready, 0);
     assert_eq!(
@@ -296,7 +296,7 @@ async fn test_unresolvable_sections_and_below_minimum_grids_are_flagged() {
     seed_curated_ports(&catalog, &blobs, &too_small, &create_test_png(512, 512)).await;
 
     let report = DatasetExportService::new(catalog, blobs)
-        .audit_dataset_readiness(None)
+        .audit_dataset_readiness(None, false)
         .await
         .unwrap();
     assert!(!report.ready);
@@ -341,7 +341,7 @@ async fn test_unreadable_ground_layer_is_flagged() {
     seed_curated_ports(&catalog, &blobs, &map, b"\x89PNG\r\n\x1a\n not really a png").await;
 
     let report = DatasetExportService::new(catalog, blobs)
-        .audit_dataset_readiness(None)
+        .audit_dataset_readiness(None, false)
         .await
         .unwrap();
     assert!(!report.ready);
@@ -457,4 +457,103 @@ async fn test_empty_store_is_not_a_ready_dataset() {
     assert_eq!(report["ready"], false);
     assert_eq!(report["maps_total"], 0);
     assert_eq!(report["sections_total"], 0);
+}
+
+#[tokio::test]
+async fn test_readiness_audit_is_reused_until_refreshed_or_the_map_changes() {
+    let (_app, catalog, blobs) = setup_test_app();
+    let map = ready_multisection_map("reuse_audit");
+    seed_curated_ports(&catalog, &blobs, &map, &create_test_png(2048, 2048)).await;
+    let export = DatasetExportService::new(catalog.clone(), blobs.clone());
+
+    let first = export.audit_dataset_readiness(None, false).await.unwrap();
+    assert!(first.ready, "{:?}", first.maps);
+    let audited_at = first
+        .audited_at
+        .expect("a persisted audit carries its timestamp");
+    let stored = catalog.get_map_readiness("reuse_audit").await.unwrap();
+    assert_eq!(stored.report, first.maps[0]);
+
+    // The stored audit answers the next request without touching the Ground layer: delete the
+    // blob and the report must stay identical.
+    blobs
+        .delete_blob(&curated_ground_key(&map))
+        .await
+        .unwrap();
+    let reused = export.audit_dataset_readiness(None, false).await.unwrap();
+    assert!(reused.ready, "a reused audit must not re-read the Ground layer");
+    assert_eq!(reused.audited_at, Some(audited_at));
+
+    // `refresh` deliberately re-reads every layer, so the missing blob now surfaces.
+    let refreshed = export.audit_dataset_readiness(None, true).await.unwrap();
+    assert!(!refreshed.ready);
+    assert_eq!(
+        refreshed.maps[0].issues[0].code,
+        DatasetIssueCode::GroundLayerMissing
+    );
+
+    // Deleting the curated map drops its audit with it.
+    catalog.delete_curated("reuse_audit").await.unwrap();
+    assert!(catalog.get_map_readiness("reuse_audit").await.is_err());
+}
+
+#[tokio::test]
+async fn test_readiness_audit_is_invalidated_by_an_edited_map() {
+    let (_app, catalog, blobs) = setup_test_app();
+    let map = ready_multisection_map("edited_map");
+    seed_curated_ports(&catalog, &blobs, &map, &create_test_png(2048, 2048)).await;
+    let export = DatasetExportService::new(catalog.clone(), blobs.clone());
+
+    let clean = export.audit_dataset_readiness(None, false).await.unwrap();
+    assert!(clean.ready);
+    let fingerprint_before = catalog.get_map_readiness("edited_map").await.unwrap().fingerprint;
+
+    let mut edited = map.clone();
+    edited.sections[0].description = "Top-down isometric render of the crypt.".to_string();
+    catalog.save_curated(&edited).await.unwrap();
+
+    let reaudited = export.audit_dataset_readiness(None, false).await.unwrap();
+    assert!(!reaudited.ready);
+    assert!(reaudited.maps[0]
+        .issues
+        .iter()
+        .any(|issue| issue.code == DatasetIssueCode::PhysicalDescriptionNotNeutral));
+    let fingerprint_after = catalog.get_map_readiness("edited_map").await.unwrap().fingerprint;
+    assert_ne!(fingerprint_before, fingerprint_after);
+}
+
+#[tokio::test]
+async fn test_freeze_reuses_the_stored_readiness_audits() {
+    let (_app, catalog, blobs) = setup_test_app();
+    seed_curated_ports(
+        &catalog,
+        &blobs,
+        &ready_multisection_map("freeze_reuse"),
+        &create_test_png(2048, 2048),
+    )
+    .await;
+    let export = DatasetExportService::new(catalog.clone(), blobs.clone());
+    export.audit_dataset_readiness(None, false).await.unwrap();
+
+    let mut messages = Vec::new();
+    export
+        .freeze_dataset_snapshot_with_progress(None, Some("ds_reuse".into()), |progress| {
+            messages.push(progress.message);
+            true
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Using stored readiness audit")),
+        "{messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.starts_with("Auditing readiness")),
+        "a freeze of an audited scope must not re-audit: {messages:?}"
+    );
 }

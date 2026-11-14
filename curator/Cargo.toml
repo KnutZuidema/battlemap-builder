@@ -2,6 +2,8 @@
 name = "curator"
 version = "0.1.0"
 edition = "2021"
+# Two binaries exist (server + migration CLI); `cargo run` must pick the server.
+default-run = "curator"
 
 [[bin]]
 name = "curator"

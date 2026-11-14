@@ -13,6 +13,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_util::io::ReaderStream;
 
 use crate::api::error::ApiError;
 use crate::api::state::AppState;
@@ -29,7 +30,7 @@ use crate::services::sections::{describe_map_sections, ground_dimensions, Sectio
 use crate::services::image_work::GroundImage;
 use crate::services::{
     DatasetExportService, FreezeDatasetError, IngestionSummary, LibraryService,
-    RedditIngestionService, StorageMaintenanceService,
+    RedditIngestionService, SpooledArchive, StorageMaintenanceService,
 };
 use crate::adapters::clean_tags;
 pub use crate::services::description::detect_image_mime;
@@ -285,20 +286,13 @@ pub async fn get_dataset_export(
     Query(query): Query<ThemeQuery>,
 ) -> Result<Response, ApiError> {
     let theme = parse_optional_theme(query.theme.as_deref())?;
-    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
-    let zip_bytes = export_service.export_lora_dataset(theme.as_ref()).await?;
-
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"))
-        .header(
-            header::CONTENT_DISPOSITION,
-            HeaderValue::from_static("attachment; filename=\"lora-dataset.zip\""),
-        )
-        .body(Body::from(zip_bytes))
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    Ok(response)
+    let export_service = DatasetExportService::new(
+        state.catalog.clone(),
+        state.blobs.clone(),
+        state.spool.clone(),
+    );
+    let archive = export_service.export_lora_dataset(theme.as_ref()).await?;
+    spooled_zip_response(archive, "lora-dataset.zip")
 }
 
 /// GET /api/dataset/readiness - Audit the curated store against the LoRA dataset contract.
@@ -310,7 +304,11 @@ pub async fn get_dataset_readiness(
     Query(query): Query<ReadinessQuery>,
 ) -> Result<Json<DatasetReadiness>, ApiError> {
     let theme = parse_optional_theme(query.theme.as_deref())?;
-    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
+    let export_service = DatasetExportService::new(
+        state.catalog.clone(),
+        state.blobs.clone(),
+        state.spool.clone(),
+    );
     let report = export_service
         .audit_dataset_readiness(theme.as_ref(), query.refresh)
         .await?;
@@ -339,22 +337,51 @@ pub async fn post_dataset_export_selected(
     State(state): State<AppState>,
     Json(payload): Json<ExportSelectedRequest>,
 ) -> Result<Response, ApiError> {
-    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
-    let zip_bytes = export_service
+    let export_service = DatasetExportService::new(
+        state.catalog.clone(),
+        state.blobs.clone(),
+        state.spool.clone(),
+    );
+    let archive = export_service
         .export_selected_lora_dataset(&payload.ids)
         .await?;
+    spooled_zip_response(archive, "lora-dataset.zip")
+}
 
-    let response = Response::builder()
+/// Read size for a streamed archive body: large enough to avoid a frame per 4 KiB, small enough
+/// to keep the response responsive.
+const STREAM_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Streams a finished dataset archive as the response body.
+///
+/// The archive owns the process-wide spool slot; capturing it in the stream keeps the file on
+/// disk (and the slot held) until the client consumes the last chunk, then releases both.
+fn spooled_zip_response(archive: SpooledArchive, filename: &str) -> Result<Response, ApiError> {
+    let len = archive.len();
+    let file = archive
+        .open()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let stream = tokio_stream::StreamExt::map(
+        ReaderStream::with_capacity(tokio::fs::File::from_std(file), STREAM_CHUNK_BYTES),
+        move |chunk| {
+            let _hold = &archive;
+            chunk
+        },
+    );
+    let disposition = format!("attachment; filename=\"{filename}\"");
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"))
         .header(
-            header::CONTENT_DISPOSITION,
-            HeaderValue::from_static("attachment; filename=\"lora-dataset.zip\""),
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&len.to_string()).map_err(|e| ApiError::internal(e.to_string()))?,
         )
-        .body(Body::from(zip_bytes))
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-
-    Ok(response)
+        .header(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::try_from(disposition).map_err(|e| ApiError::internal(e.to_string()))?,
+        )
+        .body(Body::from_stream(stream))
+        .map_err(|e| ApiError::internal(e.to_string()))
 }
 
 /// Publishes an in-progress freeze and clears it when dropped.
@@ -454,6 +481,7 @@ pub async fn post_training_dataset(
         let freeze_status = state.snapshot_freeze_status.clone();
         let catalog = state.catalog.clone();
         let blobs = state.blobs.clone();
+        let spool = state.spool.clone();
 
         tokio::spawn(async move {
             let _permit = lock_permit;
@@ -461,7 +489,7 @@ pub async fn post_training_dataset(
             // clears before the freeze lock is released, so a client never observes
             // `in_progress: false` while a freeze still holds the lock.
             let status = FreezeStatusGuard::new(freeze_status);
-            let export_service = DatasetExportService::new(catalog, blobs);
+            let export_service = DatasetExportService::new(catalog, blobs, spool);
             let res = export_service
                 .freeze_dataset_snapshot_with_progress(theme.as_ref(), req.id, |progress| {
                     // Update global status first so secondary tabs/status polling stays accurate
@@ -538,7 +566,11 @@ pub async fn post_training_dataset(
     } else {
         let _permit = lock_permit;
         let status = FreezeStatusGuard::new(state.snapshot_freeze_status.clone());
-        let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
+        let export_service = DatasetExportService::new(
+            state.catalog.clone(),
+            state.blobs.clone(),
+            state.spool.clone(),
+        );
         let snapshot_res = export_service
             .freeze_dataset_snapshot_with_progress(theme.as_ref(), req.id, |progress| {
                 status.publish(progress);
@@ -566,7 +598,11 @@ pub async fn get_training_datasets(
     Query(query): Query<ThemeQuery>,
 ) -> Result<Json<Vec<DatasetSnapshot>>, ApiError> {
     let theme = parse_optional_theme(query.theme.as_deref())?;
-    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
+    let export_service = DatasetExportService::new(
+        state.catalog.clone(),
+        state.blobs.clone(),
+        state.spool.clone(),
+    );
     let snapshots = export_service.list_dataset_snapshots(theme.as_ref()).await?;
     Ok(Json(snapshots))
 }
@@ -579,7 +615,11 @@ pub async fn get_training_dataset(
     if id.trim().is_empty() {
         return Err(ApiError::bad_request("Snapshot ID cannot be empty"));
     }
-    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
+    let export_service = DatasetExportService::new(
+        state.catalog.clone(),
+        state.blobs.clone(),
+        state.spool.clone(),
+    );
     let snapshot = export_service.get_dataset_snapshot(&id).await?;
     Ok(Json(snapshot))
 }
@@ -592,8 +632,12 @@ pub async fn get_training_dataset_archive(
     if id.trim().is_empty() {
         return Err(ApiError::bad_request("Snapshot ID cannot be empty"));
     }
-    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
-    let bytes = export_service.read_dataset_snapshot_archive(&id).await?;
+    let export_service = DatasetExportService::new(
+        state.catalog.clone(),
+        state.blobs.clone(),
+        state.spool.clone(),
+    );
+    let (size, reader) = export_service.open_dataset_snapshot_archive(&id).await?;
     let filename = format!("{id}.zip");
     let disposition = format!("attachment; filename=\"{filename}\"");
 
@@ -601,10 +645,17 @@ pub async fn get_training_dataset_archive(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"))
         .header(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&size.to_string()).map_err(|e| ApiError::internal(e.to_string()))?,
+        )
+        .header(
             header::CONTENT_DISPOSITION,
             HeaderValue::try_from(disposition).map_err(|e| ApiError::internal(e.to_string()))?,
         )
-        .body(Body::from(bytes))
+        .body(Body::from_stream(ReaderStream::with_capacity(
+            reader,
+            STREAM_CHUNK_BYTES,
+        )))
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     Ok(response)
@@ -618,7 +669,11 @@ pub async fn delete_training_dataset(
     if id.trim().is_empty() {
         return Err(ApiError::bad_request("Snapshot ID cannot be empty"));
     }
-    let export_service = DatasetExportService::new(state.catalog.clone(), state.blobs.clone());
+    let export_service = DatasetExportService::new(
+        state.catalog.clone(),
+        state.blobs.clone(),
+        state.spool.clone(),
+    );
     export_service.delete_dataset_snapshot(&id).await?;
     tracing::info!(id = %id, "Deleted dataset snapshot");
     Ok(Json(json!({ "deleted": true, "id": id })))

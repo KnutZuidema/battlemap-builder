@@ -15,8 +15,13 @@ use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::CatalogRepository;
 use curator::services::curation::{CurationService, CurationWorkflow};
 use curator::services::description::DescriptionService;
-use curator::services::DatasetExportService;
+use curator::services::{ArchiveSpool, DatasetExportService};
 use image::GenericImageView;
+
+/// Spool rooted in the system temp directory; each archive removes itself on drop.
+fn test_spool() -> Arc<ArchiveSpool> {
+    Arc::new(ArchiveSpool::new(std::env::temp_dir()))
+}
 
 /// Fresh in-memory catalog and blob ports: these tests exercise the dataset routes.
 fn in_memory_ports() -> (
@@ -36,7 +41,7 @@ fn setup_test_app() -> (
     Arc<dyn BlobStorage + Send + Sync>,
 ) {
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(catalog.clone(), blobs.clone());
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool());
     let router = create_router(state);
     (router, catalog, blobs)
 }
@@ -236,8 +241,10 @@ async fn test_storage_export_lora_dataset_paired_png_and_txt() {
     seed_curated_ports(&catalog, &blobs, &map2, &png_bytes).await;
 
     // Export all themes
-    let export = DatasetExportService::new(catalog, blobs);
-    let zip_bytes = export.export_lora_dataset(None).await.unwrap();
+    let export = DatasetExportService::new(catalog, blobs, test_spool());
+    let spooled = export.export_lora_dataset(None).await.unwrap();
+    let zip_bytes = std::fs::read(spooled.path()).unwrap();
+    drop(spooled);
     assert!(!zip_bytes.is_empty());
 
     let mut archive = ZipArchive::new(Cursor::new(&zip_bytes)).unwrap();
@@ -263,7 +270,9 @@ async fn test_storage_export_lora_dataset_paired_png_and_txt() {
     assert!(caption_content.contains("dungeon"));
 
     // Verify filtered export for Theme::Dungeon only
-    let dungeon_zip = export.export_lora_dataset(Some(&Theme::Dungeon)).await.unwrap();
+    let dungeon_spool = export.export_lora_dataset(Some(&Theme::Dungeon)).await.unwrap();
+    let dungeon_zip = std::fs::read(dungeon_spool.path()).unwrap();
+    drop(dungeon_spool);
     let mut dungeon_archive = ZipArchive::new(Cursor::new(&dungeon_zip)).unwrap();
     assert_eq!(dungeon_archive.len(), 2);
 
@@ -309,8 +318,19 @@ async fn test_api_dataset_export_headers_and_stream() {
         "attachment; filename=\"lora-dataset.zip\""
     );
 
+    // The export spools to disk and streams, so the length is announced up front.
+    let content_length: usize = resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .expect("Content-Length is set for a streamed archive")
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
     // Verify body is a valid ZIP stream containing the expected files
     let body_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body_bytes.len(), content_length);
     let mut archive = ZipArchive::new(Cursor::new(&body_bytes)).unwrap();
     assert_eq!(archive.len(), 2);
 
@@ -323,11 +343,16 @@ async fn test_empty_theme_export_handling() {
     let (app, catalog, blobs) = setup_test_app();
 
     // 1. Direct service call on empty storage
-    let empty_zip = DatasetExportService::new(catalog, blobs)
+    let empty_spool = DatasetExportService::new(catalog, blobs, test_spool())
         .export_lora_dataset(Some(&Theme::SciFi))
         .await
         .unwrap();
-    assert!(!empty_zip.is_empty(), "Empty ZIP must contain valid EOCD bytes");
+    assert!(
+        !empty_spool.is_empty(),
+        "Empty ZIP must contain valid EOCD bytes"
+    );
+    let empty_zip = std::fs::read(empty_spool.path()).unwrap();
+    drop(empty_spool);
 
     let archive = ZipArchive::new(Cursor::new(&empty_zip)).unwrap();
     assert_eq!(archive.len(), 0);

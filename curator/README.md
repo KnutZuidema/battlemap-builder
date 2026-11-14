@@ -223,6 +223,7 @@ on Linux):
 | `CURATOR_DESCRIPTION_MODEL` | `google/gemini-3.5-flash-lite` | Model ID for AI vision battlemap description generation (`POST /api/staging/:id/describe`) |
 | `CURATOR_VISION_MODEL` | `google/gemini-3.5-flash-lite` | Fallback vision model ID for theme suggestions and descriptions |
 | `CURATOR_DATA_DIR` / `DATA_DIR` | platform user data dir (`~/.local/share/battlemap-builder` on Linux) | Root for staging, curated, thumbs, telemetry and rejected storage |
+| `CURATOR_MAX_ARCHIVE_BYTES` | `8589934592` (8 GiB) | Ceiling for one spooled dataset archive; a larger scope fails the freeze with a message naming the variable |
 | `PORT` | `3002` | Curator Axum HTTP server port |
 
 ---
@@ -411,3 +412,23 @@ unsaved edits (a dirty draft is kept). After any success the library filters are
 `invalidateDatasetReadiness()` clears the cached audits, because tags, description and sections all
 feed the readiness contract above. The final toast is a success only when every map succeeded;
 otherwise it names the failed ids with the first error, and each failure is logged to the console.
+
+
+## 9. Dataset archives: spooling and streaming (ADR-0015)
+
+`lora-dataset.zip`, its theme and selection variants, and frozen snapshot downloads are never held in
+memory. A freeze builds the archive in `DATA_DIR/tmp/dataset-archive-<pid>-<n>.zip`, computes the SHA-256
+with one sequential read, and streams it to R2 in 16 MiB multipart parts; the two export routes and the
+snapshot download stream the same bytes out to the client with a `Content-Length`. Resident cost is one
+decoded Ground layer plus one resampled section, independent of library size.
+
+- **One spool slot**: a second freeze or export waits for the first archive to be uploaded or fully
+  streamed out. Snapshot downloads bypass the slot — they read straight from storage and never spool.
+- **Ceiling**: `CURATOR_MAX_ARCHIVE_BYTES` (8 GiB by default) fails the write mid-archive instead of
+  filling the volume; the partial spool is deleted and no snapshot record is written.
+- **Members are `Stored`**: each sample is already a compressed PNG, so Deflate cost a full pass for a
+  couple of percent. Existing snapshots built with Deflate still read normally.
+- **Cleanup**: the spool file deletes itself when the archive is dropped, and files a crash left behind
+  are swept at boot when older than a day.
+- **Aborts**: a cancelled or dropped upload aborts its S3 multipart upload, so no parts stay billable in
+  the bucket.

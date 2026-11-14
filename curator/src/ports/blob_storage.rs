@@ -372,6 +372,12 @@ impl BlobStat {
     }
 }
 
+/// Read side of a blob, handed to callers that forward the bytes on instead of inspecting them.
+///
+/// Returning a reader (rather than a byte vector) is what lets a multi-gigabyte archive be
+/// streamed from storage into an HTTP response instead of buffered in the server.
+pub type BlobReadStream = std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>;
+
 /// Port defining raw blob I/O under the canonical paths of [`BlobKey`].
 ///
 /// Contract: reading a missing blob fails with [`StorageError::NotFound`], while deleting a
@@ -380,6 +386,15 @@ impl BlobStat {
 pub trait BlobStorage: Send + Sync {
     /// Read the bytes stored at `key`.
     async fn read_blob(&self, key: &BlobKey) -> Result<Vec<u8>, StorageError>;
+
+    /// Stream the blob stored at `key` instead of collecting it.
+    ///
+    /// Backends that cannot stream fall back to this default, which reads the whole blob into
+    /// memory first: acceptable for test doubles, never for a multi-gigabyte archive.
+    async fn read_blob_stream(&self, key: &BlobKey) -> Result<BlobReadStream, StorageError> {
+        let bytes = self.read_blob(key).await?;
+        Ok(Box::pin(std::io::Cursor::new(bytes)))
+    }
 
     /// Write `bytes` at `key`, replacing any previous content.
     async fn write_blob(&self, key: &BlobKey, bytes: &[u8]) -> Result<(), StorageError>;
@@ -414,6 +429,28 @@ pub trait BlobStorage: Send + Sync {
         self.write_blob_with_sha256(key, bytes, sha256).await
     }
 
+    /// Write `total_bytes` read from `reader` at `key`, reporting the transfer as it moves.
+    ///
+    /// `sha256` is attached as object metadata when the backend records digests; `None` means
+    /// "not computed", never "hash the stream". `on_progress` follows the same
+    /// continue/abort contract as [`BlobStorage::write_blob_with_progress`].
+    ///
+    /// Backends that cannot stream fall back to this default, which buffers the reader first:
+    /// acceptable for test doubles, never for a multi-gigabyte archive.
+    async fn write_blob_stream(
+        &self,
+        key: &BlobKey,
+        reader: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+        total_bytes: u64,
+        sha256: Option<&str>,
+        on_progress: &mut (dyn FnMut(BlobWriteProgress) -> bool + Send),
+    ) -> Result<(), StorageError> {
+        let mut bytes = Vec::with_capacity(total_bytes.min(64 * 1024 * 1024) as usize);
+        tokio::io::AsyncReadExt::read_to_end(reader, &mut bytes).await?;
+        self.write_blob_with_progress(key, &bytes, sha256, on_progress)
+            .await
+    }
+
     /// Delete the blob at `key`. Succeeds when nothing was stored there.
     async fn delete_blob(&self, key: &BlobKey) -> Result<(), StorageError>;
 
@@ -444,6 +481,13 @@ impl<T: ?Sized + BlobStorage> BlobStorage for std::sync::Arc<T> {
         (**self).read_blob(key).await
     }
 
+    async fn read_blob_stream(
+        &self,
+        key: &BlobKey,
+    ) -> Result<crate::ports::blob_storage::BlobReadStream, StorageError> {
+        (**self).read_blob_stream(key).await
+    }
+
     async fn write_blob(&self, key: &BlobKey, bytes: &[u8]) -> Result<(), StorageError> {
         (**self).write_blob(key, bytes).await
     }
@@ -466,6 +510,19 @@ impl<T: ?Sized + BlobStorage> BlobStorage for std::sync::Arc<T> {
     ) -> Result<(), StorageError> {
         (**self)
             .write_blob_with_progress(key, bytes, sha256, on_progress)
+            .await
+    }
+
+    async fn write_blob_stream(
+        &self,
+        key: &BlobKey,
+        reader: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+        total_bytes: u64,
+        sha256: Option<&str>,
+        on_progress: &mut (dyn FnMut(BlobWriteProgress) -> bool + Send),
+    ) -> Result<(), StorageError> {
+        (**self)
+            .write_blob_stream(key, reader, total_bytes, sha256, on_progress)
             .await
     }
 

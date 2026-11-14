@@ -39,7 +39,8 @@ fn setup_test_app(
         ledger_dir.path().join("telemetry/cost_ledger.json"),
     ));
 
-    let mut state = AppState::with_cost_tracker(cost_tracker.clone(), catalog.clone(), blobs.clone());
+    let mut state = AppState::with_cost_tracker(cost_tracker.clone(), catalog.clone(), blobs.clone())
+        .with_spool(Arc::new(curator::services::ArchiveSpool::new(std::env::temp_dir())));
     if let Some(r) = runner {
         state = state.with_training_runner(r);
     }

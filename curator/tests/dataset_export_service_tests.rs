@@ -13,7 +13,12 @@ use curator::domain::{
 };
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::CatalogRepository;
-use curator::services::DatasetExportService;
+use curator::services::{ArchiveSpool, DatasetExportService};
+
+/// Spool rooted in the system temp directory; each archive removes itself on drop.
+fn test_spool() -> Arc<ArchiveSpool> {
+    Arc::new(ArchiveSpool::new(std::env::temp_dir()))
+}
 
 /// Fresh in-memory catalog and blob ports, plus the service wired to them.
 fn in_memory_service() -> (
@@ -24,7 +29,7 @@ fn in_memory_service() -> (
     let catalog = Arc::new(InMemoryCatalogRepository::new());
     let blobs = Arc::new(InMemoryBlobStorage::new());
     (
-        DatasetExportService::new(catalog.clone(), blobs.clone()),
+        DatasetExportService::new(catalog.clone(), blobs.clone(), test_spool()),
         catalog,
         blobs,
     )
@@ -96,7 +101,7 @@ fn caption_in(archive: &mut ZipArchive<Cursor<&Vec<u8>>>, name: &str) -> String 
 }
 
 #[tokio::test]
-async fn test_export_lora_dataset_builds_one_deflated_png_and_txt_pair_per_section() {
+async fn test_export_lora_dataset_builds_one_stored_png_and_txt_pair_per_section() {
     let (service, catalog, blobs) = in_memory_service();
     save_map(
         &catalog,
@@ -106,10 +111,12 @@ async fn test_export_lora_dataset_builds_one_deflated_png_and_txt_pair_per_secti
     )
     .await;
 
-    let zip_bytes = service
+    let spooled = service
         .export_lora_dataset(None)
         .await
         .expect("export succeeds");
+    let zip_bytes = std::fs::read(spooled.path()).expect("read spooled archive");
+    drop(spooled);
 
     let mut archive = ZipArchive::new(Cursor::new(&zip_bytes)).expect("readable archive");
     assert_eq!(archive.len(), 8, "four sections ship one PNG and one caption each");
@@ -120,8 +127,8 @@ async fn test_export_lora_dataset_builds_one_deflated_png_and_txt_pair_per_secti
 
         assert_eq!(
             archive.by_name(&png_name).expect("PNG member").compression(),
-            zip::CompressionMethod::Deflated,
-            "{png_name} must be DEFLATE-compressed"
+            zip::CompressionMethod::Stored,
+            "{png_name} must be STORED: the sample is already a compressed PNG"
         );
 
         let mut png_bytes = Vec::new();
@@ -163,10 +170,12 @@ async fn test_export_skips_unresolvable_section_instead_of_rescaling_it() {
         ]);
     save_map(&catalog, &blobs, &map, &test_png(1024, 1024)).await;
 
-    let zip_bytes = service
+    let spooled = service
         .export_lora_dataset(None)
         .await
         .expect("export succeeds");
+    let zip_bytes = std::fs::read(spooled.path()).expect("read spooled archive");
+    drop(spooled);
 
     let mut archive = ZipArchive::new(Cursor::new(&zip_bytes)).expect("readable archive");
     assert_eq!(archive.len(), 2, "only the resolvable section ships");
@@ -181,10 +190,12 @@ async fn test_export_skips_map_whose_ground_layer_cannot_be_read() {
     let map = multisection_map("no_bundle");
     catalog.save_curated(&map).await.expect("save curated map");
 
-    let zip_bytes = service
+    let spooled = service
         .export_lora_dataset(None)
         .await
         .expect("a missing ground layer never fails the whole export");
+    let zip_bytes = std::fs::read(spooled.path()).expect("read spooled archive");
+    drop(spooled);
 
     let archive = ZipArchive::new(Cursor::new(&zip_bytes)).expect("readable archive");
     assert_eq!(archive.len(), 0);
@@ -197,10 +208,12 @@ async fn test_export_selected_lora_dataset_honours_requested_ids_and_order() {
     save_map(&catalog, &blobs, &multisection_map("alpha"), &test_png(2048, 2048)).await;
 
     let selected = vec!["beta".to_string(), "missing".to_string(), "beta".to_string(), "alpha".to_string()];
-    let zip_bytes = service
+    let spooled = service
         .export_selected_lora_dataset(&selected)
         .await
         .expect("export succeeds");
+    let zip_bytes = std::fs::read(spooled.path()).expect("read spooled archive");
+    drop(spooled);
 
     let mut archive = ZipArchive::new(Cursor::new(&zip_bytes)).expect("readable archive");
     assert_eq!(archive.len(), 16, "two maps ship four sections each, once each");
@@ -222,8 +235,10 @@ async fn test_export_selected_lora_dataset_honours_requested_ids_and_order() {
         .export_selected_lora_dataset(&[])
         .await
         .expect("empty selection succeeds");
+    let empty_bytes = std::fs::read(empty.path()).expect("read spooled archive");
+    drop(empty);
     assert_eq!(
-        ZipArchive::new(Cursor::new(&empty)).unwrap().len(),
+        ZipArchive::new(Cursor::new(&empty_bytes)).unwrap().len(),
         0,
         "an empty selection yields an empty archive"
     );

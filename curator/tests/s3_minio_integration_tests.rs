@@ -319,6 +319,83 @@ async fn test_arc_dyn_s3_blob_storage_port() {
 }
 
 
+/// Spooled archives upload through the streamed path; it must move the same bytes as the
+/// byte-slice path, attach the digest, report parts, and reject a stream that disagrees with the
+/// declared size.
+#[tokio::test]
+async fn test_minio_stream_upload_matches_byte_upload() {
+    let minio = EphemeralMinio::start().await;
+    let bucket = "test-stream-bucket";
+    let storage = setup_minio_storage(&minio.endpoint, bucket, None).await;
+
+    let small = b"streamed small payload".to_vec();
+    let small_key = BlobKey::DatasetSnapshot {
+        id: "stream-small".into(),
+    };
+    let mut small_reader: &[u8] = &small;
+    let mut events = Vec::new();
+    storage
+        .write_blob_stream(
+            &small_key,
+            &mut small_reader,
+            small.len() as u64,
+            Some(&sha256_digest(&small)),
+            &mut |progress| {
+                events.push(progress);
+                true
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(storage.read_blob(&small_key).await.unwrap(), small);
+    let stat = storage.stat_blob(&small_key).await.unwrap();
+    assert_eq!(stat.size, small.len() as u64);
+    assert_eq!(stat.sha256, Some(sha256_digest(&small)));
+    assert_eq!(events.len(), 1);
+
+    let data: Vec<u8> = (0..MULTIPART_THRESHOLD + 4096)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let key = BlobKey::DatasetSnapshot {
+        id: "stream-multipart".into(),
+    };
+    let mut reader: &[u8] = &data;
+    let mut events = Vec::new();
+    storage
+        .write_blob_stream(
+            &key,
+            &mut reader,
+            data.len() as u64,
+            Some(&sha256_digest(&data)),
+            &mut |progress| {
+                events.push(progress);
+                true
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(storage.read_blob(&key).await.unwrap(), data);
+    let stat = storage.stat_blob(&key).await.unwrap();
+    assert_eq!(stat.size, data.len() as u64);
+    assert_eq!(stat.sha256, Some(sha256_digest(&data)));
+    assert_eq!(events.len(), 2, "one callback per completed part");
+    assert_eq!(events.last().unwrap().bytes_written, data.len() as u64);
+
+    // A stream shorter than its declared size must not produce an object.
+    let short_key = BlobKey::DatasetSnapshot {
+        id: "stream-short".into(),
+    };
+    let mut short: &[u8] = b"short";
+    let err = storage
+        .write_blob_stream(&short_key, &mut short, MULTIPART_THRESHOLD as u64 + 1, None, &mut |_| true)
+        .await
+        .expect_err("a short stream must fail");
+    assert!(matches!(err, StorageError::InvalidData(_)), "{err:?}");
+    assert!(!storage.exists_blob(&short_key).await.unwrap());
+}
+
 /// The freeze panel advances on this callback, so it must fire once per completed part, end at the
 /// full payload size, and abort the multipart upload when the operator cancels.
 #[tokio::test]

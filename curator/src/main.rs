@@ -48,6 +48,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = curator::resolve_data_dir();
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
+    // A crash during a freeze leaves its spooled archive behind; nothing else knows it exists.
+    let spool_dir = curator::services::ArchiveSpool::from_env();
+    match spool_dir.sweep_stale() {
+        Ok(0) => {}
+        Ok(removed) => tracing::info!(
+            removed,
+            path = %spool_dir.root().display(),
+            "Swept stale dataset archive spools"
+        ),
+        Err(err) => tracing::warn!(
+            error = %err,
+            path = %spool_dir.root().display(),
+            "Failed to sweep stale dataset archive spools"
+        ),
+    }
+
     tracing::info!(
         data_dir = %data_dir.display(),
         "Initializing filesystem catalog and blob ports..."

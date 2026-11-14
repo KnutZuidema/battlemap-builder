@@ -4,7 +4,9 @@ use std::io::ErrorKind;
 
 use async_trait::async_trait;
 
-use crate::ports::blob_storage::{sha256_digest, BlobKey, BlobStat, BlobStorage, BlobWriteProgress};
+use crate::ports::blob_storage::{
+    sha256_digest, BlobKey, BlobReadStream, BlobStat, BlobStorage, BlobWriteProgress,
+};
 use crate::ports::storage_error::StorageError;
 
 /// Multipart part size: 16 MiB keeps the request count (and the round-trip exposure of each part)
@@ -222,19 +224,6 @@ impl S3BlobStorage {
         StorageError::Io(std::io::Error::other(err))
     }
 
-    /// Aborts an in-flight multipart upload. The caller is already failing, so the abort error is
-    /// not allowed to mask the original cause.
-    async fn abort_multipart(&self, path: &str, upload_id: &str) {
-        let _ = self
-            .client
-            .abort_multipart_upload()
-            .bucket(&self.bucket)
-            .key(path)
-            .upload_id(upload_id)
-            .send()
-            .await;
-    }
-
     /// Writes `bytes` to `key`, reporting transferred bytes through `on_progress`.
     ///
     /// Payloads above [`MULTIPART_THRESHOLD`] upload in [`PART_SIZE`] parts, up to
@@ -285,6 +274,12 @@ impl S3BlobStorage {
             .upload_id()
             .ok_or_else(|| StorageError::Io(std::io::Error::other("Missing upload_id")))?
             .to_string();
+        let mut abort_guard = MultipartAbortGuard::new(
+            self.client.clone(),
+            self.bucket.clone(),
+            path.clone(),
+            upload_id.clone(),
+        );
 
         let total_parts = bytes.len().div_ceil(PART_SIZE);
         tracing::info!(
@@ -333,7 +328,7 @@ impl S3BlobStorage {
                         total_bytes,
                     }) {
                         in_flight.abort_all();
-                        self.abort_multipart(&path, &upload_id).await;
+                        abort_guard.abort().await;
                         return Err(StorageError::Io(std::io::Error::from(
                             ErrorKind::Interrupted,
                         )));
@@ -341,12 +336,12 @@ impl S3BlobStorage {
                 }
                 Ok(Err(err)) => {
                     in_flight.abort_all();
-                    self.abort_multipart(&path, &upload_id).await;
+                    abort_guard.abort().await;
                     return Err(err);
                 }
                 Err(join_err) => {
                     in_flight.abort_all();
-                    self.abort_multipart(&path, &upload_id).await;
+                    abort_guard.abort().await;
                     return Err(StorageError::Io(std::io::Error::other(join_err)));
                 }
             }
@@ -368,11 +363,270 @@ impl S3BlobStorage {
             .send()
             .await
         {
-            self.abort_multipart(&path, &upload_id).await;
+            abort_guard.abort().await;
             return Err(StorageError::Io(std::io::Error::other(err)));
         }
 
+        abort_guard.disarm();
         Ok(())
+    }
+
+    /// Writes `total_bytes` read from `reader` at `key`, reporting transferred bytes through
+    /// `on_progress`.
+    ///
+    /// Mirrors [`S3BlobStorage::put_with_progress`] but takes the payload from a reader, so a
+    /// multi-gigabyte archive uploads straight from its spool file instead of a resident buffer.
+    /// The reader MUST yield exactly `total_bytes`: a short or long stream aborts the upload
+    /// instead of storing an object whose size and checksum metadata disagree with its content.
+    #[allow(clippy::too_many_arguments)]
+    async fn put_stream_with_progress(
+        &self,
+        key: &BlobKey,
+        reader: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+        total_bytes: u64,
+        sha256: Option<&str>,
+        on_progress: &mut (dyn FnMut(BlobWriteProgress) -> bool + Send),
+    ) -> Result<(), StorageError> {
+        use tokio::io::AsyncReadExt;
+
+        let path = key.to_path();
+
+        if total_bytes <= MULTIPART_THRESHOLD as u64 {
+            let mut bytes = Vec::with_capacity(total_bytes as usize);
+            reader.read_to_end(&mut bytes).await?;
+            let written = bytes.len() as u64;
+            if written != total_bytes {
+                return Err(StorageError::InvalidData(format!(
+                    "Blob '{path}' stream yielded {written} bytes, expected {total_bytes}"
+                )));
+            }
+            let body = aws_sdk_s3::primitives::ByteStream::from(bytes);
+            let mut request = self
+                .client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(&path)
+                .body(body);
+            if let Some(digest) = sha256 {
+                request = request.metadata("sha256", digest);
+            }
+            request
+                .send()
+                .await
+                .map_err(|err| StorageError::Io(std::io::Error::other(err)))?;
+            let _ = on_progress(BlobWriteProgress {
+                bytes_written: written,
+                total_bytes,
+            });
+            return Ok(());
+        }
+
+        let mut create = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&path);
+        if let Some(digest) = sha256 {
+            create = create.metadata("sha256", digest);
+        }
+        let create_res = create
+            .send()
+            .await
+            .map_err(|err| StorageError::Io(std::io::Error::other(err)))?;
+        let upload_id = create_res
+            .upload_id()
+            .ok_or_else(|| StorageError::Io(std::io::Error::other("Missing upload_id")))?
+            .to_string();
+        let mut abort_guard = MultipartAbortGuard::new(
+            self.client.clone(),
+            self.bucket.clone(),
+            path.clone(),
+            upload_id.clone(),
+        );
+
+        let total_parts = total_bytes.div_ceil(PART_SIZE as u64);
+        tracing::info!(
+            path = %path,
+            bytes = total_bytes,
+            parts = total_parts,
+            concurrency = UPLOAD_CONCURRENCY,
+            "Uploading multipart object from a stream"
+        );
+
+        let mut in_flight = tokio::task::JoinSet::new();
+        let mut completed_parts = Vec::with_capacity(total_parts as usize);
+        let mut bytes_written = 0u64;
+        let mut next_part = 0u64;
+
+        loop {
+            while next_part < total_parts && in_flight.len() < UPLOAD_CONCURRENCY {
+                let mut chunk = vec![0u8; PART_SIZE];
+                let mut filled = 0usize;
+                while filled < PART_SIZE {
+                    let read = reader.read(&mut chunk[filled..]).await?;
+                    if read == 0 {
+                        break;
+                    }
+                    filled += read;
+                }
+                if filled == 0 {
+                    in_flight.abort_all();
+                    abort_guard.abort().await;
+                    return Err(StorageError::InvalidData(format!(
+                        "Blob '{path}' stream ended before the declared {total_bytes} bytes"
+                    )));
+                }
+                chunk.truncate(filled);
+                in_flight.spawn(upload_part(
+                    self.client.clone(),
+                    self.bucket.clone(),
+                    path.clone(),
+                    upload_id.clone(),
+                    (next_part + 1) as i32,
+                    chunk,
+                ));
+                next_part += 1;
+            }
+
+            let Some(joined) = in_flight.join_next().await else {
+                break;
+            };
+
+            match joined {
+                Ok(Ok((part_number, etag, part_len))) => {
+                    completed_parts.push(
+                        aws_sdk_s3::types::CompletedPart::builder()
+                            .part_number(part_number)
+                            .e_tag(etag)
+                            .build(),
+                    );
+                    bytes_written += part_len as u64;
+                    if !on_progress(BlobWriteProgress {
+                        bytes_written,
+                        total_bytes,
+                    }) {
+                        in_flight.abort_all();
+                        abort_guard.abort().await;
+                        return Err(StorageError::Io(std::io::Error::from(
+                            ErrorKind::Interrupted,
+                        )));
+                    }
+                }
+                Ok(Err(err)) => {
+                    in_flight.abort_all();
+                    abort_guard.abort().await;
+                    return Err(err);
+                }
+                Err(join_err) => {
+                    in_flight.abort_all();
+                    abort_guard.abort().await;
+                    return Err(StorageError::Io(std::io::Error::other(join_err)));
+                }
+            }
+        }
+
+        let mut extra = [0u8; 1];
+        if reader.read(&mut extra).await? > 0 {
+            abort_guard.abort().await;
+            return Err(StorageError::InvalidData(format!(
+                "Blob '{path}' stream is longer than the declared {total_bytes} bytes"
+            )));
+        }
+
+        // Parts complete out of order; S3 requires them listed in ascending part-number order.
+        completed_parts.sort_by_key(|part| part.part_number().unwrap_or_default());
+        let completed_upload = aws_sdk_s3::types::CompletedMultipartUpload::builder()
+            .set_parts(Some(completed_parts))
+            .build();
+
+        if let Err(err) = self
+            .client
+            .complete_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&path)
+            .upload_id(&upload_id)
+            .multipart_upload(completed_upload)
+            .send()
+            .await
+        {
+            abort_guard.abort().await;
+            return Err(StorageError::Io(std::io::Error::other(err)));
+        }
+
+        abort_guard.disarm();
+        Ok(())
+    }
+}
+
+/// Aborts an in-flight multipart upload unless it is explicitly disarmed.
+///
+/// An upload abandoned by a dropped future (client disconnect, request timeout, task shutdown)
+/// would otherwise leave its parts billed in the bucket until a lifecycle rule collects them.
+/// [`Drop`] cannot await, so it hands the abort to the runtime; when no runtime is running there
+/// is nothing left to clean up with, and the lifecycle rule is the fallback.
+struct MultipartAbortGuard {
+    client: aws_sdk_s3::Client,
+    bucket: String,
+    path: String,
+    upload_id: Option<String>,
+}
+
+impl MultipartAbortGuard {
+    fn new(
+        client: aws_sdk_s3::Client,
+        bucket: String,
+        path: String,
+        upload_id: String,
+    ) -> Self {
+        Self {
+            client,
+            bucket,
+            path,
+            upload_id: Some(upload_id),
+        }
+    }
+
+    /// Aborts the upload now; the caller is already failing, so an abort error is not allowed to
+    /// mask the original cause.
+    async fn abort(&mut self) {
+        if let Some(upload_id) = self.upload_id.take() {
+            let _ = self
+                .client
+                .abort_multipart_upload()
+                .bucket(&self.bucket)
+                .key(&self.path)
+                .upload_id(upload_id)
+                .send()
+                .await;
+        }
+    }
+
+    /// Keeps the completed upload, so dropping the guard does nothing.
+    fn disarm(&mut self) {
+        self.upload_id = None;
+    }
+}
+
+impl Drop for MultipartAbortGuard {
+    fn drop(&mut self) {
+        let Some(upload_id) = self.upload_id.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let path = self.path.clone();
+        runtime.spawn(async move {
+            let _ = client
+                .abort_multipart_upload()
+                .bucket(bucket)
+                .key(path)
+                .upload_id(upload_id)
+                .send()
+                .await;
+        });
     }
 }
 
@@ -430,6 +684,19 @@ impl BlobStorage for S3BlobStorage {
         Ok(bytes.to_vec())
     }
 
+    async fn read_blob_stream(&self, key: &BlobKey) -> Result<BlobReadStream, StorageError> {
+        let path = key.to_path();
+        let res = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&path)
+            .send()
+            .await
+            .map_err(|err| Self::map_get_error(&path, err))?;
+        Ok(Box::pin(res.body.into_async_read()))
+    }
+
     async fn write_blob(&self, key: &BlobKey, bytes: &[u8]) -> Result<(), StorageError> {
         self.write_blob_with_sha256(key, bytes, None).await
     }
@@ -453,6 +720,18 @@ impl BlobStorage for S3BlobStorage {
         on_progress: &mut (dyn FnMut(BlobWriteProgress) -> bool + Send),
     ) -> Result<(), StorageError> {
         self.put_with_progress(key, bytes, sha256, on_progress).await
+    }
+
+    async fn write_blob_stream(
+        &self,
+        key: &BlobKey,
+        reader: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+        total_bytes: u64,
+        sha256: Option<&str>,
+        on_progress: &mut (dyn FnMut(BlobWriteProgress) -> bool + Send),
+    ) -> Result<(), StorageError> {
+        self.put_stream_with_progress(key, reader, total_bytes, sha256, on_progress)
+            .await
     }
 
     async fn delete_blob(&self, key: &BlobKey) -> Result<(), StorageError> {

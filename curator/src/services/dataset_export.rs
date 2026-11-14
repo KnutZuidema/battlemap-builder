@@ -2,8 +2,9 @@
 //!
 //! Every `Map Section` of a curated map becomes one `1024×1024` sample whose companion `.txt`
 //! carries the `Trigger Phrase` plus that section's perspective-neutral `Physical Description`.
-//! The archive is built entirely in memory (DEFLATE, no temporary files) from the Ground layer
-//! bytes read through [`BlobStorage`].
+//! The archive is spooled to a temporary file under the data directory (ADR-0015), with `Stored`
+//! members because each sample is already a compressed PNG, and from there uploaded or streamed
+//! out instead of being held in memory.
 //!
 //! The sample planning, cropping and readiness classification are pure functions shared with the
 //! legacy monolithic storage repository, which resolved Ground layer bytes
@@ -23,9 +24,10 @@ use crate::domain::{
     DatasetIssueCode, DatasetReadiness, DatasetSnapshot, FreezeProgressUpdate, GridConfig, LayerRole,
     MapDatasetReadiness, MapReadinessRecord, MapSection, Theme, UploadProgress, TRIGGER_PHRASE,
 };
-use crate::ports::blob_storage::{sha256_digest, BlobKey, BlobStorage, BlobWriteProgress};
+use crate::ports::blob_storage::{BlobKey, BlobReadStream, BlobStorage, BlobWriteProgress};
 use crate::ports::catalog_repository::{CatalogRepository, CuratedFilter};
 use crate::ports::storage_error::StorageError;
+use crate::services::archive_spool::{ArchiveSpool, SpooledArchive};
 use crate::services::image_work;
 
 /// One planned LoRA dataset sample: a `Map Section` box, the `Physical Description` it is
@@ -353,19 +355,29 @@ pub enum DeleteDatasetError {
 pub struct DatasetExportService {
     catalog: Arc<dyn CatalogRepository>,
     blobs: Arc<dyn BlobStorage>,
+    spool: Arc<ArchiveSpool>,
 }
 
 impl DatasetExportService {
-    /// Creates a service reading curated maps from `catalog` and layer images from `blobs`.
-    pub fn new(catalog: Arc<dyn CatalogRepository>, blobs: Arc<dyn BlobStorage>) -> Self {
-        Self { catalog, blobs }
+    /// Creates a service reading curated maps from `catalog`, layer images from `blobs`, and
+    /// writing dataset archives through `spool`.
+    pub fn new(
+        catalog: Arc<dyn CatalogRepository>,
+        blobs: Arc<dyn BlobStorage>,
+        spool: Arc<ArchiveSpool>,
+    ) -> Self {
+        Self {
+            catalog,
+            blobs,
+            spool,
+        }
     }
 
-    /// Exports every curated map (optionally restricted to `theme`) as a LoRA ZIP archive.
+    /// Exports every curated map (optionally restricted to `theme`) as a spooled LoRA ZIP archive.
     pub async fn export_lora_dataset(
         &self,
         theme: Option<&Theme>,
-    ) -> Result<Vec<u8>, StorageError> {
+    ) -> Result<SpooledArchive, StorageError> {
         let curated_maps = self.list_curated(theme).await?;
         self.create_lora_zip(&curated_maps).await
     }
@@ -374,7 +386,7 @@ impl DatasetExportService {
     pub async fn export_selected_lora_dataset(
         &self,
         ids: &[String],
-    ) -> Result<Vec<u8>, StorageError> {
+    ) -> Result<SpooledArchive, StorageError> {
         let mut selected_maps = Vec::new();
         let mut seen = HashSet::new();
 
@@ -501,35 +513,37 @@ impl DatasetExportService {
             .await
     }
 
-    /// Resolves every map's Ground layer bytes and packages them into a LoRA ZIP archive.
-    /// Streams maps one-by-one to bound input image memory to O(1) maps.
+    /// Resolves every map's Ground layer bytes and packages them into a spooled LoRA ZIP archive.
+    /// Streams maps one-by-one to keep the working set to O(1) maps.
     async fn create_lora_zip(
         &self,
         curated_maps: &[CuratedMap],
-    ) -> Result<Vec<u8>, StorageError> {
-        let (bytes, _) = self
+    ) -> Result<SpooledArchive, StorageError> {
+        let (archive, _) = self
             .package_lora_zip_streaming(curated_maps, |_, _, _, _, _| true)
             .await?;
-        Ok(bytes)
+        Ok(archive)
     }
 
-    /// Streams maps one by one, crops/resamples sections, and writes into a LoRA ZIP archive.
-    /// Drops decoded images after processing each map to keep peak memory usage to O(1) maps.
+    /// Streams maps one by one, crops/resamples sections, and writes into a LoRA ZIP archive on
+    /// the spool. Drops decoded images after processing each map, so peak memory is one Ground
+    /// layer plus one resampled section, independent of the archive size.
     async fn package_lora_zip_streaming<F>(
         &self,
         curated_maps: &[CuratedMap],
         mut on_section: F,
-    ) -> Result<(Vec<u8>, usize), StorageError>
+    ) -> Result<(SpooledArchive, usize), StorageError>
     where
         F: FnMut(usize, usize, &CuratedMap, u32, u32) -> bool,
     {
-        let mut buffer = std::io::Cursor::new(Vec::new());
         let mut completed_samples = 0;
 
         {
-            let mut zip = zip::ZipWriter::new(&mut buffer);
+            let mut zip = zip::ZipWriter::new(self.spool.create().await?);
+            // PNG members are already compressed: Deflate buys ~0–2 % for a full pass over the
+            // archive, so the members are stored as-is (ADR-0015).
             let options = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated);
+                .compression_method(zip::CompressionMethod::Stored);
 
             for (map_idx, map) in curated_maps.iter().enumerate() {
                 let theme_str = map.primary_theme();
@@ -636,11 +650,12 @@ impl DatasetExportService {
                 }
             }
 
-            zip.finish()
+            let writer = zip
+                .finish()
                 .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
+            let archive = writer.finish().map_err(StorageError::Io)?;
+            Ok((archive, completed_samples))
         }
-
-        Ok((buffer.into_inner(), completed_samples))
     }
 
     /// Freezes an immutable dataset snapshot for the given scope, gated on dataset readiness.
@@ -768,7 +783,7 @@ impl DatasetExportService {
         }
 
         // 2. Stream zip packaging map-by-map via shared streaming packager
-        let (zip_bytes, completed_samples) = match self
+        let (archive, completed_samples) = match self
             .package_lora_zip_streaming(
                 &curated_maps,
                 |done, map_idx, map, col, row| {
@@ -800,8 +815,10 @@ impl DatasetExportService {
             Err(e) => return Err(FreezeDatasetError::Storage(e)),
         };
 
-        let sha256 = sha256_digest(&zip_bytes);
-        let size_bytes = zip_bytes.len() as u64;
+        // One sequential pass over the finished archive: the digest is metadata for the upload
+        // and the snapshot record, and never required the archive to be in memory.
+        let sha256 = archive.sha256().await.map_err(StorageError::Io)?;
+        let size_bytes = archive.len();
 
         if !on_progress(FreezeProgressUpdate {
             phase: "finalizing".to_string(),
@@ -853,9 +870,26 @@ impl DatasetExportService {
                 snapshot: None,
             })
         };
-        self.blobs
-            .write_blob_with_progress(&blob_key, &zip_bytes, Some(&sha256), &mut report_upload)
-            .await?;
+        let mut archive_reader =
+            tokio::fs::File::from_std(archive.open().map_err(StorageError::Io)?);
+        if let Err(err) = self
+            .blobs
+            .write_blob_stream(
+                &blob_key,
+                &mut archive_reader,
+                size_bytes,
+                Some(&sha256),
+                &mut report_upload,
+            )
+            .await
+        {
+            return Err(match err {
+                StorageError::Io(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    FreezeDatasetError::Cancelled
+                }
+                other => FreezeDatasetError::Storage(other),
+            });
+        }
 
         let artifact_key = blob_key.to_path();
         let artifact_url = std::env::var("R2_PUBLIC_URL")
@@ -911,15 +945,21 @@ impl DatasetExportService {
         self.catalog.list_dataset_snapshots(theme).await
     }
 
-    /// Reads the raw ZIP archive bytes of the dataset snapshot.
-    pub async fn read_dataset_snapshot_archive(&self, id: &str) -> Result<Vec<u8>, StorageError> {
-        // Ensure snapshot exists in the catalog before reading blob
+    /// Opens the stored archive of a dataset snapshot for streaming, returning its size.
+    ///
+    /// The catalog is checked first so a missing snapshot is a 404 before any bytes move; the
+    /// returned reader streams the object instead of collecting it.
+    pub async fn open_dataset_snapshot_archive(
+        &self,
+        id: &str,
+    ) -> Result<(u64, BlobReadStream), StorageError> {
         self.catalog.get_dataset_snapshot(id).await?;
-        self.blobs
-            .read_blob(&BlobKey::DatasetSnapshot {
-                id: id.to_string(),
-            })
-            .await
+        let blob_key = BlobKey::DatasetSnapshot {
+            id: id.to_string(),
+        };
+        let stat = self.blobs.stat_blob(&blob_key).await?;
+        let reader = self.blobs.read_blob_stream(&blob_key).await?;
+        Ok((stat.size, reader))
     }
 
     /// Deletes the dataset snapshot if unreferenced by any training run.

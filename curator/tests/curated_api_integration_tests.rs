@@ -23,6 +23,12 @@ use curator::services::curation::{CurationService, CurationWorkflow};
 use async_trait::async_trait;
 use curator::services::description::{DescriptionError, DescriptionGenerator, DescriptionService};
 
+/// Spool rooted in the system temp directory; each archive removes itself on drop.
+fn test_spool() -> Arc<curator::services::ArchiveSpool> {
+    Arc::new(curator::services::ArchiveSpool::new(std::env::temp_dir()))
+}
+
+
 /// Fresh in-memory catalog and blob ports: the curation lifecycle tests drive the HTTP surface
 /// through `AppState` with zero filesystem fixtures.
 fn in_memory_ports() -> (
@@ -70,7 +76,7 @@ fn setup_test_app() -> (
         "http://127.0.0.1:1".to_string(),
         1,
     ));
-    let state = AppState::new(catalog.clone(), blobs.clone()).with_openrouter(adapter);
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool()).with_openrouter(adapter);
     let router = create_router(state);
     (router, catalog, blobs)
 }
@@ -87,7 +93,7 @@ fn setup_filesystem_test_app(
     let catalog: Arc<dyn CatalogRepository + Send + Sync> =
         Arc::new(FilesystemCatalogRepository::new(root));
     let blobs: Arc<dyn BlobStorage + Send + Sync> = Arc::new(FilesystemBlobStorage::new(root));
-    let router = create_router(AppState::new(catalog.clone(), blobs.clone()));
+    let router = create_router(AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool()));
     (router, catalog, blobs)
 }
 
@@ -680,7 +686,7 @@ async fn test_curated_describe_never_sends_description_as_title_and_merges_tags(
     let generator = Arc::new(RecordingDescriptionGen::new(Ok(
         "Rustic wooden tavern with roaring fireplace.".to_string(),
     )));
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
     let app = create_router(state);
 
@@ -727,7 +733,7 @@ async fn test_curated_describe_merges_requested_themes_and_tags() {
     let generator = Arc::new(RecordingDescriptionGen::new(Ok(
         "Merged description.".to_string(),
     )));
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
     let app = create_router(state);
 
@@ -772,7 +778,7 @@ async fn test_curated_describe_success_with_service() {
     let (catalog, blobs) = in_memory_ports();
     let mock_desc = "Rustic wooden tavern with roaring fireplace and sturdy oak tables.";
     let mock_gen = Arc::new(MockCuratedGen(Ok(mock_desc.to_string())));
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_description_service(Arc::new(DescriptionService::new(Some(mock_gen))));
     let app = create_router(state);
 
@@ -895,7 +901,7 @@ async fn test_get_curated_layer_image_by_id() {
 #[tokio::test]
 async fn test_patch_curated_regrid_strictly_fails_when_vision_unconfigured() {
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_description_service(Arc::new(DescriptionService::new(None)));
     let app = create_router(state);
 
@@ -929,7 +935,7 @@ async fn test_patch_curated_regrid_strictly_fails_when_vision_errors() {
     let generator = Arc::new(RecordingDescriptionGen::new(Err(
         DescriptionError::GenerationFailed("upstream 500".into()),
     )));
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
     let app = create_router(state);
 
@@ -955,7 +961,7 @@ async fn test_patch_curated_regrid_persists_vision_description_without_descripti
     let (catalog, blobs) = in_memory_ports();
     let generated = "Vision-generated subterranean vault with flooded channels";
     let generator = Arc::new(RecordingDescriptionGen::new(Ok(generated.to_string())));
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
     let app = create_router(state);
 
@@ -1001,7 +1007,7 @@ fn setup_in_memory_curation_app(
 ) {
     let catalog = Arc::new(InMemoryCatalogRepository::new());
     let blobs = Arc::new(InMemoryBlobStorage::new());
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_description_service(description_service);
     (create_router(state), catalog, blobs)
 }
@@ -1384,7 +1390,7 @@ async fn test_curated_describe_apply_persists_neutral_description_and_sections()
     let neutral = "Moss-slick stone crypt with two carved sarcophagi and a flooded alcove.";
     let generator = Arc::new(MockCuratedGen(Ok(neutral.to_string())));
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
     let app = create_router(state);
 
@@ -1459,7 +1465,7 @@ async fn test_curated_describe_apply_unknown_map_is_not_found() {
 #[tokio::test]
 async fn test_curated_describe_apply_propagates_vision_failure_without_persisting() {
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_description_service(Arc::new(DescriptionService::new(None)));
     let app = create_router(state);
 
@@ -1509,7 +1515,7 @@ async fn test_curated_describe_apply_plans_sections_from_the_ground_image() {
     let neutral = "Moss-slick stone crypt with two carved sarcophagi.";
     let generator = Arc::new(MockCuratedGen(Ok(neutral.to_string())));
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
     let app = create_router(state);
 
@@ -1549,7 +1555,7 @@ async fn test_curated_describe_apply_plans_sections_from_the_ground_image() {
 async fn test_curated_describe_apply_requires_post() {
     let responder = Arc::new(MockCuratedGen(Ok("Moss-slick stone crypt.".to_string())));
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_description_service(Arc::new(DescriptionService::new(Some(responder))));
     let app = create_router(state);
 
@@ -1574,7 +1580,7 @@ async fn test_curated_describe_apply_requires_post() {
 #[tokio::test]
 async fn test_patch_curated_regrid_plans_sections_from_the_ground_image() {
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(catalog.clone(), blobs.clone()).with_description_service(Arc::new(
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool()).with_description_service(Arc::new(
         DescriptionService::new(Some(Arc::new(MockCuratedGen(Ok(
             "Moss-slick stone crypt with two carved sarcophagi.".to_string(),
         ))))),
@@ -1615,7 +1621,7 @@ async fn test_curated_describe_apply_mints_descriptions_for_a_legacy_map() {
     let neutral = "Damp grotto with a still green pool and moss-crusted boulders.";
     let generator = Arc::new(MockCuratedGen(Ok(neutral.to_string())));
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
     let app = create_router(state);
 
@@ -1666,7 +1672,7 @@ async fn test_curated_describe_apply_mints_descriptions_for_a_legacy_map() {
 #[tokio::test]
 async fn test_patch_curated_regrid_accepts_a_grid_the_pixels_support() {
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(catalog.clone(), blobs.clone()).with_description_service(Arc::new(
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool()).with_description_service(Arc::new(
         DescriptionService::new(Some(Arc::new(MockCuratedGen(Ok(
             "Moss-slick stone crypt with two carved sarcophagi.".to_string(),
         ))))),
@@ -1739,7 +1745,7 @@ async fn test_curated_bulk_refine_merges_tags_and_persists_description_and_secti
     // An unreachable adapter keeps the vision call out of this test: the suggestion set is
     // seeded into the shared cache exactly as `suggest-themes` would leave it.
     let adapter = Arc::new(OpenRouterAdapter::with_config("", "http://127.0.0.1:1".to_string(), 1));
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_openrouter(adapter)
         .with_description_service(Arc::new(DescriptionService::new(Some(generator.clone()))));
     state.theme_suggestions_cache.write().await.insert(
@@ -1813,7 +1819,7 @@ async fn test_curated_bulk_refine_without_vision_keeps_existing_tags() {
     let (catalog, blobs) = in_memory_ports();
     // An unreachable adapter stands in for "no suggestions": the endpoint must not fail.
     let adapter = Arc::new(OpenRouterAdapter::with_config("", "http://127.0.0.1:1".to_string(), 1));
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_openrouter(adapter)
         .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
     let app = create_router(state);
@@ -1834,7 +1840,7 @@ async fn test_curated_bulk_refine_without_vision_keeps_existing_tags() {
 #[tokio::test]
 async fn test_curated_bulk_refine_propagates_unconfigured_vision_without_persisting() {
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_description_service(Arc::new(DescriptionService::new(None)));
     let app = create_router(state);
 
@@ -1857,7 +1863,7 @@ async fn test_curated_bulk_refine_propagates_upstream_failure_without_persisting
     ))));
     let (catalog, blobs) = in_memory_ports();
     let adapter = Arc::new(OpenRouterAdapter::with_config("", "http://127.0.0.1:1".to_string(), 1));
-    let state = AppState::new(catalog.clone(), blobs.clone())
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool())
         .with_openrouter(adapter)
         .with_description_service(Arc::new(DescriptionService::new(Some(generator))));
     let app = create_router(state);
@@ -2545,7 +2551,7 @@ async fn test_thumbnail_precompute_failure_does_not_fail_curation_and_the_lazy_r
     blobs_impl
         .failing
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    let app = create_router(AppState::new(catalog.clone(), blobs.clone()));
+    let app = create_router(AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool()));
     for index in 0..map.layers.len() {
         let resp = get_curated_layer_thumbnail(&app, "thumb_precompute_failure", index).await;
         assert_eq!(resp.status(), StatusCode::OK, "layer {index}");

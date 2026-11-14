@@ -31,7 +31,25 @@ use curator::domain::{
 };
 use curator::ports::blob_storage::{sha256_digest, BlobKey, BlobStorage};
 use curator::ports::catalog_repository::CatalogRepository;
-use curator::services::DatasetExportService;
+use curator::services::{ArchiveSpool, DatasetExportService};
+
+/// Spool rooted in the system temp directory; each archive removes itself on drop.
+fn test_spool() -> Arc<ArchiveSpool> {
+    Arc::new(ArchiveSpool::new(std::env::temp_dir()))
+}
+
+/// Reads a stored snapshot through the streaming API the download route uses.
+async fn read_snapshot_archive(service: &DatasetExportService, id: &str) -> Vec<u8> {
+    let (size, mut reader) = service
+        .open_dataset_snapshot_archive(id)
+        .await
+        .expect("open snapshot archive");
+    let mut bytes = Vec::with_capacity(size as usize);
+    tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut bytes)
+        .await
+        .expect("read snapshot archive");
+    bytes
+}
 
 fn create_test_png(width: u32, height: u32) -> Vec<u8> {
     let img = image::RgbaImage::new(width, height);
@@ -108,7 +126,7 @@ fn setup_test_app() -> (
 ) {
     let catalog = Arc::new(InMemoryCatalogRepository::new());
     let blobs = Arc::new(InMemoryBlobStorage::new());
-    let state = AppState::new(catalog.clone(), blobs.clone());
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool());
     let router = create_router(state);
     (router, catalog, blobs)
 }
@@ -198,7 +216,18 @@ async fn test_freeze_ready_scope_produces_immutable_dataset_snapshot() {
         arch_resp.headers().get(header::CONTENT_TYPE).unwrap(),
         "application/zip"
     );
+    // The archive streams from storage, so the length is announced instead of buffered.
+    let arch_len: usize = arch_resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .expect("Content-Length is set for a streamed archive")
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(arch_len, stored_bytes.len());
     let arch_bytes = to_bytes(arch_resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(arch_bytes.len(), arch_len);
     assert_eq!(arch_bytes.to_vec(), stored_bytes);
 
     // Also verify alias /download
@@ -248,17 +277,14 @@ async fn test_snapshot_survives_restart_with_byte_identical_refetch() {
     let png = create_test_png(2048, 2048);
     seed_curated_ports(&cat_trait, &blob_trait, &map, &png).await;
 
-    let service = DatasetExportService::new(cat_trait.clone(), blob_trait.clone());
+    let service = DatasetExportService::new(cat_trait.clone(), blob_trait.clone(), test_spool());
     let created = service
         .freeze_dataset_snapshot(Some(&Theme::Dungeon), Some("ds_frozen_test_01".into()))
         .await
         .expect("freeze snapshot must succeed");
 
     assert_eq!(created.id, "ds_frozen_test_01");
-    let original_bytes = service
-        .read_dataset_snapshot_archive("ds_frozen_test_01")
-        .await
-        .expect("read archive bytes");
+    let original_bytes = read_snapshot_archive(&service, "ds_frozen_test_01").await;
     assert_eq!(sha256_digest(&original_bytes), created.sha256);
 
     // Simulate Curator pod restart: drop original instances and create fresh ones pointing to the same data directory
@@ -268,7 +294,7 @@ async fn test_snapshot_survives_restart_with_byte_identical_refetch() {
 
     let restarted_catalog = Arc::new(FilesystemCatalogRepository::new(data_dir));
     let restarted_blobs = Arc::new(FilesystemBlobStorage::new(data_dir));
-    let restarted_service = DatasetExportService::new(restarted_catalog, restarted_blobs);
+    let restarted_service = DatasetExportService::new(restarted_catalog, restarted_blobs, test_spool());
 
     // Catalog record must survive with exact same digest and metadata
     let loaded = restarted_service
@@ -283,10 +309,7 @@ async fn test_snapshot_survives_restart_with_byte_identical_refetch() {
     assert_eq!(loaded.trigger_phrase, created.trigger_phrase);
 
     // Re-fetched ZIP yields byte-identical content
-    let restarted_bytes = restarted_service
-        .read_dataset_snapshot_archive("ds_frozen_test_01")
-        .await
-        .expect("read archive after restart");
+    let restarted_bytes = read_snapshot_archive(&restarted_service, "ds_frozen_test_01").await;
     assert_eq!(
         restarted_bytes, original_bytes,
         "archive bytes after restart must be strictly byte-identical"
@@ -399,7 +422,7 @@ async fn test_reference_checked_deletion() {
     seed_curated_ports(&cat_trait, &blob_trait, &map, &create_test_png(2048, 2048)).await;
 
     // Freeze snapshot
-    let service = DatasetExportService::new(cat_trait.clone(), blob_trait.clone());
+    let service = DatasetExportService::new(cat_trait.clone(), blob_trait.clone(), test_spool());
     let snapshot = service
         .freeze_dataset_snapshot(Some(&Theme::Dungeon), Some("snap-ref-check".into()))
         .await
@@ -467,7 +490,7 @@ async fn test_reference_checked_deletion_on_filesystem_run_manifest() {
     let map = ready_multisection_map("fs-run-map", Theme::Dungeon);
     seed_curated_ports(&cat_trait, &blob_trait, &map, &create_test_png(2048, 2048)).await;
 
-    let service = DatasetExportService::new(cat_trait.clone(), blob_trait.clone());
+    let service = DatasetExportService::new(cat_trait.clone(), blob_trait.clone(), test_spool());
     let snapshot = service
         .freeze_dataset_snapshot(Some(&Theme::Dungeon), Some("snap-fs-check".into()))
         .await
@@ -686,7 +709,7 @@ async fn test_freeze_snapshot_concurrency_lock_refuses_concurrent_freeze() {
     let png_bytes = create_test_png(2048, 2048);
     seed_curated_ports(&cat_trait, &blob_trait, &map, &png_bytes).await;
 
-    let state = AppState::new(catalog.clone(), blobs.clone());
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool());
     let router = create_router(state.clone());
 
     // Acquire lock manually to simulate concurrent freeze running

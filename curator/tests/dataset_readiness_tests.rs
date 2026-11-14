@@ -19,7 +19,12 @@ use curator::domain::{
 };
 use curator::ports::blob_storage::{BlobKey, BlobStorage};
 use curator::ports::catalog_repository::CatalogRepository;
-use curator::services::DatasetExportService;
+use curator::services::{ArchiveSpool, DatasetExportService};
+
+/// Spool rooted in the system temp directory; each archive removes itself on drop.
+fn test_spool() -> Arc<ArchiveSpool> {
+    Arc::new(ArchiveSpool::new(std::env::temp_dir()))
+}
 
 /// Fresh in-memory catalog and blob ports: these tests exercise the dataset routes.
 fn in_memory_ports() -> (
@@ -39,7 +44,7 @@ fn setup_test_app() -> (
     Arc<dyn BlobStorage + Send + Sync>,
 ) {
     let (catalog, blobs) = in_memory_ports();
-    let state = AppState::new(catalog.clone(), blobs.clone());
+    let state = AppState::new(catalog.clone(), blobs.clone()).with_spool(test_spool());
     let router = create_router(state);
     (router, catalog, blobs)
 }
@@ -132,7 +137,7 @@ async fn test_clean_multisection_dataset_is_ready_and_captions_apply_the_trigger
         &create_test_png(2048, 2048),
     )
     .await;
-    let export = DatasetExportService::new(catalog.clone(), blobs.clone());
+    let export = DatasetExportService::new(catalog.clone(), blobs.clone(), test_spool());
 
     let report = export.audit_dataset_readiness(None, false).await.unwrap();
     assert!(report.ready, "{:?}", report.maps);
@@ -144,7 +149,8 @@ async fn test_clean_multisection_dataset_is_ready_and_captions_apply_the_trigger
     assert!(report.maps[0].issues.is_empty(), "{:?}", report.maps[0].issues);
 
     // The exported ZIP agrees with the audit: 4 pairs, every caption headed by the Trigger Phrase.
-    let zip_bytes = export.export_lora_dataset(None).await.unwrap();
+    let spooled = export.export_lora_dataset(None).await.unwrap();
+    let zip_bytes = std::fs::read(spooled.path()).unwrap();
     let mut archive = ZipArchive::new(Cursor::new(&zip_bytes)).unwrap();
     assert_eq!(archive.len(), 8);
 
@@ -180,14 +186,15 @@ async fn test_legacy_bundle_without_sections_reuses_the_neutral_map_description(
     .with_description("Timber hall with a stone hearth and long trestle tables.");
 
     seed_curated_ports(&catalog, &blobs, &legacy, &create_test_png(1024, 1024)).await;
-    let export = DatasetExportService::new(catalog.clone(), blobs.clone());
+    let export = DatasetExportService::new(catalog.clone(), blobs.clone(), test_spool());
 
     let report = export.audit_dataset_readiness(None, false).await.unwrap();
     assert!(report.ready, "{:?}", report.maps);
     assert_eq!(report.sections_total, 1);
     assert_eq!(report.sections_ready, 1);
 
-    let zip_bytes = export.export_lora_dataset(None).await.unwrap();
+    let spooled = export.export_lora_dataset(None).await.unwrap();
+    let zip_bytes = std::fs::read(spooled.path()).unwrap();
     let mut archive = ZipArchive::new(Cursor::new(&zip_bytes)).unwrap();
     let caption = caption_in_archive(&mut archive, "tavern/legacy_flat_c0_r0_lora1024.txt");
     assert_eq!(caption.matches(TRIGGER_PHRASE).count(), 1, "{caption}");
@@ -211,7 +218,7 @@ async fn test_caption_contaminated_section_description_is_flagged_not_neutral() 
     .with_sections(vec![MapSection::new(0, 0, contaminated.clone())]);
 
     seed_curated_ports(&catalog, &blobs, &map, &create_test_png(1024, 1024)).await;
-    let export = DatasetExportService::new(catalog.clone(), blobs.clone());
+    let export = DatasetExportService::new(catalog.clone(), blobs.clone(), test_spool());
 
     let report = export.audit_dataset_readiness(None, false).await.unwrap();
     assert!(!report.ready);
@@ -233,7 +240,8 @@ async fn test_caption_contaminated_section_description_is_flagged_not_neutral() 
     assert!(flagged.detail.contains("Map Section (0, 0)"), "{}", flagged.detail);
 
     // Exporting still yields a single Trigger Phrase, however contaminated the stored prose is.
-    let zip_bytes = export.export_lora_dataset(None).await.unwrap();
+    let spooled = export.export_lora_dataset(None).await.unwrap();
+    let zip_bytes = std::fs::read(spooled.path()).unwrap();
     let mut archive = ZipArchive::new(Cursor::new(&zip_bytes)).unwrap();
     let caption = caption_in_archive(&mut archive, "dungeon/contaminated_c0_r0_lora1024.txt");
     assert_eq!(caption.matches(TRIGGER_PHRASE).count(), 1, "{caption}");
@@ -253,7 +261,7 @@ async fn test_section_without_any_physical_description_is_flagged() {
     .with_sections(vec![MapSection::new(0, 0, "   ")]);
 
     seed_curated_ports(&catalog, &blobs, &map, &create_test_png(1024, 1024)).await;
-    let export = DatasetExportService::new(catalog.clone(), blobs.clone());
+    let export = DatasetExportService::new(catalog.clone(), blobs.clone(), test_spool());
 
     let report = export.audit_dataset_readiness(None, false).await.unwrap();
     assert!(!report.ready);
@@ -295,7 +303,7 @@ async fn test_unresolvable_sections_and_below_minimum_grids_are_flagged() {
     .with_description("River ford with a broken footbridge.");
     seed_curated_ports(&catalog, &blobs, &too_small, &create_test_png(512, 512)).await;
 
-    let report = DatasetExportService::new(catalog, blobs)
+    let report = DatasetExportService::new(catalog, blobs, test_spool())
         .audit_dataset_readiness(None, false)
         .await
         .unwrap();
@@ -340,7 +348,7 @@ async fn test_unreadable_ground_layer_is_flagged() {
 
     seed_curated_ports(&catalog, &blobs, &map, b"\x89PNG\r\n\x1a\n not really a png").await;
 
-    let report = DatasetExportService::new(catalog, blobs)
+    let report = DatasetExportService::new(catalog, blobs, test_spool())
         .audit_dataset_readiness(None, false)
         .await
         .unwrap();
@@ -464,7 +472,7 @@ async fn test_readiness_audit_is_reused_until_refreshed_or_the_map_changes() {
     let (_app, catalog, blobs) = setup_test_app();
     let map = ready_multisection_map("reuse_audit");
     seed_curated_ports(&catalog, &blobs, &map, &create_test_png(2048, 2048)).await;
-    let export = DatasetExportService::new(catalog.clone(), blobs.clone());
+    let export = DatasetExportService::new(catalog.clone(), blobs.clone(), test_spool());
 
     let first = export.audit_dataset_readiness(None, false).await.unwrap();
     assert!(first.ready, "{:?}", first.maps);
@@ -502,7 +510,7 @@ async fn test_readiness_audit_is_invalidated_by_an_edited_map() {
     let (_app, catalog, blobs) = setup_test_app();
     let map = ready_multisection_map("edited_map");
     seed_curated_ports(&catalog, &blobs, &map, &create_test_png(2048, 2048)).await;
-    let export = DatasetExportService::new(catalog.clone(), blobs.clone());
+    let export = DatasetExportService::new(catalog.clone(), blobs.clone(), test_spool());
 
     let clean = export.audit_dataset_readiness(None, false).await.unwrap();
     assert!(clean.ready);
@@ -532,7 +540,7 @@ async fn test_freeze_reuses_the_stored_readiness_audits() {
         &create_test_png(2048, 2048),
     )
     .await;
-    let export = DatasetExportService::new(catalog.clone(), blobs.clone());
+    let export = DatasetExportService::new(catalog.clone(), blobs.clone(), test_spool());
     export.audit_dataset_readiness(None, false).await.unwrap();
 
     let mut messages = Vec::new();

@@ -40,6 +40,8 @@ pub struct AppState {
     pub model_registry: Arc<crate::services::ModelRegistry>,
     /// Derived Thumbnails of curated Layers served to the dataset library (ADR-0013).
     pub thumbnails: Arc<crate::services::ThumbnailService>,
+    /// Disk-backed spool for dataset archives (ADR-0015).
+    pub spool: Arc<crate::services::ArchiveSpool>,
     pub start_time: Instant,
     pub snapshot_freeze_status: Arc<std::sync::RwLock<Option<crate::domain::FreezeProgressUpdate>>>,
     pub snapshot_freeze_lock: Arc<tokio::sync::Mutex<()>>,
@@ -112,6 +114,7 @@ impl AppState {
             training_runner,
             model_registry,
             thumbnails,
+            spool: Arc::new(crate::services::ArchiveSpool::from_env()),
             harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
@@ -156,6 +159,7 @@ impl AppState {
             training_runner,
             model_registry,
             thumbnails,
+            spool: Arc::new(crate::services::ArchiveSpool::from_env()),
             harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
@@ -198,6 +202,7 @@ impl AppState {
             training_runner,
             model_registry,
             thumbnails,
+            spool: Arc::new(crate::services::ArchiveSpool::from_env()),
             harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
@@ -241,6 +246,7 @@ impl AppState {
             training_runner,
             model_registry,
             thumbnails,
+            spool: Arc::new(crate::services::ArchiveSpool::from_env()),
             harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
@@ -279,11 +285,18 @@ impl AppState {
             training_runner,
             model_registry,
             thumbnails,
+            spool: Arc::new(crate::services::ArchiveSpool::from_env()),
             harvest_ledger: Arc::new(NoopHarvestRunLedger),
             start_time: Instant::now(),
             snapshot_freeze_status: Arc::new(std::sync::RwLock::new(None)),
             snapshot_freeze_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Overrides the archive spool, e.g. to root it in a test directory.
+    pub fn with_spool(mut self, spool: Arc<crate::services::ArchiveSpool>) -> Self {
+        self.spool = spool;
+        self
     }
 
     /// Configures an explicit model registry.

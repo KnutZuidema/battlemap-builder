@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 
-use crate::ports::blob_storage::{BlobKey, BlobStat, BlobStorage};
+use crate::ports::blob_storage::{BlobKey, BlobReadStream, BlobStat, BlobStorage, BlobWriteProgress};
 use crate::ports::storage_error::StorageError;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -72,6 +72,16 @@ impl BlobStorage for FilesystemBlobStorage {
         }
     }
 
+    async fn read_blob_stream(&self, key: &BlobKey) -> Result<BlobReadStream, StorageError> {
+        match tokio::fs::File::open(self.path_for(key)).await {
+            Ok(file) => Ok(Box::pin(file)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(StorageError::NotFound(
+                format!("Blob '{}' not found", key.to_path()),
+            )),
+            Err(err) => Err(StorageError::Io(err)),
+        }
+    }
+
     async fn write_blob(&self, key: &BlobKey, bytes: &[u8]) -> Result<(), StorageError> {
         Self::atomic_write(&self.path_for(key), bytes)
     }
@@ -123,6 +133,77 @@ impl BlobStorage for FilesystemBlobStorage {
         _sha256: Option<&str>,
     ) -> Result<(), StorageError> {
         self.write_blob(key, bytes).await
+    }
+
+    async fn write_blob_stream(
+        &self,
+        key: &BlobKey,
+        reader: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+        total_bytes: u64,
+        _sha256: Option<&str>,
+        on_progress: &mut (dyn FnMut(BlobWriteProgress) -> bool + Send),
+    ) -> Result<(), StorageError> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let path = self.path_for(key);
+        let parent = path.parent().ok_or_else(|| {
+            StorageError::InvalidData(format!("Blob '{}' has no parent directory", key.to_path()))
+        })?;
+        tokio::fs::create_dir_all(parent).await?;
+
+        let file_name = path.file_name().and_then(|f| f.to_str()).unwrap_or("tmp");
+        let count = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = path.with_file_name(format!(
+            ".{file_name}.{}.{count}.tmp",
+            std::process::id()
+        ));
+
+        let mut file = tokio::fs::File::create(&tmp_path).await?;
+        let mut written = 0u64;
+        let mut buffer = vec![0u8; 256 * 1024];
+        loop {
+            let read = reader.read(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            if let Err(err) = file.write_all(&buffer[..read]).await {
+                drop(file);
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(StorageError::Io(err));
+            }
+            written += read as u64;
+            if !on_progress(BlobWriteProgress {
+                bytes_written: written,
+                total_bytes,
+            }) {
+                drop(file);
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(StorageError::Io(std::io::Error::from(
+                    std::io::ErrorKind::Interrupted,
+                )));
+            }
+        }
+
+        if let Err(err) = file.flush().await {
+            drop(file);
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(StorageError::Io(err));
+        }
+        drop(file);
+
+        if written != total_bytes {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(StorageError::InvalidData(format!(
+                "Blob '{}' stream yielded {written} bytes, expected {total_bytes}",
+                key.to_path()
+            )));
+        }
+
+        if let Err(err) = tokio::fs::rename(&tmp_path, &path).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(StorageError::Io(err));
+        }
+        Ok(())
     }
 
     async fn list_prefix(&self, prefix: &BlobKey) -> Result<Vec<BlobKey>, StorageError> {

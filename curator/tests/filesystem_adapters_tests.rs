@@ -67,6 +67,59 @@ fn blob_keys() -> Vec<BlobKey> {
 }
 
 #[tokio::test]
+async fn streamed_blob_round_trip_matches_bytes_and_rejects_short_streams() {
+    use tokio::io::AsyncReadExt;
+
+    let dir = tempdir().unwrap();
+    let storage = FilesystemBlobStorage::new(dir.path());
+    let key = BlobKey::DatasetSnapshot {
+        id: "streamed".into(),
+    };
+    let payload: Vec<u8> = (0..300_000).map(|i| (i % 251) as u8).collect();
+
+    let mut reader: &[u8] = &payload;
+    let mut events = Vec::new();
+    storage
+        .write_blob_stream(
+            &key,
+            &mut reader,
+            payload.len() as u64,
+            None,
+            &mut |progress| {
+                events.push(progress);
+                true
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read(dir.path().join(key.to_path())).unwrap(),
+        payload,
+        "the streamed write must land byte-identical at the canonical path"
+    );
+    assert!(!events.is_empty(), "progress must report as the payload moves");
+    assert_eq!(events.last().unwrap().bytes_written, payload.len() as u64);
+
+    let mut stream = storage.read_blob_stream(&key).await.unwrap();
+    let mut read_back = Vec::new();
+    stream.read_to_end(&mut read_back).await.unwrap();
+    assert_eq!(read_back, payload);
+
+    // A stream shorter than the declared length must not land at the final path.
+    let short_key = BlobKey::DatasetSnapshot {
+        id: "short".into(),
+    };
+    let mut short: &[u8] = b"only a few bytes";
+    let err = storage
+        .write_blob_stream(&short_key, &mut short, 4096, None, &mut |_| true)
+        .await
+        .expect_err("a short stream must fail");
+    assert!(matches!(err, StorageError::InvalidData(_)), "{err:?}");
+    assert!(!storage.exists_blob(&short_key).await.unwrap());
+}
+
+#[tokio::test]
 async fn blob_round_trip_every_variant_lands_at_exact_path() {
     let dir = tempdir().unwrap();
     let storage = FilesystemBlobStorage::new(dir.path());

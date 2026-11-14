@@ -324,11 +324,21 @@ All persistent state is stored under `/data` on the Hetzner CSI block volume.
 | `/data/rejected/rejections.json` | JSON audit trail of discarded candidates with reasons. |
 | `/data/readiness/<id>.json` | Persisted dataset readiness audit of one curated map, keyed by a fingerprint of the map (ADR-0014). Derived: safe to delete, rebuilt on the next audit. |
 | `/data/telemetry/cost_ledger.json` | Persistent ledger recording token usage, model generation costs, and API spend. |
+| `/data/tmp/dataset-archive-*.zip` | In-flight spooled dataset archive (ADR-0015); deleted when the upload or download finishes, and swept at boot when older than a day. |
 
 
 ### 5.4. Object Storage & Training Artifact Layout (Cloudflare R2 / S3)
 
 Curator manages dataset snapshots and LoRA fine-tuning artifacts via S3-compatible object storage (Cloudflare R2 in cluster, MinIO in dev and CI).
+
+#### Archive spooling
+
+Frozen snapshots and dataset exports are written to `/data/tmp/` and streamed to R2 in 16 MiB parts
+instead of being buffered in memory (ADR-0015). `CURATOR_MAX_ARCHIVE_BYTES` (pinned to `8589934592`
+in `deployment.yaml`) caps one archive at half the 20 GiB volume; a larger scope fails the freeze with a
+message naming the variable rather than filling `/data`. One archive is spooled at a time, so the volume
+needs room for one archive plus the data directory, and the pod's memory limit no longer scales with the
+curated library.
 
 #### Backend Selection
 

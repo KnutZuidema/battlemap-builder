@@ -49,6 +49,10 @@ spec:
               value: "/data"
             - name: RUST_LOG
               value: "info"
+            # Spooled dataset archives (ADR-0015): 8 GiB, half the 20 GiB volume, so an
+            # oversized freeze fails with a clear error instead of filling /data.
+            - name: CURATOR_MAX_ARCHIVE_BYTES
+              value: "8589934592"
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:

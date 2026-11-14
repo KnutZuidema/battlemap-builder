@@ -18,6 +18,7 @@
 #   CURATOR_SECRET_NAME    secret with the runtime credentials (default: curator-secrets)
 #   CURATOR_LOCAL_ENV_FILE generated env file, mode 600        (default: curator/.env.cluster)
 #   CURATOR_LOCAL_DB_PORT  local port for the Postgres forward (default: 5433)
+#   CURATOR_LOCAL_PROFILE  cargo profile to build: release|dev (default: release)
 #   PORT                   Curator HTTP port                   (default: 3002, read by Curator)
 #
 # Anything already exported in the shell wins over the generated file: Curator loads
@@ -30,6 +31,15 @@ namespace="${CURATOR_NAMESPACE:-curator}"
 secret_name="${CURATOR_SECRET_NAME:-curator-secrets}"
 env_file="${CURATOR_LOCAL_ENV_FILE:-$repo_root/curator/.env.cluster}"
 db_port="${CURATOR_LOCAL_DB_PORT:-5433}"
+
+profile="${CURATOR_LOCAL_PROFILE:-release}"
+case "$profile" in
+  release | dev) ;;
+  *)
+    echo "curator-local: CURATOR_LOCAL_PROFILE must be 'release' or 'dev' (got '$profile')" >&2
+    exit 1
+    ;;
+esac
 
 secrets_only=0
 while (($#)); do
@@ -173,5 +183,9 @@ fi
 export CURATOR_ENV_FILE="$env_file"
 cd -- "$repo_root"
 status=0
-cargo run --manifest-path curator/Cargo.toml "$@" || status=$?
+# Release by default (`just curator-local` sets it): the readiness audit and dataset export
+# decode full-resolution Ground layers through the same single-threaded pipeline as the
+# release-built cluster image, and an unoptimized `image` decode is an order of magnitude slower.
+# The first run compiles the dependency tree; later runs are incremental.
+cargo run --profile "$profile" --manifest-path curator/Cargo.toml "$@" || status=$?
 exit "$status"

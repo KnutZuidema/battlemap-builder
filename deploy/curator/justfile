@@ -29,7 +29,8 @@ tail-logs:
 port-forward:
     kubectl port-forward service/curator 3002:3002 -n curator
 
-# Run Curator natively on this machine, with the cluster's secrets and dependencies
+# Run Curator natively on this machine, with the cluster's secrets and dependencies.
+# The root `curator-local` recipe selects the release profile (CURATOR_LOCAL_PROFILE=dev to opt out).
 local *args:
     ../../scripts/curator-local.sh {{args}}
 

@@ -247,7 +247,11 @@ scripts/curator-local.sh --secrets-only  # only materialize the env file, e.g. t
    `shared-postgres-rw.database.svc.cluster.local` DSN becomes `127.0.0.1:5433`, and
    `kubectl port-forward svc/shared-postgres-rw -n database 5433:5432` is held open for the lifetime of the
    process (killed on exit, including Ctrl-C).
-3. Runs `cargo run --manifest-path curator/Cargo.toml` with `CURATOR_ENV_FILE` pointing at that file.
+3. Runs `cargo run --profile release` with `CURATOR_ENV_FILE` pointing at that file. Release is
+   deliberate: the readiness audit and dataset export decode full-resolution Ground layers through the
+   same single-threaded pipeline the release-built cluster image runs, and an unoptimized (`dev`) image
+   decode is an order of magnitude slower. The first run compiles the dependency tree; later runs are
+   incremental. `CURATOR_LOCAL_PROFILE=dev just curator-local` restores the debug build.
 
 | Dependency | How a local run reaches it |
 |:---|:---|

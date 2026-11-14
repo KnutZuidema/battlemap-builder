@@ -9,6 +9,7 @@
 #   just curator-publish   # publish only: build + push, no rollout
 #   just curator-rollout   # roll the cluster onto an already published tag
 #   just port-forward      # forwarded access to the running service on localhost:3002
+#   just curator-local     # run Curator on this machine, using the cluster's secrets and deps
 #
 # Checks — run them narrowly locally; PR CI is the authoritative full run:
 #   just lint-client          # client lint (no compile)
@@ -141,6 +142,10 @@ curator-migrate-storage-job:
 # Port-forward the cluster Curator service to localhost:3002
 port-forward:
     just --justfile "{{deploy_dir}}/justfile" port-forward
+
+# Run Curator natively on this machine against the cluster's secrets and external deps
+curator-local *args:
+    just --justfile "{{deploy_dir}}/justfile" local {{args}}
 
 # Run any deploy/curator/justfile recipe, e.g. `just cluster status`, `just cluster tail-logs`
 cluster *args:

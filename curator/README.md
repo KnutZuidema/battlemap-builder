@@ -245,6 +245,10 @@ just check-curator
 
 # Run the Curator service locally
 cargo run --manifest-path curator/Cargo.toml
+
+# Run locally against the cluster's secrets and external dependencies (Postgres, R2, OpenRouter,
+# WaveSpeed, Modal, Reddit) — see deploy/curator/README.md §4.4
+just curator-local
 ```
 
 ---

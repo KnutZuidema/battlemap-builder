@@ -29,6 +29,10 @@ tail-logs:
 port-forward:
     kubectl port-forward service/curator 3002:3002 -n curator
 
+# Run Curator natively on this machine, with the cluster's secrets and dependencies
+local *args:
+    ../../scripts/curator-local.sh {{args}}
+
 
 # Run disk-to-S3 storage migration inside running pod
 migrate-storage:

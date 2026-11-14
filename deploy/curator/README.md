@@ -226,6 +226,55 @@ just cluster status         # any deploy/curator/justfile recipe: status, logs, 
 
 ---
 
+### 4.4. Running Curator Locally Against Cluster Dependencies
+
+The pod is sized for a shared `cax11` node (`requests: 250m` CPU / `128Mi`, `limits: 1000m` / `1536Mi`), so heavy
+triage, dataset exports or benchmark runs are faster as a native process on a workstation. `just curator-local`
+runs the binary from this checkout while keeping the cluster's credentials and every external dependency:
+
+```bash
+just curator-local                       # compile + run the service on localhost:3002
+PORT=3003 CURATOR_LOCAL_DB_PORT=5434 just curator-local   # no clash with a local Postgres
+scripts/curator-local.sh --secrets-only  # only materialize the env file, e.g. to inspect it
+```
+
+`scripts/curator-local.sh` (wrapped by `just curator-local` and `just cluster local`) does three things:
+
+1. Reads the live `curator-secrets` Secret from the `curator` namespace and writes it to `curator/.env.cluster`
+   (mode `600`, gitignored). Nothing is copied by hand, so the local process cannot drift from the pod's
+   credentials; empty and template placeholder values are dropped, exactly as the pod sees them.
+2. Rewrites the DSN host when `DATABASE_URL` targets an in-cluster service: the cluster's
+   `shared-postgres-rw.database.svc.cluster.local` DSN becomes `127.0.0.1:5433`, and
+   `kubectl port-forward svc/shared-postgres-rw -n database 5433:5432` is held open for the lifetime of the
+   process (killed on exit, including Ctrl-C).
+3. Runs `cargo run --manifest-path curator/Cargo.toml` with `CURATOR_ENV_FILE` pointing at that file.
+
+| Dependency | How a local run reaches it |
+|:---|:---|
+| PostgreSQL catalog | Port-forward to `svc/shared-postgres-rw` in namespace `database` — the same catalog rows the pod reads |
+| Cloudflare R2 blobs | Public S3 endpoint (`R2_ENDPOINT`), same bucket, no forward |
+| OpenRouter, WaveSpeed, Modal, Hugging Face, Reddit | Public HTTPS endpoints, no forward |
+| Cost ledger | Local file `~/.local/share/battlemap-builder/telemetry/cost_ledger.json`, not the PVC |
+
+- **Overrides**: `CURATOR_NAMESPACE`, `CURATOR_SECRET_NAME`, `CURATOR_LOCAL_ENV_FILE`, `CURATOR_LOCAL_DB_PORT`
+  and `PORT`. Variables already exported in the shell win over the file, because Curator loads it through
+  dotenvy, which never overrides the process environment.
+- **Same data as the cluster**: the local process writes the same Postgres catalog and the same R2 keys, so
+  triage done locally shows up in the cluster and vice versa. Concurrent catalog writes are safe; avoid triaging
+  the same candidate in both at once, and scale the deployment down
+  (`kubectl scale deployment/curator -n curator --replicas=0`) when you want the node's CPU entirely for a local
+  benchmark. Scale it back up afterwards.
+- **Cost ledger**: it stays on the PVC, so a local run starts its own history. Copy the cluster's ledger down once
+  to continue the same numbers:
+  ```bash
+  kubectl cp "curator/$(kubectl get pod -n curator -l app=curator -o jsonpath='{.items[0].metadata.name}'):/data/telemetry/cost_ledger.json" \
+    ~/.local/share/battlemap-builder/telemetry/cost_ledger.json
+  ```
+- **Rotation**: the env file is regenerated on every run, so a rotated `curator-secrets` is picked up by
+  restarting the command. `curator/.env.cluster` is gitignored and must never be committed.
+
+---
+
 ## 5. Operations & Troubleshooting
 
 The `deploy/curator/justfile` provides standard commands for day-to-day cluster operations.

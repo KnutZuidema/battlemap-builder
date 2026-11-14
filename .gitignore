@@ -8,6 +8,8 @@ client/dist/
 .env
 *.local
 deploy/curator/secret.yaml
+# Secrets materialized by scripts/curator-local.sh for local runs
+curator/.env.cluster
 
 # OS noise
 .DS_Store

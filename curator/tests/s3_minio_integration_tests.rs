@@ -1,13 +1,13 @@
 //! Integration tests for [`S3BlobStorage`] against an S3-compatible MinIO endpoint.
 //!
 //! Tests put -> stat -> get byte-identical round-trips for both single-part and multipart
-//! uploads (> 5 MiB), verify that stat returns size and SHA-256 without downloading the payload,
+//! uploads (above the 16 MiB multipart threshold), verify that stat returns size and SHA-256 without downloading the payload,
 //! and tests prefix listing, deletion, and public URL resolution.
 
 use std::sync::Arc;
 
 use curator::adapters::s3_blob_storage::{S3BlobStorage, S3StorageConfig, MULTIPART_THRESHOLD};
-use curator::ports::blob_storage::{sha256_digest, BlobKey, BlobStorage};
+use curator::ports::blob_storage::{sha256_digest, BlobKey, BlobStorage, BlobWriteProgress};
 use curator::ports::storage_error::StorageError;
 
 struct EphemeralMinio {
@@ -161,7 +161,7 @@ async fn test_minio_single_part_and_multipart_round_trip() {
     let public_url = Some("https://pub-r2.dev".to_string());
     let storage = setup_minio_storage(&minio.endpoint, bucket, public_url).await;
 
-    // 1. Single-part upload (< 5 MiB)
+    // 1. Single-part upload (below the multipart threshold)
     let small_data = b"small dataset snapshot payload for unit verification".to_vec();
     let small_key = BlobKey::DatasetSnapshot {
         id: "snapshot-01".into(),
@@ -201,9 +201,9 @@ async fn test_minio_single_part_and_multipart_round_trip() {
     let small_read = storage.read_blob(&small_key).await.unwrap();
     assert_eq!(small_read, small_data);
 
-    // 2. Multipart upload (> 5 MiB threshold, e.g. 6 MiB)
-    assert_eq!(MULTIPART_THRESHOLD, 5 * 1024 * 1024);
-    let large_size = 6 * 1024 * 1024; // 6 MiB
+    // 2. Multipart upload (above the threshold: one full part plus a remainder)
+    assert_eq!(MULTIPART_THRESHOLD, 16 * 1024 * 1024);
+    let large_size = MULTIPART_THRESHOLD + 4 * 1024 * 1024;
     let mut large_data = Vec::with_capacity(large_size);
     for i in 0..large_size {
         large_data.push((i % 251) as u8);
@@ -318,3 +318,57 @@ async fn test_arc_dyn_s3_blob_storage_port() {
     assert!(!dyn_storage.exists_blob(&key).await.unwrap());
 }
 
+
+/// The freeze panel advances on this callback, so it must fire once per completed part, end at the
+/// full payload size, and abort the multipart upload when the operator cancels.
+#[tokio::test]
+async fn test_minio_multipart_reports_progress_and_aborts_on_cancel() {
+    let minio = EphemeralMinio::start().await;
+    let bucket = "test-progress-bucket";
+    let storage = setup_minio_storage(&minio.endpoint, bucket, None).await;
+
+    let data: Vec<u8> = (0..MULTIPART_THRESHOLD + 1024)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let key = BlobKey::DatasetSnapshot {
+        id: "snapshot-progress".into(),
+    };
+
+    let mut events = Vec::new();
+    let mut record_progress = |progress: BlobWriteProgress| {
+        events.push(progress);
+        true
+    };
+    storage
+        .write_blob_with_progress(&key, &data, None, &mut record_progress)
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 2, "one callback per completed part");
+    assert_eq!(events.last().unwrap().bytes_written, data.len() as u64);
+    assert!(events.iter().all(|event| event.total_bytes == data.len() as u64));
+    assert!(events
+        .windows(2)
+        .all(|pair| pair[0].bytes_written < pair[1].bytes_written));
+
+    // Cancellation: the first completed part ends the transfer and leaves no object behind.
+    let cancelled_key = BlobKey::DatasetSnapshot {
+        id: "snapshot-cancelled".into(),
+    };
+    let mut calls = 0u32;
+    let mut cancel = |_progress: BlobWriteProgress| {
+        calls += 1;
+        false
+    };
+    let err = storage
+        .write_blob_with_progress(&cancelled_key, &data, None, &mut cancel)
+        .await
+        .expect_err("a cancelled upload must fail");
+    match err {
+        StorageError::Io(io_err) => assert_eq!(io_err.kind(), std::io::ErrorKind::Interrupted),
+        other => panic!("expected an Interrupted I/O error, got {other:?}"),
+    }
+    assert_eq!(calls, 1);
+    assert!(!storage.exists_blob(&cancelled_key).await.unwrap());
+    assert!(storage.exists_blob(&key).await.unwrap());
+}

@@ -590,6 +590,36 @@ impl GridConfig {
     }
 }
 
+/// Bounds of the exact `16 × 16` Grid Cell Map Section box at `(col, row)`: `(x, y, side)`, where
+/// `x = offset_x + col * cell_size_px`, `y = offset_y + row * cell_size_px` and
+/// `side = 16 * cell_size_px`.
+///
+/// Returns `None` when the box does not fit fully inside a `width × height` Ground layer. This is
+/// the fit decision without the pixel copy, for callers that only need to know whether the section
+/// is resolvable (the readiness audit, which classifies every section).
+pub fn section_box_bounds(
+    grid: &GridConfig,
+    col: u32,
+    row: u32,
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32, u32)> {
+    let cell_size = if grid.cell_size_px > 0 {
+        grid.cell_size_px
+    } else {
+        GridConfig::DEFAULT_CELL_SIZE
+    };
+    let box_size = cell_size.saturating_mul(16);
+    let x = grid.offset_x.saturating_add(col.saturating_mul(cell_size));
+    let y = grid.offset_y.saturating_add(row.saturating_mul(cell_size));
+
+    if x < width && y < height && box_size <= width - x && box_size <= height - y {
+        Some((x, y, box_size))
+    } else {
+        None
+    }
+}
+
 /// Crops the exact `16 × 16` Grid Cell Map Section box at `(col, row)` from `img`, aligned to
 /// `grid` (`x = offset_x + col * cell_size_px`, `y = offset_y + row * cell_size_px`, side length
 /// `16 * cell_size_px`).
@@ -602,21 +632,8 @@ pub fn crop_section_box(
     col: u32,
     row: u32,
 ) -> Option<image::DynamicImage> {
-    let cell_size = if grid.cell_size_px > 0 {
-        grid.cell_size_px
-    } else {
-        GridConfig::DEFAULT_CELL_SIZE
-    };
-    let box_size = 16 * cell_size;
-    let x = grid.offset_x.saturating_add(col.saturating_mul(cell_size));
-    let y = grid.offset_y.saturating_add(row.saturating_mul(cell_size));
-
-    if x < img.width() && y < img.height() && box_size <= img.width() - x && box_size <= img.height() - y
-    {
-        Some(img.crop_imm(x, y, box_size, box_size))
-    } else {
-        None
-    }
+    let (x, y, box_size) = section_box_bounds(grid, col, row, img.width(), img.height())?;
+    Some(img.crop_imm(x, y, box_size, box_size))
 }
 
 /// Builds the Map Section list for a curated map from its grid section origins.
@@ -2916,6 +2933,35 @@ mod tests {
         // (17, 0) starts at x = 272, so its 256px box overruns the 512px image width.
         assert!(crop_section_box(&img, &grid, 17, 0).is_none());
         assert!(crop_section_box(&img, &grid, 0, 17).is_none());
+    }
+
+    /// The bounds predicate is the fit decision without the pixel copy, so it must agree with the
+    /// crop for the boundary cases the audit classifies.
+    #[test]
+    fn test_section_box_bounds_is_the_crop_fit_decision() {
+        let grid = GridConfig::new(16, 0, 0); // 16 * 16 = 256px per section
+
+        assert_eq!(section_box_bounds(&grid, 0, 0, 512, 512), Some((0, 0, 256)));
+        // Last box that still fits flush against the far edge/right column.
+        assert_eq!(section_box_bounds(&grid, 16, 16, 512, 512), Some((256, 256, 256)));
+        // One cell further overruns and is unresolvable, matching `crop_section_box`.
+        assert_eq!(section_box_bounds(&grid, 17, 0, 512, 512), None);
+        assert_eq!(section_box_bounds(&grid, 0, 17, 512, 512), None);
+        // Non-square Ground layer: each axis is bounded independently.
+        assert_eq!(section_box_bounds(&grid, 16, 0, 512, 300), Some((256, 0, 256)));
+        assert_eq!(section_box_bounds(&grid, 0, 3, 512, 300), None);
+
+        // A zero cell size (possible through deserialization, not `GridConfig::new`, which clamps)
+        // falls back to the default grid cell, exactly like the crop does.
+        let zero_cell = GridConfig {
+            cell_size_px: 0,
+            offset_x: 0,
+            offset_y: 0,
+        };
+        assert_eq!(
+            section_box_bounds(&zero_cell, 0, 0, 4096, 4096),
+            Some((0, 0, 16 * GridConfig::DEFAULT_CELL_SIZE))
+        );
     }
 
     #[test]

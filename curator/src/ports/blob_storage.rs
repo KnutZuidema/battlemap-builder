@@ -357,6 +357,15 @@ pub struct BlobStat {
     pub sha256: Option<String>,
 }
 
+/// Byte-level progress reported by [`BlobStorage::write_blob_with_progress`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobWriteProgress {
+    /// Bytes transferred to storage so far.
+    pub bytes_written: u64,
+    /// Total payload size in bytes.
+    pub total_bytes: u64,
+}
+
 impl BlobStat {
     pub fn new(size: u64, sha256: Option<String>) -> Self {
         Self { size, sha256 }
@@ -384,6 +393,25 @@ pub trait BlobStorage: Send + Sync {
     ) -> Result<(), StorageError> {
         let _ = sha256;
         self.write_blob(key, bytes).await
+    }
+
+    /// Write `bytes` at `key` like [`BlobStorage::write_blob_with_sha256`], reporting the transfer
+    /// through `on_progress` as the payload moves.
+    ///
+    /// `on_progress` is called once per completed transfer unit (one S3 part for the object store)
+    /// and returns whether to continue; `false` aborts the transfer and fails with an
+    /// [`std::io::ErrorKind::Interrupted`] [`StorageError::Io`], the shape callers already treat as
+    /// cancellation. Backends that cannot report progress use this default, which delegates
+    /// unchanged.
+    async fn write_blob_with_progress(
+        &self,
+        key: &BlobKey,
+        bytes: &[u8],
+        sha256: Option<&str>,
+        on_progress: &mut (dyn FnMut(BlobWriteProgress) -> bool + Send),
+    ) -> Result<(), StorageError> {
+        let _ = on_progress;
+        self.write_blob_with_sha256(key, bytes, sha256).await
     }
 
     /// Delete the blob at `key`. Succeeds when nothing was stored there.
@@ -427,6 +455,18 @@ impl<T: ?Sized + BlobStorage> BlobStorage for std::sync::Arc<T> {
         sha256: Option<&str>,
     ) -> Result<(), StorageError> {
         (**self).write_blob_with_sha256(key, bytes, sha256).await
+    }
+
+    async fn write_blob_with_progress(
+        &self,
+        key: &BlobKey,
+        bytes: &[u8],
+        sha256: Option<&str>,
+        on_progress: &mut (dyn FnMut(BlobWriteProgress) -> bool + Send),
+    ) -> Result<(), StorageError> {
+        (**self)
+            .write_blob_with_progress(key, bytes, sha256, on_progress)
+            .await
     }
 
     async fn delete_blob(&self, key: &BlobKey) -> Result<(), StorageError> {

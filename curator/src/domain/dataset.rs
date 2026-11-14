@@ -307,11 +307,23 @@ pub struct FreezeProgressUpdate {
     /// (col, row) coordinates of the section currently being cropped/resampled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_section: Option<(u32, u32)>,
+    /// Byte progress of the snapshot archive upload; only set while the artifact is being written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload: Option<UploadProgress>,
     /// Human-readable status description for UI progress banners.
     pub message: String,
     /// The resulting DatasetSnapshot once phase == "complete".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<DatasetSnapshot>,
+}
+
+/// Byte-level progress of the dataset snapshot archive upload, reported during `finalizing`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UploadProgress {
+    /// Bytes of the archive transferred to storage so far.
+    pub bytes_written: u64,
+    /// Total archive size in bytes.
+    pub total_bytes: u64,
 }
 
 

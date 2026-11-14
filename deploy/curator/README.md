@@ -350,7 +350,7 @@ Internal objects (`staging/`, `curated/`, `rejected/`, `telemetry/`) remain stri
 #### Integrity Verification & Upload Chunking
 
 - **Metadata Checksums**: Writes automatically compute the SHA-256 digest and attach it as S3 user metadata (`x-amz-meta-sha256`). Subsequent `stat_blob` operations query byte size and checksum via S3 `HEAD` without downloading the object payload.
-- **Multipart Uploads**: Payloads larger than 5 MiB automatically use S3 multipart uploads in 5 MiB chunks, with automatic cancellation (`abort_multipart_upload`) on transfer failure.
+- **Multipart Uploads**: Payloads larger than 16 MiB upload as 16 MiB S3 multipart parts, up to four parts in flight at once, reporting per-part byte progress to the snapshot freeze panel. Uploads abort (`abort_multipart_upload`) on transfer failure or operator cancellation.
 
 #### Disk-to-S3 Storage Migration Job
 

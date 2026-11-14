@@ -17,12 +17,12 @@ use std::sync::Arc;
 use fast_image_resize::{FilterType, ResizeAlg, ResizeOptions, Resizer};
 
 use crate::domain::{
-    crop_section_box, is_perspective_neutral, sample_description, synthesize_map_sections,
-    BlockingIssue, CaptionGenerator, CuratedMap, DatasetIssue, DatasetIssueCode, DatasetReadiness,
-    DatasetSnapshot, FreezeProgressUpdate, GridConfig, LayerRole, MapDatasetReadiness, MapSection,
-    Theme, TRIGGER_PHRASE,
+    crop_section_box, is_perspective_neutral, sample_description, section_box_bounds,
+    synthesize_map_sections, BlockingIssue, CaptionGenerator, CuratedMap, DatasetIssue,
+    DatasetIssueCode, DatasetReadiness, DatasetSnapshot, FreezeProgressUpdate, GridConfig, LayerRole,
+    MapDatasetReadiness, MapSection, Theme, UploadProgress, TRIGGER_PHRASE,
 };
-use crate::ports::blob_storage::{sha256_digest, BlobKey, BlobStorage};
+use crate::ports::blob_storage::{sha256_digest, BlobKey, BlobStorage, BlobWriteProgress};
 use crate::ports::catalog_repository::{CatalogRepository, CuratedFilter};
 use crate::ports::storage_error::StorageError;
 use crate::services::image_work;
@@ -71,6 +71,17 @@ pub(crate) fn describe_for_issue(text: &str) -> String {
     format!("{head}…")
 }
 
+/// Renders a byte count for progress banners, e.g. `412.3 MiB`.
+fn human_bytes(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    const KIB: f64 = 1024.0;
+    if (bytes as f64) >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    } else {
+        format!("{:.0} KiB", bytes as f64 / KIB)
+    }
+}
+
 /// Enumerates the LoRA dataset samples a curated map contributes, resolving every section's
 /// `Physical Description` through the one shared policy used by both the ZIP export and the
 /// readiness audit.
@@ -109,7 +120,11 @@ pub(crate) fn plan_dataset_samples(
     for section in sections {
         let mut section_issues = Vec::new();
 
-        if crop_section_box(image, &map.grid, section.col, section.row).is_none() {
+        // Fit check only: the audit never needs the section pixels, so do not pay the crop copy
+        // here (`crop_section_box` allocates a full box per section).
+        if section_box_bounds(&map.grid, section.col, section.row, image.width(), image.height())
+            .is_none()
+        {
             section_issues.push(DatasetIssue::new(
                 DatasetIssueCode::SectionUnresolvable,
                 format!(
@@ -557,6 +572,7 @@ impl DatasetExportService {
             total_samples: 0,
             current_map: None,
             current_section: None,
+            upload: None,
             message: "Starting dataset snapshot freeze...".to_string(),
             snapshot: None,
         }) {
@@ -577,6 +593,7 @@ impl DatasetExportService {
                 total_samples: 0,
                 current_map: Some(map.id.clone()),
                 current_section: None,
+                upload: None,
                 message: format!("Auditing readiness: map {} of {} ('{}')", idx + 1, total_maps, map.id),
                 snapshot: None,
             }) {
@@ -620,6 +637,7 @@ impl DatasetExportService {
                 total_samples: 0,
                 current_map: None,
                 current_section: None,
+                upload: None,
                 message: summary.clone(),
                 snapshot: None,
             });
@@ -639,6 +657,7 @@ impl DatasetExportService {
             total_samples,
             current_map: None,
             current_section: None,
+            upload: None,
             message: format!("Starting packaging for {total_maps} maps ({total_samples} samples)..."),
             snapshot: None,
         }) {
@@ -658,6 +677,7 @@ impl DatasetExportService {
                         total_samples,
                         current_map: Some(map.id.clone()),
                         current_section: Some((col, row)),
+                        upload: None,
                         message: format!(
                             "Resampling section ({col}, {row}) for '{}' ({}/{} samples)",
                             map.id,
@@ -688,6 +708,7 @@ impl DatasetExportService {
             total_samples,
             current_map: None,
             current_section: None,
+            upload: None,
             message: "Writing frozen dataset snapshot artifact to storage...".to_string(),
             snapshot: None,
         }) {
@@ -702,8 +723,35 @@ impl DatasetExportService {
         });
 
         let blob_key = BlobKey::DatasetSnapshot { id: id.clone() };
+        // The upload is the one long stage with no per-section progress: report every completed
+        // storage part so the operator sees the archive moving instead of one frozen label.
+        let mut report_upload = |progress: BlobWriteProgress| {
+            let pct = (progress.bytes_written * 100)
+                .checked_div(progress.total_bytes)
+                .unwrap_or(100)
+                .min(100);
+            on_progress(FreezeProgressUpdate {
+                phase: "finalizing".to_string(),
+                completed_maps: total_maps,
+                total_maps,
+                completed_samples,
+                total_samples,
+                current_map: None,
+                current_section: None,
+                upload: Some(UploadProgress {
+                    bytes_written: progress.bytes_written,
+                    total_bytes: progress.total_bytes,
+                }),
+                message: format!(
+                    "Uploading dataset snapshot artifact: {pct}% ({} of {})",
+                    human_bytes(progress.bytes_written),
+                    human_bytes(progress.total_bytes)
+                ),
+                snapshot: None,
+            })
+        };
         self.blobs
-            .write_blob_with_sha256(&blob_key, &zip_bytes, Some(&sha256))
+            .write_blob_with_progress(&blob_key, &zip_bytes, Some(&sha256), &mut report_upload)
             .await?;
 
         let artifact_key = blob_key.to_path();
@@ -739,6 +787,7 @@ impl DatasetExportService {
             total_samples,
             current_map: None,
             current_section: None,
+            upload: None,
             message: format!("Frozen dataset snapshot '{}' created", snapshot.id),
             snapshot: Some(snapshot.clone()),
         });

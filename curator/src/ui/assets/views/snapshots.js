@@ -203,8 +203,15 @@ export function updateFreezeProgressUI(progress) {
         countsText = `${completed} / ${total} samples`;
         if (dom.btnFreezeLabel) dom.btnFreezeLabel.textContent = `Freezing (${completed}/${total})`;
     } else if (phase === "finalizing") {
-        pct = 95;
-        countsText = "Saving artifact...";
+        const upload = progress.upload || null;
+        if (upload && upload.total_bytes > 0) {
+            const ratio = Math.min(1, upload.bytes_written / upload.total_bytes);
+            pct = 95 + Math.round(ratio * 4);
+            countsText = `Uploading ${formatBytes(upload.bytes_written)} / ${formatBytes(upload.total_bytes)}`;
+        } else {
+            pct = 95;
+            countsText = "Saving artifact...";
+        }
         if (dom.btnFreezeLabel) dom.btnFreezeLabel.textContent = "Finalizing...";
     } else if (phase === "complete") {
         pct = 100;

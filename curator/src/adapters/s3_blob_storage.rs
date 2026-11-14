@@ -1,13 +1,20 @@
 //! S3-compatible [`BlobStorage`] implementation supporting Cloudflare R2 and MinIO.
 
+use std::io::ErrorKind;
+
 use async_trait::async_trait;
 
-use crate::ports::blob_storage::{sha256_digest, BlobKey, BlobStat, BlobStorage};
+use crate::ports::blob_storage::{sha256_digest, BlobKey, BlobStat, BlobStorage, BlobWriteProgress};
 use crate::ports::storage_error::StorageError;
 
-/// Chunk size and threshold for S3 multipart uploads (5 MiB, the S3 minimum part size).
-pub const MULTIPART_THRESHOLD: usize = 5 * 1024 * 1024;
-pub const PART_SIZE: usize = 5 * 1024 * 1024;
+/// Multipart part size: 16 MiB keeps the request count (and the round-trip exposure of each part)
+/// low on an asymmetric home uplink, and stays far below the 10,000-part ceiling.
+pub const PART_SIZE: usize = 16 * 1024 * 1024;
+/// Payload size above which the upload switches to S3 multipart.
+pub const MULTIPART_THRESHOLD: usize = PART_SIZE;
+/// Parts uploaded concurrently: four 16 MiB parts saturate a typical uplink without opening one
+/// socket per part.
+const UPLOAD_CONCURRENCY: usize = 4;
 
 /// Errors arising from missing or invalid S3 / Cloudflare R2 configuration.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -214,6 +221,190 @@ impl S3BlobStorage {
         }
         StorageError::Io(std::io::Error::other(err))
     }
+
+    /// Aborts an in-flight multipart upload. The caller is already failing, so the abort error is
+    /// not allowed to mask the original cause.
+    async fn abort_multipart(&self, path: &str, upload_id: &str) {
+        let _ = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(path)
+            .upload_id(upload_id)
+            .send()
+            .await;
+    }
+
+    /// Writes `bytes` to `key`, reporting transferred bytes through `on_progress`.
+    ///
+    /// Payloads above [`MULTIPART_THRESHOLD`] upload in [`PART_SIZE`] parts, up to
+    /// [`UPLOAD_CONCURRENCY`] at a time; `on_progress` fires after each completed part and may
+    /// abort the transfer by returning `false`.
+    async fn put_with_progress(
+        &self,
+        key: &BlobKey,
+        bytes: &[u8],
+        sha256: Option<&str>,
+        on_progress: &mut (dyn FnMut(BlobWriteProgress) -> bool + Send),
+    ) -> Result<(), StorageError> {
+        let path = key.to_path();
+        let digest = sha256
+            .map(str::to_string)
+            .unwrap_or_else(|| sha256_digest(bytes));
+        let total_bytes = bytes.len() as u64;
+
+        if bytes.len() <= MULTIPART_THRESHOLD {
+            let body = aws_sdk_s3::primitives::ByteStream::from(bytes.to_vec());
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(&path)
+                .metadata("sha256", &digest)
+                .body(body)
+                .send()
+                .await
+                .map_err(|err| StorageError::Io(std::io::Error::other(err)))?;
+            let _ = on_progress(BlobWriteProgress {
+                bytes_written: total_bytes,
+                total_bytes,
+            });
+            return Ok(());
+        }
+
+        let create_res = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&path)
+            .metadata("sha256", &digest)
+            .send()
+            .await
+            .map_err(|err| StorageError::Io(std::io::Error::other(err)))?;
+
+        let upload_id = create_res
+            .upload_id()
+            .ok_or_else(|| StorageError::Io(std::io::Error::other("Missing upload_id")))?
+            .to_string();
+
+        let total_parts = bytes.len().div_ceil(PART_SIZE);
+        tracing::info!(
+            path = %path,
+            bytes = total_bytes,
+            parts = total_parts,
+            concurrency = UPLOAD_CONCURRENCY,
+            "Uploading multipart object"
+        );
+
+        let mut in_flight = tokio::task::JoinSet::new();
+        let mut completed_parts = Vec::with_capacity(total_parts);
+        let mut bytes_written = 0u64;
+        let mut next_part = 0usize;
+
+        loop {
+            while next_part < total_parts && in_flight.len() < UPLOAD_CONCURRENCY {
+                let start = next_part * PART_SIZE;
+                let end = (start + PART_SIZE).min(bytes.len());
+                in_flight.spawn(upload_part(
+                    self.client.clone(),
+                    self.bucket.clone(),
+                    path.clone(),
+                    upload_id.clone(),
+                    (next_part + 1) as i32,
+                    bytes[start..end].to_vec(),
+                ));
+                next_part += 1;
+            }
+
+            let Some(joined) = in_flight.join_next().await else {
+                break;
+            };
+
+            match joined {
+                Ok(Ok((part_number, etag, part_len))) => {
+                    completed_parts.push(
+                        aws_sdk_s3::types::CompletedPart::builder()
+                            .part_number(part_number)
+                            .e_tag(etag)
+                            .build(),
+                    );
+                    bytes_written += part_len as u64;
+                    if !on_progress(BlobWriteProgress {
+                        bytes_written,
+                        total_bytes,
+                    }) {
+                        in_flight.abort_all();
+                        self.abort_multipart(&path, &upload_id).await;
+                        return Err(StorageError::Io(std::io::Error::from(
+                            ErrorKind::Interrupted,
+                        )));
+                    }
+                }
+                Ok(Err(err)) => {
+                    in_flight.abort_all();
+                    self.abort_multipart(&path, &upload_id).await;
+                    return Err(err);
+                }
+                Err(join_err) => {
+                    in_flight.abort_all();
+                    self.abort_multipart(&path, &upload_id).await;
+                    return Err(StorageError::Io(std::io::Error::other(join_err)));
+                }
+            }
+        }
+
+        // Parts complete out of order; S3 requires them listed in ascending part-number order.
+        completed_parts.sort_by_key(|part| part.part_number().unwrap_or_default());
+        let completed_upload = aws_sdk_s3::types::CompletedMultipartUpload::builder()
+            .set_parts(Some(completed_parts))
+            .build();
+
+        if let Err(err) = self
+            .client
+            .complete_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&path)
+            .upload_id(&upload_id)
+            .multipart_upload(completed_upload)
+            .send()
+            .await
+        {
+            self.abort_multipart(&path, &upload_id).await;
+            return Err(StorageError::Io(std::io::Error::other(err)));
+        }
+
+        Ok(())
+    }
+}
+
+/// Uploads one multipart part, returning `(part_number, etag, byte_len)`.
+///
+/// A free function so each part runs in its own [`tokio::task::JoinSet`] task with owned inputs;
+/// `S3BlobStorage` clones its client and strings per part.
+async fn upload_part(
+    client: aws_sdk_s3::Client,
+    bucket: String,
+    path: String,
+    upload_id: String,
+    part_number: i32,
+    chunk: Vec<u8>,
+) -> Result<(i32, String, usize), StorageError> {
+    let len = chunk.len();
+    let body = aws_sdk_s3::primitives::ByteStream::from(chunk);
+    let part_res = client
+        .upload_part()
+        .bucket(bucket)
+        .key(path)
+        .upload_id(upload_id)
+        .part_number(part_number)
+        .body(body)
+        .send()
+        .await
+        .map_err(|err| StorageError::Io(std::io::Error::other(err)))?;
+    Ok((
+        part_number,
+        part_res.e_tag().unwrap_or_default().to_string(),
+        len,
+    ))
 }
 
 #[async_trait]
@@ -249,104 +440,19 @@ impl BlobStorage for S3BlobStorage {
         bytes: &[u8],
         sha256: Option<&str>,
     ) -> Result<(), StorageError> {
-        let path = key.to_path();
-        let digest = sha256
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| sha256_digest(bytes));
+        let mut ignore_progress = |_progress: BlobWriteProgress| true;
+        self.put_with_progress(key, bytes, sha256, &mut ignore_progress)
+            .await
+    }
 
-        if bytes.len() <= MULTIPART_THRESHOLD {
-            let body = aws_sdk_s3::primitives::ByteStream::from(bytes.to_vec());
-            self.client
-                .put_object()
-                .bucket(&self.bucket)
-                .key(&path)
-                .metadata("sha256", &digest)
-                .body(body)
-                .send()
-                .await
-                .map_err(|err| StorageError::Io(std::io::Error::other(err)))?;
-            Ok(())
-        } else {
-            // Multipart upload for large payloads
-            let create_res = self
-                .client
-                .create_multipart_upload()
-                .bucket(&self.bucket)
-                .key(&path)
-                .metadata("sha256", &digest)
-                .send()
-                .await
-                .map_err(|err| StorageError::Io(std::io::Error::other(err)))?;
-
-            let upload_id = create_res
-                .upload_id()
-                .ok_or_else(|| StorageError::Io(std::io::Error::other("Missing upload_id")))?;
-
-            let mut completed_parts = Vec::new();
-
-            for (part_number, chunk) in (1..).zip(bytes.chunks(PART_SIZE)) {
-                let body = aws_sdk_s3::primitives::ByteStream::from(chunk.to_vec());
-                let part_res = match self
-                    .client
-                    .upload_part()
-                    .bucket(&self.bucket)
-                    .key(&path)
-                    .upload_id(upload_id)
-                    .part_number(part_number)
-                    .body(body)
-                    .send()
-                    .await
-                {
-                    Ok(res) => res,
-                    Err(err) => {
-                        let _ = self
-                            .client
-                            .abort_multipart_upload()
-                            .bucket(&self.bucket)
-                            .key(&path)
-                            .upload_id(upload_id)
-                            .send()
-                            .await;
-                        return Err(StorageError::Io(std::io::Error::other(err)));
-                    }
-                };
-
-                let etag = part_res.e_tag().unwrap_or_default().to_string();
-                completed_parts.push(
-                    aws_sdk_s3::types::CompletedPart::builder()
-                        .part_number(part_number)
-                        .e_tag(etag)
-                        .build(),
-                );
-            }
-
-            let completed_upload = aws_sdk_s3::types::CompletedMultipartUpload::builder()
-                .set_parts(Some(completed_parts))
-                .build();
-
-            if let Err(err) = self
-                .client
-                .complete_multipart_upload()
-                .bucket(&self.bucket)
-                .key(&path)
-                .upload_id(upload_id)
-                .multipart_upload(completed_upload)
-                .send()
-                .await
-            {
-                let _ = self
-                    .client
-                    .abort_multipart_upload()
-                    .bucket(&self.bucket)
-                    .key(&path)
-                    .upload_id(upload_id)
-                    .send()
-                    .await;
-                return Err(StorageError::Io(std::io::Error::other(err)));
-            }
-
-            Ok(())
-        }
+    async fn write_blob_with_progress(
+        &self,
+        key: &BlobKey,
+        bytes: &[u8],
+        sha256: Option<&str>,
+        on_progress: &mut (dyn FnMut(BlobWriteProgress) -> bool + Send),
+    ) -> Result<(), StorageError> {
+        self.put_with_progress(key, bytes, sha256, on_progress).await
     }
 
     async fn delete_blob(&self, key: &BlobKey) -> Result<(), StorageError> {

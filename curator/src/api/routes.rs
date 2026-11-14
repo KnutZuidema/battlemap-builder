@@ -1904,6 +1904,7 @@ mod tests {
                 total_samples: 0,
                 current_map: Some("cancelled-freeze".to_string()),
                 current_section: None,
+                upload: None,
                 message: "auditing".to_string(),
                 snapshot: None,
             });

@@ -261,7 +261,7 @@ modal_app = modal.App("curator-training-runner")
 
 training_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("git")
+    .apt_install("git", "libgl1", "libglib2.0-0")
     .pip_install(
         "torch>=2.4.0",
         "torchvision",

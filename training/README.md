@@ -60,7 +60,7 @@ At each 250-step checkpoint produced by `ai-toolkit`:
 
 ```bash
 # Deploy FastAPI web endpoint and L40S GPU worker to Modal
-modal deploy dungeonforge_training/app.py
+modal deploy dungeonforge_training/app.py::modal_app
 ```
 
 ## Running Tests

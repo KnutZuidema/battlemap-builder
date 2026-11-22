@@ -179,3 +179,11 @@ def test_post_run_cancel(client, setup_test_app):
     resp = client.post("/run/run-to-cancel/cancel")
     assert resp.status_code == 200
     assert resp.json()["state"] == "cancelled"
+
+
+def test_modal_training_image_defined():
+    import modal
+    import dungeonforge_training.app as app_module
+
+    assert app_module.training_image is not None
+    assert isinstance(app_module.training_image, modal.Image)

@@ -554,3 +554,20 @@ def test_run_aitoolkit_subprocess_waits_for_samples(tmp_path: Path):
         writer_th.join()
 
     assert callback_invocations == [250]
+
+
+def test_find_step_weights_nine_digit_zero_padding_no_collision(tmp_path: Path):
+    """Verify ai-toolkit 9-digit zero-padded checkpoint filenames match exact step without prefix collisions."""
+    from dungeonforge_training.runner import find_step_weights
+
+    w250 = tmp_path / "run_000000250.safetensors"
+    w2500 = tmp_path / "run_000002500.safetensors"
+    w2500.write_bytes(b"weights_2500")
+
+    assert find_step_weights(tmp_path, step=250, total_steps=4000) is None
+    assert find_step_weights(tmp_path, step=25, total_steps=4000) is None
+    assert find_step_weights(tmp_path, step=2500, total_steps=4000) == w2500
+
+    w250.write_bytes(b"weights_250")
+    assert find_step_weights(tmp_path, step=250, total_steps=4000) == w250
+    assert find_step_weights(tmp_path, step=25, total_steps=4000) is None

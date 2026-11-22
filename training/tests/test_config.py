@@ -62,7 +62,7 @@ class TestConfigGeneration(unittest.TestCase):
             model = proc["model"]
             self.assertEqual(model["name_or_path"], "black-forest-labs/flux-3-image-klein-base")
             self.assertEqual(model["arch"], "flux3")
-            self.assertTrue(model["is_flux"])
+            self.assertNotIn("is_flux", model)
             self.assertFalse(model["quantize"])
 
             # Train: AdamW betas [0.9, 0.95], lr 1e-4, warmup_steps 200, lr_scheduler linear, batch_size 1, bf16

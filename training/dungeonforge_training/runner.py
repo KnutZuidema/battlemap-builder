@@ -145,9 +145,8 @@ def find_step_weights(job_dir: Path, step: int, total_steps: int) -> Optional[Pa
 
     step_str = str(step)
     step_patterns = [
-        re.compile(rf"(^|[_\-\. ]){step_str}([_\-\. ]|$|\.safetensors$)", re.IGNORECASE),
-        re.compile(rf"{step:08d}"),
-        re.compile(rf"step[-_]?{step_str}", re.IGNORECASE),
+        re.compile(rf"(^|[_\-\. ])0*{step_str}([_\-\. ]|$|\.safetensors$)", re.IGNORECASE),
+        re.compile(rf"step[-_]?0*{step_str}([_\-\. ]|$|\.safetensors$)", re.IGNORECASE),
     ]
 
     for file in sorted(job_dir.iterdir()):

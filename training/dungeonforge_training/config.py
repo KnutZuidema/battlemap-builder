@@ -134,7 +134,6 @@ def build_aitoolkit_config(
                     "model": {
                         "name_or_path": active_recipe.base_model,
                         "arch": active_recipe.arch,
-                        "is_flux": True,
                         "quantize": False,
                     },
                     "sample": {

@@ -111,6 +111,9 @@ fn create_router_with_timeouts(
         // bundle, so they belong to the long-running group.
         .route("/api/curated/{id}", patch(patch_curated).delete(delete_curated))
         .route("/api/curated/bulk-delete", post(post_curated_bulk_delete))
+        .route("/api/curated/export", get(get_curated_export))
+        .route("/api/curated/export-selected", post(post_curated_export_selected))
+        .route("/api/curated/{id}/export", get(get_curated_battlemap_export))
         .route(
             "/api/curated/{id}/suggest-themes",
             post(post_curated_suggest_themes).get(post_curated_suggest_themes),
@@ -704,5 +707,52 @@ mod tests {
             StatusCode::REQUEST_TIMEOUT,
             "the timed-out freeze must release the freeze lock"
         );
+    }
+
+    /// The three full Battlemap export routes must sit in `long_routes`: they fail on `long_timeout`
+    /// rather than `standard_timeout` when a Layer blob read stalls.
+    #[tokio::test]
+    async fn battlemap_export_routes_belong_to_long_routes() {
+        let spool_dir = tempfile::tempdir().expect("spool tempdir");
+        let state = state_with_hanging_ground_read()
+            .await
+            .with_spool(Arc::new(crate::services::ArchiveSpool::new(spool_dir.path())));
+        let app = create_router_with_timeouts(
+            state,
+            LONG_REQUEST_TIMEOUT,
+            Duration::from_millis(25),
+        );
+
+        let requests = [
+            Request::builder()
+                .uri("/api/curated/export")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+            Request::builder()
+                .uri("/api/curated/export-selected")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"ids":["hung-map"]}"#))
+                .unwrap(),
+            Request::builder()
+                .uri("/api/curated/hung-map/export")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        ];
+
+        for req in requests {
+            let uri = req.uri().to_string();
+            let resp = tokio::time::timeout(Duration::from_secs(1), app.clone().oneshot(req))
+                .await
+                .unwrap_or_else(|_| panic!("{uri} must be bounded by long_timeout"))
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::REQUEST_TIMEOUT,
+                "{uri} must time out on the long budget"
+            );
+        }
     }
 }

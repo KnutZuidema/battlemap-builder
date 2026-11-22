@@ -2,6 +2,7 @@ pub mod curation;
 pub mod description;
 pub mod benchmark;
 pub mod archive_spool;
+pub mod battlemap_export;
 pub mod catalog_migration;
 pub mod model_registry;
 pub mod dataset_export;
@@ -20,6 +21,7 @@ pub use curation::*;
 
 pub use benchmark::*;
 pub use archive_spool::{ArchiveSpool, SpooledArchive, DEFAULT_MAX_ARCHIVE_BYTES};
+pub use battlemap_export::BattlemapExportService;
 pub use model_registry::ModelRegistry;
 pub use dataset_export::{DatasetExportService, DeleteDatasetError, FreezeDatasetError};
 pub use training::{compute_poll_backoff, CreateTrainingRunRequest, TrainingService, TrainingServiceError};

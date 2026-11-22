@@ -2559,3 +2559,312 @@ async fn test_thumbnail_precompute_failure_does_not_fail_curation_and_the_lazy_r
         assert_eq!(&bytes[..3], &[0xFF, 0xD8, 0xFF], "layer {index}");
     }
 }
+
+#[tokio::test]
+async fn test_get_curated_battlemap_export_single_map_headers_and_404_cases() {
+    use std::io::Read;
+    let (app, catalog, blobs) = setup_test_app();
+
+    let (map, img0, img1) =
+        curate_test_bundle(&catalog, &blobs, "fort_01-v2.0", vec!["dungeon".into()]).await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/curated/fort_01-v2.0/export")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/zip")
+    );
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok()),
+        Some("attachment; filename=\"fort_01-v2.0.zip\"")
+    );
+    let content_len: usize = resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .expect("Content-Length header present")
+        .parse()
+        .expect("numeric Content-Length");
+
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.len(), content_len);
+
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(body.as_ref())).unwrap();
+    assert_eq!(archive.len(), 3);
+    let mut g_bytes = Vec::new();
+    archive
+        .by_name("fort_01-v2.0/0_ground.png")
+        .unwrap()
+        .read_to_end(&mut g_bytes)
+        .unwrap();
+    assert_eq!(g_bytes, img0);
+    let mut u_bytes = Vec::new();
+    archive
+        .by_name("fort_01-v2.0/1_upper_1.png")
+        .unwrap()
+        .read_to_end(&mut u_bytes)
+        .unwrap();
+    assert_eq!(u_bytes, img1);
+    let mut manifest_json = String::new();
+    archive
+        .by_name("fort_01-v2.0/manifest.json")
+        .unwrap()
+        .read_to_string(&mut manifest_json)
+        .unwrap();
+    let parsed: CuratedMap = serde_json::from_str(&manifest_json).unwrap();
+    assert_eq!(parsed.id, map.id);
+
+    // Unknown ID -> 404
+    let resp_missing = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/curated/no_such_battlemap/export")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_missing.status(), StatusCode::NOT_FOUND);
+
+    // Missing layer blob -> 404
+    let broken = CuratedMap::with_now("missing_layer_map", Theme::Cave, vec![], (512, 512))
+        .with_layers(vec![
+            CuratedLayer::new(0, "0_ground.png", LayerRole::Ground, Some(0), (512, 512)),
+            CuratedLayer::new(1, "1_upper_1.png", LayerRole::UpperFloor, Some(1), (512, 512)),
+        ]);
+    catalog.save_curated(&broken).await.unwrap();
+    blobs
+        .write_blob(
+            &BlobKey::CuratedLayer {
+                id: "missing_layer_map".into(),
+                index: 0,
+                role: LayerRole::Ground,
+                elevation: Some(0),
+            },
+            b"ONLY-GROUND",
+        )
+        .await
+        .unwrap();
+    let resp_broken = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/curated/missing_layer_map/export")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_broken.status(), StatusCode::NOT_FOUND);
+
+    // Filename sanitization fallback when ID contains only non-filename characters
+    let weird = CuratedMap::with_now("!!!", Theme::Dungeon, vec![], (512, 512)).with_layers(vec![
+        CuratedLayer::new(0, "0_ground.png", LayerRole::Ground, Some(0), (512, 512)),
+    ]);
+    catalog.save_curated(&weird).await.unwrap();
+    blobs
+        .write_blob(
+            &BlobKey::CuratedLayer {
+                id: "!!!".into(),
+                index: 0,
+                role: LayerRole::Ground,
+                elevation: Some(0),
+            },
+            b"WEIRD-ID",
+        )
+        .await
+        .unwrap();
+    let resp_weird = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/curated/!!!/export")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_weird.status(), StatusCode::OK);
+    assert_eq!(
+        resp_weird
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok()),
+        Some("attachment; filename=\"battlemap.zip\"")
+    );
+}
+
+#[tokio::test]
+async fn test_get_curated_export_theme_filtering_and_invalid_theme_400() {
+    let (app, catalog, blobs) = setup_test_app();
+    curate_test_map(&catalog, &blobs, "dng_1", Theme::Dungeon, vec![], None).await;
+    curate_test_map(&catalog, &blobs, "cav_1", Theme::Cave, vec![], None).await;
+
+    // Seed a dungeon map with missing blob to confirm multi-map export skips it instead of failing.
+    let missing_blob = CuratedMap::with_now("dng_broken", Theme::Dungeon, vec![], (1024, 1024))
+        .with_layers(vec![CuratedLayer::new(
+            0,
+            "0_ground.png",
+            LayerRole::Ground,
+            Some(0),
+            (1024, 1024),
+        )]);
+    catalog.save_curated(&missing_blob).await.unwrap();
+
+    // Unfiltered export -> battlemaps.zip
+    let resp_all = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/curated/export")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_all.status(), StatusCode::OK);
+    assert_eq!(
+        resp_all
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/zip")
+    );
+    assert_eq!(
+        resp_all
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok()),
+        Some("attachment; filename=\"battlemaps.zip\"")
+    );
+    let all_bytes = to_bytes(resp_all.into_body(), usize::MAX).await.unwrap();
+    let mut all_zip = zip::ZipArchive::new(std::io::Cursor::new(all_bytes.as_ref())).unwrap();
+    assert!(all_zip.by_name("dng_1/0_ground.png").is_ok());
+    assert!(all_zip.by_name("cav_1/0_ground.png").is_ok());
+    assert!(all_zip.by_name("dng_broken/manifest.json").is_err());
+
+    // Filtered export -> battlemaps-dungeon.zip
+    let resp_dungeon = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/curated/export?theme=dungeon")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_dungeon.status(), StatusCode::OK);
+    assert_eq!(
+        resp_dungeon
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok()),
+        Some("attachment; filename=\"battlemaps-dungeon.zip\"")
+    );
+    let dungeon_bytes = to_bytes(resp_dungeon.into_body(), usize::MAX).await.unwrap();
+    let mut dungeon_zip =
+        zip::ZipArchive::new(std::io::Cursor::new(dungeon_bytes.as_ref())).unwrap();
+    assert!(dungeon_zip.by_name("dng_1/0_ground.png").is_ok());
+    assert!(dungeon_zip.by_name("cav_1/0_ground.png").is_err());
+    assert!(dungeon_zip.by_name("dng_broken/manifest.json").is_err());
+
+    // Invalid theme -> 400
+    let resp_bad = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/curated/export?theme=not_a_theme")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_bad.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_post_curated_export_selected_order_dedup_and_pure_read() {
+    let (app, catalog, blobs) = setup_test_app();
+    curate_test_map(&catalog, &blobs, "sel_a", Theme::Tavern, vec![], None).await;
+    curate_test_map(&catalog, &blobs, "sel_b", Theme::Ruins, vec![], None).await;
+    curate_test_map(&catalog, &blobs, "sel_c", Theme::Cave, vec![], None).await;
+
+    let before_maps = catalog.list_curated(&Default::default()).await.unwrap();
+    let before_snapshots = catalog.list_dataset_snapshots(None).await.unwrap();
+    let before_readiness = catalog.list_map_readiness().await.unwrap();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/curated/export-selected")
+                .method("POST")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({ "ids": ["sel_c", "unknown_x", "sel_c", "sel_a"] }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/zip")
+    );
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok()),
+        Some("attachment; filename=\"battlemaps.zip\"")
+    );
+    let content_len: usize = resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .parse()
+        .unwrap();
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.len(), content_len);
+
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(body.as_ref())).unwrap();
+    let names: Vec<String> = (0..archive.len())
+        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "sel_c/manifest.json",
+            "sel_c/0_ground.png",
+            "sel_a/manifest.json",
+            "sel_a/0_ground.png",
+        ]
+    );
+
+    // Pure read check
+    assert_eq!(catalog.list_curated(&Default::default()).await.unwrap(), before_maps);
+    assert_eq!(catalog.list_dataset_snapshots(None).await.unwrap(), before_snapshots);
+    assert_eq!(catalog.list_map_readiness().await.unwrap(), before_readiness);
+}

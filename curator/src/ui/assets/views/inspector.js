@@ -12,7 +12,7 @@ import {
     isCanonicalThemeTag,
     normalizeLayerRole,
 } from "../kit/tags.js";
-import { applyLibraryFilters, getScrubPillRoleClass } from "./library.js";
+import { applyLibraryFilters, exportSingleBattlemap, getScrubPillRoleClass } from "./library.js";
 import { openLibraryFullscreen } from "./library/fullscreen.js";
 import { openDeleteCuratedModal } from "./library/bulk.js";
 import { showToast } from "../shell/status.js";
@@ -614,6 +614,13 @@ async function runAllInspectorAiRefinements() {
     }
 }
 
+export function exportInspectorBattlemap() {
+    return exportSingleBattlemap(state.libraryDrawerMap?.id, {
+        labelEl: dom.btnInspectorExportLabel,
+        idleLabel: "Export Battlemap",
+    });
+}
+
 export function setupInspectorDrawerControls() {
     dom.btnCloseInspector?.addEventListener("click", () => closeLibraryInspector());
     dom.btnInspectorDiscard?.addEventListener("click", () => discardLibraryInspectorChanges());
@@ -685,6 +692,8 @@ export function setupInspectorDrawerControls() {
         }
         openLibraryFullscreen(targetIdx);
     });
+
+    dom.btnInspectorExport?.addEventListener("click", () => exportInspectorBattlemap());
 
     dom.btnInspectorDelete?.addEventListener("click", () => {
         if (state.libraryDrawerMap) {

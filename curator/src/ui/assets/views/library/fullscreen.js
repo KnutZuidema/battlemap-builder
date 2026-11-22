@@ -19,7 +19,7 @@ import {
 } from "../../kit/grid-math.js";
 import { getLibraryFullscreenDimensions } from "../../kit/layers.js";
 import { createViewport, drawGridOverlay, isGridCalibrating } from "../../stage/viewport.js";
-import { setLibraryFocus } from "../library.js";
+import { exportSingleBattlemap, setLibraryFocus } from "../library.js";
 import { invalidateDatasetReadiness } from "../readiness.js";
 import { saveCuratedMap } from "../../requests/library.js";
 
@@ -649,6 +649,13 @@ export function closeLibraryFullscreen() {
     }
 }
 
+export function exportFullscreenBattlemap() {
+    return exportSingleBattlemap(state.libraryFullscreenMap?.id, {
+        labelEl: dom.btnFsExportLabel,
+        idleLabel: "Export",
+    });
+}
+
 export function setupFullscreenControls() {
     if (!dom.libraryFullscreenCanvas) return;
     ensureFullscreenViewport();
@@ -701,6 +708,8 @@ export function setupFullscreenControls() {
             setLibraryFocus(state.libraryFullscreenIndex, true);
         }
     });
+
+    dom.btnFsExport?.addEventListener("click", () => exportFullscreenBattlemap());
 
     dom.btnFsClose?.addEventListener("click", () => closeLibraryFullscreen());
 

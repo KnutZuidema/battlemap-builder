@@ -29,8 +29,8 @@ use crate::ports::cost_tracker::CostStats;
 use crate::services::sections::{describe_map_sections, ground_dimensions, SectionDescriptionContext};
 use crate::services::image_work::GroundImage;
 use crate::services::{
-    DatasetExportService, FreezeDatasetError, IngestionSummary, LibraryService,
-    RedditIngestionService, SpooledArchive, StorageMaintenanceService,
+    BattlemapExportService, DatasetExportService, FreezeDatasetError, IngestionSummary,
+    LibraryService, RedditIngestionService, SpooledArchive, StorageMaintenanceService,
 };
 use crate::adapters::clean_tags;
 pub use crate::services::description::detect_image_mime;
@@ -346,6 +346,73 @@ pub async fn post_dataset_export_selected(
         .export_selected_lora_dataset(&payload.ids)
         .await?;
     spooled_zip_response(archive, "lora-dataset.zip")
+}
+
+/// Sanitizes a curated map ID into a safe ZIP filename stem (`[A-Za-z0-9._-]`, fallback `"battlemap"`).
+fn sanitize_battlemap_archive_stem(id: &str) -> String {
+    let filtered: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .collect();
+    let trimmed = filtered.trim_matches('.');
+    if trimmed.is_empty() {
+        "battlemap".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// GET /api/curated/export - Export full-resolution curated Battlemaps as a spooled ZIP archive.
+pub async fn get_curated_export(
+    State(state): State<AppState>,
+    Query(query): Query<ThemeQuery>,
+) -> Result<Response, ApiError> {
+    let theme = parse_optional_theme(query.theme.as_deref())?;
+    let export_service = BattlemapExportService::new(
+        state.catalog.clone(),
+        state.blobs.clone(),
+        state.spool.clone(),
+    );
+    let archive = export_service.export_battlemaps(theme.as_ref()).await?;
+    let filename = match theme {
+        Some(t) => format!("battlemaps-{}.zip", t.as_str()),
+        None => "battlemaps.zip".to_string(),
+    };
+    spooled_zip_response(archive, &filename)
+}
+
+/// POST /api/curated/export-selected - Export selected full-resolution Battlemaps as a spooled ZIP archive.
+pub async fn post_curated_export_selected(
+    State(state): State<AppState>,
+    Json(payload): Json<ExportSelectedRequest>,
+) -> Result<Response, ApiError> {
+    let export_service = BattlemapExportService::new(
+        state.catalog.clone(),
+        state.blobs.clone(),
+        state.spool.clone(),
+    );
+    let archive = export_service
+        .export_selected_battlemaps(&payload.ids)
+        .await?;
+    spooled_zip_response(archive, "battlemaps.zip")
+}
+
+/// GET /api/curated/{id}/export - Export one full-resolution curated Battlemap as a spooled ZIP archive.
+pub async fn get_curated_battlemap_export(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    if id.trim().is_empty() {
+        return Err(ApiError::bad_request("Curated map ID cannot be empty"));
+    }
+    let export_service = BattlemapExportService::new(
+        state.catalog.clone(),
+        state.blobs.clone(),
+        state.spool.clone(),
+    );
+    let archive = export_service.export_battlemap(&id).await?;
+    let filename = format!("{}.zip", sanitize_battlemap_archive_stem(&id));
+    spooled_zip_response(archive, &filename)
 }
 
 /// Read size for a streamed archive body: large enough to avoid a frame per 4 KiB, small enough

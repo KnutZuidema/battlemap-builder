@@ -6,10 +6,10 @@
 import { dom } from "../../dom.js";
 import { state } from "../../store.js";
 import { escapeHtml } from "../../kit/dom.js";
-import { formatBytes } from "../../kit/format.js";
 import {
     applyLibraryFilters,
     clearLibrarySelection,
+    runArchiveExport,
     updateLibraryBulkBar,
 } from "../library.js";
 import {
@@ -24,6 +24,7 @@ import { invalidateDatasetReadiness } from "../readiness.js";
 import {
     bulkDeleteCuratedMaps,
     deleteCuratedMap,
+    exportSelectedBattlemaps,
     exportSelectedMaps,
     refineCuratedMap,
     saveCuratedMap,
@@ -278,33 +279,29 @@ export async function refineSelectedMaps() {
     }
 }
 
-export async function exportSelectedLoraDataset() {
-    if (!state.librarySelectedIds || state.librarySelectedIds.size === 0) return;
-    if (state.isExporting) return;
-    state.isExporting = true;
-    if (dom.btnBulkExport) dom.btnBulkExport.disabled = true;
+export function exportSelectedLoraDataset() {
+    if (!state.librarySelectedIds || state.librarySelectedIds.size === 0) return Promise.resolve();
+    const ids = Array.from(state.librarySelectedIds);
+    const count = ids.length;
+    return runArchiveExport({
+        fetchBlob: () => exportSelectedMaps(ids),
+        filename: "lora-dataset.zip",
+        pendingMessage: `Packaging ${count} selected maps into LoRA dataset ZIP...`,
+        successMessage: (size) => `Downloaded LoRA dataset (${size}) for ${count} map${count === 1 ? "" : "s"}!`,
+    });
+}
 
-    const count = state.librarySelectedIds.size;
-    showToast(`Packaging ${count} selected maps into LoRA dataset ZIP...`, "info");
-
-    try {
-        const blob = await exportSelectedMaps(Array.from(state.librarySelectedIds));
-        const filename = "lora-dataset.zip";
-
-        const downloadUrl = window.URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = downloadUrl;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        window.URL.revokeObjectURL(downloadUrl);
-
-        showToast(`Downloaded LoRA dataset (${formatBytes(blob.size)}) for ${count} map${count === 1 ? "" : "s"}!`, "success");
-    } catch (_) {
-        // The failure policy names the operation and carries the server's reason.
-    } finally {
-        state.isExporting = false;
-        if (dom.btnBulkExport) dom.btnBulkExport.disabled = false;
-    }
+export function exportSelectedFullBattlemaps() {
+    if (!state.librarySelectedIds || state.librarySelectedIds.size === 0) return Promise.resolve();
+    const ids = Array.from(state.librarySelectedIds);
+    const count = ids.length;
+    return runArchiveExport({
+        fetchBlob: () => exportSelectedBattlemaps(ids),
+        filename: "battlemaps.zip",
+        pendingMessage: `Packaging ${count} selected map${count === 1 ? "" : "s"} into Battlemaps ZIP...`,
+        successMessage: (size) => `Downloaded Battlemaps (${size}) for ${count} map${count === 1 ? "" : "s"}!`,
+        labelEl: dom.btnBulkExportBattlemapsLabel,
+        loadingLabel: "Packaging ZIP...",
+        idleLabel: "Export Battlemaps (ZIP)",
+    });
 }

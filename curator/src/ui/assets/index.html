@@ -427,6 +427,14 @@
                         </svg>
                         <span id="btn-export-label">Export LoRA Dataset</span>
                     </button>
+                    <button type="button" id="btn-export-battlemaps" class="btn btn-secondary btn-export-battlemaps" title="Export full-resolution Battlemaps with all Layers and metadata (.zip)">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        <span id="btn-export-battlemaps-label">Export Battlemaps</span>
+                    </button>
                     <button type="button" id="btn-freeze-snapshot" class="btn btn-secondary btn-freeze" title="Freeze an immutable Dataset Snapshot for the active theme scope">
                         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
                             <path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M4.93 19.07l14.14-14.14"/>
@@ -651,6 +659,16 @@
                             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                                 <polyline points="9 18 15 12 9 6"/>
                             </svg>
+                        </button>
+
+                        <!-- Export active Battlemap button -->
+                        <button type="button" id="btn-fs-export" class="btn-hud btn-hud-export" title="Export Full Battlemap with all Layers and metadata (.zip)" aria-label="Export Battlemap">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            <span id="btn-fs-export-label">Export</span>
                         </button>
 
                         <!-- Close button (hotkey Esc) -->
@@ -954,6 +972,14 @@
                             </svg>
                             <span>Inspect Fullscreen</span>
                         </button>
+                        <button type="button" id="btn-inspector-export" class="btn btn-secondary btn-sm btn-inspect-export" title="Export Full Battlemap with all Layers and metadata (.zip)">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            <span id="btn-inspector-export-label">Export Battlemap</span>
+                        </button>
                         <button type="button" id="btn-inspector-delete" class="btn btn-danger btn-sm btn-inspect-delete" title="Delete &amp; Reject Map (Hotkey: Delete)">
                             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                                 <polyline points="3 6 5 6 21 6"/>
@@ -1065,13 +1091,21 @@
                             </svg>
                             <span id="btn-bulk-refine-label">AI Refine Selected</span>
                         </button>
-                        <button type="button" id="btn-bulk-export" class="btn btn-primary btn-sm btn-bulk" title="Export Selected Maps as ZIP">
+                        <button type="button" id="btn-bulk-export" class="btn btn-primary btn-sm btn-bulk" title="Export Selected Maps as LoRA Dataset ZIP">
                             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
                                 <polyline points="7 10 12 15 17 10"/>
                                 <line x1="12" y1="15" x2="12" y2="3"/>
                             </svg>
-                            <span>Export Selected (ZIP)</span>
+                            <span>Export LoRA (ZIP)</span>
+                        </button>
+                        <button type="button" id="btn-bulk-export-battlemaps" class="btn btn-secondary btn-sm btn-bulk" title="Export Selected Full Battlemaps with all Layers as ZIP">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                                <polyline points="7 10 12 15 17 10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            <span id="btn-bulk-export-battlemaps-label">Export Battlemaps (ZIP)</span>
                         </button>
                         <button type="button" id="btn-bulk-deselect" class="btn btn-ghost btn-sm btn-bulk" title="Deselect All (Esc)">
                             <span>Deselect All</span>

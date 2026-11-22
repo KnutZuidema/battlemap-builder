@@ -211,6 +211,20 @@ on Linux):
 - **Deterministic Layer Filenames**: Layers are saved with standardized names: `<index>_<role>[_<elevation>].<ext>` (e.g. `0_ground.png`, `1_upper_1.png`, `2_basement_-1.png`).
 - **Atomic Operations**: Manifests and blobs are written atomically (`atomic_write` in the filesystem catalog and blob adapters), ensuring crash-safe state updates.
 - **Theme-Free Image Routes**: Curated images are served by id (`/api/image/curated/<id>` and `/api/image/curated/<id>/<layer_index>`); theme remains a listing/export filter (`/api/curated?theme=...`), never part of a storage path.
+- **Full Battlemap Export (`GET /api/curated/export`, `POST /api/curated/export-selected`, `GET /api/curated/{id}/export`)**:
+  - Unlike LoRA `Training Dataset` exports (which crop and resample only the `Ground` Layer into 1024×1024 `Map Section` samples), full Battlemap exports package complete, full-resolution `Curated Map` bundles verbatim from `BlobStorage` (zero image decode or re-encode, never acquiring the `image_work` decode permit) mirroring the flat curated storage layout:
+    ```text
+    <map_id>/
+    ├── manifest.json          # Pretty-printed CuratedMap JSON (id, tags, dimensions, grid, layers, description, sections, curated_at, source)
+    ├── 0_ground.png           # Full-resolution Layer bytes verbatim from BlobStorage
+    ├── 1_upper_1.png          # Every included Layer (Ground, Upper Floor, Basement, Roof, Variant); Exclude layers skipped
+    └── ...
+    ```
+  - Legacy `Curated Map` manifests with an empty `layers` list fall back to resolving `0_ground.png`.
+  - **`GET /api/curated/export`** (optional `?theme=<theme>`, `400` on invalid theme): streams `battlemaps.zip` (or `battlemaps-<theme>.zip`). Missing Layer blobs log a warning and are skipped; if 0 Layers can be read for a map, its `manifest.json` is omitted too.
+  - **`POST /api/curated/export-selected`** (`{ "ids": [...] }`): deduplicates IDs preserving requested order, skips unknown IDs, and streams `battlemaps.zip`.
+  - **`GET /api/curated/{id}/export`**: strict single-map export streaming `{safe_id}.zip` (filename stem sanitized to `[A-Za-z0-9._-]`, fallback `battlemap`), returning `404` when the `Curated Map` or any included Layer blob is missing.
+  - All three endpoints are mounted in `long_routes` (15-minute timeout budget) and are pure reads (never mutating catalog, blobs, snapshots, or readiness audits).
 - **Derived Thumbnails (`GET /api/thumb/curated/<id>[/<layer_index>]`)**: library cards load a Thumbnail of the map's Ground layer (falling back to its first layer, exactly like `/api/image/curated/<id>`) instead of the full-resolution original (ADR-0013). The layer selector mirrors `/api/image/curated/<id>/<layer_index>`: `GET /api/thumb/curated/<id>/<layer_index>` serves that Layer's Thumbnail, and an unknown index answers `404` without falling back to another Layer; the library's layer scrubber uses it on hover, click and touch, while fullscreen and the inspector keep the full-resolution Layer. Thumbnails live under the rebuildable `thumbs/curated/<id>/` namespace with the same `<index>_<role>.jpg` names as their Layers, are generated on first request (long edge ≤ 768 px, aspect preserved, Lanczos3, alpha composited over the dark padding colour, JPEG quality 82), and are then served byte-identically from storage: one decode runs at a time across the whole process and concurrent requests for the same Thumbnail share a single generation. Curation precomputes the Thumbnail of every Layer after the manifest commits, detached from the response and skipping Layers that already have one; a precompute failure only logs a warning and the lazy route retries it. The route answers `image/jpeg` with the same `Cache-Control` as the image routes; an unrenderable Layer answers `502` and never falls back to the original bytes. Deleting a Curated Map purges its `thumbs/curated/<id>/` directory together with its Layer blobs, and a layer edit or a re-curation drops it so the next request regenerates; after an edit the client appends a per-map `?v=<timestamp>` to the card Thumbnail URL so that card refetches instead of serving the browser-cached JPEG. `GET /api/storage/stats` does not count the `thumbs/` tree.
 
 ---
@@ -416,14 +430,17 @@ otherwise it names the failed ids with the first error, and each failure is logg
 
 ## 9. Dataset archives: spooling and streaming (ADR-0015)
 
-`lora-dataset.zip`, its theme and selection variants, and frozen snapshot downloads are never held in
-memory. A freeze builds the archive in `DATA_DIR/tmp/dataset-archive-<pid>-<n>.zip`, computes the SHA-256
-with one sequential read, and streams it to R2 in 16 MiB multipart parts; the two export routes and the
-snapshot download stream the same bytes out to the client with a `Content-Length`. Resident cost is one
-decoded Ground layer plus one resampled section, independent of library size.
+`lora-dataset.zip`, its theme and selection variants, full Battlemap exports (`GET /api/curated/export`,
+`POST /api/curated/export-selected`, `GET /api/curated/{id}/export`), and frozen snapshot downloads are never
+held in memory. A freeze builds the archive in `DATA_DIR/tmp/dataset-archive-<pid>-<n>.zip`, computes the
+SHA-256 with one sequential read, and streams it to R2 in 16 MiB multipart parts; the LoRA export routes, full
+Battlemap export routes, and snapshot download stream the same bytes out to the client with a `Content-Length`.
+Resident cost for LoRA archives is one decoded Ground layer plus one resampled section, and for full Battlemap
+archives is one verbatim Layer blob at a time (no image decode or re-encode), independent of library size.
 
-- **One spool slot**: a second freeze or export waits for the first archive to be uploaded or fully
-  streamed out. Snapshot downloads bypass the slot — they read straight from storage and never spool.
+- **One spool slot**: a second freeze or export (LoRA or full Battlemap) waits for the first archive to be
+  uploaded or fully streamed out. Snapshot downloads bypass the slot — they read straight from storage and
+  never spool.
 - **Ceiling**: `CURATOR_MAX_ARCHIVE_BYTES` (8 GiB by default) fails the write mid-archive instead of
   filling the volume; the partial spool is deleted and no snapshot record is written.
 - **Members are `Stored`**: each sample is already a compressed PNG, so Deflate cost a full pass for a

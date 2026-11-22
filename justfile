@@ -144,7 +144,7 @@ port-forward:
     just --justfile "{{deploy_dir}}/justfile" port-forward
 
 # Run Curator natively on this machine against the cluster's secrets and external deps.
-# Release build: the audit/export paths decode full-resolution Ground layers (README §4.4).
+# Release build: the audit/export paths decode full-resolution Ground layers (README §4.5).
 curator-local *args:
     CURATOR_LOCAL_PROFILE=release just --justfile "{{deploy_dir}}/justfile" local {{args}}
 

@@ -43,10 +43,10 @@ spec:
             - name: harvest-trigger
               image: curlimages/curl:8.10.1
               imagePullPolicy: IfNotPresent
-              # Internal ClusterIP target: the curator Service is not exposed
-              # through any Ingress, so the CronJob calls it in-cluster only.
-              # The /data volume is ReadWriteOnce and held by the running pod,
-              # which is why this triggers the HTTP API instead of mounting it.
+              # Internal ClusterIP target: bypasses the public Traefik IngressRoute
+              # and Authelia ForwardAuth so the in-cluster CronJob needs no browser
+              # session. The /data volume is ReadWriteOnce and held by the running
+              # pod, which is why this triggers the HTTP API instead of mounting it.
               command: ["curl"]
               args:
                 - "-sSf"

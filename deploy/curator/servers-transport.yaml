@@ -1,0 +1,15 @@
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: curator-long-timeout
+  namespace: curator
+  labels:
+    app: curator
+    app.kubernetes.io/name: curator
+spec:
+  # Matches LONG_REQUEST_TIMEOUT (15m) in curator/src/api/mod.rs for dataset exports,
+  # readiness audits, snapshot freezes, vision refinements, harvests, and benchmarks.
+  forwardingTimeouts:
+    responseHeaderTimeout: 900s
+    idleConnTimeout: 900s
+    dialTimeout: 30s

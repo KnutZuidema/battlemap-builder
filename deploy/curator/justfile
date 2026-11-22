@@ -11,11 +11,14 @@ deploy:
     if [ -f secret.yaml ]; then kubectl apply -f secret.yaml; fi
     kubectl apply -f deployment.yaml
     kubectl apply -f service.yaml
+    kubectl apply -f certificate.yaml
+    kubectl apply -f servers-transport.yaml
+    kubectl apply -f routes.yaml
     kubectl rollout status deployment/curator -n curator
 
 # View resource status
 status:
-    kubectl get all,pvc -n curator
+    kubectl get all,pvc,ingressroute,serverstransport,certificate -n curator
 
 # View pod logs
 logs:
@@ -117,6 +120,9 @@ harvest-logs job="":
 
 # Delete deployed manifests
 delete:
+    kubectl delete -f routes.yaml --ignore-not-found
+    kubectl delete -f servers-transport.yaml --ignore-not-found
+    kubectl delete -f certificate.yaml --ignore-not-found
     kubectl delete -f service.yaml --ignore-not-found
     kubectl delete -f deployment.yaml --ignore-not-found
     kubectl delete -f pvc.yaml --ignore-not-found

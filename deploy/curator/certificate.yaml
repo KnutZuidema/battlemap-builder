@@ -1,0 +1,16 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: curator-tls
+  namespace: curator
+  labels:
+    app: curator
+    app.kubernetes.io/name: curator
+spec:
+  secretName: curator-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  commonName: curator.knutzuidema.de
+  dnsNames:
+    - curator.knutzuidema.de

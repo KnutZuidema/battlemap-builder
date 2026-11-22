@@ -1,17 +1,20 @@
 # Curator Deployment & Operations Runbook
 
-This guide covers cluster provisioning, continuous deployment, local access via port-forwarding, and operational verification for the **Curator** service.
+This guide covers cluster provisioning, continuous deployment, public and local access, and operational verification for the **Curator** service.
 
 ---
 
 ## 1. Overview & Architecture
 
-Curator is an internal ingestion, benchmarking, and curation platform for tabletop RPG battlemaps. It runs as a containerized Rust service deployed to a private Kubernetes cluster.
+Curator is an ingestion, benchmarking, and curation platform for tabletop RPG battlemaps. It runs as a containerized Rust service deployed to a Kubernetes cluster and exposed at `https://curator.knutzuidema.de` behind cluster Authelia SSO.
 
 ### Key Architectural Pillars
 
 - **Hardware & Node Topology**: Deployed on a **Hetzner Cloud ARM64 k0s cluster** utilizing `cax11` worker nodes (Ampere Altra ARM64 compute).
-- **Internal-Only Networking**: Exposed strictly via a **`ClusterIP` service on port `3002`**. There are intentionally **no public IngressRoutes, Traefik routes, or DNS records**. The triage interface and API keys are completely shielded from public exposure.
+- **Authenticated Public Ingress**: Exposed internally via a **`ClusterIP` service on port `3002`** and publicly at **`https://curator.knutzuidema.de`** via a Traefik `IngressRoute` (`routes.yaml`) backed by:
+  - **TLS**: Cert-Manager `Certificate` (`certificate.yaml`, `curator-tls`) issued by the `letsencrypt-prod` `ClusterIssuer`.
+  - **SSO / ForwardAuth**: Cluster-wide Authelia middleware (`authelia/authelia`, `https://auth.knutzuidema.de`) gating every external route; in-cluster callers (liveness/readiness probes and the hourly Reddit harvest `CronJob`) talk directly to `service/curator:3002`.
+  - **Extended Proxy Timeouts**: Traefik `ServersTransport` (`servers-transport.yaml`, `curator-long-timeout`, `responseHeaderTimeout: 900s` / `idleConnTimeout: 900s`) matching Curator's 15-minute `LONG_REQUEST_TIMEOUT` for dataset exports, freezes, readiness audits, refinements, harvests, and benchmarks.
 - **Persistent Storage**: Backed by **Hetzner Cloud Volumes CSI** (`hcloud-volumes` storage class, `20Gi`, `ReadWriteOnce`). The volume mounts to `/data` in the container.
 - **Volume Recreate Strategy**: The deployment specifies `strategy.type: Recreate`. Because Hetzner Cloud block volumes are `ReadWriteOnce` and cannot be mounted across multiple nodes simultaneously, `Recreate` guarantees the old pod releases the volume and terminates before the replacement pod starts and claims the mount.
 - **Filesystem Permissions**: A lightweight `initContainers` (`busybox:1.36`) runs `chown -R 1000:1000 /data` prior to application startup, ensuring the unprivileged container user (`uid: 1000`, `gid: 1000`, `fsGroup: 1000`) has full read and write access to the volume root.
@@ -129,7 +132,7 @@ Push to GHCR (ghcr.io/knutzuidema/curator:<sha> + :latest)
 Check secrets.KUBECONFIG ────(Not Set)───► Safe Exit (Image published)
     │ (Set)
     ▼
-Apply Base Manifests (namespace, pvc, service)
+Apply Base Manifests & Ingress (namespace, pvc, service, certificate, servers-transport, routes)
     │
     ▼
 Refresh ghcr-secret from GHCR_TOKEN
@@ -153,7 +156,7 @@ Rollout Verification (kubectl rollout status)
    - Utilizes GitHub Actions cache (`type=gha`) for fast incremental Cargo compilation.
 3. **Cluster Rollout**:
    - Extracts `KUBECONFIG` and installs `kubectl`.
-   - Applies core manifests (`namespace.yaml`, `pvc.yaml`, `service.yaml`).
+   - Applies core manifests and ingress (`namespace.yaml`, `pvc.yaml`, `service.yaml`, `certificate.yaml`, `servers-transport.yaml`, `routes.yaml`).
    - Automatically synchronizes `ghcr-secret` with the configured `GHCR_TOKEN` secret.
    - Dynamically points the deployment to the immutable commit SHA tag:
      ```bash
@@ -167,13 +170,18 @@ Rollout Verification (kubectl rollout status)
 
 ---
 
-## 4. Local Access via Port-Forwarding
+## 4. Accessing Curator
 
-Because Curator has no public ingress or domain name, access is established securely from an authorized local machine via Kubernetes port-forwarding.
+### 4.1. Public HTTPS Access (Authelia SSO)
 
-### 4.1. Start Port-Forward
+Curator is exposed publicly at **[https://curator.knutzuidema.de/](https://curator.knutzuidema.de/)** behind cluster Authelia ForwardAuth (`https://auth.knutzuidema.de`).
 
-From the repository root or `deploy/curator` directory:
+- Unauthenticated requests redirect (`302`) to `https://auth.knutzuidema.de` and return to Curator after login.
+- All Curator UI routes, API calls, SSE streams (harvests, benchmarks, snapshot freezes), and archive downloads work directly over HTTPS with the `authelia_session` cookie.
+
+### 4.2. Local Access via Port-Forwarding
+
+For direct access bypassing Traefik and Authelia (e.g., debugging or scripting from an authorized workstation with `kubectl` access), port-forward the `ClusterIP` service:
 
 ```bash
 # Using just (recommended)
@@ -183,27 +191,27 @@ just port-forward
 kubectl port-forward service/curator 3002:3002 -n curator
 ```
 
-Keep this process running in a terminal session while interacting with Curator.
+Keep this process running in a terminal session while interacting with Curator locally.
 
-### 4.2. Open Application in Browser
+### 4.3. Application Endpoints
 
-Once port-forwarding is established:
+Available at `https://curator.knutzuidema.de` (authenticated) or `http://localhost:3002` (via port-forward):
 
-- **Web Triage UI**: [http://localhost:3002/](http://localhost:3002/)
+- **Web Triage UI**: `/`
   - Canvas viewer with pan/zoom.
   - Hotkey triage (1–6 rating, thematic categorization, rejection logging).
   - Reddit Harvester drawer.
   - Multi-model OpenRouter Benchmark drawer.
-- **Health Probe API**: [http://localhost:3002/api/healthz](http://localhost:3002/api/healthz)
+- **Health Probe API**: `/api/healthz`
   - Kubernetes liveness/readiness target: answers `ok` without touching the catalog, blobs or a model.
-- **Health & Status API**: [http://localhost:3002/api/status](http://localhost:3002/api/status)
+- **Health & Status API**: `/api/status`
   - Returns JSON status, uptime, candidate staging queue count, and total curated count.
-- **Staging Queue API**: [http://localhost:3002/api/staging](http://localhost:3002/api/staging)
+- **Staging Queue API**: `/api/staging`
   - Lists pending map candidates in staging with associated metadata.
 
 ---
 
-### 4.3. Publishing and Deploying from a Local Machine
+### 4.4. Publishing and Deploying from a Local Machine
 
 The root `justfile` runs the CD pipeline from your machine: **every deployment uses an image published to GHCR**, because that registry is where the cluster nodes pull from. Nothing is built into a local container; the nodes pull the published tag.
 
@@ -222,11 +230,11 @@ just cluster status         # any deploy/curator/justfile recipe: status, logs, 
 - **Guards**: `curator-rollout` reads the tag back from GHCR first and refuses to touch the cluster when it is missing/unreadable or carries no `linux/arm64` leg; `curator-publish` verifies the pushed index contains every platform it was asked for.
 - **Rollout**: identical to the CD step — `kubectl set image -f deploy/curator/deployment.yaml curator=ghcr.io/knutzuidema/curator:<tag> --local -o yaml | kubectl apply -f -`, then `kubectl rollout status deployment/curator -n curator --timeout=180s`. Cluster prerequisites (namespace, PVC, `curator-secrets`, `ghcr-secret`) come from §2.
 - **Private package**: `ghcr.io/knutzuidema/curator` needs credentials, hence `curator-login` (or `docker login ghcr.io -u <user> -p <PAT with read:packages>`). Pods use the existing `ghcr-secret`.
-- **Watching the result**: `just port-forward` plus http://localhost:3002/ (§4.1–4.2), or `just cluster tail-logs`.
+- **Watching the result**: open [https://curator.knutzuidema.de/](https://curator.knutzuidema.de/) (§4.1), `just port-forward` plus http://localhost:3002/ (§4.2), or `just cluster tail-logs`.
 
 ---
 
-### 4.4. Running Curator Locally Against Cluster Dependencies
+### 4.5. Running Curator Locally Against Cluster Dependencies
 
 The pod is sized for a shared `cax11` node (`requests: 250m` CPU / `128Mi`, `limits: 1000m` / `1536Mi`), so heavy
 triage, dataset exports or benchmark runs are faster as a native process on a workstation. `just curator-local`
@@ -285,11 +293,11 @@ The `deploy/curator/justfile` provides standard commands for day-to-day cluster 
 
 ### 5.1. Resource Status
 
-Check deployment, pod, service, and persistent volume claim statuses:
+Check deployment, pod, service, persistent volume claim, ingress, and certificate statuses:
 
 ```bash
 just status
-# Equivalent to: kubectl get all,pvc -n curator
+# Equivalent to: kubectl get all,pvc,ingressroute,serverstransport,certificate -n curator
 ```
 
 Expected healthy output:
@@ -297,6 +305,9 @@ Expected healthy output:
 - **Service**: `service/curator ClusterIP ... 3002/TCP`
 - **Deployment**: `deployment.apps/curator 1/1`
 - **PersistentVolumeClaim**: `curator-data-pvc Bound ... 20Gi ReadWriteOnce hcloud-volumes`
+- **IngressRoute**: `ingressroute.traefik.io/curator`
+- **ServersTransport**: `serverstransport.traefik.io/curator-long-timeout`
+- **Certificate**: `certificate.cert-manager.io/curator-tls` with `READY: True`
 
 ### 5.2. Inspecting Logs
 
@@ -436,7 +447,7 @@ To verify that data survives across pod restarts and recreations on Hetzner CSI 
    kubectl exec -it -n curator deployment/curator -- ls -la /data
    ```
 2. **Note Current Counts**:
-   Check `http://localhost:3002/api/status` via `just port-forward` (§4.1), or query it in-cluster
+   Check `http://localhost:3002/api/status` via `just port-forward` (§4.2), or query it in-cluster
    (the runtime image ships no `curl`/`wget`, so use a throwaway curl pod):
    ```bash
    # `--quiet` keeps `--rm`'s pod-deletion notice off stdout, so the JSON stays parseable.
@@ -463,7 +474,7 @@ To verify that data survives across pod restarts and recreations on Hetzner CSI 
 
 ### 5.5. Scheduled Reddit Harvest (CronJob)
 
-`cronjob-harvest.yaml` runs an hourly sweep of `/r/battlemaps` (ADR-0011): every tick it `POST`s `{"sort":"hot","limit":25,"gridless_only":false}` to `http://curator:3002/api/harvest/reddit` from a throwaway `curlimages/curl` pod. It calls the internal `ClusterIP` service — there is no ingress — because the `ReadWriteOnce` data volume is held by the running Curator pod, so a second pod cannot mount `/data`.
+`cronjob-harvest.yaml` runs an hourly sweep of `/r/battlemaps` (ADR-0011): every tick it `POST`s `{"sort":"hot","limit":25,"gridless_only":false}` to `http://curator:3002/api/harvest/reddit` from a throwaway `curlimages/curl` pod. It calls the internal `ClusterIP` service directly — bypassing the external Traefik `IngressRoute` and Authelia SSO — because the `ReadWriteOnce` data volume is held by the running Curator pod, so a second pod cannot mount `/data`.
 
 - **Schedule**: `0 * * * *` (top of every hour), `concurrencyPolicy: Forbid` and `startingDeadlineSeconds: 300`, so a slow or rate-limited harvest never overlaps the next tick. A tick skipped because the previous Job is still running produces no Job at all — only a `JobAlreadyActive` event on the CronJob (`kubectl -n curator describe cronjob curator-harvest-reddit`).
 - **Timeouts**: curl aborts the HTTP call itself at `--max-time 900` (a hung Reddit OAuth/HTTP exchange then fails as an ordinary container error), the Job hard-stops at `activeDeadlineSeconds: 1200` leaving 300s for `backoffLimit: 2` retries, and history is capped at 3 succeeded / 5 failed Jobs. That history records runs that *started*; skipped ticks are not in it — see the CronJob events above, or the gaps in `harvest_runs.started_at`.
@@ -495,7 +506,7 @@ kubectl -n curator run harvest-check --rm -i --quiet --restart=Never \
 # (`kubectl -n curator run harvest-check --rm -i --quiet --restart=Never ... > staging.json`).
 # `--quiet` is required: `--rm` otherwise prints `pod "harvest-check" deleted` on
 # stdout, which makes jq fail with exit code 5 and corrupts the redirect.
-# Alternative from your machine: `just port-forward` (§4.1), then
+# Alternative from your machine: `just port-forward` (§4.2), then
 # `curl -s http://localhost:3002/api/staging | jq 'length'`.
 
 # Harvest ledger rows

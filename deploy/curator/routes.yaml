@@ -1,0 +1,23 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: curator
+  namespace: curator
+  labels:
+    app: curator
+    app.kubernetes.io/name: curator
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`curator.knutzuidema.de`)
+      kind: Rule
+      middlewares:
+        - name: authelia
+          namespace: authelia
+      services:
+        - name: curator
+          port: 3002
+          serversTransport: curator-long-timeout
+  tls:
+    secretName: curator-tls

@@ -64,10 +64,13 @@ jobs:
           echo "$KUBECONFIG_DATA" > $HOME/.kube/config
           chmod 600 $HOME/.kube/config
 
-          # Apply base infrastructure
+          # Apply base infrastructure and ingress
           kubectl apply -f deploy/curator/namespace.yaml
           kubectl apply -f deploy/curator/pvc.yaml
           kubectl apply -f deploy/curator/service.yaml
+          kubectl apply -f deploy/curator/certificate.yaml
+          kubectl apply -f deploy/curator/servers-transport.yaml
+          kubectl apply -f deploy/curator/routes.yaml
 
           # Create/update ghcr-secret using persistent GHCR_TOKEN
           kubectl create secret docker-registry ghcr-secret \

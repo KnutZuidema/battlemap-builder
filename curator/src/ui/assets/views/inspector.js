@@ -5,20 +5,20 @@
 
 import { dom } from "../dom.js";
 import { state } from "../store.js";
-import { battlemapArchiveFilename, escapeHtml, triggerBlobDownload } from "../kit/dom.js";
-import { formatBytes, formatRoleName } from "../kit/format.js";
+import { escapeHtml } from "../kit/dom.js";
+import { formatRoleName } from "../kit/format.js";
 import {
     CANONICAL_THEMES,
     isCanonicalThemeTag,
     normalizeLayerRole,
 } from "../kit/tags.js";
-import { applyLibraryFilters, getScrubPillRoleClass, setExportButtonsDisabled } from "./library.js";
+import { applyLibraryFilters, exportSingleBattlemap, getScrubPillRoleClass } from "./library.js";
 import { openLibraryFullscreen } from "./library/fullscreen.js";
 import { openDeleteCuratedModal } from "./library/bulk.js";
 import { showToast } from "../shell/status.js";
 import { invalidateDatasetReadiness } from "./readiness.js";
 import { describeCuratedMap, suggestCuratedThemes } from "../requests/ai.js";
-import { exportBattlemap, saveCuratedMap } from "../requests/library.js";
+import { saveCuratedMap } from "../requests/library.js";
 import { join, latest } from "../requests/tracker.js";
 
 // ==========================================================================
@@ -614,32 +614,11 @@ async function runAllInspectorAiRefinements() {
     }
 }
 
-export async function exportInspectorBattlemap() {
-    if (!state.libraryDrawerMap || !state.libraryDrawerMap.id) return;
-    if (state.isExporting) return;
-
-    const mapId = state.libraryDrawerMap.id;
-    state.isExporting = true;
-    setExportButtonsDisabled(true);
-    if (dom.btnInspectorExportLabel) {
-        dom.btnInspectorExportLabel.textContent = "Exporting...";
-    }
-
-    showToast(`Packaging Battlemap ${mapId} ZIP...`, "info");
-
-    try {
-        const blob = await exportBattlemap(mapId);
-        triggerBlobDownload(blob, battlemapArchiveFilename(mapId));
-        showToast(`Downloaded Battlemap ${mapId} (${formatBytes(blob.size)})!`, "success");
-    } catch (_) {
-        // The failure policy names the operation and carries the server's reason.
-    } finally {
-        state.isExporting = false;
-        setExportButtonsDisabled(false);
-        if (dom.btnInspectorExportLabel) {
-            dom.btnInspectorExportLabel.textContent = "Export Battlemap";
-        }
-    }
+export function exportInspectorBattlemap() {
+    return exportSingleBattlemap(state.libraryDrawerMap?.id, {
+        labelEl: dom.btnInspectorExportLabel,
+        idleLabel: "Export Battlemap",
+    });
 }
 
 export function setupInspectorDrawerControls() {

@@ -5,12 +5,11 @@
 
 import { dom } from "../../dom.js";
 import { state } from "../../store.js";
-import { escapeHtml, triggerBlobDownload } from "../../kit/dom.js";
-import { formatBytes } from "../../kit/format.js";
+import { escapeHtml } from "../../kit/dom.js";
 import {
     applyLibraryFilters,
     clearLibrarySelection,
-    setExportButtonsDisabled,
+    runArchiveExport,
     updateLibraryBulkBar,
 } from "../library.js";
 import {
@@ -280,51 +279,29 @@ export async function refineSelectedMaps() {
     }
 }
 
-export async function exportSelectedLoraDataset() {
-    if (!state.librarySelectedIds || state.librarySelectedIds.size === 0) return;
-    if (state.isExporting) return;
-    state.isExporting = true;
-    setExportButtonsDisabled(true);
-
-    const count = state.librarySelectedIds.size;
-    showToast(`Packaging ${count} selected maps into LoRA dataset ZIP...`, "info");
-
-    try {
-        const blob = await exportSelectedMaps(Array.from(state.librarySelectedIds));
-        triggerBlobDownload(blob, "lora-dataset.zip");
-        showToast(`Downloaded LoRA dataset (${formatBytes(blob.size)}) for ${count} map${count === 1 ? "" : "s"}!`, "success");
-    } catch (_) {
-        // The failure policy names the operation and carries the server's reason.
-    } finally {
-        state.isExporting = false;
-        setExportButtonsDisabled(false);
-    }
-}
-
-export async function exportSelectedFullBattlemaps() {
-    if (!state.librarySelectedIds || state.librarySelectedIds.size === 0) return;
-    if (state.isExporting) return;
-    state.isExporting = true;
-    setExportButtonsDisabled(true);
-    if (dom.btnBulkExportBattlemapsLabel) {
-        dom.btnBulkExportBattlemapsLabel.textContent = "Packaging ZIP...";
-    }
-
+export function exportSelectedLoraDataset() {
+    if (!state.librarySelectedIds || state.librarySelectedIds.size === 0) return Promise.resolve();
     const ids = Array.from(state.librarySelectedIds);
     const count = ids.length;
-    showToast(`Packaging ${count} selected map${count === 1 ? "" : "s"} into Battlemaps ZIP...`, "info");
+    return runArchiveExport({
+        fetchBlob: () => exportSelectedMaps(ids),
+        filename: "lora-dataset.zip",
+        pendingMessage: `Packaging ${count} selected maps into LoRA dataset ZIP...`,
+        successMessage: (size) => `Downloaded LoRA dataset (${size}) for ${count} map${count === 1 ? "" : "s"}!`,
+    });
+}
 
-    try {
-        const blob = await exportSelectedBattlemaps(ids);
-        triggerBlobDownload(blob, "battlemaps.zip");
-        showToast(`Downloaded Battlemaps (${formatBytes(blob.size)}) for ${count} map${count === 1 ? "" : "s"}!`, "success");
-    } catch (_) {
-        // The failure policy names the operation and carries the server's reason.
-    } finally {
-        state.isExporting = false;
-        setExportButtonsDisabled(false);
-        if (dom.btnBulkExportBattlemapsLabel) {
-            dom.btnBulkExportBattlemapsLabel.textContent = "Export Battlemaps (ZIP)";
-        }
-    }
+export function exportSelectedFullBattlemaps() {
+    if (!state.librarySelectedIds || state.librarySelectedIds.size === 0) return Promise.resolve();
+    const ids = Array.from(state.librarySelectedIds);
+    const count = ids.length;
+    return runArchiveExport({
+        fetchBlob: () => exportSelectedBattlemaps(ids),
+        filename: "battlemaps.zip",
+        pendingMessage: `Packaging ${count} selected map${count === 1 ? "" : "s"} into Battlemaps ZIP...`,
+        successMessage: (size) => `Downloaded Battlemaps (${size}) for ${count} map${count === 1 ? "" : "s"}!`,
+        labelEl: dom.btnBulkExportBattlemapsLabel,
+        loadingLabel: "Packaging ZIP...",
+        idleLabel: "Export Battlemaps (ZIP)",
+    });
 }

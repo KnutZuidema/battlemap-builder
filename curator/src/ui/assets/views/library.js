@@ -5,7 +5,7 @@
 
 import { dom } from "../dom.js";
 import { state } from "../store.js";
-import { escapeHtml, triggerBlobDownload } from "../kit/dom.js";
+import { battlemapArchiveFilename, escapeHtml, triggerBlobDownload } from "../kit/dom.js";
 import { formatRoleName, formatBytes } from "../kit/format.js";
 import { datasetScopeTheme } from "../dataset-scope.js";
 import { resizeCanvas, requestRender } from "../stage/canvas.js";
@@ -35,7 +35,7 @@ import {
 } from "./inspector.js";
 import { showToast } from "../shell/status.js";
 import { syncReadinessToScope, auditFilterMapIds, datasetIssueLabel } from "./readiness.js";
-import { exportBattlemaps, exportDataset, fetchCuratedMaps } from "../requests/library.js";
+import { exportBattlemap, exportBattlemaps, exportDataset, fetchCuratedMaps } from "../requests/library.js";
 import {
     fetchDatasetSnapshots,
     freezeDatasetSnapshot,
@@ -1271,8 +1271,7 @@ function renderCuratedCard(map, index) {
     return card;
 }
 
-/** Disable or re-enable every library/inspector/fullscreen export button while one archive streams. */
-export function setExportButtonsDisabled(disabled) {
+function setExportButtonsDisabled(disabled) {
     const buttons = [
         dom.btnExportLora,
         dom.btnExportBattlemaps,
@@ -1286,51 +1285,79 @@ export function setExportButtonsDisabled(disabled) {
     }
 }
 
-export async function exportLoraDataset() {
+/**
+ * Run one spooled archive export: guards against overlap via `state.isExporting`, disables every
+ * export control while streaming, swaps/restores an optional button label, triggers the download,
+ * and fires the info/success toasts.
+ */
+export async function runArchiveExport({
+    fetchBlob,
+    filename,
+    pendingMessage,
+    successMessage,
+    labelEl = null,
+    loadingLabel = null,
+    idleLabel = null,
+}) {
     if (state.isExporting) return;
     state.isExporting = true;
     setExportButtonsDisabled(true);
-    if (dom.btnExportLabel) dom.btnExportLabel.textContent = "Packaging ZIP...";
+    if (labelEl && loadingLabel) labelEl.textContent = loadingLabel;
 
-    const scopeTheme = datasetScopeTheme();
-    const tagLabel = scopeTheme || "all maps";
-    showToast(`Packaging LoRA dataset ZIP archive (${tagLabel})...`, "info");
+    showToast(pendingMessage, "info");
 
     try {
-        const blob = await exportDataset();
-        triggerBlobDownload(blob, "lora-dataset.zip");
-        showToast(`LoRA dataset downloaded (${formatBytes(blob.size)})!`, "success");
+        const blob = await fetchBlob();
+        triggerBlobDownload(blob, filename);
+        showToast(successMessage(formatBytes(blob.size)), "success");
     } catch (_) {
         // The failure policy names the operation and carries the server's reason.
     } finally {
         state.isExporting = false;
         setExportButtonsDisabled(false);
-        if (dom.btnExportLabel) dom.btnExportLabel.textContent = "Export LoRA Dataset";
+        if (labelEl && idleLabel) labelEl.textContent = idleLabel;
     }
 }
 
-export async function exportFullBattlemaps() {
-    if (state.isExporting) return;
-    state.isExporting = true;
-    setExportButtonsDisabled(true);
-    if (dom.btnExportBattlemapsLabel) dom.btnExportBattlemapsLabel.textContent = "Packaging ZIP...";
+/** Export a single Curated Map archive (shared by the Inspector drawer and Fullscreen HUD). */
+export function exportSingleBattlemap(mapId, { labelEl, idleLabel }) {
+    if (!mapId) return Promise.resolve();
+    return runArchiveExport({
+        fetchBlob: () => exportBattlemap(mapId),
+        filename: battlemapArchiveFilename(mapId),
+        pendingMessage: `Packaging Battlemap ${mapId} ZIP...`,
+        successMessage: (size) => `Downloaded Battlemap ${mapId} (${size})!`,
+        labelEl,
+        loadingLabel: "Exporting...",
+        idleLabel,
+    });
+}
 
+export function exportLoraDataset() {
+    const tagLabel = datasetScopeTheme() || "all maps";
+    return runArchiveExport({
+        fetchBlob: () => exportDataset(),
+        filename: "lora-dataset.zip",
+        pendingMessage: `Packaging LoRA dataset ZIP archive (${tagLabel})...`,
+        successMessage: (size) => `LoRA dataset downloaded (${size})!`,
+        labelEl: dom.btnExportLabel,
+        loadingLabel: "Packaging ZIP...",
+        idleLabel: "Export LoRA Dataset",
+    });
+}
+
+export function exportFullBattlemaps() {
     const scopeTheme = datasetScopeTheme();
     const scopeLabel = scopeTheme || "all maps";
-    const filename = scopeTheme ? `battlemaps-${scopeTheme}.zip` : "battlemaps.zip";
-    showToast(`Packaging full Battlemaps ZIP archive (${scopeLabel})...`, "info");
-
-    try {
-        const blob = await exportBattlemaps();
-        triggerBlobDownload(blob, filename);
-        showToast(`Battlemaps downloaded (${formatBytes(blob.size)})!`, "success");
-    } catch (_) {
-        // The failure policy names the operation and carries the server's reason.
-    } finally {
-        state.isExporting = false;
-        setExportButtonsDisabled(false);
-        if (dom.btnExportBattlemapsLabel) dom.btnExportBattlemapsLabel.textContent = "Export Battlemaps";
-    }
+    return runArchiveExport({
+        fetchBlob: () => exportBattlemaps(),
+        filename: scopeTheme ? `battlemaps-${scopeTheme}.zip` : "battlemaps.zip",
+        pendingMessage: `Packaging full Battlemaps ZIP archive (${scopeLabel})...`,
+        successMessage: (size) => `Battlemaps downloaded (${size})!`,
+        labelEl: dom.btnExportBattlemapsLabel,
+        loadingLabel: "Packaging ZIP...",
+        idleLabel: "Export Battlemaps",
+    });
 }
 
 export function setupLibraryControls() {

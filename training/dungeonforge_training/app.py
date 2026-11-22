@@ -265,6 +265,7 @@ training_image = (
     .pip_install(
         "torch>=2.4.0",
         "torchvision",
+        "torchaudio",
         "safetensors",
         "diffusers>=0.30.0",
         "transformers>=4.44.0",
@@ -280,6 +281,7 @@ training_image = (
     .run_commands(
         "git clone https://github.com/ostris/ai-toolkit.git /opt/ai-toolkit",
         "cd /opt/ai-toolkit && git submodule update --init --recursive && pip install -r requirements.txt",
+        "python3 -c \"import sys; sys.path[:0] = ['/opt/ai-toolkit', '/opt/ai-toolkit/extensions_built_in/diffusion_models']; from toolkit.job import get_job; from jobs import ExtensionJob; from toolkit.config_modules import DatasetConfig, ModelConfig, NetworkConfig; from toolkit.lora_special import LoRASpecialNetwork; from flux3.src.transformer import Flux3Transformer, Flux3TransformerParams; mc = ModelConfig(name_or_path='black-forest-labs/flux-3-image-klein-base', arch='flux3', quantize=False); nc = NetworkConfig(type='lora', linear=32, linear_alpha=32); t = Flux3Transformer(Flux3TransformerParams(hidden_size=64, num_heads=2, depth=1, depth_single_blocks=1, axes_dim=[8, 8, 8, 8])); net = LoRASpecialNetwork(text_encoder=None, unet=t, lora_dim=nc.linear, alpha=nc.linear_alpha, train_unet=True, train_text_encoder=False, is_flux=mc.is_flux, network_config=nc, network_type=nc.type, transformer_only=nc.transformer_only, is_transformer=True, target_lin_modules=['Flux3Transformer']); net._update_torch_multiplier(); assert len(net.get_all_modules()) > 0\"",
     )
     .add_local_python_source("dungeonforge_training")
 )

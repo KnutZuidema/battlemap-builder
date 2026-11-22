@@ -79,3 +79,16 @@ def test_find_step_sample_images_stem_end_matching(tmp_path: Path):
     p3.write_bytes(b"\x89PNG\r\n\x1a\nfake")
     matched_250_with_p3 = find_step_sample_images(tmp_path, step=250)
     assert p3 in matched_250_with_p3
+
+
+def test_find_step_sample_images_nine_digit_zero_padding_no_collision(tmp_path: Path):
+    """Verify ai-toolkit 9-digit zero-padded sample names match exact step without prefix collisions."""
+    p250_0 = tmp_path / "1724085406830__000000250_0.jpg"
+    p250_1 = tmp_path / "1724085406830__000000250_1.jpg"
+    p2500_0 = tmp_path / "1724085406830__000002500_0.jpg"
+    for p in (p250_0, p250_1, p2500_0):
+        p.write_bytes(b"\xff\xd8\xff\xe0fake")
+
+    assert find_step_sample_images(tmp_path, step=250) == [p250_0, p250_1]
+    assert find_step_sample_images(tmp_path, step=25) == []
+    assert find_step_sample_images(tmp_path, step=2500) == [p2500_0]

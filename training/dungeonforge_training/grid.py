@@ -102,9 +102,8 @@ def find_step_sample_images(samples_dir: Path | str, step: int) -> list[Path]:
     # Search files in samples_dir matching step token
     step_str = str(step)
     step_patterns = [
-        re.compile(rf"(^|[_\-\. ]){step_str}([_\-\. ]|$|\.png$|\.jpg$)", re.IGNORECASE),
-        re.compile(rf"{step:08d}"),
-        re.compile(rf"step[-_]?{step_str}", re.IGNORECASE),
+        re.compile(rf"(^|[_\-\. ])0*{step_str}([_\-\. ]|$|\.png$|\.jpg$)", re.IGNORECASE),
+        re.compile(rf"step[-_]?0*{step_str}([_\-\. ]|$|\.png$|\.jpg$)", re.IGNORECASE),
     ]
 
     matched: list[Path] = []

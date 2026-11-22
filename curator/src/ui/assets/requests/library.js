@@ -1,6 +1,6 @@
 /**
  * The curated library requests: the map listing, one map's save / delete / refine, the bulk
- * delete and tag writes, and the two dataset exports.
+ * delete and tag writes, the LoRA dataset exports, and the full Battlemap exports.
  *
  * The exports answer with a ZIP archive, so they resolve with a `Blob`; everything else
  * resolves with the JSON payload the endpoint documents.
@@ -72,5 +72,31 @@ export function exportSelectedMaps(ids, { signal } = {}) {
         body: { ids },
         signal,
         operation: "Export selected maps",
+    });
+}
+
+/** Package full-resolution Battlemaps in the active dataset scope as a ZIP archive. */
+export function exportBattlemaps({ signal } = {}) {
+    return requestBlob(`/api/curated/export${datasetScopeQuery()}`, {
+        signal,
+        operation: "Export battlemaps",
+    });
+}
+
+/** Package exactly the selected full-resolution Battlemaps as a ZIP archive. */
+export function exportSelectedBattlemaps(ids, { signal } = {}) {
+    return requestBlob("/api/curated/export-selected", {
+        method: "POST",
+        body: { ids },
+        signal,
+        operation: "Export selected battlemaps",
+    });
+}
+
+/** Package one full-resolution Battlemap (all included Layers and manifest.json) as a ZIP archive. */
+export function exportBattlemap(mapId, { signal } = {}) {
+    return requestBlob(`${mapPath(mapId)}/export`, {
+        signal,
+        operation: "Export battlemap",
     });
 }

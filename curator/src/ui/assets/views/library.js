@@ -5,8 +5,9 @@
 
 import { dom } from "../dom.js";
 import { state } from "../store.js";
-import { escapeHtml } from "../kit/dom.js";
+import { escapeHtml, triggerBlobDownload } from "../kit/dom.js";
 import { formatRoleName, formatBytes } from "../kit/format.js";
+import { datasetScopeTheme } from "../dataset-scope.js";
 import { resizeCanvas, requestRender } from "../stage/canvas.js";
 import {
     openLibraryFullscreen,
@@ -24,6 +25,7 @@ import {
     bulkTagSelectedMaps,
     refineSelectedMaps,
     exportSelectedLoraDataset,
+    exportSelectedFullBattlemaps,
 } from "./library/bulk.js";
 import {
     openLibraryInspector,
@@ -33,7 +35,7 @@ import {
 } from "./inspector.js";
 import { showToast } from "../shell/status.js";
 import { syncReadinessToScope, auditFilterMapIds, datasetIssueLabel } from "./readiness.js";
-import { exportDataset, fetchCuratedMaps } from "../requests/library.js";
+import { exportBattlemaps, exportDataset, fetchCuratedMaps } from "../requests/library.js";
 import {
     fetchDatasetSnapshots,
     freezeDatasetSnapshot,
@@ -1269,36 +1271,65 @@ function renderCuratedCard(map, index) {
     return card;
 }
 
-async function exportLoraDataset() {
+/** Disable or re-enable every library/inspector/fullscreen export button while one archive streams. */
+export function setExportButtonsDisabled(disabled) {
+    const buttons = [
+        dom.btnExportLora,
+        dom.btnExportBattlemaps,
+        dom.btnBulkExport,
+        dom.btnBulkExportBattlemaps,
+        dom.btnInspectorExport,
+        dom.btnFsExport,
+    ];
+    for (const btn of buttons) {
+        if (btn) btn.disabled = disabled;
+    }
+}
+
+export async function exportLoraDataset() {
     if (state.isExporting) return;
     state.isExporting = true;
-    if (dom.btnExportLora) dom.btnExportLora.disabled = true;
+    setExportButtonsDisabled(true);
     if (dom.btnExportLabel) dom.btnExportLabel.textContent = "Packaging ZIP...";
 
-    const tag = state.libraryActiveTag || "all";
-    const tagLabel = tag === "all" ? "all maps" : tag;
+    const scopeTheme = datasetScopeTheme();
+    const tagLabel = scopeTheme || "all maps";
     showToast(`Packaging LoRA dataset ZIP archive (${tagLabel})...`, "info");
 
     try {
         const blob = await exportDataset();
-        const filename = "lora-dataset.zip";
-
-        const downloadUrl = window.URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = downloadUrl;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        window.URL.revokeObjectURL(downloadUrl);
-
+        triggerBlobDownload(blob, "lora-dataset.zip");
         showToast(`LoRA dataset downloaded (${formatBytes(blob.size)})!`, "success");
     } catch (_) {
         // The failure policy names the operation and carries the server's reason.
     } finally {
         state.isExporting = false;
-        if (dom.btnExportLora) dom.btnExportLora.disabled = false;
+        setExportButtonsDisabled(false);
         if (dom.btnExportLabel) dom.btnExportLabel.textContent = "Export LoRA Dataset";
+    }
+}
+
+export async function exportFullBattlemaps() {
+    if (state.isExporting) return;
+    state.isExporting = true;
+    setExportButtonsDisabled(true);
+    if (dom.btnExportBattlemapsLabel) dom.btnExportBattlemapsLabel.textContent = "Packaging ZIP...";
+
+    const scopeTheme = datasetScopeTheme();
+    const scopeLabel = scopeTheme || "all maps";
+    const filename = scopeTheme ? `battlemaps-${scopeTheme}.zip` : "battlemaps.zip";
+    showToast(`Packaging full Battlemaps ZIP archive (${scopeLabel})...`, "info");
+
+    try {
+        const blob = await exportBattlemaps();
+        triggerBlobDownload(blob, filename);
+        showToast(`Battlemaps downloaded (${formatBytes(blob.size)})!`, "success");
+    } catch (_) {
+        // The failure policy names the operation and carries the server's reason.
+    } finally {
+        state.isExporting = false;
+        setExportButtonsDisabled(false);
+        if (dom.btnExportBattlemapsLabel) dom.btnExportBattlemapsLabel.textContent = "Export Battlemaps";
     }
 }
 
@@ -1308,6 +1339,7 @@ export function setupLibraryControls() {
     dom.btnSwitchToTriage?.addEventListener("click", () => switchView("triage"));
     dom.btnRefreshLibrary?.addEventListener("click", () => fetchLibraryMaps());
     dom.btnExportLora?.addEventListener("click", () => exportLoraDataset());
+    dom.btnExportBattlemaps?.addEventListener("click", () => exportFullBattlemaps());
     dom.btnClearLibraryFilters?.addEventListener("click", () => clearLibraryFilters());
     dom.btnClearLibraryAuditFilter?.addEventListener("click", () => clearLibraryAuditFilter());
     dom.btnFreezeSnapshot?.addEventListener("click", () => freezeDatasetSnapshot());
@@ -1360,5 +1392,6 @@ export function setupLibraryControls() {
     dom.btnBulkTag?.addEventListener("click", () => bulkTagSelectedMaps());
     dom.btnBulkRefine?.addEventListener("click", () => refineSelectedMaps());
     dom.btnBulkExport?.addEventListener("click", () => exportSelectedLoraDataset());
+    dom.btnBulkExportBattlemaps?.addEventListener("click", () => exportSelectedFullBattlemaps());
     dom.btnBulkDeselect?.addEventListener("click", () => clearLibrarySelection());
 }

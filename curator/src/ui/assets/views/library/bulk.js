@@ -5,11 +5,12 @@
 
 import { dom } from "../../dom.js";
 import { state } from "../../store.js";
-import { escapeHtml } from "../../kit/dom.js";
+import { escapeHtml, triggerBlobDownload } from "../../kit/dom.js";
 import { formatBytes } from "../../kit/format.js";
 import {
     applyLibraryFilters,
     clearLibrarySelection,
+    setExportButtonsDisabled,
     updateLibraryBulkBar,
 } from "../library.js";
 import {
@@ -24,6 +25,7 @@ import { invalidateDatasetReadiness } from "../readiness.js";
 import {
     bulkDeleteCuratedMaps,
     deleteCuratedMap,
+    exportSelectedBattlemaps,
     exportSelectedMaps,
     refineCuratedMap,
     saveCuratedMap,
@@ -282,29 +284,47 @@ export async function exportSelectedLoraDataset() {
     if (!state.librarySelectedIds || state.librarySelectedIds.size === 0) return;
     if (state.isExporting) return;
     state.isExporting = true;
-    if (dom.btnBulkExport) dom.btnBulkExport.disabled = true;
+    setExportButtonsDisabled(true);
 
     const count = state.librarySelectedIds.size;
     showToast(`Packaging ${count} selected maps into LoRA dataset ZIP...`, "info");
 
     try {
         const blob = await exportSelectedMaps(Array.from(state.librarySelectedIds));
-        const filename = "lora-dataset.zip";
-
-        const downloadUrl = window.URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = downloadUrl;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        window.URL.revokeObjectURL(downloadUrl);
-
+        triggerBlobDownload(blob, "lora-dataset.zip");
         showToast(`Downloaded LoRA dataset (${formatBytes(blob.size)}) for ${count} map${count === 1 ? "" : "s"}!`, "success");
     } catch (_) {
         // The failure policy names the operation and carries the server's reason.
     } finally {
         state.isExporting = false;
-        if (dom.btnBulkExport) dom.btnBulkExport.disabled = false;
+        setExportButtonsDisabled(false);
+    }
+}
+
+export async function exportSelectedFullBattlemaps() {
+    if (!state.librarySelectedIds || state.librarySelectedIds.size === 0) return;
+    if (state.isExporting) return;
+    state.isExporting = true;
+    setExportButtonsDisabled(true);
+    if (dom.btnBulkExportBattlemapsLabel) {
+        dom.btnBulkExportBattlemapsLabel.textContent = "Packaging ZIP...";
+    }
+
+    const ids = Array.from(state.librarySelectedIds);
+    const count = ids.length;
+    showToast(`Packaging ${count} selected map${count === 1 ? "" : "s"} into Battlemaps ZIP...`, "info");
+
+    try {
+        const blob = await exportSelectedBattlemaps(ids);
+        triggerBlobDownload(blob, "battlemaps.zip");
+        showToast(`Downloaded Battlemaps (${formatBytes(blob.size)}) for ${count} map${count === 1 ? "" : "s"}!`, "success");
+    } catch (_) {
+        // The failure policy names the operation and carries the server's reason.
+    } finally {
+        state.isExporting = false;
+        setExportButtonsDisabled(false);
+        if (dom.btnBulkExportBattlemapsLabel) {
+            dom.btnBulkExportBattlemapsLabel.textContent = "Export Battlemaps (ZIP)";
+        }
     }
 }

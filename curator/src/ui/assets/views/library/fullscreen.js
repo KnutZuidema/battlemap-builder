@@ -9,7 +9,8 @@
 
 import { dom } from "../../dom.js";
 import { state } from "../../store.js";
-import { escapeHtml } from "../../kit/dom.js";
+import { battlemapArchiveFilename, escapeHtml, triggerBlobDownload } from "../../kit/dom.js";
+import { formatBytes } from "../../kit/format.js";
 import {
     VTT_GRID_SIZE,
     MIN_GRID_SIZE,
@@ -19,9 +20,10 @@ import {
 } from "../../kit/grid-math.js";
 import { getLibraryFullscreenDimensions } from "../../kit/layers.js";
 import { createViewport, drawGridOverlay, isGridCalibrating } from "../../stage/viewport.js";
-import { setLibraryFocus } from "../library.js";
+import { setExportButtonsDisabled, setLibraryFocus } from "../library.js";
+import { showToast } from "../../shell/status.js";
 import { invalidateDatasetReadiness } from "../readiness.js";
-import { saveCuratedMap } from "../../requests/library.js";
+import { exportBattlemap, saveCuratedMap } from "../../requests/library.js";
 
 const WHEEL_ZOOM_FACTOR = 1.15;
 const BUTTON_ZOOM_FACTOR = 1.2;
@@ -649,6 +651,34 @@ export function closeLibraryFullscreen() {
     }
 }
 
+export async function exportFullscreenBattlemap() {
+    if (!state.libraryFullscreenMap || !state.libraryFullscreenMap.id) return;
+    if (state.isExporting) return;
+
+    const mapId = state.libraryFullscreenMap.id;
+    state.isExporting = true;
+    setExportButtonsDisabled(true);
+    if (dom.btnFsExportLabel) {
+        dom.btnFsExportLabel.textContent = "Exporting...";
+    }
+
+    showToast(`Packaging Battlemap ${mapId} ZIP...`, "info");
+
+    try {
+        const blob = await exportBattlemap(mapId);
+        triggerBlobDownload(blob, battlemapArchiveFilename(mapId));
+        showToast(`Downloaded Battlemap ${mapId} (${formatBytes(blob.size)})!`, "success");
+    } catch (_) {
+        // The failure policy names the operation and carries the server's reason.
+    } finally {
+        state.isExporting = false;
+        setExportButtonsDisabled(false);
+        if (dom.btnFsExportLabel) {
+            dom.btnFsExportLabel.textContent = "Export";
+        }
+    }
+}
+
 export function setupFullscreenControls() {
     if (!dom.libraryFullscreenCanvas) return;
     ensureFullscreenViewport();
@@ -701,6 +731,8 @@ export function setupFullscreenControls() {
             setLibraryFocus(state.libraryFullscreenIndex, true);
         }
     });
+
+    dom.btnFsExport?.addEventListener("click", () => exportFullscreenBattlemap());
 
     dom.btnFsClose?.addEventListener("click", () => closeLibraryFullscreen());
 

@@ -147,6 +147,8 @@ export function initializeDom() {
     dom.librarySortSelect = document.getElementById("library-sort-select");
     dom.btnExportLora = document.getElementById("btn-export-lora");
     dom.btnExportLabel = document.getElementById("btn-export-label");
+    dom.btnExportBattlemaps = document.getElementById("btn-export-battlemaps");
+    dom.btnExportBattlemapsLabel = document.getElementById("btn-export-battlemaps-label");
     dom.btnRefreshLibrary = document.getElementById("btn-refresh-library");
     dom.btnSwitchToTriage = document.getElementById("btn-switch-to-triage");
     dom.btnClearLibraryFilters = document.getElementById("btn-clear-library-filters");
@@ -243,6 +245,8 @@ export function initializeDom() {
     dom.fsZoomReadout = document.getElementById("fs-zoom-readout");
     dom.btnFsPrevMap = document.getElementById("btn-fs-prev-map");
     dom.btnFsNextMap = document.getElementById("btn-fs-next-map");
+    dom.btnFsExport = document.getElementById("btn-fs-export");
+    dom.btnFsExportLabel = document.getElementById("btn-fs-export-label");
     dom.btnFsClose = document.getElementById("btn-fs-close");
     dom.libraryFullscreenGridPanel = document.getElementById("library-fullscreen-grid-panel");
     dom.btnFsCloseGridPanel = document.getElementById("btn-fs-close-grid-panel");
@@ -285,6 +289,8 @@ export function initializeDom() {
     dom.inspectorAiSuggestionsPills = document.getElementById("inspector-ai-suggestions-pills");
     dom.btnAcceptAllSuggestions = document.getElementById("btn-accept-all-suggestions");
     dom.btnInspectorFullscreen = document.getElementById("btn-inspector-fullscreen");
+    dom.btnInspectorExport = document.getElementById("btn-inspector-export");
+    dom.btnInspectorExportLabel = document.getElementById("btn-inspector-export-label");
     dom.btnInspectorDiscard = document.getElementById("btn-inspector-discard");
     dom.btnInspectorSave = document.getElementById("btn-inspector-save");
     dom.deleteCuratedModal = document.getElementById("delete-curated-modal");
@@ -303,6 +309,8 @@ export function initializeDom() {
     dom.btnBulkRefine = document.getElementById("btn-bulk-refine");
     dom.btnBulkRefineLabel = document.getElementById("btn-bulk-refine-label");
     dom.btnBulkExport = document.getElementById("btn-bulk-export");
+    dom.btnBulkExportBattlemaps = document.getElementById("btn-bulk-export-battlemaps");
+    dom.btnBulkExportBattlemapsLabel = document.getElementById("btn-bulk-export-battlemaps-label");
     dom.btnBulkDeselect = document.getElementById("btn-bulk-deselect");
     dom.btnInspectorDelete = document.getElementById("btn-inspector-delete");
 }
